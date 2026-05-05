@@ -4,12 +4,24 @@
 namespace dzIPC {
 struct sniffer_info
 {
-    explicit sniffer_info(ipc::buffer&& req, ipc::buffer&& res)
+    sniffer_info() {}
+
+    sniffer_info(ipc::buffer&& req, ipc::buffer&& res)
         : request(std::move(req))
         , response(std::move(res))
     {}
 
-    ipc::buffer request;
-    ipc::buffer response;
+    sniffer_info& operator=(sniffer_info&& other)
+    {
+        if (this != &other)
+        {
+            request = std::move(other.request);
+            response = std::move(other.response);
+        }
+        return *this;
+    }
+
+    ipc::buffer request{};
+    ipc::buffer response{};
 };
 }   // namespace dzIPC

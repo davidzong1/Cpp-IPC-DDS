@@ -163,8 +163,14 @@ inline std::vector<T> read_array_from_buffer(const uint8_t* buffer, uint32_t& of
     }
 }
 
-inline std::string msg_to_string(uint8_t* buffer, const uint32_t size)
+inline std::string msg_to_string(ipc::buffer& raw_data)
 {
+    if (raw_data.empty())
+    {
+        return std::string("");
+    }
+    const uint8_t* buffer = static_cast<const uint8_t*>(raw_data.data());
+    uint32_t size = static_cast<uint32_t>(raw_data.size());
     std::stringstream ss;
     uint32_t offset = 0;
     uint32_t page = 0;

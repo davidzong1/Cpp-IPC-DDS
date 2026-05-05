@@ -1,0 +1,209 @@
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <csignal>
+#include <mutex>
+#include <thread>
+#include "argparser.h"
+#include "dzIPC/common/srv_data.h"
+#include "dzIPC/common/topic_data.h"
+#include "dzIPC/ipc_info_pool.h"
+#include "info.h"
+#include "msg_type_identify.h"
+#include "sniffer.h"
+constexpr std::uint64_t RECV_FREQ = 20;   //Hz
+
+enum class StateMachine : int {
+    UNCONNECTED = 0,
+    CONNECTED = 1,
+};
+
+namespace {
+volatile std::sig_atomic_t g_running = 1;
+
+std::mutex topic_in_use_mutex;
+std::condition_variable topic_in_use_cv;
+std::mutex sniffer_use_mutex;
+dzIPC::info_pool::EntryKind kind_cache{dzIPC::info_pool::EntryKind::Unknown};
+
+void handle_sigint(int)
+{
+    std::cerr << "Process exiting..." << std::endl;
+    g_running = 0;
+    topic_in_use_cv.notify_all();
+}
+}   // namespace
+
+bool check_topic_state(dzIPC::info_pool::IpcInfoPool& pool, std::string& topic_name, bool ser_or_topic, uint32_t msg_id,
+                       std::unique_ptr<dzIPC::sniffer>& sniffer, std::unique_ptr<dzIPC::TopicData>& MsgManager_topic,
+                       std::unique_ptr<dzIPC::ServiceData>& MsgManager_service, std::atomic<StateMachine>& state)
+{
+    auto entries = pool.snapshot(true);
+    for (const auto& entry : entries)
+    {
+        if (entry.topic_name == topic_name)
+        {
+            if (!entry.alive || !entry.in_use)
+            {
+                state.store(StateMachine::UNCONNECTED, std::memory_order_release);
+                return false;
+            }
+            if (kind_cache != entry.kind && kind_cache != dzIPC::info_pool::EntryKind::Unknown)
+            {
+                kind_cache = entry.kind;
+                state.store(StateMachine::UNCONNECTED, std::memory_order_release);
+                return false;
+            }
+            if (ser_or_topic)
+            {
+                if (entry.kind == dzIPC::info_pool::EntryKind::SocketServer
+                    || entry.kind == dzIPC::info_pool::EntryKind::SocketClient
+                    || entry.kind == dzIPC::info_pool::EntryKind::ShmServer
+                    || entry.kind == dzIPC::info_pool::EntryKind::ShmClient)
+                {
+                    int domain_id = entry.domain_id;
+                    bool link_type = (entry.kind == dzIPC::info_pool::EntryKind::ShmServer
+                                      || entry.kind == dzIPC::info_pool::EntryKind::ShmClient)
+                                         ? true
+                                         : false;
+                    {
+                        std::unique_lock<std::mutex> lock(sniffer_use_mutex);
+                        MsgManager_service = std::make_unique<dzIPC::ServiceData>(std::make_shared<IpcMsgBase>(),
+                                                                                  std::make_shared<IpcMsgBase>(),
+                                                                                  msg_id);
+                        sniffer = std::make_unique<dzIPC::sniffer>(topic_name, domain_id, ser_or_topic, link_type);
+                    }
+                    state.store(StateMachine::CONNECTED, std::memory_order_release);
+                    kind_cache = entry.kind;
+                    return true;
+                }
+            }
+            else
+            {
+                if (entry.kind == dzIPC::info_pool::EntryKind::SocketPub
+                    || entry.kind == dzIPC::info_pool::EntryKind::ShmPub
+                    || entry.kind == dzIPC::info_pool::EntryKind::SocketSub
+                    || entry.kind == dzIPC::info_pool::EntryKind::ShmSub)
+                {
+                    int domain_id = entry.domain_id;
+                    bool link_type = (entry.kind == dzIPC::info_pool::EntryKind::ShmPub
+                                      || entry.kind == dzIPC::info_pool::EntryKind::ShmSub)
+                                         ? true
+                                         : false;
+                    {
+                        std::unique_lock<std::mutex> lock(sniffer_use_mutex);
+                        MsgManager_topic = std::make_unique<dzIPC::TopicData>(std::make_shared<IpcMsgBase>(), msg_id);
+                        sniffer = std::make_unique<dzIPC::sniffer>(topic_name, domain_id, ser_or_topic, link_type);
+                    }
+                    state.store(StateMachine::CONNECTED, std::memory_order_release);
+                    kind_cache = entry.kind;
+                    return true;
+                }
+            }
+        }
+    }
+    state.store(StateMachine::UNCONNECTED, std::memory_order_release);
+    return false;
+}
+
+int main(int argc, char* argv[])
+{
+    std::signal(SIGINT, handle_sigint);
+    ArgParser parser("dzipc_topic_cat", "Topic cat for dzIPC");
+    parser.add_argument("--topic", "-t", "Topic name", ArgParser::Type::STRING, true);
+    parser.add_argument("--ser_or_topic", "-s", "Service or topic flag", ArgParser::Type::BOOL, true);
+    parser.add_argument("--msg_id", "-m", "Message ID to filter (optional)", ArgParser::Type::INT, false, "0");
+    try
+    {
+        parser.parse(argc, argv);
+    }
+    catch (const std::exception& e)
+    {
+        std::fprintf(stderr, "Error: %s\n", e.what());
+        return 1;
+    }
+
+    std::string topic_name = parser.get<std::string>("--topic");
+    bool ser_or_topic = parser.get<bool>("--ser_or_topic");
+    std::atomic<StateMachine> state{StateMachine::UNCONNECTED};
+    std::unique_ptr<dzIPC::TopicData> MsgManager_topic;
+    std::unique_ptr<dzIPC::ServiceData> MsgManager_service;
+    std::unique_ptr<dzIPC::sniffer> sniffer;
+    auto& pool = dzIPC::info_pool::IpcInfoPool::instance();
+    uint64_t beat_pahse = 1'000 / RECV_FREQ;   //ms
+    uint32_t msg_id = static_cast<uint32_t>(parser.get<int>("--msg_id"));
+    dzIPC::sniffer_info info;
+    std::stringstream ss;
+    std::thread pool__thread(
+        [&pool, &topic_name, &ser_or_topic, &msg_id, &sniffer, &MsgManager_topic, &MsgManager_service, &state]()
+        {
+            while (g_running)
+            {
+                if (check_topic_state(pool, topic_name, ser_or_topic, msg_id, sniffer, MsgManager_topic,
+                                      MsgManager_service, state))
+                {
+                    topic_in_use_cv.notify_all();
+                }
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        });
+    while (g_running)
+    {
+        if (state == StateMachine::UNCONNECTED)
+        {
+            std::unique_lock<std::mutex> lock(topic_in_use_mutex);
+            topic_in_use_cv.wait(lock,
+                                 [&state]
+                                 {
+                                     return state.load(std::memory_order_acquire) == StateMachine::CONNECTED
+                                            || !g_running;
+                                 });
+        }
+        else
+        {
+            while (g_running && state.load(std::memory_order_acquire) == StateMachine::CONNECTED)
+            {
+                auto start = std::chrono::steady_clock::now();
+                {
+                    std::unique_lock<std::mutex> lock(sniffer_use_mutex);
+                    info = std::move(sniffer->try_recv());
+                }
+                if (ser_or_topic)
+                {
+                    ss.clear();
+                    std::string req_str = dzIPC::msg_to_string(info.request);
+                    std::string res_str = dzIPC::msg_to_string(info.response);
+                    ss << "\x1b[2J\x1b[H=====================================================\n\n";
+                    ss << "Topic: " << topic_name << std::setw(30) << "Type: Service" << std::setw(30)
+                       << "Msg ID: " << msg_id << "\n\n";
+                    ss << "------------------------------------------------------\n"
+                       << "Request:\n"
+                       << req_str << "\nResponse:\n"
+                       << res_str << std::endl;
+                    fprintf(stdout, "%s", ss.str().c_str());
+                    fflush(stdout);
+                }
+                else
+                {
+                    ss.clear();
+                    std::string topic_str = dzIPC::msg_to_string(info.request);
+                    ss << "\x1b[2J\x1b[H=====================================================\n\n";
+                    ss << "Topic: " << topic_name << std::setw(30) << "Type: Topic" << std::setw(30)
+                       << "Msg ID: " << msg_id << "\n\n";
+                    ss << "------------------------------------------------------\n"
+                       << "Message:\n"
+                       << topic_str << std::endl;
+                    fprintf(stdout, "%s", ss.str().c_str());
+                    fflush(stdout);
+                }
+                auto end = std::chrono::steady_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(beat_pahse > duration ? beat_pahse - duration : 0));
+            }
+        }
+    }
+    pool__thread.join();
+    return 0;
+}

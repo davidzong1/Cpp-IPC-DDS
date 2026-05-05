@@ -13,4 +13,4 @@ target_link_libraries(dzipc_list
         $<$<NOT:$<OR:$<STREQUAL:${CMAKE_SYSTEM_NAME},Windows>,$<STREQUAL:${CMAKE_SYSTEM_NAME},QNX>>>:rt>)
 
 set_target_properties(dzipc_list PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${EXECUTABLE_OUTPUT_PATH})
+    RUNTIME_OUTPUT_DIRECTORY ${APP_OUTPUT_PATH})
