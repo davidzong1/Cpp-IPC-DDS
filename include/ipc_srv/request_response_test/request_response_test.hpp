@@ -27,6 +27,8 @@ public:
 
             // 计算总缓冲区大小
             size_t total_size_ = 0;
+            total_size_ += sizeof(int32_t) + 7;
+            total_size_ += sizeof(uint8_t);
             total_size_ += sizeof(request_count) + request_size;
 
             // 一次性分配缓冲区
@@ -35,6 +37,11 @@ public:
             uint16_t page = 1;
 
             // 序列化 request
+            int32_t request_name_size = 7;
+            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&request_name_size), page, offset, sizeof(request_name_size));
+            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>("request"), page, offset, request_name_size);
+            uint8_t request_type = 23;
+            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&request_type), page, offset, sizeof(request_type));
             this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&request_count), page, offset, sizeof(request_count));
             if (request_count > 0) {
                 this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(request.data()), page, offset, request_size);
@@ -50,6 +57,10 @@ public:
         uint32_t offset = 0;
         deserialize_data_cut(buffer.size());
             // 反序列化 request
+            int32_t request_name_size;
+            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&request_name_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(request_name_size));
+            offset += request_name_size;
+            offset += sizeof(uint8_t); // 跳过类型标识
             int32_t request_count;
             this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&request_count), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(request_count));
             request.resize(request_count);
@@ -85,6 +96,8 @@ public:
 
             // 计算总缓冲区大小
             size_t total_size_ = 0;
+            total_size_ += sizeof(int32_t) + 8;
+            total_size_ += sizeof(uint8_t);
             total_size_ += sizeof(response_count) + response_size;
 
             // 一次性分配缓冲区
@@ -93,6 +106,11 @@ public:
             uint16_t page = 1;
 
             // 序列化 response
+            int32_t response_name_size = 8;
+            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&response_name_size), page, offset, sizeof(response_name_size));
+            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>("response"), page, offset, response_name_size);
+            uint8_t response_type = 23;
+            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&response_type), page, offset, sizeof(response_type));
             this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&response_count), page, offset, sizeof(response_count));
             if (response_count > 0) {
                 this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(response.data()), page, offset, response_size);
@@ -108,6 +126,10 @@ public:
         uint32_t offset = 0;
         deserialize_data_cut(buffer.size());
             // 反序列化 response
+            int32_t response_name_size;
+            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&response_name_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(response_name_size));
+            offset += response_name_size;
+            offset += sizeof(uint8_t); // 跳过类型标识
             int32_t response_count;
             this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&response_count), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(response_count));
             response.resize(response_count);

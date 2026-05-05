@@ -73,7 +73,8 @@ void socket_pub_ipc::InitChannel(std::string extra_info)
                                           ? dzIPC::info_pool::demangle(typeid(*topic_msg_->topic()).name())
                                           : std::string{};
         topic_type_name = extract_last_segment(topic_type_name);
-        pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketPub, topic_name_, topic_type_name, "socket", extra_info});
+        pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketPub, topic_name_, topic_type_name, "socket",
+                          static_cast<int32_t>(domain_id_), extra_info});
     }
     catch (const std::exception& e)
     {
@@ -175,7 +176,8 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
                                           ? dzIPC::info_pool::demangle(typeid(*topic_msg_->topic()).name())
                                           : std::string{};
         topic_type_name = extract_last_segment(topic_type_name);
-        pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketSub, topic_name_, topic_type_name, "socket", extra_info});
+        pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketSub, topic_name_, topic_type_name, "socket",
+                          static_cast<int32_t>(domain_id_), extra_info});
         subscribe_thread_ = new std::thread(
             [this]()
             {

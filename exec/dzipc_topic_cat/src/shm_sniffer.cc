@@ -14,6 +14,18 @@
 #include "shm_sniffer.h"
 
 namespace dzIPC {
+struct shm_sniffer_options
+{
+    std::string name;
+    std::string pref;
+    ipc::sniffer::topology topo = ipc::sniffer::topology::route;
+    bool hex = true;
+    bool ascii = true;
+    std::size_t max = 0;   // 0 = unlimited
+    std::uint64_t timeout_ms = ipc::invalid_value;
+    std::size_t width = 16;   // bytes per row in hex view
+    bool quiet_meta = false;
+};
 
 void print_help(char const* prog)
 {
@@ -155,12 +167,16 @@ void on_sigint(int)
     g_stop.store(true);
 }
 
-void shm_sniffer::create_sniffer(shm_sniffer_options& opt)
-
+void shm_sniffer::create_sniffer(const std::string& topic_name, int domain_id, bool ser_or_topic)
 {
-    std::unique_ptr<ipc::sniffer> s = std::make_unique<ipc::sniffer>();
-    bool ok = opt.pref.empty() ? s->open(opt.name.c_str(), opt.topo)
-                               : s->open(ipc::prefix{opt.pref.c_str()}, opt.name.c_str(), opt.topo);
+    this->ser_or_topic_ = ser_or_topic;
+    shm_sniffer_options opt;
+    opt.name = topic_name;
+    opt.pref = "";
+    opt.topo = ser_or_topic ? ipc::sniffer::topology::server : ipc::sniffer::topology::route;
+    req_ = std::make_unique<ipc::sniffer>();
+    bool ok = opt.pref.empty() ? req_->open(opt.name.c_str(), opt.topo)
+                               : req_->open(ipc::prefix{opt.pref.c_str()}, opt.name.c_str(), opt.topo);
     if (!ok)
     {
         std::fprintf(stderr, "error: failed to open channel '%s' (prefix='%s', topology=%s)\n", opt.name.c_str(),
@@ -171,31 +187,54 @@ void shm_sniffer::create_sniffer(shm_sniffer_options& opt)
 
         std::exit(1);
     }
-    if (opt.verbose)
+    if (this->ser_or_topic_)
     {
-        std::fprintf(stderr,
-                     "[topic_cat] listening on '%s' (prefix='%s', topology=%s, "
-                     "active receivers=%zu)\n",
-                     s->name(), s->prefix_str(), opt.topo == ipc::sniffer::topology::server ? "server" : "route",
-                     s->receiver_connections());
+        res_ = std::make_unique<ipc::sniffer>();
+        bool ok = opt.pref.empty()
+                      ? res_->open(opt.name.c_str(), ipc::sniffer::topology::route)
+                      : res_->open(ipc::prefix{opt.pref.c_str()}, opt.name.c_str(), ipc::sniffer::topology::route);
+        if (!ok)
+        {
+            std::fprintf(stderr, "error: failed to open channel '%s' (prefix='%s', topology=%s)\n", opt.name.c_str(),
+                         opt.pref.c_str(), "route");
+            std::exit(1);
+        }
     }
     ready = true;
 }
 
-shm_sniffer_info shm_sniffer::try_recv() noexcept
+sniffer_info shm_sniffer::try_recv() noexcept
 {
-    ipc::sniffer::meta m;
     if (!ready)
-        return shm_sniffer_info{ipc::buff_t{}, ipc::sniffer::meta{}};
-    return shm_sniffer_info{s->try_recv(&m), m};
+        return sniffer_info{ipc::buffer{}, ipc::buffer{}};
+    if (ser_or_topic_)
+    {
+        ipc::sniffer::meta m1, m2;
+        return sniffer_info{req_->try_recv(&m1), res_->try_recv(&m2)};
+    }
+    else
+    {
+        ipc::sniffer::meta m1;
+        return sniffer_info{req_->try_recv(&m1), ipc::buffer{}};
+    }
 }
 
-shm_sniffer_info shm_sniffer::recv(std::uint64_t timeout_ms) noexcept
+sniffer_info shm_sniffer::recv(std::uint64_t timeout_ms) noexcept
 {
-    ipc::sniffer::meta m;
     if (!ready)
-        return shm_sniffer_info{ipc::buff_t{}, ipc::sniffer::meta{}};
-    return shm_sniffer_info{s->recv(timeout_ms, &m), m};
+        return sniffer_info{ipc::buffer{}, ipc::buffer{}};
+    if (ser_or_topic_)
+    {
+        ipc::sniffer::meta m1, m2;
+        ipc::buffer req_cache = std::move(req_->recv(timeout_ms, &m1));
+        ipc::buffer res_cache = std::move(res_->recv(timeout_ms, &m2));
+        return sniffer_info{std::move(req_cache), std::move(res_cache)};
+    }
+    else
+    {
+        ipc::sniffer::meta m1;
+        return sniffer_info{req_->recv(timeout_ms, &m1), ipc::buffer{}};
+    }
 }
 }   // namespace dzIPC
 

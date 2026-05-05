@@ -39,6 +39,7 @@ private:
     // void sub_listener();
 
 private:
+    size_t domain_id_{0};
     std::atomic<bool> subscribed_{false};
     bool verbose_{false};
     std::atomic<bool> running{true};
@@ -68,6 +69,7 @@ private:
     void sub_handshake();
 
 private:
+    size_t domain_id_{0};
     std::atomic<bool> running{true};
     std::atomic<bool> handshake_completed{false};
     bool data_update_{false};

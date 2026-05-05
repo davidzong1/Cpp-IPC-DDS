@@ -54,11 +54,13 @@ public:
     };
 
     /* 序列化函数 */
-    virtual ipc::buffer serialize() = 0;
+    virtual ipc::buffer serialize() { return ipc::buffer(); };
+
     /* 反序列化函数 */
-    virtual void deserialize(const ipc::buffer& data) = 0;
+    virtual void deserialize(const ipc::buffer& data) {};
+
     /* 克隆函数 */
-    virtual IpcMsgBase* clone() const = 0;
+    virtual IpcMsgBase* clone() const { return new IpcMsgBase(*this); };
 
 protected:
 #define TAIL_MSG_SIZE 12         // total cnt(2 bytes)+ now page(2 bytes)+total_size(4byte) + dz_ipc_msg_id(4 bytes)

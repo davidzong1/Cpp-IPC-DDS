@@ -5,6 +5,13 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python test",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/test/test_dzipc_cat.py",
+            "console": "integratedTerminal"
+        },
+        {
             "name": "dzipc_test",
             "type": "cppdbg",
             "request": "launch",
@@ -28,6 +35,5 @@
                 }
             ]
         }
-
     ]
 }

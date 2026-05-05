@@ -36,6 +36,7 @@ struct PoolEntry
     std::atomic<int64_t> heartbeat_ns;
     char topic_name[kMaxTopicName];
     char type_name[kMaxTypeName];
+    int32_t domain_id;
     char extra[kMaxExtra];
 };
 
@@ -259,6 +260,7 @@ int32_t IpcInfoPool::register_entry(const RegisterInfo& info)
         e.heartbeat_ns.store(e.register_ts_ns, std::memory_order_relaxed);
         copy_truncate(e.topic_name, kMaxTopicName, info.topic_name);
         copy_truncate(e.type_name, kMaxTypeName, info.type_name);
+        e.domain_id = info.domain_id;
         copy_truncate(e.extra, kMaxExtra, info.extra);
         e.in_use.store(1, std::memory_order_release);
         return static_cast<int32_t>(i);
@@ -286,6 +288,7 @@ void IpcInfoPool::unregister_entry(int32_t slot)
     e.heartbeat_ns.store(0, std::memory_order_relaxed);
     e.topic_name[0] = '\0';
     e.type_name[0] = '\0';
+    e.domain_id = 0;
     e.extra[0] = '\0';
     e.in_use.store(0, std::memory_order_release);
 }
@@ -319,6 +322,7 @@ std::vector<EntrySnapshot> IpcInfoPool::snapshot(bool gc_dead_flag)
         int64_t heartbeat_ns;
         char topic_name[kMaxTopicName];
         char type_name[kMaxTypeName];
+        int32_t domain_id;
         char extra[kMaxExtra];
         bool in_use;
         bool alive;
@@ -348,6 +352,7 @@ std::vector<EntrySnapshot> IpcInfoPool::snapshot(bool gc_dead_flag)
                 e.heartbeat_ns.store(0, std::memory_order_relaxed);
                 e.topic_name[0] = '\0';
                 e.type_name[0] = '\0';
+                e.domain_id = 0;
                 e.extra[0] = '\0';
                 e.in_use.store(0, std::memory_order_release);
                 continue;
@@ -361,6 +366,7 @@ std::vector<EntrySnapshot> IpcInfoPool::snapshot(bool gc_dead_flag)
             r.heartbeat_ns = e.heartbeat_ns.load(std::memory_order_relaxed);
             std::memcpy(r.topic_name, e.topic_name, kMaxTopicName);
             std::memcpy(r.type_name, e.type_name, kMaxTypeName);
+            r.domain_id = e.domain_id;
             std::memcpy(r.extra, e.extra, kMaxExtra);
             r.in_use = in_use;
             r.alive = alive;
@@ -379,6 +385,7 @@ std::vector<EntrySnapshot> IpcInfoPool::snapshot(bool gc_dead_flag)
         s.heartbeat_ns = r.heartbeat_ns;
         s.topic_name = r.topic_name;
         s.type_name = r.type_name;
+        s.domain_id = r.domain_id;
         s.extra = r.extra;
         s.in_use = r.in_use;
         s.alive = r.alive;
@@ -410,6 +417,7 @@ std::size_t IpcInfoPool::gc_dead()
         e.heartbeat_ns.store(0, std::memory_order_relaxed);
         e.topic_name[0] = '\0';
         e.type_name[0] = '\0';
+        e.domain_id = 0;
         e.extra[0] = '\0';
         e.in_use.store(0, std::memory_order_release);
         ++n;

@@ -16,7 +16,7 @@
 namespace py = pybind11;
 namespace info = dzIPC::info_pool;
 
-PYBIND11_MODULE(dzipc_cpp, m)
+PYBIND11_MODULE(dzipc, m)
 {
     m.doc() = "pybind11 bindings for cpp-ipc (dzIPC)";
 
@@ -52,29 +52,42 @@ PYBIND11_MODULE(dzipc_cpp, m)
         .def("response", [](dzIPC::ServiceData& self) { return self.response(); });
 
     py::class_<dzIPC::pimpl::server_ipc_impl, std::shared_ptr<dzIPC::pimpl::server_ipc_impl>>(m, "ServerIPC")
-        .def("InitChannel", &dzIPC::pimpl::server_ipc_impl::InitChannel, py::arg("extra_info") = "")
+        // InitChannel 会建立 socket/shm 通道并可能等待对端，可能阻塞 → 释放 GIL
+        .def("InitChannel", &dzIPC::pimpl::server_ipc_impl::InitChannel, py::arg("extra_info") = "",
+             py::call_guard<py::gil_scoped_release>())
         .def("reset_message", &dzIPC::pimpl::server_ipc_impl::reset_message)
         .def("reset_callback", &dzIPC::pimpl::server_ipc_impl::reset_callback);
 
     py::class_<dzIPC::pimpl::client_ipc_impl, std::shared_ptr<dzIPC::pimpl::client_ipc_impl>>(m, "ClientIPC")
-        .def("InitChannel", &dzIPC::pimpl::client_ipc_impl::InitChannel, py::arg("extra_info") = "")
+        // InitChannel 同上
+        .def("InitChannel", &dzIPC::pimpl::client_ipc_impl::InitChannel, py::arg("extra_info") = "",
+             py::call_guard<py::gil_scoped_release>())
         .def("reset_message", &dzIPC::pimpl::client_ipc_impl::reset_message)
+        // send_request 会阻塞等待 server 回包（带 rev_tm 超时）→ 必须释放 GIL
         .def(
             "send_request",
             [](dzIPC::pimpl::client_ipc_impl& self, std::shared_ptr<dzIPC::ServiceData> request, uint64_t rev_tm)
             { return self.send_request(request, rev_tm); }, py::arg("request"),
-            py::arg("rev_tm") = std::numeric_limits<uint32_t>::max());
+            py::arg("rev_tm") = std::numeric_limits<uint32_t>::max(),
+            py::call_guard<py::gil_scoped_release>());
 
     py::class_<dzIPC::pimpl::publisher_ipc_impl, std::shared_ptr<dzIPC::pimpl::publisher_ipc_impl>>(m, "PublisherIPC")
-        .def("InitChannel", &dzIPC::pimpl::publisher_ipc_impl::InitChannel, py::arg("extra_info") = "")
+        // InitChannel 同上
+        .def("InitChannel", &dzIPC::pimpl::publisher_ipc_impl::InitChannel, py::arg("extra_info") = "",
+             py::call_guard<py::gil_scoped_release>())
         .def("reset_message", &dzIPC::pimpl::publisher_ipc_impl::reset_message)
-        .def("publish", &dzIPC::pimpl::publisher_ipc_impl::publish)
+        // publish 涉及 socket/shm 写入，可能阻塞在内核发送缓冲或共享内存锁 → 释放 GIL
+        .def("publish", &dzIPC::pimpl::publisher_ipc_impl::publish, py::call_guard<py::gil_scoped_release>())
+        // has_subscribed 通常是轻量原子判断，不释放 GIL
         .def("has_subscribed", &dzIPC::pimpl::publisher_ipc_impl::has_subscribed);
 
     py::class_<dzIPC::pimpl::subscriber_ipc_impl, std::shared_ptr<dzIPC::pimpl::subscriber_ipc_impl>>(m,
                                                                                                       "SubscriberIPC")
-        .def("InitChannel", &dzIPC::pimpl::subscriber_ipc_impl::InitChannel, py::arg("extra_info") = "")
+        // InitChannel 同上
+        .def("InitChannel", &dzIPC::pimpl::subscriber_ipc_impl::InitChannel, py::arg("extra_info") = "",
+             py::call_guard<py::gil_scoped_release>())
         .def("reset_message", &dzIPC::pimpl::subscriber_ipc_impl::reset_message)
+        // get 是阻塞型：等到消息才返回。**必须**释放 GIL，否则同进程发布线程会被饿死
         .def(
             "get",
             [](dzIPC::pimpl::subscriber_ipc_impl& self, std::shared_ptr<dzIPC::TopicData> msg)
@@ -82,7 +95,9 @@ PYBIND11_MODULE(dzipc_cpp, m)
                 self.get(msg);
                 return msg;
             },
-            py::arg("msg"))
+            py::arg("msg"),
+            py::call_guard<py::gil_scoped_release>())
+        // try_get 非阻塞，但仍涉及 socket/shm 读、互斥锁；同样释放 GIL 以避免长尾抖动
         .def(
             "try_get",
             [](dzIPC::pimpl::subscriber_ipc_impl& self, std::shared_ptr<dzIPC::TopicData> msg)
@@ -90,7 +105,8 @@ PYBIND11_MODULE(dzipc_cpp, m)
                 bool ok = self.try_get(msg);
                 return py::make_tuple(ok, msg);
             },
-            py::arg("msg"));
+            py::arg("msg"),
+            py::call_guard<py::gil_scoped_release>());
 
     m.def(
         "make_topic_data", [](const std::shared_ptr<IpcMsgBase>& msg, int msg_id)
@@ -103,17 +119,24 @@ PYBIND11_MODULE(dzipc_cpp, m)
         { return std::make_shared<dzIPC::ServiceData>(request, response, static_cast<uint32_t>(msg_id)); },
         py::arg("request"), py::arg("response"), py::arg("msg_id") = 0);
 
+    // 4 个 *PtrMake 工厂在内部会建立 socket / 共享内存 / 多播订阅，可能阻塞 → 释放 GIL。
+    // 注意 ServerIPCPtrMake 接受 Python callback：构造期只是存指针，不会回调；
+    // 后续 server 工作线程触发 callback 时由 pybind11/functional.h 自行获取 GIL，安全。
     m.def("ServerIPCPtrMake", &dzIPC::ServerIPCPtrMake, py::arg("topic_name"), py::arg("msg"), py::arg("callback"),
-          py::arg("domain_id"), py::arg("ipc_type"), py::arg("verbose") = false);
+          py::arg("domain_id"), py::arg("ipc_type"), py::arg("verbose") = false,
+          py::call_guard<py::gil_scoped_release>());
 
     m.def("ClientIPCPtrMake", &dzIPC::ClientIPCPtrMake, py::arg("topic_name"), py::arg("msg"), py::arg("domain_id"),
-          py::arg("ipc_type"), py::arg("verbose") = false);
+          py::arg("ipc_type"), py::arg("verbose") = false,
+          py::call_guard<py::gil_scoped_release>());
 
     m.def("PublisherIPCPtrMake", &dzIPC::PublisherIPCPtrMake, py::arg("msg"), py::arg("topic_name"),
-          py::arg("domain_id"), py::arg("ipc_type"), py::arg("verbose") = false);
+          py::arg("domain_id"), py::arg("ipc_type"), py::arg("verbose") = false,
+          py::call_guard<py::gil_scoped_release>());
 
     m.def("SubscriberIPCPtrMake", &dzIPC::SubscriberIPCPtrMake, py::arg("msg"), py::arg("topic_name"),
-          py::arg("domain_id"), py::arg("queue_size"), py::arg("ipc_type"), py::arg("verbose") = false);
+          py::arg("domain_id"), py::arg("queue_size"), py::arg("ipc_type"), py::arg("verbose") = false,
+          py::call_guard<py::gil_scoped_release>());
 
     m.def("StartShutdownMonitor", &dzIPC::StartShutdownMonitor);
     m.def("RequestShutdown", &dzIPC::RequestShutdown);

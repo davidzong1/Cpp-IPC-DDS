@@ -41,6 +41,7 @@ struct RegisterInfo
     std::string topic_name;
     std::string type_name;
     std::string ipc_mode;
+    int32_t domain_id;
     std::string extra;
 };
 
@@ -54,6 +55,7 @@ struct EntrySnapshot
     int64_t heartbeat_ns{0};
     std::string topic_name;
     std::string type_name;
+    int32_t domain_id{0};
     std::string extra;
     bool in_use{true};
     bool alive{true};

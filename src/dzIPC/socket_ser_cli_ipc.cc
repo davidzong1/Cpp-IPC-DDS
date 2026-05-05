@@ -116,8 +116,8 @@ void socket_ser_ipc::InitChannel(std::string extra_info)
                                             ? dzIPC::info_pool::demangle(typeid(*message_->request()).name())
                                             : std::string{};
         request_type_name = extract_last_segment(request_type_name);
-        pool_reg_.rebind(
-            {dzIPC::info_pool::EntryKind::SocketServer, topic_name_, request_type_name, "socket", extra_info});
+        pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketServer, topic_name_, request_type_name, "socket",
+                          static_cast<int32_t>(domain_id_), extra_info});
         response_thread_ = new std::thread(&socket_ser_ipc::response_thread_func, this);
         handshake_thread_ = new std::thread(&socket_ser_ipc::server_handshake, this);
     }
@@ -299,7 +299,8 @@ void socket_cli_ipc::InitChannel(std::string extra_info)
                                          ? dzIPC::info_pool::demangle(typeid(*message_->response()).name())
                                          : std::string{};
     response_type_name = extract_last_segment(response_type_name);
-    pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketClient, topic_name_, response_type_name, "socket", extra_info});
+    pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketClient, topic_name_, response_type_name, "socket",
+                      static_cast<int32_t>(domain_id_), extra_info});
     if (verbose_)
     {
         std::cerr << "\033[32m[" << topic_name_ << "_CliInfo] Client connected to server topic: " << topic_name_

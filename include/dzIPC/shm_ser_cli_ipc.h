@@ -34,6 +34,7 @@ protected:
     void ser_handshake();
 
 private:
+    size_t domain_id_{0};
     std::atomic<bool> running{true};
     std::atomic<bool> handshake_completed{false};
     bool verbose_{true};
@@ -66,6 +67,7 @@ protected:
     void cli_handshake();
 
 private:
+    size_t domain_id_{0};
     std::atomic<bool> running{true};
     std::atomic<bool> handshake_completed{false};
     bool verbose_{true};

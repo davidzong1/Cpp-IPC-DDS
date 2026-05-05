@@ -2,32 +2,11 @@
 #include <memory>
 #include "libipc/ipc.h"
 #include "libipc/sniffer.h"
+#include "sniffer_base.h"
 
 namespace dzIPC {
-constexpr ipc::sniffer::topology topic_sniffer_topology = ipc::sniffer::topology::route;
-constexpr ipc::sniffer::topology service_sniffer_topology = ipc::sniffer::topology::server;
 
-struct shm_sniffer_options
-{
-    std::string name;
-    std::string pref;
-    ipc::sniffer::topology topo = topic_sniffer_topology;
-    bool hex = true;
-    bool ascii = true;
-    std::size_t max = 0;   // 0 = unlimited
-    std::uint64_t timeout_ms = ipc::invalid_value;
-    std::size_t width = 16;   // bytes per row in hex view
-    bool quiet_meta = false;
-    bool verbose = false;
-};
-
-struct shm_sniffer_info
-{
-    ipc::buff_t buf;
-    ipc::sniffer::meta m;
-};
-
-class shm_sniffer
+class shm_sniffer : public sniffer_base
 {
 public:
     shm_sniffer() = default;
@@ -36,16 +15,18 @@ public:
     shm_sniffer(shm_sniffer const&) = delete;
     shm_sniffer& operator=(shm_sniffer const&) = delete;
 
-    shm_sniffer(shm_sniffer_options& opt) { create_sniffer(opt); }
+    shm_sniffer(const std::string& topic_name, int domain_id, bool ser_or_topic)
+    {
+        create_sniffer(topic_name, domain_id, ser_or_topic);
+    }
 
-    void create_sniffer(shm_sniffer_options& opt);
+    void create_sniffer(const std::string& topic_name, int domain_id, bool ser_or_topic) override;
 
-    shm_sniffer_info try_recv() noexcept;
+    sniffer_info try_recv() noexcept override;
 
-    shm_sniffer_info recv(std::uint64_t timeout_ms = 5'000) noexcept;
+    sniffer_info recv(std::uint64_t timeout_ms = 5'000) noexcept override;
 
 private:
-    bool ready = false;
-    std::unique_ptr<ipc::sniffer> s;
+    std::unique_ptr<ipc::sniffer> req_, res_;
 };
 }   // namespace dzIPC

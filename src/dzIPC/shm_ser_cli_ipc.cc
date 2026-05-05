@@ -28,6 +28,7 @@ shm_ser_ipc::shm_ser_ipc(const std::string& topic_name, const std::shared_ptr<Se
     : ser_ipc_base(topic_name, msg, callback, domain_id, verbose)
     , topic_name_(topic_name)
     , callback_(std::move(callback))
+    , domain_id_(domain_id)
     , verbose_(verbose)
 {
     message_.reset(msg->clone());
@@ -102,7 +103,8 @@ void shm_ser_ipc::InitChannel(std::string extra_info)
                                         ? dzIPC::info_pool::demangle(typeid(*message_->request()).name())
                                         : std::string{};
     request_type_name = extract_last_segment(request_type_name);
-    pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmServer, topic_name_, request_type_name, "shm", extra_info});
+    pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmServer, topic_name_, request_type_name, "shm",
+                      static_cast<int32_t>(domain_id_), extra_info});
     std::cerr << "\033[32m[" << topic_name_ << "_SerInfo] Server channel created for topic: " << topic_name_
               << "\033[0m" << std::endl;
     response_thread_ = new std::thread(&shm_ser_ipc::response_thread_func, this);
@@ -234,6 +236,7 @@ shm_cli_ipc::shm_cli_ipc(const std::string& topic_name, const std::shared_ptr<Se
     : cli_ipc_base(topic_name, msg, domain_id, verbose)
     , topic_name_(topic_name)
     , message_(msg)
+    , domain_id_(domain_id)
     , verbose_(verbose)
 {}
 
@@ -272,7 +275,8 @@ void shm_cli_ipc::InitChannel(std::string extra_info)
                                          ? dzIPC::info_pool::demangle(typeid(*message_->response()).name())
                                          : std::string{};
     response_type_name = extract_last_segment(response_type_name);
-    pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmClient, topic_name_, response_type_name, "shm", extra_info});
+    pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmClient, topic_name_, response_type_name, "shm",
+                      static_cast<int32_t>(domain_id_), extra_info});
     if (verbose_)
     {
         std::cerr << "\033[32m[" << topic_name_ << "_CLiInfo] Client connected to server topic: " << topic_name_

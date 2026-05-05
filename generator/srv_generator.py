@@ -42,6 +42,33 @@ class ServiceGenerator:
         "string": "std::string",
     }
 
+    TYPE_INDEX = {
+        "bool": 1,
+        "int8": 2,
+        "uint8": 3,
+        "int16": 4,
+        "uint16": 5,
+        "int32": 6,
+        "uint32": 7,
+        "int64": 8,
+        "uint64": 9,
+        "float32": 10,
+        "float64": 11,
+        "string": 12,
+        "bool[]": 13,
+        "int8[]": 14,
+        "uint8[]": 15,
+        "int16[]": 16,
+        "uint16[]": 17,
+        "int32[]": 18,
+        "uint32[]": 19,
+        "int64[]": 20,
+        "uint64[]": 21,
+        "float32[]": 22,
+        "float64[]": 23,
+        "string[]": 24,
+    }
+
     def __init__(self):
         self.request_fields: List[FieldInfo] = []
         self.response_fields: List[FieldInfo] = []
@@ -57,6 +84,11 @@ class ServiceGenerator:
             normalized_leading = (leading_spaces // indent_size) * indent_size
             normalized_lines.append(" " * normalized_leading + stripped)
         return "\n".join(normalized_lines)
+
+    def _get_type_index(self, field_type: str) -> int:
+        if field_type not in self.TYPE_INDEX:
+            raise ValueError(f"Unsupported type index: {field_type}")
+        return self.TYPE_INDEX[field_type]
 
     def parse_field_definition(self, line: str) -> Optional[FieldInfo]:
         """解析字段定义"""
@@ -217,17 +249,33 @@ namespace dzIPC::Srv {{
         for field in fields:
             if field.is_string and not field.is_array:
                 lines.append(
+                    f"            total_size_ += sizeof(int32_t) + {len(field.field_name)};"
+                )
+                lines.append("            total_size_ += sizeof(uint8_t);")
+                lines.append(
                     f"            total_size_ += sizeof({field.field_name}_size) + {field.field_name}_size;"
                 )
             elif field.is_array and field.is_string:
+                lines.append(
+                    f"            total_size_ += sizeof(int32_t) + {len(field.field_name)};"
+                )
+                lines.append("            total_size_ += sizeof(uint8_t);")
                 lines.append(
                     f"            total_size_ += sizeof({field.field_name}_count) + {field.field_name}_total_size_;"
                 )
             elif field.is_array:
                 lines.append(
+                    f"            total_size_ += sizeof(int32_t) + {len(field.field_name)};"
+                )
+                lines.append("            total_size_ += sizeof(uint8_t);")
+                lines.append(
                     f"            total_size_ += sizeof({field.field_name}_count) + {field.field_name}_size;"
                 )
             else:
+                lines.append(
+                    f"            total_size_ += sizeof(int32_t) + {len(field.field_name)};"
+                )
+                lines.append("            total_size_ += sizeof(uint8_t);")
                 lines.append(f"            total_size_ += {field.field_name}_size;")
 
         lines.append("")
@@ -245,6 +293,11 @@ namespace dzIPC::Srv {{
                 lines.extend(
                     [
                         f"            // 序列化 {field.field_name}",
+                        f"            int32_t {field.field_name}_name_size = {len(field.field_name)};",
+                        f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_name_size), page, offset, sizeof({field.field_name}_name_size));",
+                        f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(\"{field.field_name}\"), page, offset, {field.field_name}_name_size);",
+                        f"            uint8_t {field.field_name}_type = {self._get_type_index(field.field_type)};",
+                        f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_type), page, offset, sizeof({field.field_name}_type));",
                         f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_size), page, offset, sizeof({field.field_name}_size));",
                         f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>({field.field_name}.data()), page, offset, {field.field_name}_size);",
                         "",
@@ -255,6 +308,11 @@ namespace dzIPC::Srv {{
                 lines.extend(
                     [
                         f"            // 序列化 {field.field_name}",
+                        f"            int32_t {field.field_name}_name_size = {len(field.field_name)};",
+                        f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_name_size), page, offset, sizeof({field.field_name}_name_size));",
+                        f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(\"{field.field_name}\"), page, offset, {field.field_name}_name_size);",
+                        f"            uint8_t {field.field_name}_type = {self._get_type_index(field.field_type)};",
+                        f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_type), page, offset, sizeof({field.field_name}_type));",
                         f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_count), page, offset, sizeof({field.field_name}_count));",
                         f"            for (const auto& str : {field.field_name}) {{",
                         f"                int32_t str_size = str.size();",
@@ -272,6 +330,11 @@ namespace dzIPC::Srv {{
                     lines.extend(
                         [
                             f"            // 序列化 {field.field_name} (bool数组特殊处理)",
+                            f"            int32_t {field.field_name}_name_size = {len(field.field_name)};",
+                            f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_name_size), page, offset, sizeof({field.field_name}_name_size));",
+                            f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(\"{field.field_name}\"), page, offset, {field.field_name}_name_size);",
+                            f"            uint8_t {field.field_name}_type = {self._get_type_index(field.field_type)};",
+                            f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_type), page, offset, sizeof({field.field_name}_type));",
                             f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_count), page, offset, sizeof({field.field_name}_count));",
                             f"            std::vector<uint8_t> bool_byte({field.field_name}_count, 0);",
                             f"            for (int32_t i = 0; i < {field.field_name}_count; ++i) {{",
@@ -287,6 +350,11 @@ namespace dzIPC::Srv {{
                     lines.extend(
                         [
                             f"            // 序列化 {field.field_name}",
+                            f"            int32_t {field.field_name}_name_size = {len(field.field_name)};",
+                            f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_name_size), page, offset, sizeof({field.field_name}_name_size));",
+                            f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(\"{field.field_name}\"), page, offset, {field.field_name}_name_size);",
+                            f"            uint8_t {field.field_name}_type = {self._get_type_index(field.field_type)};",
+                            f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_type), page, offset, sizeof({field.field_name}_type));",
                             f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_count), page, offset, sizeof({field.field_name}_count));",
                             f"            if ({field.field_name}_count > 0) {{",
                             f"                this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>({field.field_name}.data()), page, offset, {field.field_name}_size);",
@@ -302,6 +370,11 @@ namespace dzIPC::Srv {{
                     lines.extend(
                         [
                             f"            // 序列化 {field.field_name} (bool类型特殊处理)",
+                            f"            int32_t {field.field_name}_name_size = {len(field.field_name)};",
+                            f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_name_size), page, offset, sizeof({field.field_name}_name_size));",
+                            f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(\"{field.field_name}\"), page, offset, {field.field_name}_name_size);",
+                            f"            uint8_t {field.field_name}_type = {self._get_type_index(field.field_type)};",
+                            f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_type), page, offset, sizeof({field.field_name}_type));",
                             f"            uint8_t {field.field_name}_byte = {field.field_name} ? 1 : 0;",
                             f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_byte), page, offset, sizeof({field.field_name}_byte));",
                             "",
@@ -311,6 +384,11 @@ namespace dzIPC::Srv {{
                     lines.extend(
                         [
                             f"            // 序列化 {field.field_name}",
+                            f"            int32_t {field.field_name}_name_size = {len(field.field_name)};",
+                            f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_name_size), page, offset, sizeof({field.field_name}_name_size));",
+                            f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(\"{field.field_name}\"), page, offset, {field.field_name}_name_size);",
+                            f"            uint8_t {field.field_name}_type = {self._get_type_index(field.field_type)};",
+                            f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_type), page, offset, sizeof({field.field_name}_type));",
                             f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}), page, offset, sizeof({field.field_name}));",
                             "",
                         ]
@@ -348,6 +426,10 @@ namespace dzIPC::Srv {{
                 lines.extend(
                     [
                         f"            // 反序列化 {field.field_name}",
+                        f"            int32_t {field.field_name}_name_size;",
+                        f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_name_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_name_size));",
+                        f"            offset += {field.field_name}_name_size;",
+                        f"            offset += sizeof(uint8_t); // 跳过类型标识",
                         f"            int32_t {field.field_name}_size;",
                         f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_size));",
                         f"            {field.field_name}.resize({field.field_name}_size );",
@@ -360,6 +442,26 @@ namespace dzIPC::Srv {{
                 lines.extend(
                     [
                         f"            // 反序列化 {field.field_name}",
+                        f"            int32_t {field.field_name}_name_size;",
+                        f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_name_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_name_size));",
+                        f"            offset += {field.field_name}_name_size;",
+                        f"            offset += sizeof(uint8_t); // 跳过类型标识",
+                        f"            int32_t {field.field_name}_size;",
+                        f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_size));",
+                        f"            {field.field_name}.resize({field.field_name}_size );",
+                        f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>({field.field_name}.data()), static_cast<const uint8_t *>(buffer.data()), offset, {field.field_name}_size);",
+                        "",
+                    ]
+                )
+            elif field.is_array and field.is_string:
+                # 字符串数组
+                lines.extend(
+                    [
+                        f"            // 反序列化 {field.field_name}",
+                        f"            int32_t {field.field_name}_name_size;",
+                        f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_name_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_name_size));",
+                        f"            offset += {field.field_name}_name_size;",
+                        f"            offset += sizeof(uint8_t); // 跳过类型标识",
                         f"            int32_t {field.field_name}_count;",
                         f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_count), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_count));",
                         f"            {field.field_name}.clear();",
@@ -383,6 +485,10 @@ namespace dzIPC::Srv {{
                     lines.extend(
                         [
                             f"            // 反序列化 {field.field_name} (bool数组特殊处理)",
+                            f"            int32_t {field.field_name}_name_size;",
+                            f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_name_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_name_size));",
+                            f"            offset += {field.field_name}_name_size;",
+                            f"            offset += sizeof(uint8_t); // 跳过类型标识",
                             f"            int32_t {field.field_name}_count;",
                             f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_count), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_count));",
                             f"            {field.field_name}.clear();",
@@ -401,6 +507,10 @@ namespace dzIPC::Srv {{
                     lines.extend(
                         [
                             f"            // 反序列化 {field.field_name}",
+                            f"            int32_t {field.field_name}_name_size;",
+                            f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_name_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_name_size));",
+                            f"            offset += {field.field_name}_name_size;",
+                            f"            offset += sizeof(uint8_t); // 跳过类型标识",
                             f"            int32_t {field.field_name}_count;",
                             f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_count), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_count));",
                             f"            {field.field_name}.resize({field.field_name}_count);",
@@ -418,6 +528,10 @@ namespace dzIPC::Srv {{
                     lines.extend(
                         [
                             f"            // 反序列化 {field.field_name} (bool类型特殊处理)",
+                            f"            int32_t {field.field_name}_name_size;",
+                            f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_name_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_name_size));",
+                            f"            offset += {field.field_name}_name_size;",
+                            f"            offset += sizeof(uint8_t); // 跳过类型标识",
                             f"            uint8_t {field.field_name}_byte;",
                             f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_byte), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_byte));",
                             f"            {field.field_name} = ({field.field_name}_byte != 0);",
@@ -428,6 +542,10 @@ namespace dzIPC::Srv {{
                     lines.extend(
                         [
                             f"            // 反序列化 {field.field_name}",
+                            f"            int32_t {field.field_name}_name_size;",
+                            f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_name_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_name_size));",
+                            f"            offset += {field.field_name}_name_size;",
+                            f"            offset += sizeof(uint8_t); // 跳过类型标识",
                             f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}));",
                             "",
                         ]

@@ -39,6 +39,7 @@ public:
     socket_pub_ipc& operator=(const socket_pub_ipc&) = delete;
 
 private:
+    size_t domain_id_{0};
     int cli_cnt{0};
     std::atomic<bool> subscribed_{false};
     bool verbose_{false};
@@ -47,7 +48,6 @@ private:
     std::shared_ptr<ipc::socket::UDPNode> publisher_;
     uint16_t port_hash_;
     std::string ipaddr_;
-    size_t domain_id_;
     std::mutex sleep_mtx;
     std::condition_variable sleep_cv;
     dzIPC::info_pool::ScopedRegistration pool_reg_;
@@ -69,6 +69,7 @@ public:
     socket_sub_ipc& operator=(const socket_sub_ipc&) = delete;
 
 private:
+    size_t domain_id_{0};
     std::atomic<bool> subscribed_{false};
     std::atomic<bool> running{true};
     bool data_update_{false};
@@ -76,7 +77,6 @@ private:
     std::string topic_name_;
     uint16_t port_hash_;
     std::string ipaddr_;
-    size_t domain_id_;
     std::shared_ptr<ipc::socket::UDPNode> subscriber_;
     std::shared_ptr<TopicData> topic_msg_;
     std::unique_ptr<CircularQueue<IpcMsgBase>> msg_queue_;

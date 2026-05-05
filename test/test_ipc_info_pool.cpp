@@ -28,7 +28,7 @@ const EntrySnapshot* find_slot(const std::vector<EntrySnapshot>& es, int32_t slo
 TEST(IpcInfoPool, RegisterThenSnapshotReturnsEntry)
 {
     auto& pool = IpcInfoPool::instance();
-    RegisterInfo info{EntryKind::ShmPub, "ut_topic_register", "TestMsgType", "", "extra=foo"};
+    RegisterInfo info{EntryKind::ShmPub, "ut_topic_register", "TestMsgType", "", 0, "extra=foo"};
     int32_t slot = pool.register_entry(info);
     ASSERT_GE(slot, 0);
 
@@ -50,7 +50,7 @@ TEST(IpcInfoPool, ScopedRegistrationAutoReleases)
 {
     int32_t slot = -1;
     {
-        ScopedRegistration reg({EntryKind::SocketSub, "ut_scoped", "T", "", ""});
+        ScopedRegistration reg({EntryKind::SocketSub, "ut_scoped", "T", "", 0, ""});
         ASSERT_TRUE(reg.valid());
         slot = reg.slot();
         auto es = IpcInfoPool::instance().snapshot(false);
@@ -62,11 +62,11 @@ TEST(IpcInfoPool, ScopedRegistrationAutoReleases)
 
 TEST(IpcInfoPool, RebindReleasesOldSlot)
 {
-    ScopedRegistration reg({EntryKind::ShmPub, "ut_rebind_a", "", "", "first"});
+    ScopedRegistration reg({EntryKind::ShmPub, "ut_rebind_a", "", "", 0, "first"});
     int32_t slot = reg.slot();
     ASSERT_GE(slot, 0);
 
-    reg.rebind({EntryKind::SocketPub, "ut_rebind_b", "", "", "second"});
+    reg.rebind({EntryKind::SocketPub, "ut_rebind_b", "", "", 0, "second"});
     int32_t slot_after = reg.slot();
     ASSERT_GE(slot_after, 0);
 
@@ -80,7 +80,7 @@ TEST(IpcInfoPool, RebindReleasesOldSlot)
 
 TEST(IpcInfoPool, ScopedRegistrationMoveTransfersOwnership)
 {
-    ScopedRegistration a({EntryKind::ShmServer, "ut_move_src", "", "", ""});
+    ScopedRegistration a({EntryKind::ShmServer, "ut_move_src", "", "", 0, ""});
     ASSERT_TRUE(a.valid());
     int32_t slot = a.slot();
 
@@ -104,7 +104,7 @@ TEST(IpcInfoPool, GcReapsEntriesOfDeadChildProcess)
     if (child == 0)
     {
         auto& child_pool = IpcInfoPool::instance();
-        child_pool.register_entry({EntryKind::ShmPub, "ut_gc_deadchild", "", "", "from-child"});
+        child_pool.register_entry({EntryKind::ShmPub, "ut_gc_deadchild", "", "", 0, "from-child"});
         ::_exit(0);
     }
     /* 等子进程退出 */
@@ -140,7 +140,7 @@ TEST(IpcInfoPool, GcReapsEntriesOfDeadChildProcess)
 
 TEST(IpcInfoPool, HeartbeatUpdatesTimestamp)
 {
-    ScopedRegistration reg({EntryKind::ShmSub, "ut_hb", "", "", ""});
+    ScopedRegistration reg({EntryKind::ShmSub, "ut_hb", "", "", 0, ""});
     ASSERT_TRUE(reg.valid());
 
     int64_t ts_before = 0;

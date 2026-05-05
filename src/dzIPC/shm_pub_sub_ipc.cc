@@ -26,6 +26,7 @@ shm_pub_ipc::shm_pub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
     : pub_ipc_base(msg, topic_name, domain_id, verbose)
     , topic_name_("dz_ipc_" + topic_name + "_topic")
     , raw_topic_name_(topic_name)
+    , domain_id_(domain_id)
     , verbose_(verbose)
 {
     topic_msg_.reset(msg->clone());
@@ -71,7 +72,8 @@ void shm_pub_ipc::InitChannel(std::string extra_info)
                                           ? dzIPC::info_pool::demangle(typeid(topic_msg_->topic()).name())
                                           : std::string{};
         topic_type_name = extract_last_segment(topic_type_name);
-        pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmPub, raw_topic_name_, topic_type_name, "shm", extra_info});
+        pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmPub, raw_topic_name_, topic_type_name, "shm",
+                          static_cast<int32_t>(domain_id_), extra_info});
         // publish_thread_ = std::thread(&shm_pub_ipc::sub_listener, this);
     }
     catch (const std::exception& e)
@@ -183,6 +185,7 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
     : sub_ipc_base(msg, topic_name, domain_id, queue_size, verbose)
     , topic_name_("dz_ipc_" + topic_name + "_topic")
     , raw_topic_name_(topic_name)
+    , domain_id_(domain_id)
     , verbose_(verbose)
 {
     topic_msg_.reset(msg->clone());
@@ -305,7 +308,8 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
     std::string topic_type_name = topic_msg_->topic() ? dzIPC::info_pool::demangle(typeid(topic_msg_->topic()).name())
                                                       : std::string{};
     topic_type_name = extract_last_segment(topic_type_name);
-    pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmSub, raw_topic_name_, topic_type_name, "shm", extra_info});
+    pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmSub, raw_topic_name_, topic_type_name, "shm",
+                      static_cast<int32_t>(domain_id_), extra_info});
     sub_handshake_thread_ = new std::thread(&shm_sub_ipc::sub_handshake, this);
     subscribe_thread_ = new std::thread(
         [this]()

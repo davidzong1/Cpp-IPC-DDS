@@ -35,7 +35,7 @@ option(LIBIPC_BUILD_DEMOS       "Build all of libipc's own demos."              
 option(LIBIPC_BUILD_SHARED_LIBS "Build shared libraries (DLLs)."                        ON)
 option(LIBIPC_USE_STATIC_CRT    "Set to ON to build with static CRT on Windows (/MT)."  OFF)
 option(OPEN_DEBUG_MODE          "Enable debug mode in PROJECT."                         ON)
-option(LIBIPC_BUILD_PYTHON      "Build pybind11 Python module dzipc_cpp."               OFF)
+option(LIBIPC_BUILD_PYTHON      "Build pybind11 Python module dzipc_cpp."               ON)
 option(UPDATA_MSG_SRV_GENERATOR    "Update msg/srv generator scripts."                  ON)
 
 
@@ -88,7 +88,7 @@ if (MSVC)
 endif()
 
 set(LIBRARY_OUTPUT_PATH    ${CMAKE_BINARY_DIR}/bin)
-set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR}/bin)
+set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR}/app)
 set(LIBIPC_PROJECT_DIR     ${PROJECT_SOURCE_DIR})
 
 # Unicode Support
