@@ -51,6 +51,11 @@ bool UDPNode::send(ipc::buffer& data) Exception
     return impl(p_)->node_.send(data);
 }
 
+ipc::buffer UDPNode::receive_nowait() Exception
+{
+    return impl(p_)->node_.receive_nowait();
+}
+
 ipc::buffer UDPNode::receive(uint64_t tm) Exception
 {
     return impl(p_)->node_.receive(tm);

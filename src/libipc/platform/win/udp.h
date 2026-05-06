@@ -160,6 +160,31 @@ public:
         return sent == static_cast<int>(payload_size);
     }
 
+    ipc::buffer receive_nowait()
+    {
+        if (server_fd == INVALID_SOCKET)
+            return ipc::buffer();
+
+        ssize_t received = ::recvfrom(server_fd, temp_buffer.data(), temp_buffer.size(), MSG_DONTWAIT, nullptr, nullptr);
+        if (received >= 0)
+        {
+            return ipc::buffer(temp_buffer.data(), received, nullptr);
+        }
+        else
+        {
+            int err = ::WSAGetLastError();
+            // info too large for buffer
+            if (err == WSAEMSGSIZE)
+                return ipc::buffer();
+            // 异常中断或资源暂时不可用
+            if (err == WSAEINTR || err == WSAEWOULDBLOCK)
+            {
+                return ipc::buffer();
+            }
+            return ipc::buffer();
+        }
+    }
+
     ipc::buffer receive(uint64_t tm)
     {
         if (server_fd == INVALID_SOCKET)

@@ -24,7 +24,7 @@ volatile std::sig_atomic_t g_running = 1;
 std::mutex topic_in_use_mutex;
 std::condition_variable topic_in_use_cv;
 std::mutex sniffer_use_mutex;
-dzIPC::info_pool::EntryKind kind_cache{dzIPC::info_pool::EntryKind::Unknown};
+std::string kind_cache{"unknown"};
 
 void handle_sigint(int)
 {
@@ -33,6 +33,8 @@ void handle_sigint(int)
     topic_in_use_cv.notify_all();
 }
 }   // namespace
+
+bool link_type{false};   // false for socket, true for shm
 
 bool check_topic_state(dzIPC::info_pool::IpcInfoPool& pool, std::string& topic_name, bool ser_or_topic, uint32_t msg_id,
                        std::unique_ptr<dzIPC::sniffer>& sniffer, std::unique_ptr<dzIPC::TopicData>& MsgManager_topic,
@@ -48,10 +50,14 @@ bool check_topic_state(dzIPC::info_pool::IpcInfoPool& pool, std::string& topic_n
                 state.store(StateMachine::UNCONNECTED, std::memory_order_release);
                 return false;
             }
-            if (kind_cache != entry.kind && kind_cache != dzIPC::info_pool::EntryKind::Unknown)
+            if ((kind_cache != std::string(dzIPC::info_pool::get_type_from_kind(entry.kind))) && kind_cache != "unknown")
             {
-                kind_cache = entry.kind;
+                kind_cache = std::string(dzIPC::info_pool::get_type_from_kind(entry.kind));
                 state.store(StateMachine::UNCONNECTED, std::memory_order_release);
+                return false;
+            }
+            if (state.load(std::memory_order_acquire) == StateMachine::CONNECTED)
+            {
                 return false;
             }
             if (ser_or_topic)
@@ -61,20 +67,21 @@ bool check_topic_state(dzIPC::info_pool::IpcInfoPool& pool, std::string& topic_n
                     || entry.kind == dzIPC::info_pool::EntryKind::ShmServer
                     || entry.kind == dzIPC::info_pool::EntryKind::ShmClient)
                 {
+                    printf("\x1b[2J\x1b[HFound service '%s' with msg_id %u! Connecting...\n", topic_name.c_str(),
+                           msg_id);
                     int domain_id = entry.domain_id;
-                    bool link_type = (entry.kind == dzIPC::info_pool::EntryKind::ShmServer
-                                      || entry.kind == dzIPC::info_pool::EntryKind::ShmClient)
-                                         ? true
-                                         : false;
+                    link_type = (entry.kind == dzIPC::info_pool::EntryKind::ShmServer
+                                 || entry.kind == dzIPC::info_pool::EntryKind::ShmClient)
+                                    ? true
+                                    : false;
                     {
                         std::unique_lock<std::mutex> lock(sniffer_use_mutex);
-                        MsgManager_service = std::make_unique<dzIPC::ServiceData>(std::make_shared<IpcMsgBase>(),
-                                                                                  std::make_shared<IpcMsgBase>(),
-                                                                                  msg_id);
-                        sniffer = std::make_unique<dzIPC::sniffer>(topic_name, domain_id, ser_or_topic, link_type);
+                        MsgManager_service.reset(new dzIPC::ServiceData(std::make_shared<IpcMsgBase>(),
+                                                                        std::make_shared<IpcMsgBase>(), msg_id));
+                        sniffer.reset(new dzIPC::sniffer(topic_name, domain_id, ser_or_topic, link_type, msg_id));
                     }
                     state.store(StateMachine::CONNECTED, std::memory_order_release);
-                    kind_cache = entry.kind;
+                    kind_cache = std::string(dzIPC::info_pool::get_type_from_kind(entry.kind));
                     return true;
                 }
             }
@@ -85,18 +92,19 @@ bool check_topic_state(dzIPC::info_pool::IpcInfoPool& pool, std::string& topic_n
                     || entry.kind == dzIPC::info_pool::EntryKind::SocketSub
                     || entry.kind == dzIPC::info_pool::EntryKind::ShmSub)
                 {
+                    printf("\x1b[2J\x1b[HFound topic '%s' with msg_id %u! Connecting...\n", topic_name.c_str(), msg_id);
                     int domain_id = entry.domain_id;
-                    bool link_type = (entry.kind == dzIPC::info_pool::EntryKind::ShmPub
-                                      || entry.kind == dzIPC::info_pool::EntryKind::ShmSub)
-                                         ? true
-                                         : false;
+                    link_type = (entry.kind == dzIPC::info_pool::EntryKind::ShmPub
+                                 || entry.kind == dzIPC::info_pool::EntryKind::ShmSub)
+                                    ? true
+                                    : false;
                     {
                         std::unique_lock<std::mutex> lock(sniffer_use_mutex);
-                        MsgManager_topic = std::make_unique<dzIPC::TopicData>(std::make_shared<IpcMsgBase>(), msg_id);
-                        sniffer = std::make_unique<dzIPC::sniffer>(topic_name, domain_id, ser_or_topic, link_type);
+                        MsgManager_topic.reset(new dzIPC::TopicData(std::make_shared<IpcMsgBase>(), msg_id));
+                        sniffer.reset(new dzIPC::sniffer(topic_name, domain_id, ser_or_topic, link_type, msg_id));
                     }
                     state.store(StateMachine::CONNECTED, std::memory_order_release);
-                    kind_cache = entry.kind;
+                    kind_cache = std::string(dzIPC::info_pool::get_type_from_kind(entry.kind));
                     return true;
                 }
             }
@@ -111,7 +119,7 @@ int main(int argc, char* argv[])
     std::signal(SIGINT, handle_sigint);
     ArgParser parser("dzipc_topic_cat", "Topic cat for dzIPC");
     parser.add_argument("--topic", "-t", "Topic name", ArgParser::Type::STRING, true);
-    parser.add_argument("--ser_or_topic", "-s", "Service or topic flag", ArgParser::Type::BOOL, true);
+    parser.add_argument("--ser_or_topic", "-s", "Service(true) or Publish(false) flag", ArgParser::Type::BOOL, true);
     parser.add_argument("--msg_id", "-m", "Message ID to filter (optional)", ArgParser::Type::INT, false, "0");
     try
     {
@@ -152,6 +160,8 @@ int main(int argc, char* argv[])
     {
         if (state == StateMachine::UNCONNECTED)
         {
+            fprintf(stderr, "%s\n\033[33mWaiting for topic '%s' to be published...\n\033[0m", ss.str().c_str(),
+                    topic_name.c_str());
             std::unique_lock<std::mutex> lock(topic_in_use_mutex);
             topic_in_use_cv.wait(lock,
                                  [&state]
@@ -171,31 +181,41 @@ int main(int argc, char* argv[])
                 }
                 if (ser_or_topic)
                 {
-                    ss.clear();
                     std::string req_str = dzIPC::msg_to_string(info.request);
                     std::string res_str = dzIPC::msg_to_string(info.response);
-                    ss << "\x1b[2J\x1b[H=====================================================\n\n";
-                    ss << "Topic: " << topic_name << std::setw(30) << "Type: Service" << std::setw(30)
-                       << "Msg ID: " << msg_id << "\n\n";
-                    ss << "------------------------------------------------------\n"
-                       << "Request:\n"
-                       << req_str << "\nResponse:\n"
-                       << res_str << std::endl;
-                    fprintf(stdout, "%s", ss.str().c_str());
-                    fflush(stdout);
+                    if (!req_str.empty() || !res_str.empty())
+                    {
+                        ss.str("");
+                        ss.clear();
+                        ss << "\x1b[2J\x1b[H=====================================================\n\n";
+                        ss << "Topic: \033[32m" << topic_name << "\033[0m" << std::setw(20) << "Type: Service(\033[34m"
+                           << (link_type ? "SHM" : "SOCKET") << "\033[0m)" << std::setw(20) << "Msg ID: " << msg_id
+                           << "\n\n";
+                        ss << "------------------------------------------------------\n"
+                           << "Request:\n"
+                           << req_str << "\nResponse:\n"
+                           << res_str << std::endl;
+                        fprintf(stdout, "%s", ss.str().c_str());
+                        fflush(stdout);
+                    }
                 }
                 else
                 {
-                    ss.clear();
                     std::string topic_str = dzIPC::msg_to_string(info.request);
-                    ss << "\x1b[2J\x1b[H=====================================================\n\n";
-                    ss << "Topic: " << topic_name << std::setw(30) << "Type: Topic" << std::setw(30)
-                       << "Msg ID: " << msg_id << "\n\n";
-                    ss << "------------------------------------------------------\n"
-                       << "Message:\n"
-                       << topic_str << std::endl;
-                    fprintf(stdout, "%s", ss.str().c_str());
-                    fflush(stdout);
+                    if (!topic_str.empty())
+                    {
+                        ss.str("");
+                        ss.clear();
+                        ss << "\x1b[2J\x1b[H=====================================================\n\n";
+                        ss << "Topic: \033[32m" << topic_name << "\033[0m" << std::setw(20) << "Type: Topic(\033[34m"
+                           << (link_type ? "SHM" : "SOCKET") << "\033[0m)" << std::setw(20) << "Msg ID: " << msg_id
+                           << "\n\n";
+                        ss << "------------------------------------------------------\n"
+                           << "Message:\n"
+                           << topic_str << std::endl;
+                        fprintf(stdout, "%s", ss.str().c_str());
+                        fflush(stdout);
+                    }
                 }
                 auto end = std::chrono::steady_clock::now();
                 auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();

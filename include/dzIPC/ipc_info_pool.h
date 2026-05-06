@@ -24,7 +24,7 @@ enum class EntryKind : uint32_t {
 };
 
 const char* to_string(EntryKind kind) noexcept;
-
+const char* get_type_from_kind(EntryKind kind) noexcept;
 /* Best-effort demangle（ABI 为 Itanium 时有效；回退为原始 mangled 名） */
 std::string demangle(const char* mangled);
 

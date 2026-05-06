@@ -68,8 +68,7 @@ PYBIND11_MODULE(dzipc, m)
             "send_request",
             [](dzIPC::pimpl::client_ipc_impl& self, std::shared_ptr<dzIPC::ServiceData> request, uint64_t rev_tm)
             { return self.send_request(request, rev_tm); }, py::arg("request"),
-            py::arg("rev_tm") = std::numeric_limits<uint32_t>::max(),
-            py::call_guard<py::gil_scoped_release>());
+            py::arg("rev_tm") = std::numeric_limits<uint32_t>::max(), py::call_guard<py::gil_scoped_release>());
 
     py::class_<dzIPC::pimpl::publisher_ipc_impl, std::shared_ptr<dzIPC::pimpl::publisher_ipc_impl>>(m, "PublisherIPC")
         // InitChannel 同上
@@ -87,26 +86,33 @@ PYBIND11_MODULE(dzipc, m)
         .def("InitChannel", &dzIPC::pimpl::subscriber_ipc_impl::InitChannel, py::arg("extra_info") = "",
              py::call_guard<py::gil_scoped_release>())
         .def("reset_message", &dzIPC::pimpl::subscriber_ipc_impl::reset_message)
-        // get 是阻塞型：等到消息才返回。**必须**释放 GIL，否则同进程发布线程会被饿死
+        // get 是阻塞型：等到消息才返回。**必须**释放 GIL，否则同进程发布线程会被饿死。
+        // 注意：只在 C++ IO 调用期间释放 GIL，返回值（Python 对象）的构造必须在持有 GIL 时进行，
+        // 否则 pybind11 会触发 "inc_ref() PyGILState_Check() failure" 断言。
         .def(
             "get",
             [](dzIPC::pimpl::subscriber_ipc_impl& self, std::shared_ptr<dzIPC::TopicData> msg)
             {
-                self.get(msg);
+                {
+                    py::gil_scoped_release release;
+                    self.get(msg);
+                }
                 return msg;
             },
-            py::arg("msg"),
-            py::call_guard<py::gil_scoped_release>())
-        // try_get 非阻塞，但仍涉及 socket/shm 读、互斥锁；同样释放 GIL 以避免长尾抖动
+            py::arg("msg"))
+        // try_get 非阻塞，但仍涉及 socket/shm 读、互斥锁；同样仅在 C++ 调用期间释放 GIL。
         .def(
             "try_get",
             [](dzIPC::pimpl::subscriber_ipc_impl& self, std::shared_ptr<dzIPC::TopicData> msg)
             {
-                bool ok = self.try_get(msg);
+                bool ok;
+                {
+                    py::gil_scoped_release release;
+                    ok = self.try_get(msg);
+                }
                 return py::make_tuple(ok, msg);
             },
-            py::arg("msg"),
-            py::call_guard<py::gil_scoped_release>());
+            py::arg("msg"));
 
     m.def(
         "make_topic_data", [](const std::shared_ptr<IpcMsgBase>& msg, int msg_id)
@@ -127,8 +133,7 @@ PYBIND11_MODULE(dzipc, m)
           py::call_guard<py::gil_scoped_release>());
 
     m.def("ClientIPCPtrMake", &dzIPC::ClientIPCPtrMake, py::arg("topic_name"), py::arg("msg"), py::arg("domain_id"),
-          py::arg("ipc_type"), py::arg("verbose") = false,
-          py::call_guard<py::gil_scoped_release>());
+          py::arg("ipc_type"), py::arg("verbose") = false, py::call_guard<py::gil_scoped_release>());
 
     m.def("PublisherIPCPtrMake", &dzIPC::PublisherIPCPtrMake, py::arg("msg"), py::arg("topic_name"),
           py::arg("domain_id"), py::arg("ipc_type"), py::arg("verbose") = false,

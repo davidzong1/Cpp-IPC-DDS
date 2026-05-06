@@ -17,7 +17,8 @@ public:
         STRING,
         INT,
         DOUBLE,
-        BOOL
+        BOOL,
+        FLAG,   // 仅作为布尔标志，不接受值
     };
 
     struct Argument
@@ -53,7 +54,7 @@ public:
         a.required = required;
         a.default_value = default_value;
         a.value = default_value;
-        a.is_flag = (type == Type::BOOL);
+        a.is_flag = (type == Type::FLAG);
         a.is_positional = name.empty() || name[0] != '-';
         a.present = !default_value.empty();
 

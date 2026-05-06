@@ -39,7 +39,8 @@ enum MsgType : uint8_t {
 template<typename T>
 inline T read_value_from_buffer(const uint8_t* buffer, uint32_t& offset)
 {
-    uint8_t value;
+    T value{};
+    uint8_t* value_bytes = reinterpret_cast<uint8_t*>(&value);
     uint32_t data_len = sizeof(T);
     uint32_t passed_tails = offset / (IPC_MSG_MAX_SIZE + TAIL_MSG_SIZE);
     uint32_t pure_data_offset = offset - passed_tails * TAIL_MSG_SIZE;
@@ -49,7 +50,7 @@ inline T read_value_from_buffer(const uint8_t* buffer, uint32_t& offset)
     {
         uint32_t copy_size = std::min(IPC_MSG_MAX_SIZE - (pure_data_offset % IPC_MSG_MAX_SIZE),
                                       data_len - has_copy_size);
-        std::memcpy(&value, buffer + offset, copy_size);
+        std::memcpy(value_bytes + has_copy_size, buffer + offset, copy_size);
 
         offset += copy_size + TAIL_MSG_SIZE;   // 跨过数据长度外，还要跨过那 12 个尾部特征字节
         pure_data_offset += copy_size;
@@ -58,10 +59,10 @@ inline T read_value_from_buffer(const uint8_t* buffer, uint32_t& offset)
     long remaining_size = data_len - has_copy_size;
     if (remaining_size > 0)
     {
-        std::memcpy(&value + has_copy_size, buffer + offset, remaining_size);
+        std::memcpy(value_bytes + has_copy_size, buffer + offset, remaining_size);
         offset += remaining_size;
     }
-    return static_cast<T>(value);
+    return value;
 }
 
 inline std::string read_string_from_buffer(const uint8_t* buffer, uint32_t& offset)
@@ -188,7 +189,6 @@ inline std::string msg_to_string(ipc::buffer& raw_data)
         }
         std::string name = read_string_from_buffer(buffer, offset);
         uint8_t type = read_value_from_buffer<uint8_t>(buffer, offset);
-        offset++;
         switch (type)
         {
         case MsgType::MSG_BOOL:

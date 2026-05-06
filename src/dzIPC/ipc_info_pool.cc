@@ -1,18 +1,18 @@
 #include "dzIPC/ipc_info_pool.h"
 
+#include <cxxabi.h>
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <thread>
 #include <type_traits>
-
-#include <cxxabi.h>
-#include <pthread.h>
-#include <signal.h>
-#include <unistd.h>
 #include "libipc/shm.h"
 
 namespace dzIPC {
@@ -124,6 +124,28 @@ struct ScopedShmLock
 };
 
 }   // namespace
+
+const char* get_type_from_kind(EntryKind kind) noexcept
+{
+    switch (kind)
+    {
+    case EntryKind::ShmPub:
+    case EntryKind::ShmSub:
+        return "shm_pubsub";
+    case EntryKind::ShmServer:
+    case EntryKind::ShmClient:
+        return "shm_sercli";
+    case EntryKind::SocketPub:
+    case EntryKind::SocketSub:
+        return "socket_pubsub";
+    case EntryKind::SocketServer:
+    case EntryKind::SocketClient:
+        return "socket_sercli";
+    case EntryKind::Unknown:
+    default:
+        throw std::runtime_error("invalid EntryKind");
+    }
+}
 
 const char* to_string(EntryKind kind) noexcept
 {

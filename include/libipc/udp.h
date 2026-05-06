@@ -20,6 +20,7 @@ public:
     void create(const char* name, const char* ip, uint16_t port) Exception;
     bool connect() Exception;
     bool send(ipc::buffer& data) Exception;
+    ipc::buffer receive_nowait() Exception;
     ipc::buffer receive(uint64_t tm = ipc::invalid_value) Exception;
     bool close() Exception;
     void clear_cache() Exception;

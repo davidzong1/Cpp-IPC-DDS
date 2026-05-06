@@ -130,6 +130,23 @@ public:
         return true;
     }
 
+    ipc::buffer receive_nowait()
+    {
+        if (server_fd < 0)
+            return ipc::buffer();
+
+        ssize_t received = ::recvfrom(server_fd, temp_buffer.data(), temp_buffer.size(), MSG_DONTWAIT, nullptr, nullptr);
+        if (received >= 0)
+        {
+            return ipc::buffer(temp_buffer.data(), received, nullptr);
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+        {
+            return ipc::buffer();   // 没有数据可读
+        }
+        return ipc::buffer();
+    }
+
     ipc::buffer receive(uint64_t tm)
     {
         if (server_fd < 0)

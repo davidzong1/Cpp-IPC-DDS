@@ -279,6 +279,13 @@ void send_nack_for_missing(std::shared_ptr<ipc::socket::UDPNode>& node, const ch
     send_chunk_with_retry(node, nack_buf);
 }
 
+ipc::buffer make_owned_copy(const void* src, std::size_t n)
+{
+    auto* mem = new uint8_t[n];
+    std::memcpy(mem, src, n);
+    return ipc::buffer(mem, n, [](void* p, std::size_t) { delete[] static_cast<uint8_t*>(p); });
+}
+
 bool recv_chunk_common(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<IpcMsgBase>& msg_ptr, uint64_t tm)
 {
     const auto begin = std::chrono::steady_clock::now();
@@ -385,6 +392,166 @@ bool chunk_rev_server(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_p
 {
     std::shared_ptr<IpcMsgBase> msg_ptr = ser_or_cli ? rev_msg->request() : rev_msg->response();
     return recv_chunk_common(node, msg_ptr, tm);
+}
+
+ipc::buffer chunk_rev_sniff(ipc::socket::UDPNode& node, uint64_t tm)
+{
+    const auto first_begin = std::chrono::steady_clock::now();
+
+    chunk_meta meta{};
+    bool have_meta = false;
+    std::vector<uint8_t> assembled;
+    std::vector<uint8_t> received;
+    std::size_t received_cnt = 0;
+    std::chrono::steady_clock::time_point assembly_begin{};
+    uint64_t assembly_budget_ms = 0;
+    ipc::buffer pending;
+
+    auto begin_assembly = [&](const ipc::buffer& first_page)
+    {
+        assembled.assign(meta.total_size, 0);
+        received.assign(static_cast<std::size_t>(meta.page_cnt) + 1, 0);
+        received_cnt = 0;
+        assembly_begin = std::chrono::steady_clock::now();
+        // Bounded internal deadline so a stuck assembly doesn't hold the sniffer
+        // thread past the next sender cycle. Tied to page_cnt so big frames get
+        // proportionally more time, but capped to keep stop-responsiveness sane.
+        assembly_budget_ms = std::min<uint64_t>(500, std::max<uint64_t>(50, static_cast<uint64_t>(meta.page_cnt) * 2));
+        place_page(first_page, meta, assembled, received, received_cnt);
+    };
+
+    while (true)
+    {
+        uint64_t wait_ms;
+        if (have_meta)
+        {
+            const uint64_t used = elapsed_ms(assembly_begin);
+            if (used >= assembly_budget_ms)
+            {
+                return ipc::buffer{};
+            }
+            wait_ms = assembly_budget_ms - used;
+        }
+        else
+        {
+            if (tm == ipc::invalid_value)
+            {
+                wait_ms = ipc::invalid_value;
+            }
+            else
+            {
+                const uint64_t used = elapsed_ms(first_begin);
+                if (used >= tm)
+                {
+                    return ipc::buffer{};
+                }
+                wait_ms = tm - used;
+            }
+        }
+
+        ipc::buffer page;
+        if (pending.size() > 0)
+        {
+            page = std::move(pending);
+        }
+        else
+        {
+            try
+            {
+                page = node.receive(wait_ms);
+            }
+            catch (...)
+            {
+                return ipc::buffer{};
+            }
+            if (page.empty())
+            {
+                return ipc::buffer{};
+            }
+        }
+
+        ipc_tail_msg tail;
+        if (!parse_tail(page, tail) || !valid_chunk_meta(tail))
+        {
+            continue;
+        }
+        if (tail.now_page == 0 || tail.now_page > tail.page_cnt)
+        {
+            continue;
+        }
+
+        chunk_meta tentative{tail.page_cnt, tail.total_size, tail.dz_ipc_msg_id};
+        if (page.size() != expected_page_size(tentative, tail.now_page))
+        {
+            continue;
+        }
+
+        if (!have_meta)
+        {
+            // Only kick off assembly on a true first page. This is what keeps us
+            // from latching onto the tail of a message whose head we missed —
+            // i.e., the case where the previous frame was still being verified
+            // on the wire while we were already moving on to "the next packet".
+            if (tail.now_page != 1)
+            {
+                continue;
+            }
+            meta = tentative;
+            have_meta = true;
+            if (meta.page_cnt == 1)
+            {
+                if (page.size() != meta.total_size)
+                {
+                    have_meta = false;
+                    continue;
+                }
+                return make_owned_copy(page.data(), page.size());
+            }
+            begin_assembly(page);
+            if (received_cnt >= meta.page_cnt)
+            {
+                return make_owned_copy(assembled.data(), meta.total_size);
+            }
+            continue;
+        }
+
+        if (tail.dz_ipc_msg_id == meta.msg_id && tail.page_cnt == meta.page_cnt && tail.total_size == meta.total_size)
+        {
+            place_page(page, meta, assembled, received, received_cnt);
+            if (received_cnt >= meta.page_cnt)
+            {
+                return make_owned_copy(assembled.data(), meta.total_size);
+            }
+            continue;
+        }
+
+        // A chunk with a different msg_id arrived mid-assembly — the sender has
+        // already moved on, so the in-flight frame is unrecoverable.
+        if (tail.now_page == 1)
+        {
+            // Fresh first page of a new message: discard the old frame and
+            // restart cleanly on this one.
+            meta = tentative;
+            if (meta.page_cnt == 1)
+            {
+                if (page.size() != meta.total_size)
+                {
+                    have_meta = false;
+                    continue;
+                }
+                return make_owned_copy(page.data(), page.size());
+            }
+            begin_assembly(page);
+            if (received_cnt >= meta.page_cnt)
+            {
+                return make_owned_copy(assembled.data(), meta.total_size);
+            }
+            continue;
+        }
+        // Mid-page of a message whose start we never saw — we missed the boat.
+        // Drop and let the caller try again from a clean state.
+        return ipc::buffer{};
+    }
 }
 
 bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publish_data)
