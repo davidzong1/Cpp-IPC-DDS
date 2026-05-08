@@ -10,8 +10,20 @@ target_include_directories(dzipc_topic_cat
 target_link_libraries(dzipc_topic_cat
     PRIVATE
         ipc
-        $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},QNX>>:pthread>
+        $<$<NOT:$<OR:$<STREQUAL:${CMAKE_SYSTEM_NAME},Windows>,$<STREQUAL:${CMAKE_SYSTEM_NAME},QNX>>>:pthread>
         $<$<NOT:$<OR:$<STREQUAL:${CMAKE_SYSTEM_NAME},Windows>,$<STREQUAL:${CMAKE_SYSTEM_NAME},QNX>>>:rt>)
+
+if (MSVC)
+    target_compile_options(dzipc_topic_cat PRIVATE /utf-8 /wd4251)
+endif()
 
 set_target_properties(dzipc_topic_cat PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${APP_OUTPUT_PATH})
+
+if (WIN32 AND LIBIPC_BUILD_SHARED_LIBS)
+    add_custom_command(TARGET dzipc_topic_cat POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:ipc>
+            $<TARGET_FILE_DIR:dzipc_topic_cat>
+    )
+endif()

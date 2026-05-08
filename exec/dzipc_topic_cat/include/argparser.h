@@ -175,7 +175,7 @@ public:
 
     void print_help() const
     {
-        std::cout << "Usage: " << program_ << " [options] [positional...]\n";
+        std::cout << "Usage: " << this->program_ << " [options] [positional...]\n";
         if (!description_.empty())
             std::cout << "\n" << description_ << "\n";
         std::cout << "\nOptions:\n";

@@ -1,7 +1,6 @@
 #include "dzIPC/socket_ser_cli_ipc.h"
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <atomic>
 #include <iostream>
 #include <memory>
@@ -70,6 +69,20 @@ socket_ser_ipc::~socket_ser_ipc()
         {
             response_thread_->join();
         }
+        delete response_thread_;
+        response_thread_ = nullptr;
+    }
+    /* handshake 线程也必须 join，否则析构返回后该线程仍会读取本对象的成员
+       (running / topic_name_ / verbose_ 等)，造成 use-after-free。Windows
+       上的堆分配器更激进地复用内存，命中崩溃的概率远高于 Linux */
+    if (handshake_thread_ != nullptr)
+    {
+        if (handshake_thread_->joinable())
+        {
+            handshake_thread_->join();
+        }
+        delete handshake_thread_;
+        handshake_thread_ = nullptr;
     }
     if (ipc_r_ptr_)
     {
@@ -245,6 +258,17 @@ socket_cli_ipc::socket_cli_ipc(const std::string& topic_name, const std::shared_
 socket_cli_ipc::~socket_cli_ipc()
 {
     running.store(false, std::memory_order_release);
+    /* 必须先 join handshake 线程，再让本对象的成员变量被销毁；
+       否则该线程后续 cli_hs.receive 超时返回时会读到已被释放的成员 */
+    if (handshake_thread_ != nullptr)
+    {
+        if (handshake_thread_->joinable())
+        {
+            handshake_thread_->join();
+        }
+        delete handshake_thread_;
+        handshake_thread_ = nullptr;
+    }
     if (ipc_r_ptr_)
     {
         ipc_r_ptr_->close();

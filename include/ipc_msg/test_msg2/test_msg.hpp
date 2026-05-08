@@ -24,16 +24,16 @@ public:
         /* 序列化函数 */
         ipc::buffer serialize() override
         {
-        int32_t data1_count = data1.size();
-        int32_t data1_size = data1_count * sizeof(double);
-        int32_t data2_count = data2.size();
-        int32_t data2_size = data2_count * sizeof(int32_t);
-        int32_t data3_count = data3.size();
+        int32_t data1_count = int32_t(data1.size());
+        int32_t data1_size = int32_t(data1_count * sizeof(double));
+        int32_t data2_count = int32_t(data2.size());
+        int32_t data2_size = int32_t(data2_count * sizeof(int32_t));
+        int32_t data3_count = int32_t(data3.size());
         int32_t data3_total_size_ = 0;
         for (const auto& str : data3) {
-            data3_total_size_ += sizeof(int32_t) + str.size() ;
+            data3_total_size_ += int32_t(sizeof(int32_t) + str.size()) ;
         }
-        int32_t data4_size = sizeof(data4);
+        int32_t data4_size = int32_t(sizeof(data4));
 
         // 计算总缓冲区大小
         size_t total_size_ = 0;
@@ -51,7 +51,7 @@ public:
         total_size_ += data4_size;
 
         // 一次性分配缓冲区
-        ipc::buffer buffer = std::move(this->serialize_data_cut(total_size_));
+        ipc::buffer buffer = std::move(this->serialize_data_cut(uint32_t(total_size_)));
         uint32_t offset = 0;
         uint16_t page = 1;
 
@@ -85,7 +85,7 @@ public:
         this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&data3_type), page, offset, sizeof(data3_type));
         this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&data3_count), page, offset, sizeof(data3_count));
         for (const auto& str : data3) {
-            int32_t str_size = str.size();
+            int32_t str_size = int32_t(str.size());
             this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&str_size), page, offset, sizeof(str_size));
             this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(str.data()), page, offset, str_size);
         }
@@ -106,7 +106,7 @@ public:
     void deserialize(const ipc::buffer& buffer) override
     {
         uint32_t offset = 0;
-        deserialize_data_cut(buffer.size());
+        deserialize_data_cut(uint32_t(buffer.size()));
         // 反序列化 data1
         int32_t data1_name_size;
         this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&data1_name_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(data1_name_size));

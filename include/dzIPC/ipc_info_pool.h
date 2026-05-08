@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "libipc/export.h"
 #include "libipc/shm.h"
 
 namespace dzIPC {
@@ -23,10 +24,10 @@ enum class EntryKind : uint32_t {
     SocketClient = 8,
 };
 
-const char* to_string(EntryKind kind) noexcept;
-const char* get_type_from_kind(EntryKind kind) noexcept;
+IPC_EXPORT const char* to_string(EntryKind kind) noexcept;
+IPC_EXPORT const char* get_type_from_kind(EntryKind kind) noexcept;
 /* Best-effort demangle（ABI 为 Itanium 时有效；回退为原始 mangled 名） */
-std::string demangle(const char* mangled);
+IPC_EXPORT std::string demangle(const char* mangled);
 
 /* 池内字符串字段的定长上限（与 PoolEntry 物理布局严格对应） */
 constexpr std::size_t kMaxTopicName = 128;
@@ -61,7 +62,7 @@ struct EntrySnapshot
     bool alive{true};
 };
 
-class IpcInfoPool
+class IPC_EXPORT IpcInfoPool
 {
 public:
     static IpcInfoPool& instance();
@@ -95,7 +96,7 @@ private:
 };
 
 /* RAII 包装：构造时注册，析构时注销；建议作为 pub/sub/ser/cli 成员 */
-class ScopedRegistration
+class IPC_EXPORT ScopedRegistration
 {
 public:
     ScopedRegistration() = default;

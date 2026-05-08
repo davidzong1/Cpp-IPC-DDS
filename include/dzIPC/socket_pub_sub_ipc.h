@@ -1,5 +1,5 @@
 #pragma once
-#include <semaphore.h>
+// #include <semaphore.h>
 #include <atomic>
 #include <condition_variable>
 #include <functional>
@@ -20,7 +20,7 @@ namespace socket {
 class socket_pub_ipc;
 class socket_sub_ipc;
 
-class socket_pub_ipc : public pub_ipc_base
+class IPC_EXPORT socket_pub_ipc : public pub_ipc_base
 {
 public:
     explicit socket_pub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
@@ -54,7 +54,7 @@ private:
     std::shared_ptr<TopicData> topic_msg_;
 };
 
-class socket_sub_ipc : public sub_ipc_base
+class IPC_EXPORT socket_sub_ipc : public sub_ipc_base
 {
 public:
     explicit socket_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,

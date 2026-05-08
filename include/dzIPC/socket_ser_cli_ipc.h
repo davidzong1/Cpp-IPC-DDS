@@ -15,7 +15,7 @@ namespace socket {
 class socket_ser_ipc;
 class socket_cli_ipc;
 
-class socket_ser_ipc : public ser_ipc_base
+class IPC_EXPORT socket_ser_ipc : public ser_ipc_base
 {
 public:
     explicit socket_ser_ipc(const std::string& topic_name, const std::shared_ptr<ServiceData>& msg,
@@ -52,7 +52,7 @@ private:
     dzIPC::info_pool::ScopedRegistration pool_reg_;
 };
 
-class socket_cli_ipc : public cli_ipc_base
+class IPC_EXPORT socket_cli_ipc : public cli_ipc_base
 {
 public:
     explicit socket_cli_ipc(const std::string& topic_name, const std::shared_ptr<ServiceData>& msg, size_t domain_id,

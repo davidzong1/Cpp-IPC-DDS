@@ -2,10 +2,11 @@
 #include "dzIPC/shm_pub_sub_ipc.h"
 #include "dzIPC/socket_pub_sub_ipc.h"
 #include "dzIPC/type.h"
+#include "libipc/export.h"
 
 namespace dzIPC {
 namespace pimpl {
-class publisher_ipc_impl
+class IPC_EXPORT publisher_ipc_impl
 {
 public:
     explicit publisher_ipc_impl(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
@@ -22,7 +23,7 @@ private:
     publisher_ipc_impl_* p_;
 };
 
-class subscriber_ipc_impl
+class IPC_EXPORT subscriber_ipc_impl
 {
 public:
     explicit subscriber_ipc_impl(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,

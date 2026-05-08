@@ -6,7 +6,7 @@
 #include "dzIPC/common/srv_data.h"
 
 namespace dzIPC {
-class ser_ipc_base
+class IPC_EXPORT ser_ipc_base
 {
 public:
     explicit ser_ipc_base(const std::string& topic_name, const std::shared_ptr<ServiceData>& msg,
@@ -20,7 +20,7 @@ public:
     std::atomic<bool> exit_flag{false};
 };
 
-class cli_ipc_base
+class IPC_EXPORT cli_ipc_base
 {
 public:
     explicit cli_ipc_base(const std::string& topic_name, const std::shared_ptr<ServiceData>& msg, size_t domain_id,

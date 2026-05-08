@@ -44,44 +44,44 @@ public:
         /* 序列化函数 */
         ipc::buffer serialize() override
         {
-        int32_t status_size = sizeof(status);
-        int32_t tiny_int_size = sizeof(tiny_int);
-        int32_t tiny_uint_size = sizeof(tiny_uint);
-        int32_t small_int_size = sizeof(small_int);
-        int32_t small_uint_size = sizeof(small_uint);
-        int32_t normal_int_size = sizeof(normal_int);
-        int32_t normal_uint_size = sizeof(normal_uint);
-        int32_t big_int_size = sizeof(big_int);
-        int32_t big_uint_size = sizeof(big_uint);
-        int32_t single_precision_size = sizeof(single_precision);
-        int32_t double_precision_size = sizeof(double_precision);
-        int32_t message_size = message.size() ;
-        int32_t status_array_count = status_array.size();
-        int32_t status_array_size = status_array_count * sizeof(bool);
-        int32_t tiny_int_array_count = tiny_int_array.size();
-        int32_t tiny_int_array_size = tiny_int_array_count * sizeof(int8_t);
-        int32_t tiny_uint_array_count = tiny_uint_array.size();
-        int32_t tiny_uint_array_size = tiny_uint_array_count * sizeof(uint8_t);
-        int32_t small_int_array_count = small_int_array.size();
-        int32_t small_int_array_size = small_int_array_count * sizeof(int16_t);
-        int32_t small_uint_array_count = small_uint_array.size();
-        int32_t small_uint_array_size = small_uint_array_count * sizeof(uint16_t);
-        int32_t normal_int_array_count = normal_int_array.size();
-        int32_t normal_int_array_size = normal_int_array_count * sizeof(int32_t);
-        int32_t normal_uint_array_count = normal_uint_array.size();
-        int32_t normal_uint_array_size = normal_uint_array_count * sizeof(uint32_t);
-        int32_t big_int_array_count = big_int_array.size();
-        int32_t big_int_array_size = big_int_array_count * sizeof(int64_t);
-        int32_t big_uint_array_count = big_uint_array.size();
-        int32_t big_uint_array_size = big_uint_array_count * sizeof(uint64_t);
-        int32_t single_precision_array_count = single_precision_array.size();
-        int32_t single_precision_array_size = single_precision_array_count * sizeof(float);
-        int32_t double_precision_array_count = double_precision_array.size();
-        int32_t double_precision_array_size = double_precision_array_count * sizeof(double);
-        int32_t message_array_count = message_array.size();
+        int32_t status_size = int32_t(sizeof(status));
+        int32_t tiny_int_size = int32_t(sizeof(tiny_int));
+        int32_t tiny_uint_size = int32_t(sizeof(tiny_uint));
+        int32_t small_int_size = int32_t(sizeof(small_int));
+        int32_t small_uint_size = int32_t(sizeof(small_uint));
+        int32_t normal_int_size = int32_t(sizeof(normal_int));
+        int32_t normal_uint_size = int32_t(sizeof(normal_uint));
+        int32_t big_int_size = int32_t(sizeof(big_int));
+        int32_t big_uint_size = int32_t(sizeof(big_uint));
+        int32_t single_precision_size = int32_t(sizeof(single_precision));
+        int32_t double_precision_size = int32_t(sizeof(double_precision));
+        int32_t message_size = int32_t(message.size()) ;
+        int32_t status_array_count = int32_t(status_array.size());
+        int32_t status_array_size = int32_t(status_array_count * sizeof(bool));
+        int32_t tiny_int_array_count = int32_t(tiny_int_array.size());
+        int32_t tiny_int_array_size = int32_t(tiny_int_array_count * sizeof(int8_t));
+        int32_t tiny_uint_array_count = int32_t(tiny_uint_array.size());
+        int32_t tiny_uint_array_size = int32_t(tiny_uint_array_count * sizeof(uint8_t));
+        int32_t small_int_array_count = int32_t(small_int_array.size());
+        int32_t small_int_array_size = int32_t(small_int_array_count * sizeof(int16_t));
+        int32_t small_uint_array_count = int32_t(small_uint_array.size());
+        int32_t small_uint_array_size = int32_t(small_uint_array_count * sizeof(uint16_t));
+        int32_t normal_int_array_count = int32_t(normal_int_array.size());
+        int32_t normal_int_array_size = int32_t(normal_int_array_count * sizeof(int32_t));
+        int32_t normal_uint_array_count = int32_t(normal_uint_array.size());
+        int32_t normal_uint_array_size = int32_t(normal_uint_array_count * sizeof(uint32_t));
+        int32_t big_int_array_count = int32_t(big_int_array.size());
+        int32_t big_int_array_size = int32_t(big_int_array_count * sizeof(int64_t));
+        int32_t big_uint_array_count = int32_t(big_uint_array.size());
+        int32_t big_uint_array_size = int32_t(big_uint_array_count * sizeof(uint64_t));
+        int32_t single_precision_array_count = int32_t(single_precision_array.size());
+        int32_t single_precision_array_size = int32_t(single_precision_array_count * sizeof(float));
+        int32_t double_precision_array_count = int32_t(double_precision_array.size());
+        int32_t double_precision_array_size = int32_t(double_precision_array_count * sizeof(double));
+        int32_t message_array_count = int32_t(message_array.size());
         int32_t message_array_total_size_ = 0;
         for (const auto& str : message_array) {
-            message_array_total_size_ += sizeof(int32_t) + str.size() ;
+            message_array_total_size_ += int32_t(sizeof(int32_t) + str.size()) ;
         }
 
         // 计算总缓冲区大小
@@ -160,7 +160,7 @@ public:
         total_size_ += sizeof(message_array_count) + message_array_total_size_;
 
         // 一次性分配缓冲区
-        ipc::buffer buffer = std::move(this->serialize_data_cut(total_size_));
+        ipc::buffer buffer = std::move(this->serialize_data_cut(uint32_t(total_size_)));
         uint32_t offset = 0;
         uint16_t page = 1;
 
@@ -393,7 +393,7 @@ public:
         this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&message_array_type), page, offset, sizeof(message_array_type));
         this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&message_array_count), page, offset, sizeof(message_array_count));
         for (const auto& str : message_array) {
-            int32_t str_size = str.size();
+            int32_t str_size = int32_t(str.size());
             this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&str_size), page, offset, sizeof(str_size));
             this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(str.data()), page, offset, str_size);
         }
@@ -406,7 +406,7 @@ public:
     void deserialize(const ipc::buffer& buffer) override
     {
         uint32_t offset = 0;
-        deserialize_data_cut(buffer.size());
+        deserialize_data_cut(uint32_t(buffer.size()));
         // 反序列化 status
         int32_t status_name_size;
         this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&status_name_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(status_name_size));

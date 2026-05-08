@@ -1,7 +1,6 @@
 #include "dzIPC/shm_ser_cli_ipc.h"
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <atomic>
 #include <iostream>
 #include <memory>

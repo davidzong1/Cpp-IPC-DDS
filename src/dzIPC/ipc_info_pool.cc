@@ -1,9 +1,5 @@
 #include "dzIPC/ipc_info_pool.h"
 
-#include <cxxabi.h>
-#include <pthread.h>
-#include <signal.h>
-#include <unistd.h>
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -13,12 +9,32 @@
 #include <iostream>
 #include <thread>
 #include <type_traits>
+
+#if defined(_WIN32)
+#    ifndef WIN32_LEAN_AND_MEAN
+#        define WIN32_LEAN_AND_MEAN
+#    endif
+#    ifndef NOMINMAX
+#        define NOMINMAX
+#    endif
+#    include <process.h>
+#    include <windows.h>
+#else
+#    include <cxxabi.h>
+#    include <pthread.h>
+#    include <signal.h>
+#    include <unistd.h>
+#endif
+
 #include "libipc/shm.h"
 
 namespace dzIPC {
 namespace info_pool {
 namespace {
 constexpr char kShmName[] = "dz_ipc_info_pool_v1";
+#if defined(_WIN32)
+constexpr char kMutexName[] = "Global\\dz_ipc_info_pool_v1_mtx";
+#endif
 constexpr uint32_t kMagic = 0x5A'49'50'44u;   // 'DZIP'
 constexpr uint32_t kVersion = 1;
 
@@ -40,6 +56,20 @@ struct PoolEntry
     char extra[kMaxExtra];
 };
 
+#if defined(_WIN32)
+/* Windows 上跨进程互斥量用具名 Win32 mutex（不放在 shm 里），
+   header 仍保留同等大小的占位以保持 PoolEntry 数组的偏移稳定 */
+struct PoolHeader
+{
+    std::atomic<uint32_t> init_state;
+    uint32_t magic;
+    uint32_t version;
+    uint32_t max_entries;
+    /* 占位：保留与 Linux 版 pthread_mutex_t 同等量级的空间，
+       避免不同平台二进制布局差异过大；不被 Windows 实际使用 */
+    char mtx_placeholder[64];
+};
+#else
 struct PoolHeader
 {
     std::atomic<uint32_t> init_state;
@@ -48,6 +78,7 @@ struct PoolHeader
     uint32_t max_entries;
     pthread_mutex_t mtx;
 };
+#endif
 
 static_assert(ATOMIC_INT_LOCK_FREE == 2, "std::atomic<uint32_t> must be lock-free for cross-process sharing");
 static_assert(ATOMIC_LLONG_LOCK_FREE == 2, "std::atomic<int64_t> must be lock-free for cross-process sharing");
@@ -62,14 +93,38 @@ int64_t now_ns() noexcept
         .count();
 }
 
+int32_t current_pid() noexcept
+{
+#if defined(_WIN32)
+    return static_cast<int32_t>(::GetCurrentProcessId());
+#else
+    return static_cast<int32_t>(::getpid());
+#endif
+}
+
 bool pid_alive(int32_t pid) noexcept
 {
     if (pid <= 0)
         return false;
+#if defined(_WIN32)
+    HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+    if (h == nullptr)
+    {
+        /* ERROR_ACCESS_DENIED 表示进程存在但无权访问，视为存活 */
+        return ::GetLastError() == ERROR_ACCESS_DENIED;
+    }
+    DWORD code = 0;
+    bool alive = false;
+    if (::GetExitCodeProcess(h, &code))
+        alive = (code == STILL_ACTIVE);
+    ::CloseHandle(h);
+    return alive;
+#else
     if (::kill(static_cast<pid_t>(pid), 0) == 0)
         return true;
     /* EPERM 说明 pid 存在但无权限探测，视为存活 */
     return errno != ESRCH;
+#endif
 }
 
 void copy_truncate(char* dst, std::size_t dst_cap, const std::string& src) noexcept
@@ -82,6 +137,37 @@ void copy_truncate(char* dst, std::size_t dst_cap, const std::string& src) noexc
     dst[n] = '\0';
 }
 
+#if defined(_WIN32)
+/* Windows 跨进程互斥量句柄（每进程独立打开，指向同一具名内核对象） */
+HANDLE g_named_mutex = nullptr;
+
+bool ensure_named_mutex() noexcept
+{
+    if (g_named_mutex != nullptr)
+        return true;
+    /* CreateMutexA 在已存在时返回已有对象；持有者异常退出时其它等待者会得到
+       WAIT_ABANDONED，等价于 pthread robust mutex 的 EOWNERDEAD 语义 */
+    g_named_mutex = ::CreateMutexA(nullptr, FALSE, kMutexName);
+    return g_named_mutex != nullptr;
+}
+
+int robust_lock_win() noexcept
+{
+    if (!ensure_named_mutex())
+        return -1;
+    DWORD r = ::WaitForSingleObject(g_named_mutex, INFINITE);
+    /* WAIT_ABANDONED 表示前一个持有者崩溃但锁已转交给本调用者，可以继续 */
+    if (r == WAIT_OBJECT_0 || r == WAIT_ABANDONED)
+        return 0;
+    return -1;
+}
+
+void robust_unlock_win() noexcept
+{
+    if (g_named_mutex != nullptr)
+        ::ReleaseMutex(g_named_mutex);
+}
+#else
 /* 跨进程 robust mutex 的加解锁辅助：
                - 若上一个持有者崩溃 (EOWNERDEAD)，先标记一致再使用 */
 int robust_lock(pthread_mutex_t* m) noexcept
@@ -99,15 +185,31 @@ void robust_unlock(pthread_mutex_t* m) noexcept
 {
     ::pthread_mutex_unlock(m);
 }
+#endif
 
 /* 作用域锁：构造加锁，析构解锁 */
 struct ScopedShmLock
 {
-    pthread_mutex_t* m{nullptr};
     bool locked{false};
+#if !defined(_WIN32)
+    pthread_mutex_t* m{nullptr};
+#endif
 
-    explicit ScopedShmLock(pthread_mutex_t* mtx)
-        : m(mtx)
+#if defined(_WIN32)
+    explicit ScopedShmLock(PoolHeader* /*hdr*/)
+    {
+        if (robust_lock_win() == 0)
+            locked = true;
+    }
+
+    ~ScopedShmLock()
+    {
+        if (locked)
+            robust_unlock_win();
+    }
+#else
+    explicit ScopedShmLock(PoolHeader* hdr)
+        : m(hdr ? &hdr->mtx : nullptr)
     {
         if (m && robust_lock(m) == 0)
             locked = true;
@@ -118,6 +220,7 @@ struct ScopedShmLock
         if (locked)
             robust_unlock(m);
     }
+#endif
 
     ScopedShmLock(const ScopedShmLock&) = delete;
     ScopedShmLock& operator=(const ScopedShmLock&) = delete;
@@ -143,7 +246,7 @@ const char* get_type_from_kind(EntryKind kind) noexcept
         return "socket_sercli";
     case EntryKind::Unknown:
     default:
-        throw std::runtime_error("invalid EntryKind");
+        return "invalid EntryKind";
     }
 }
 
@@ -177,12 +280,18 @@ std::string demangle(const char* mangled)
 {
     if (mangled == nullptr)
         return {};
+#if defined(_WIN32)
+    /* MSVC 的 typeid(T).name() 已经返回人类可读形式（如 "class Foo"），
+       直接原样返回即可 */
+    return std::string(mangled);
+#else
     int status = 0;
     char* buf = ::abi::__cxa_demangle(mangled, nullptr, nullptr, &status);
     std::string out = (status == 0 && buf != nullptr) ? std::string(buf) : std::string(mangled);
     if (buf != nullptr)
         std::free(buf);
     return out;
+#endif
 }
 
 /***********************************************************************************/
@@ -208,6 +317,12 @@ struct IpcInfoPool::Impl
         header = reinterpret_cast<PoolHeader*>(base);
         entries = reinterpret_cast<PoolEntry*>(base + sizeof(PoolHeader));
 
+#if defined(_WIN32)
+        /* Windows：每个进程都需要打开同名内核 mutex */
+        if (!ensure_named_mutex())
+            return;
+#endif
+
         /* 首个进程完成 header 初始化，后续进程自旋等待就绪 */
         uint32_t expect = kInitUninit;
         if (header->init_state.compare_exchange_strong(expect, kInitInProgress, std::memory_order_acq_rel))
@@ -216,12 +331,14 @@ struct IpcInfoPool::Impl
             header->version = kVersion;
             header->max_entries = static_cast<uint32_t>(kMaxEntries);
 
+#if !defined(_WIN32)
             pthread_mutexattr_t attr;
             ::pthread_mutexattr_init(&attr);
             ::pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
             ::pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST);
             ::pthread_mutex_init(&header->mtx, &attr);
             ::pthread_mutexattr_destroy(&attr);
+#endif
 
             for (std::size_t i = 0; i < kMaxEntries; ++i)
             {
@@ -266,7 +383,7 @@ int32_t IpcInfoPool::register_entry(const RegisterInfo& info)
     if (!impl_ || !impl_->ok())
         return -1;
 
-    ScopedShmLock lock(&impl_->header->mtx);
+    ScopedShmLock lock(impl_->header);
     if (!lock.locked)
         return -1;
 
@@ -276,7 +393,7 @@ int32_t IpcInfoPool::register_entry(const RegisterInfo& info)
         if (e.in_use.load(std::memory_order_relaxed) != 0)
             continue;
 
-        e.pid = static_cast<int32_t>(::getpid());
+        e.pid = current_pid();
         e.kind = static_cast<uint32_t>(info.kind);
         e.register_ts_ns = now_ns();
         e.heartbeat_ns.store(e.register_ts_ns, std::memory_order_relaxed);
@@ -297,7 +414,7 @@ void IpcInfoPool::unregister_entry(int32_t slot)
     if (!impl_ || !impl_->ok())
         return;
 
-    ScopedShmLock lock(&impl_->header->mtx);
+    ScopedShmLock lock(impl_->header);
     if (!lock.locked)
         return;
 
@@ -354,7 +471,7 @@ std::vector<EntrySnapshot> IpcInfoPool::snapshot(bool gc_dead_flag)
     raws.reserve(32);
 
     {
-        ScopedShmLock lock(&impl_->header->mtx);
+        ScopedShmLock lock(impl_->header);
         if (!lock.locked)
             return out;
 
@@ -421,7 +538,7 @@ std::size_t IpcInfoPool::gc_dead()
     if (!impl_ || !impl_->ok())
         return 0;
 
-    ScopedShmLock lock(&impl_->header->mtx);
+    ScopedShmLock lock(impl_->header);
     if (!lock.locked)
         return 0;
 

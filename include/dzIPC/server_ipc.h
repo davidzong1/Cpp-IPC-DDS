@@ -2,10 +2,11 @@
 #include "dzIPC/shm_ser_cli_ipc.h"
 #include "dzIPC/socket_ser_cli_ipc.h"
 #include "dzIPC/type.h"
+#include "libipc/export.h"
 
 namespace dzIPC {
 namespace pimpl {
-class server_ipc_impl
+class IPC_EXPORT server_ipc_impl
 {
 public:
     explicit server_ipc_impl(const std::string& topic_name_, const std::shared_ptr<ServiceData>& msg,
@@ -22,7 +23,7 @@ private:
     server_ipc_impl_* p_;
 };
 
-class client_ipc_impl
+class IPC_EXPORT client_ipc_impl
 {
 public:
     explicit client_ipc_impl(const std::string& topic_name_, const std::shared_ptr<ServiceData>& msg, size_t domain_id,

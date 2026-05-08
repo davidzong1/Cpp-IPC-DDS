@@ -57,6 +57,7 @@ else()
       $<$<CONFIG:Debug>:/Zi /Od>
       $<$<CONFIG:Release>:/O2>
     )
+    target_compile_options(${PROJECT_NAME} PRIVATE /utf-8)
   endif()
 endif()
 # set output directory
@@ -73,15 +74,17 @@ set_target_properties(${PROJECT_NAME}
     SOVERSION 3)
 
 target_include_directories(${PROJECT_NAME}
-  PUBLIC  
+  PUBLIC
     "$<BUILD_INTERFACE:${LIBIPC_PROJECT_DIR}/include>"
     "$<INSTALL_INTERFACE:include>"
   PRIVATE ${LIBIPC_PROJECT_DIR}/src
-          $<$<BOOL:UNIX>:${LIBIPC_PROJECT_DIR}/src/libipc/platform/linux>)
+          $<$<BOOL:${UNIX}>:${LIBIPC_PROJECT_DIR}/src/libipc/platform/linux>)
 
-if(NOT MSVC)
+if(MSVC)
+  target_link_libraries(${PROJECT_NAME} PUBLIC ws2_32)
+else()
   target_link_libraries(${PROJECT_NAME} PUBLIC
-    $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_NAME},QNX>>:pthread>
+    $<$<NOT:$<OR:$<STREQUAL:${CMAKE_SYSTEM_NAME},Windows>,$<STREQUAL:${CMAKE_SYSTEM_NAME},QNX>>>:pthread>
     $<$<NOT:$<OR:$<STREQUAL:${CMAKE_SYSTEM_NAME},Windows>,$<STREQUAL:${CMAKE_SYSTEM_NAME},QNX>>>:rt>)
 endif()
 
@@ -105,14 +108,14 @@ else()
   install(
     TARGETS ${PROJECT_NAME}
     EXPORT cpp-ipc-targets
-    RUNTIME DESTINATION bin
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib)
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
   install(EXPORT cpp-ipc-targets
     FILE cpp-ipc-targets.cmake
     NAMESPACE cpp-ipc::
-    DESTINATION share/cpp-ipc
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/cpp-ipc
   )
 
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/cpp-ipc-config.cmake.in"
@@ -120,7 +123,7 @@ else()
   include("${CMAKE_CURRENT_LIST_DIR}/cpp-ipc-targets.cmake")
   ]])
   configure_file("${CMAKE_CURRENT_BINARY_DIR}/cpp-ipc-config.cmake.in" "${CMAKE_CURRENT_BINARY_DIR}/cpp-ipc-config.cmake" @ONLY)
-  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/cpp-ipc-config.cmake DESTINATION share/cpp-ipc)
+  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/cpp-ipc-config.cmake DESTINATION ${CMAKE_INSTALL_DATADIR}/cpp-ipc)
 
   include(CMakePackageConfigHelpers)
   write_basic_package_version_file(
@@ -128,6 +131,6 @@ else()
     VERSION ${PACKAGE_VERSION}
     COMPATIBILITY AnyNewerVersion
   )
-  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/cppIpcConfigVersion.cmake DESTINATION share/cpp-ipc)
+  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/cppIpcConfigVersion.cmake DESTINATION ${CMAKE_INSTALL_DATADIR}/cpp-ipc)
 
 endif()

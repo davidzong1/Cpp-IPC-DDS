@@ -38,6 +38,50 @@ public:
     /* Instantiation */
     UDPNode(const char* name, const char* ip, uint16_t port) { create(name, ip, port); }
 
+    /* SOCKET 是原始内核句柄，禁止隐式拷贝以避免双重 closesocket 触发
+       EXCEPTION_INVALID_HANDLE，导致进程异常退出 */
+    UDPNode(const UDPNode&) = delete;
+    UDPNode& operator=(const UDPNode&) = delete;
+
+    /* 移动语义：转移句柄所有权，源对象置为空 */
+    UDPNode(UDPNode&& rhs) noexcept
+        : port(rhs.port)
+        , server_fd(rhs.server_fd)
+        , temp_buffer(std::move(rhs.temp_buffer))
+    {
+        std::memcpy(name, rhs.name, sizeof(name));
+        std::memcpy(ip, rhs.ip, sizeof(ip));
+        rhs.server_fd = INVALID_SOCKET;
+        rhs.name[0] = '\0';
+        rhs.ip[0] = '\0';
+        rhs.port = 0;
+    }
+
+    UDPNode& operator=(UDPNode&& rhs) noexcept
+    {
+        if (this != &rhs)
+        {
+            close();
+            std::memcpy(name, rhs.name, sizeof(name));
+            std::memcpy(ip, rhs.ip, sizeof(ip));
+            port = rhs.port;
+            server_fd = rhs.server_fd;
+            temp_buffer = std::move(rhs.temp_buffer);
+            rhs.server_fd = INVALID_SOCKET;
+            rhs.name[0] = '\0';
+            rhs.ip[0] = '\0';
+            rhs.port = 0;
+        }
+        return *this;
+    }
+
+    /* 析构必须释放 socket，否则栈对象（例如握手用的 ser_hs/cli_hs）会泄露 fd；
+       此外避免静态/全局对象在 Winsock DLL detach 之后才走 closesocket */
+    ~UDPNode()
+    {
+        close();
+    }
+
     void create(const char* name, const char* ip, uint16_t port)
     {
         if (server_fd != INVALID_SOCKET)
@@ -47,7 +91,7 @@ public:
 
         if (name)
         {
-            std::strncpy(this->name, name, sizeof(this->name) - 1);
+            strncpy_s(this->name, sizeof(this->name) - 1, name, _TRUNCATE);
             this->name[sizeof(this->name) - 1] = '\0';
         }
         else
@@ -57,7 +101,7 @@ public:
 
         if (ip)
         {
-            std::strncpy(this->ip, ip, sizeof(this->ip) - 1);
+            strncpy_s(this->ip, sizeof(this->ip) - 1, ip, _TRUNCATE);
             this->ip[sizeof(this->ip) - 1] = '\0';
         }
         else
@@ -134,7 +178,7 @@ public:
 
     bool send(ipc::buffer& data)
     {
-        if (server_fd == INVALID_SOCKET || !data)
+        if (server_fd == INVALID_SOCKET || data.empty())
         {
             return false;
         }
@@ -165,7 +209,18 @@ public:
         if (server_fd == INVALID_SOCKET)
             return ipc::buffer();
 
-        ssize_t received = ::recvfrom(server_fd, temp_buffer.data(), temp_buffer.size(), MSG_DONTWAIT, nullptr, nullptr);
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(server_fd, &read_fds);
+
+        timeval timeout{};
+        int ready = ::select(0, &read_fds, nullptr, nullptr, &timeout);
+        if (ready <= 0)
+        {
+            return ipc::buffer();
+        }
+
+        int received = ::recvfrom(server_fd, temp_buffer.data(), int(temp_buffer.size()), 0, nullptr, nullptr);
         if (received >= 0)
         {
             return ipc::buffer(temp_buffer.data(), received, nullptr);
@@ -190,107 +245,124 @@ public:
         if (server_fd == INVALID_SOCKET)
             return ipc::buffer();
 
+        int err_cnt = 0;
+
         // 1. 无限等待模式
         if (tm == ipc::invalid_value)
         {
-            int err_cnt = 0;
             for (;;)
             {
-                int received = ::recvfrom(server_fd, temp_buffer.data(), temp_buffer.size(), 0, nullptr, nullptr);
+                int received = ::recvfrom(server_fd, temp_buffer.data(), int(temp_buffer.size()), 0, nullptr, nullptr);
                 if (received >= 0)
                 {
-                    ;
+                    return ipc::buffer(temp_buffer.data(), size_t(received));
+                }
+                int err = ::WSAGetLastError();
+                if (err == WSAEINTR && ++err_cnt < 100)
+                    continue;
+                return ipc::buffer();
+            }
+        }
+
+        // 2. 超时等待模式
+        auto start_time = std::chrono::steady_clock::now();
+        uint64_t remaining_ms = tm;
+
+        while (remaining_ms > 0)
+        {
+            fd_set read_fds;
+            FD_ZERO(&read_fds);
+            FD_SET(server_fd, &read_fds);
+
+            timeval timeout;
+            timeout.tv_sec = static_cast<long>(remaining_ms / 1'000);
+            timeout.tv_usec = static_cast<long>((remaining_ms % 1'000) * 1'000);
+
+            int ret = ::select(0, &read_fds, nullptr, nullptr, &timeout);   // Windows下select第一个参数被忽略
+
+            if (ret > 0)
+            {
+                int received = ::recvfrom(server_fd, temp_buffer.data(), int(temp_buffer.size()), 0, nullptr,
+                                          nullptr);
+                if (received >= 0)
+                {
                     return ipc::buffer(temp_buffer.data(), received);
                 }
-            }
 
-            // 2. 超时等待模式
-            auto start_time = std::chrono::steady_clock::now();
-            uint64_t remaining_ms = tm;
-            int err_cnt = 0;
-
-            while (remaining_ms > 0)
-            {
-                fd_set read_fds;
-                FD_ZERO(&read_fds);
-                FD_SET(server_fd, &read_fds);
-
-                timeval timeout;
-                timeout.tv_sec = static_cast<long>(remaining_ms / 1'000);
-                timeout.tv_usec = static_cast<long>((remaining_ms % 1'000) * 1'000);
-
-                int ret = ::select(0, &read_fds, nullptr, nullptr, &timeout);   // Windows下select第一个参数被忽略
-
-                if (ret > 0)
+                int err = ::WSAGetLastError();
+                // info too large for buffer
+                if (err == WSAEMSGSIZE)
+                    return ipc::buffer();
+                // 异常中断或资源暂时不可用
+                if ((err == WSAEINTR || err == WSAEWOULDBLOCK) && ++err_cnt < 10)
                 {
-                    int received = ::recvfrom(server_fd, temp_buffer.data(), temp_buffer.size(), 0, nullptr, nullptr);
-                    if (received >= 0)
-                    {
-                        return ipc::buffer(temp_buffer.data(), received);
-                    }
-
-                    int err = ::WSAGetLastError();
-                    // info too large for buffer
-                    if (err == WSAEMSGSIZE)
-                        return ipc::buffer();
-                    // 异常中断或资源暂时不可用
-                    if ((err == WSAEINTR || err == WSAEWOULDBLOCK) && ++err_cnt < 10)
-                    {
-                        goto refresh_time;
-                    }
-                    return ipc::buffer();
+                    goto refresh_time;
                 }
-                else if (ret == 0)
-                {   // Select timeout
-                    return ipc::buffer();
+                return ipc::buffer();
+            }
+            else if (ret == 0)
+            {   // Select timeout
+                return ipc::buffer();
+            }
+            else
+            {   // Select error
+                if (::WSAGetLastError() == WSAEINTR && ++err_cnt < 10)
+                {
+                    goto refresh_time;
                 }
-                else
-                {   // Select error
-                    if (::WSAGetLastError() == WSAEINTR && ++err_cnt < 10)
-                    {
-                        goto refresh_time;
-                    }
-                    return ipc::buffer();
-                }
-
-            refresh_time:
-                auto now = std::chrono::steady_clock::now();
-                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
-                if (static_cast<uint64_t>(elapsed) >= tm)
-                    return ipc::buffer();
-                remaining_ms = tm - static_cast<uint64_t>(elapsed);
+                return ipc::buffer();
             }
 
-            return ipc::buffer();
+        refresh_time:
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
+            if (static_cast<uint64_t>(elapsed) >= tm)
+                return ipc::buffer();
+            remaining_ms = tm - static_cast<uint64_t>(elapsed);
         }
 
-        bool close()
+        return ipc::buffer();
+    }
+
+    bool close()
+    {
+        if (server_fd == INVALID_SOCKET)
         {
-            if (server_fd == INVALID_SOCKET)
-            {
-                return true;
-            }
-
-            ip_mreq mreq{};
-            if (::InetPtonA(AF_INET, ip, &mreq.imr_multiaddr) == 1)
-            {
-                mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-                ::setsockopt(server_fd, IPPROTO_IP, IP_DROP_MEMBERSHIP, reinterpret_cast<char*>(&mreq), sizeof(mreq));
-            }
-
-            ::closesocket(server_fd);
-            server_fd = INVALID_SOCKET;
             return true;
         }
-    };
+
+        ip_mreq mreq{};
+        if (::InetPtonA(AF_INET, ip, &mreq.imr_multiaddr) == 1)
+        {
+            mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+            ::setsockopt(server_fd, IPPROTO_IP, IP_DROP_MEMBERSHIP, reinterpret_cast<char*>(&mreq), sizeof(mreq));
+        }
+
+        ::closesocket(server_fd);
+        server_fd = INVALID_SOCKET;
+        return true;
+    }
 
     void clear_cache()
     {
-        // 循环读取直到缓冲区空
-        char discard_buf[4'096];
-        while (::recvfrom(server_fd, discard_buf.data(), discard_buf.size(), 0, nullptr, nullptr) > 0)
-            ;
+        if (server_fd == INVALID_SOCKET)
+            return;
+        // 循环读取直到缓冲区空，用 select 0 超时判断可读，避免阻塞
+        char discard_buf[1'472];   // UDP最大报文长度
+        for (;;)
+        {
+            fd_set read_fds;
+            FD_ZERO(&read_fds);
+            FD_SET(server_fd, &read_fds);
+            timeval tv{};
+            int ready = ::select(0, &read_fds, nullptr, nullptr, &tv);
+            if (ready <= 0)
+                break;
+            if (::recvfrom(server_fd, discard_buf, int(sizeof(discard_buf)), 0, nullptr, nullptr) <= 0)
+                break;
+        }
     }
+};
 }   // namespace socket
 }   // namespace detail
 }   // namespace ipc

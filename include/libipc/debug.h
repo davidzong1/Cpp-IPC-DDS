@@ -1,18 +1,16 @@
 #pragma once
 
-namespace ipc
-{
-    namespace socket
-    {
+namespace ipc {
+namespace socket {
 
 #define Debug true
 #if Debug
-#define Exception
+#    define IPC_EXCEPTION_
 #else
-#define Exception noexcept
+#    define IPC_EXCEPTION_ noexcept
 #endif
 
 #define TCP true
 #define UDP false
-    }
-}
+}   // namespace socket
+}   // namespace ipc

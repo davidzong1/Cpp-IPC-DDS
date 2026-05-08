@@ -40,18 +40,45 @@ foreach(src_file ${SRC_FILES})
      # 检查是否是需要调试的目标
     if(${test_name} IN_LIST DEBUG_TARGETS)
         message(STATUS "Setting debug flags for: ${test_name}")
-        target_compile_options(${test_name} PRIVATE 
-            -g3          # 最大调试信息
-            -ggdb        # GDB专用调试信息
-            -O0          # 无优化
-            -DDEBUG      # 定义DEBUG宏
-            -fno-omit-frame-pointer  # 保留帧指针
-        )
-        target_link_options(${test_name} PRIVATE -g)
+        if(MSVC)
+            target_compile_options(${test_name} PRIVATE
+                /Zi          # 完整调试信息(PDB)
+                /Od          # 关闭优化
+                /Oy-         # 保留帧指针
+            )
+            target_compile_definitions(${test_name} PRIVATE DEBUG)
+            target_link_options(${test_name} PRIVATE /DEBUG)
+        else()
+            target_compile_options(${test_name} PRIVATE
+                -g3          # 最大调试信息
+                -ggdb        # GDB专用调试信息
+                -O0          # 无优化
+                -fno-omit-frame-pointer  # 保留帧指针
+            )
+            target_compile_definitions(${test_name} PRIVATE DEBUG)
+            target_link_options(${test_name} PRIVATE -g)
+        endif()
     else()
-        # 非调试目标使用优化
-        target_compile_options(${test_name} PRIVATE -O2 -DNDEBUG)
+        # 非调试目标：Debug 配置不强行开启 /O2，避免与 /RTC1 冲突
+        if(MSVC)
+            target_compile_options(${test_name} PRIVATE
+                $<$<CONFIG:Release>:/O2>
+                $<$<CONFIG:RelWithDebInfo>:/O2>
+                $<$<CONFIG:MinSizeRel>:/O2>
+            )
+        else()
+            target_compile_options(${test_name} PRIVATE
+                $<$<CONFIG:Release>:-O2>
+                $<$<CONFIG:RelWithDebInfo>:-O2>
+                $<$<CONFIG:MinSizeRel>:-O2>
+            )
+        endif()
+        target_compile_definitions(${test_name} PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
     endif()
+    if (MSVC)
+        target_compile_options(${test_name} PRIVATE /utf-8 /wd4251)
+    endif()
+
     # 链接库 - 注意链接顺序很重要
     target_link_libraries(${test_name} 
         ipc

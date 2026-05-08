@@ -36,37 +36,37 @@ UDPNode::~UDPNode()
     delete p_;
 }
 
-void UDPNode::create(const char* name, const char* ip, uint16_t port) Exception
+void UDPNode::create(const char* name, const char* ip, uint16_t port) IPC_EXCEPTION_
 {
     impl(p_)->node_.create(name, ip, port);
 }
 
-bool UDPNode::connect() Exception
+bool UDPNode::connect() IPC_EXCEPTION_
 {
     return impl(p_)->node_.connect();
 }
 
-bool UDPNode::send(ipc::buffer& data) Exception
+bool UDPNode::send(ipc::buffer& data) IPC_EXCEPTION_
 {
     return impl(p_)->node_.send(data);
 }
 
-ipc::buffer UDPNode::receive_nowait() Exception
+ipc::buffer UDPNode::receive_nowait() IPC_EXCEPTION_
 {
     return impl(p_)->node_.receive_nowait();
 }
 
-ipc::buffer UDPNode::receive(uint64_t tm) Exception
+ipc::buffer UDPNode::receive(uint64_t tm) IPC_EXCEPTION_
 {
     return impl(p_)->node_.receive(tm);
 }
 
-bool UDPNode::close() Exception
+bool UDPNode::close() IPC_EXCEPTION_
 {
     return impl(p_)->node_.close();
 }
 
-void UDPNode::clear_cache() Exception
+void UDPNode::clear_cache() IPC_EXCEPTION_
 {
     impl(p_)->node_.clear_cache();
 }

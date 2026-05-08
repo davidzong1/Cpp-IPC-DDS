@@ -7,7 +7,7 @@
 #include "dzIPC/common/topic_data.h"
 
 namespace dzIPC {
-class pub_ipc_base
+class IPC_EXPORT pub_ipc_base
 {
 public:
     explicit pub_ipc_base(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
@@ -25,8 +25,8 @@ public:
 class sub_ipc_base
 {
 public:
-    explicit sub_ipc_base(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
-                          const size_t queue_size, bool verbose)
+    explicit IPC_EXPORT sub_ipc_base(const std::shared_ptr<TopicData>& msg, const std::string& topic_name,
+                                     size_t domain_id, const size_t queue_size, bool verbose)
     {}
 
     ~sub_ipc_base() = default;

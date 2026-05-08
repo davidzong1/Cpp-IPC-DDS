@@ -14,7 +14,7 @@ namespace shm {
 class shm_ser_ipc;
 class shm_cli_ipc;
 
-class shm_ser_ipc : public ser_ipc_base
+class IPC_EXPORT shm_ser_ipc : public ser_ipc_base
 {
 public:
     explicit shm_ser_ipc(const std::string& topic_name, const std::shared_ptr<ServiceData>& msg,
@@ -50,7 +50,7 @@ private:
     dzIPC::info_pool::ScopedRegistration pool_reg_;
 };
 
-class shm_cli_ipc : public cli_ipc_base
+class IPC_EXPORT shm_cli_ipc : public cli_ipc_base
 {
 public:
     explicit shm_cli_ipc(const std::string& topic_name, const std::shared_ptr<ServiceData>& msg, size_t domain_id,

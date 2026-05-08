@@ -1,6 +1,10 @@
-#include <sys/wait.h>
-#include <unistd.h>
-
+#if defined(__linux__) || defined(__QNX__)
+#    include <sys/wait.h>
+#    include <unistd.h>
+#elif defined(_WIN32)
+#    include <process.h>
+#    include <windows.h>
+#endif
 #include <algorithm>
 #include <cstdlib>
 #include <string>
@@ -39,7 +43,12 @@ TEST(IpcInfoPool, RegisterThenSnapshotReturnsEntry)
     EXPECT_EQ(e->topic_name, "ut_topic_register");
     EXPECT_EQ(e->type_name, "TestMsgType");
     EXPECT_EQ(e->extra, "extra=foo");
-    EXPECT_EQ(e->pid, static_cast<int32_t>(::getpid()));
+#if defined(_WIN32)
+    const int32_t self_pid = static_cast<int32_t>(::_getpid());
+#else
+    const int32_t self_pid = static_cast<int32_t>(::getpid());
+#endif
+    EXPECT_EQ(e->pid, self_pid);
 
     pool.unregister_entry(slot);
     auto es2 = pool.snapshot(false);
@@ -99,23 +108,41 @@ TEST(IpcInfoPool, GcReapsEntriesOfDeadChildProcess)
 {
     /* 子进程注册后直接退出，父进程 gc_dead 应将其回收 */
     auto& pool = IpcInfoPool::instance();
+#if defined(__linux__) || defined(__QNX__)
     pid_t child = ::fork();
-    ASSERT_GE(child, 0);
     if (child == 0)
     {
         auto& child_pool = IpcInfoPool::instance();
         child_pool.register_entry({EntryKind::ShmPub, "ut_gc_deadchild", "", "", 0, "from-child"});
         ::_exit(0);
     }
+#elif defined(_WIN32)
+    intptr_t child_handle_raw = _spawnl(_P_NOWAIT, "child_process.exe", "child_process.exe", nullptr);
+    ASSERT_NE(child_handle_raw, static_cast<intptr_t>(-1));
+    HANDLE child_handle = reinterpret_cast<HANDLE>(child_handle_raw);
+    DWORD child_pid = ::GetProcessId(child_handle);
+    ASSERT_NE(child_pid, 0u);
+#endif
+#if defined(__linux__) || defined(__QNX__)
+    ASSERT_GE(child, 0);
+#endif
     /* 等子进程退出 */
     int status = 0;
+#if defined(__linux__) || defined(__QNX__)
     ::waitpid(child, &status, 0);
-
+#elif defined(_WIN32)
+    WaitForSingleObject(child_handle, INFINITE);
+    ::CloseHandle(child_handle);
+#endif
     /* 在 gc 前应能看到子进程写入的那条 */
     bool present_before = false;
     for (const auto& e : pool.snapshot(false))
     {
+#if defined(_WIN32)
+        if (e.topic_name == "ut_gc_deadchild" && e.pid == static_cast<int32_t>(child_pid))
+#else
         if (e.topic_name == "ut_gc_deadchild" && e.pid == child)
+#endif
         {
             present_before = true;
             break;
@@ -129,7 +156,11 @@ TEST(IpcInfoPool, GcReapsEntriesOfDeadChildProcess)
     bool present_after = false;
     for (const auto& e : pool.snapshot(false))
     {
+#if defined(_WIN32)
+        if (e.topic_name == "ut_gc_deadchild" && e.pid == static_cast<int32_t>(child_pid))
+#else
         if (e.topic_name == "ut_gc_deadchild" && e.pid == child)
+#endif
         {
             present_after = true;
             break;

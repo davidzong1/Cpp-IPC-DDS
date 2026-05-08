@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.10)
 project(cpp-ipc)
+
+# 标准安装目录(Linux: bin/lib/include; Windows: bin/lib/include 相对 CMAKE_INSTALL_PREFIX)
+include(GNUInstallDirs)
+
 # 生成消息头文件
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 function(generate_ipc_messages)
@@ -138,11 +142,14 @@ if (LIBIPC_BUILD_DEMOS)
 endif()
 
 if(NOT ROSBUILD)
-    install(DIRECTORY include/ DESTINATION include)
+    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(TARGETS dzipc_topic_cat dzipc_list
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
     install(EXPORT cpp-ipc-targets
         FILE cpp-ipc-targets.cmake
         NAMESPACE cpp-ipc::
-        DESTINATION lib/cmake/${PROJECT_NAME}
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}
     )
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmake_uninstall.cmake.in"
@@ -153,23 +160,28 @@ if(NOT ROSBUILD)
 else()
     # 安装头文件
     install(DIRECTORY include/
-        DESTINATION include/
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/
     )
 
     # 只有当ipc目标存在时才处理导出
     if(TARGET ipc)
         install(TARGETS ipc
             EXPORT ipc-targets
-            ARCHIVE DESTINATION lib
-            LIBRARY DESTINATION lib
-            RUNTIME DESTINATION bin
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         )
-        
+
         install(EXPORT ipc-targets
             FILE ipc-targets.cmake
-            DESTINATION lib/cmake/${PROJECT_NAME}
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}
         )
-        
+        install(TARGETS dzipc_topic_cat
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
+        install(TARGETS dzipc_list
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
         ament_export_targets(ipc-targets HAS_LIBRARY_TARGET)
         ament_export_libraries(ipc)
     endif()

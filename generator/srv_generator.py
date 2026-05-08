@@ -206,39 +206,39 @@ namespace dzIPC::Srv {{
         for field in fields:
             if field.is_string and not field.is_array:
                 lines.append(
-                    f"            int32_t {field.field_name}_size = {field.field_name}.size() ;"
+                    f"            int32_t {field.field_name}_size = int32_t({field.field_name}.size()) ;"
                 )
             elif field.is_array and field.is_string:
                 lines.append(
-                    f"            int32_t {field.field_name}_count = {field.field_name}.size();"
+                    f"            int32_t {field.field_name}_count = int32_t({field.field_name}.size());"
                 )
                 lines.append(f"           int32_t {field.field_name}_total_size_ = 0;")
                 lines.append(
                     f"           for (const auto& str : {field.field_name}) {{"
                 )
                 lines.append(
-                    f"                {field.field_name}_total_size_ += sizeof(int32_t) + str.size();"
+                    f"                {field.field_name}_total_size_ += int32_t(sizeof(int32_t) + str.size()) ;"
                 )
                 lines.append(f"           }}")
             elif field.is_array:
                 base_type = field.cpp_type[12:-1]  # 从 std::vector<type> 中提取 type
                 if base_type == "bool":
                     lines.append(
-                        f"            int32_t {field.field_name}_count = {field.field_name}.size();"
+                        f"            int32_t {field.field_name}_count = int32_t({field.field_name}.size());"
                     )
                     lines.append(
-                        f"            int32_t {field.field_name}_size = {field.field_name}_count * sizeof(bool);"
+                        f"            int32_t {field.field_name}_size = int32_t({field.field_name}_count * sizeof(bool));"
                     )
                 else:
                     lines.append(
-                        f"            int32_t {field.field_name}_count = {field.field_name}.size();"
+                        f"            int32_t {field.field_name}_count = int32_t({field.field_name}.size());"
                     )
                     lines.append(
-                        f"            int32_t {field.field_name}_size = {field.field_name}_count * sizeof({base_type});"
+                        f"            int32_t {field.field_name}_size = int32_t({field.field_name}_count * sizeof({base_type}));"
                     )
             else:
                 lines.append(
-                    f"            int32_t {field.field_name}_size = sizeof({field.field_name});"
+                    f"            int32_t {field.field_name}_size = int32_t(sizeof({field.field_name}));"
                 )
 
         lines.append("")
@@ -281,7 +281,7 @@ namespace dzIPC::Srv {{
         lines.append("")
         lines.append("            // 一次性分配缓冲区")
         lines.append(
-            "             ipc::buffer buffer = std::move(this->serialize_data_cut(total_size_));"
+            "             ipc::buffer buffer = std::move(this->serialize_data_cut(uint32_t(total_size_)));"
         )
         lines.append("            uint32_t offset = 0;")
         lines.append("            uint16_t page = 1;")
@@ -315,7 +315,7 @@ namespace dzIPC::Srv {{
                         f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_type), page, offset, sizeof({field.field_name}_type));",
                         f"            this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&{field.field_name}_count), page, offset, sizeof({field.field_name}_count));",
                         f"            for (const auto& str : {field.field_name}) {{",
-                        f"                int32_t str_size = str.size();",
+                        f"                int32_t str_size = int32_t(str.size());",
                         f"                this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&str_size), page, offset, sizeof(str_size));",
                         f"                this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(str.data()), page, offset, str_size);",
                         f"            }}",
@@ -418,7 +418,7 @@ namespace dzIPC::Srv {{
             return "\n".join(lines)
 
         lines.append("          uint32_t offset = 0;")
-        lines.append("          deserialize_data_cut(buffer.size());")
+        lines.append("          deserialize_data_cut(uint32_t(buffer.size()));")
         # 反序列化每个字段
         for field in fields:
             if field.is_string and not field.is_array:

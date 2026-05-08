@@ -18,7 +18,7 @@ namespace shm {
 class shm_pub_ipc;
 class shm_sub_ipc;
 
-class shm_pub_ipc : public pub_ipc_base
+class IPC_EXPORT shm_pub_ipc : public pub_ipc_base
 {
 public:
     explicit shm_pub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
@@ -51,7 +51,7 @@ private:
     std::shared_ptr<TopicData> topic_msg_;
 };
 
-class shm_sub_ipc : public sub_ipc_base
+class IPC_EXPORT shm_sub_ipc : public sub_ipc_base
 {
 public:
     explicit shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,

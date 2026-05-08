@@ -8,7 +8,7 @@ namespace dzIPC {
 class TopicData : public DataBase
 {
 public:
-    TopicData(const std::shared_ptr<IpcMsgBase>& topic, size_t msg_id = 0)
+    TopicData(const std::shared_ptr<IpcMsgBase>& topic, uint32_t msg_id = 0)
     {
         topic_.reset(topic->clone());
         topic_cache.reset(topic->clone());
@@ -18,7 +18,7 @@ public:
         msg_method = 0;
     }
 
-    TopicData(std::shared_ptr<IpcMsgBase>&& topic, size_t msg_id = 0)
+    TopicData(std::shared_ptr<IpcMsgBase>&& topic, uint32_t msg_id = 0)
         : topic_(std::move(topic))
         , msg_id_(msg_id)
     {
@@ -61,7 +61,7 @@ private:
 
     TopicData() = default;
     std::shared_ptr<IpcMsgBase> topic_, topic_cache;
-    size_t msg_id_{0};
+    uint32_t msg_id_{0};
 };
 }   // namespace dzIPC
 

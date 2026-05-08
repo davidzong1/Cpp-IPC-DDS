@@ -57,3 +57,5 @@ build/**
 .log/**
 
 *.venv/**
+build_py/**
+build_win/**

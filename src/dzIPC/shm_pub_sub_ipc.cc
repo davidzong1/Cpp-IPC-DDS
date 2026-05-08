@@ -1,9 +1,5 @@
-#include <arpa/inet.h>
 #include <dzIPC/shm_pub_sub_ipc.h>
 #include <fcntl.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
 #include <chrono>
 #include <cstring>
 #include <iostream>

@@ -98,7 +98,7 @@ protected:
                            - (pure_data_offset / IPC_MSG_MAX_SIZE);
         uint32_t has_copy_size = 0;
 
-        for (int i = 0; i < cut_cnt; ++i)
+        for (uint32_t i = 0; i < cut_cnt; ++i)
         {
             // 按照正确的纯逻辑偏移去算：当前此数据页还剩下的真正写入容量
             uint32_t copy_size = std::min(IPC_MSG_MAX_SIZE - (pure_data_offset % IPC_MSG_MAX_SIZE),
@@ -131,7 +131,7 @@ protected:
         uint32_t cut_cnt = ((pure_data_offset + local_data_len) / IPC_MSG_MAX_SIZE)
                            - (pure_data_offset / IPC_MSG_MAX_SIZE);
         uint32_t has_copy_size = 0;
-        for (int i = 0; i < cut_cnt; ++i)
+        for (uint32_t i = 0; i < cut_cnt; ++i)
         {
             uint32_t copy_size = std::min(IPC_MSG_MAX_SIZE - (pure_data_offset % IPC_MSG_MAX_SIZE),
                                           local_data_len - has_copy_size);
