@@ -17,6 +17,7 @@ public:
     virtual void reset_message(const std::shared_ptr<ServiceData>& msg) = 0;
     virtual void reset_callback(std::function<void(std::shared_ptr<ServiceData>&)> callback) = 0;
     virtual void InitChannel(std::string extra_info) = 0;
+    virtual bool handshake_completed() const = 0;
     std::atomic<bool> exit_flag{false};
 };
 
@@ -31,6 +32,7 @@ public:
     virtual void InitChannel(std::string extra_info) = 0;
     virtual void reset_message(const std::shared_ptr<ServiceData>& msg) = 0;
     virtual bool send_request(std::shared_ptr<ServiceData>& request, uint64_t rev_tm) = 0;
+    virtual bool handshake_completed() const = 0;
     std::atomic<bool> exit_flag{false};
 };
 }   // namespace dzIPC

@@ -185,7 +185,7 @@ void socket_ser_ipc::server_handshake()
                               << "SerInfo] Handshake with client completed for topic: " << topic_name_ << "\033[0m"
                               << std::endl;
                 }
-                handshake_completed.store(true, std::memory_order_release);
+                handshake_completed_.store(true, std::memory_order_release);
                 st = State::StopHS;
                 continue;
             }
@@ -206,7 +206,7 @@ void socket_ser_ipc::server_handshake()
                               << "SerInfo] Client disconnected, restarting handshake for topic: " << topic_name_
                               << "\033[0m" << std::endl;
                 }
-                handshake_completed.store(false, std::memory_order_release);
+                handshake_completed_.store(false, std::memory_order_release);
                 st = State::RunHS;
                 continue;
             }
@@ -377,7 +377,7 @@ void socket_cli_ipc::client_handshake()
                               << std::endl;
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                 }
-                handshake_completed.store(true, std::memory_order_release);
+                handshake_completed_.store(true, std::memory_order_release);
                 if (verbose_)
                 {
                     std::cerr << "\033[32m[" << topic_name_
@@ -404,7 +404,7 @@ void socket_cli_ipc::client_handshake()
                               << "CliInfo] Server disconnected, restarting handshake for topic: " << topic_name_
                               << "\033[0m" << std::endl;
                 }
-                handshake_completed.store(false, std::memory_order_release);
+                handshake_completed_.store(false, std::memory_order_release);
                 st = State::RunHS;
                 continue;
             }
@@ -421,7 +421,7 @@ void socket_cli_ipc::client_handshake()
 /******************************************************************************************************/
 bool socket_cli_ipc::send_request(std::shared_ptr<ServiceData>& request, uint64_t rev_tm)
 {
-    if (handshake_completed.load(std::memory_order_acquire))
+    if (handshake_completed_.load(std::memory_order_acquire))
     {
         ipc::buffer request_data(std::move(request->request()->serialize()));
         if (!chunk_send(ipc_r_ptr_, request_data))

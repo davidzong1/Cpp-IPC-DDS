@@ -60,48 +60,55 @@ void cli_thread_function()
     std::shared_ptr<ServiceData> message_
         = std::make_shared<dzIPC::ServiceData>(std::make_shared<dzIPC::Srv::RequestResponseTestRequest>(),
                                                std::make_shared<dzIPC::Srv::RequestResponseTestResponse>());
-    dzIPC::socket::socket_cli_ipc client_ipc("request_response_test", message_, 1, true);
+    dzIPC::socket::socket_cli_ipc client_ipc("request_response_test", message_, 1, false);
     std::vector<double> test_data;
     client_ipc.InitChannel();
-    int cnt = 0;
-
+    while (!client_ipc.handshake_completed())
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     test_data.clear();
     for (int i = 0; i < 5'000; i++)
     {
         test_data.push_back(i);
     }
-    message_->request()->msgcast<dzIPC::Srv::RequestResponseTestRequest>()->request = test_data;
-    auto start = std::chrono::high_resolution_clock::now();
-    while (!client_ipc.send_request(message_))
+    std::vector<std::chrono::duration<double, std::micro>> times;
+    for (int i = 0; i < 10; i++)
     {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double, std::micro> elapsed_us = end - start;
-    std::cout << "Time taken to send request: " << elapsed_us.count() << " us" << std::endl;
-    auto response_ = message_->response()->msgcast<dzIPC::Srv::RequestResponseTestResponse>();
-    if (response_->response.size() != test_data.size())
-    {
-        std::cerr << "Expected response size: " << test_data.size() << ", but got: " << response_->response.size()
-                  << std::endl;
-        record_response_error("response size mismatch");
-        response_complete.store(true);
-        return;
-    }
-    for (int k = 0; k < static_cast<int>(test_data.size()); k++)
-    {
-        if (response_->response[k] != test_data[k] + 1.0)
+        message_->request()->msgcast<dzIPC::Srv::RequestResponseTestRequest>()->request = test_data;
+
+        auto start = std::chrono::high_resolution_clock::now();
+        while (!client_ipc.send_request(message_))
         {
-            std::cerr << "Expected response value: " << test_data[k] + 1.0 << ", but got: " << response_->response[k]
+            // std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::this_thread::yield();
+        }
+        auto end = std::chrono::high_resolution_clock::now();
+        auto response_ = message_->response()->msgcast<dzIPC::Srv::RequestResponseTestResponse>();
+        times.push_back(end - start);
+        if (response_->response.size() != test_data.size())
+        {
+            std::cerr << "Expected response size: " << test_data.size() << ", but got: " << response_->response.size()
                       << std::endl;
-            record_response_error("response value mismatch");
+            record_response_error("response size mismatch");
             response_complete.store(true);
             return;
         }
+        for (int k = 0; k < static_cast<int>(test_data.size()); k++)
+        {
+            if (response_->response[k] != test_data[k] + 1.0)
+            {
+                std::cerr << "Expected response value: " << test_data[k] + 1.0
+                          << ", but got: " << response_->response[k] << std::endl;
+                record_response_error("response value mismatch");
+                response_complete.store(true);
+                return;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::cout << "Iteration " << (i + 1)
+                  << ": Time taken to send request and receive response: " << times.back().count() << " us"
+                  << std::endl;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    cnt++;
-
+    std::cout << std::endl;
     response_complete.store(true);
 }
 

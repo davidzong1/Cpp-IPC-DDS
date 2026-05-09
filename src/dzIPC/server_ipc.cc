@@ -57,6 +57,11 @@ bool pimpl::server_ipc_impl::exit_flag() const
     return impl(p_)->ipc->exit_flag.load(std::memory_order_acquire);
 }
 
+bool pimpl::server_ipc_impl::handshake_completed() const
+{
+    return impl(p_)->ipc->handshake_completed();
+}
+
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
@@ -109,4 +114,10 @@ bool pimpl::client_ipc_impl::exit_flag() const
 {
     return impl(p_)->ipc->exit_flag.load(std::memory_order_acquire);
 }
+
+bool pimpl::client_ipc_impl::handshake_completed() const
+{
+    return impl(p_)->ipc->handshake_completed();
+}
+
 }   // namespace dzIPC

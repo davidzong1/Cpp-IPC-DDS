@@ -29,6 +29,8 @@ public:
     socket_ser_ipc(const socket_ser_ipc&) = delete;
     socket_ser_ipc& operator=(const socket_ser_ipc&) = delete;
 
+    bool handshake_completed() const override { return handshake_completed_.load(std::memory_order_acquire); }
+
 protected:
     void response_thread_func();
     void server_handshake();
@@ -36,7 +38,7 @@ protected:
 private:
     size_t domain_id_{0};
     std::atomic<bool> running{true};
-    std::atomic<bool> handshake_completed{false};
+    std::atomic<bool> handshake_completed_{false};
     uint64_t port_hash_;
     std::string ipaddr_;
     bool verbose_{true};
@@ -65,13 +67,15 @@ public:
     socket_cli_ipc(const socket_cli_ipc&) = delete;
     socket_cli_ipc& operator=(const socket_cli_ipc&) = delete;
 
+    bool handshake_completed() const override { return handshake_completed_.load(std::memory_order_acquire); }
+
 protected:
     void client_handshake();
 
 private:
     size_t domain_id_{0};
     std::atomic<bool> running{true};
-    std::atomic<bool> handshake_completed{false};
+    std::atomic<bool> handshake_completed_{false};
     uint64_t port_hash_;
     std::string ipaddr_;
     bool verbose_{true};

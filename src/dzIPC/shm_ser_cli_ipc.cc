@@ -156,7 +156,7 @@ void shm_ser_ipc::ser_handshake()
             while (sem_ser.try_wait())
                 ;   // 清空服务信号量
             st = State::StopHS;
-            handshake_completed.store(true, std::memory_order_release);
+            handshake_completed_.store(true, std::memory_order_release);
         }
         else
         {
@@ -169,7 +169,7 @@ void shm_ser_ipc::ser_handshake()
                 std::cerr << "\033[32m[" << topic_name_ << "_SerInfo] Client disconnected from server: " << topic_name_
                           << "\033[0m" << std::endl;
                 st = State::RunHS;   // 进入重新连接状态
-                handshake_completed.store(false, std::memory_order_release);
+                handshake_completed_.store(false, std::memory_order_release);
             }
         }
     }
@@ -333,7 +333,7 @@ void shm_cli_ipc::cli_handshake()
             ipc_w_ptr_ = std::make_shared<ipc::server>(w_name.c_str(), ipc::sender, verbose_);
             sem_cli.post();   // 通知服务端连接完成
             st = State::StopHS;
-            handshake_completed.store(true, std::memory_order_release);
+            handshake_completed_.store(true, std::memory_order_release);
         }
         else
         {
@@ -342,7 +342,7 @@ void shm_cli_ipc::cli_handshake()
                 continue;
             }
             st = State::RunHS;   // 进入重新连接状态
-            handshake_completed.store(false, std::memory_order_release);
+            handshake_completed_.store(false, std::memory_order_release);
         }
     }
     while (sem_stop.try_wait())
@@ -364,7 +364,7 @@ void shm_cli_ipc::cli_handshake()
 bool shm_cli_ipc::send_request(std::shared_ptr<ServiceData>& request, uint64_t rev_tm)
 {
     /* 主线程执行，因此无需考虑running */
-    if (!handshake_completed.load(std::memory_order_acquire))
+    if (!handshake_completed_.load(std::memory_order_acquire))
     {
         if (verbose_)
         {

@@ -19,7 +19,7 @@ def pub_thread():
         topic_data,
         "test_python_api",
         0,
-        ipc.IPC_SOCKET,
+        ipc.IPC_SHM,
         True,
     )
     pub.InitChannel()
@@ -51,7 +51,7 @@ if __name__ == "__main__":
         "test_python_api",
         0,
         10,
-        ipc.IPC_SOCKET,
+        ipc.IPC_SHM,
         True,
     )
     sub.InitChannel()

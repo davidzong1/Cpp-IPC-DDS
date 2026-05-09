@@ -25,6 +25,8 @@ public:
     void reset_callback(std::function<void(std::shared_ptr<ServiceData>&)> callback);
     void InitChannel(std::string extra_info = "");
 
+    bool handshake_completed() const override { return handshake_completed_.load(std::memory_order_acquire); }
+
     /* 禁用拷贝 */
     shm_ser_ipc(const shm_ser_ipc&) = delete;
     shm_ser_ipc& operator=(const shm_ser_ipc&) = delete;
@@ -36,7 +38,7 @@ protected:
 private:
     size_t domain_id_{0};
     std::atomic<bool> running{true};
-    std::atomic<bool> handshake_completed{false};
+    std::atomic<bool> handshake_completed_{false};
     bool verbose_{true};
     std::function<void(std::shared_ptr<ServiceData>&)> callback_;
     std::string topic_name_;
@@ -63,13 +65,15 @@ public:
     shm_cli_ipc(const shm_cli_ipc&) = delete;
     shm_cli_ipc& operator=(const shm_cli_ipc&) = delete;
 
+    bool handshake_completed() const override { return handshake_completed_.load(std::memory_order_acquire); }
+
 protected:
     void cli_handshake();
 
 private:
     size_t domain_id_{0};
     std::atomic<bool> running{true};
-    std::atomic<bool> handshake_completed{false};
+    std::atomic<bool> handshake_completed_{false};
     bool verbose_{true};
     std::shared_ptr<ServiceData> message_;
     std::string topic_name_;

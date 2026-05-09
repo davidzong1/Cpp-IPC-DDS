@@ -188,6 +188,20 @@ bool send_all_chunks(std::shared_ptr<ipc::socket::UDPNode>& node, std::vector<ip
     return true;
 }
 
+/* Clean buffer after receiving */
+void drain_self_loopback(std::shared_ptr<ipc::socket::UDPNode>& node)
+{
+    constexpr int kMaxDrain = 8'192;
+    for (int i = 0; i < kMaxDrain; ++i)
+    {
+        ipc::buffer buf = node->receive_nowait();
+        if (buf.empty())
+        {
+            return;
+        }
+    }
+}
+
 void send_ack(std::shared_ptr<ipc::socket::UDPNode>& node, const chunk_meta& meta)
 {
     IpcRtpsAckMsg ack_msg;
@@ -315,6 +329,13 @@ bool recv_chunk_common(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_
         return false;
     }
 
+    /* 首片到位后重置预算时钟。否则若首片正好在 tm 末尾才到达
+       （例如 200ms 等待循环刚要超时时 client 才发包），剩余 27
+       片就只剩 0ms 可以收，必然组装失败 → 进入下一次
+       chunk_rev_server 后才看到 chunk #2，而 chunk #1 已被消费，
+       永远缺一片。*/
+    const auto assembly_begin = std::chrono::steady_clock::now();
+
     const uint64_t round_wait_ms = calc_round_wait_ms(meta.page_cnt, tm);
     IpcRtpsNackMsg nack_msg;
 
@@ -332,7 +353,7 @@ bool recv_chunk_common(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_
             uint64_t wait_ms = round_wait_ms - round_used;
             if (tm != ipc::invalid_value)
             {
-                const uint64_t used = elapsed_ms(begin);
+                const uint64_t used = elapsed_ms(assembly_begin);
                 if (used >= tm)
                 {
                     return false;
@@ -358,7 +379,7 @@ bool recv_chunk_common(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_
             break;
         }
 
-        if (tm != ipc::invalid_value && elapsed_ms(begin) >= tm)
+        if (tm != ipc::invalid_value && elapsed_ms(assembly_begin) >= tm)
         {
             return false;
         }
@@ -588,6 +609,11 @@ bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publis
         return false;
     }
 
+    /* 入口排空：清掉上一轮 chunk_send 退出时还没来得及到达 / 处理的残留包
+       （晚到的 ACK/NACK 或 self-loopback 数据片）。否则与本轮发出的包混杂后，
+       由于多轮共用同一份 meta，下面 ACK 等待循环会拿旧 ACK 当本轮 ACK 用。 */
+    drain_self_loopback(node);
+
     if (!send_all_chunks(node, chunks))
     {
         return false;
@@ -595,6 +621,9 @@ bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publis
 
     if (chunks.size() <= 1)
     {
+        /* 单片消息没有 ACK 等待，本轮发出的 1 个 self-loopback 也要清掉，
+           否则会污染下一轮的 wait_first_data_chunk 或 ACK 等待。 */
+        drain_self_loopback(node);
         return true;
     }
 
@@ -658,6 +687,9 @@ bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publis
 
         if (got_ack)
         {
+            /* ACK 命中后立刻 return 会把队列里剩余的 self-loopback 数据片留给下一轮，
+               下一轮会把它们当作本轮 self-loopback 误处理（meta 完全相同）。 */
+            drain_self_loopback(node);
             return true;
         }
 
@@ -680,6 +712,9 @@ bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publis
         }
     }
 
+    /* 所有 ACK round 走完仍未拿到 ACK（典型 5ms 静默退出）。本轮发出去的
+       self-loopback 数据片此时还在队列里，必须清掉再返回。 */
+    drain_self_loopback(node);
     return true;
 }
 }   // namespace socket

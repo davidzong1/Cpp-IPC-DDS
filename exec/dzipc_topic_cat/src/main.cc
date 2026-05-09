@@ -48,12 +48,22 @@ bool check_topic_state(dzIPC::info_pool::IpcInfoPool& pool, std::string& topic_n
             if (!entry.alive || !entry.in_use)
             {
                 state.store(StateMachine::UNCONNECTED, std::memory_order_release);
+                {
+                    std::unique_lock<std::mutex> lock(sniffer_use_mutex);
+                    MsgManager_service.reset();
+                    sniffer.reset();
+                }
                 return false;
             }
             if ((kind_cache != std::string(dzIPC::info_pool::get_type_from_kind(entry.kind))) && kind_cache != "unknown")
             {
                 kind_cache = std::string(dzIPC::info_pool::get_type_from_kind(entry.kind));
                 state.store(StateMachine::UNCONNECTED, std::memory_order_release);
+                {
+                    std::unique_lock<std::mutex> lock(sniffer_use_mutex);
+                    MsgManager_service.reset();
+                    sniffer.reset();
+                }
                 return false;
             }
             if (state.load(std::memory_order_acquire) == StateMachine::CONNECTED)
@@ -110,6 +120,13 @@ bool check_topic_state(dzIPC::info_pool::IpcInfoPool& pool, std::string& topic_n
             }
         }
     }
+    {
+        std::unique_lock<std::mutex> lock(sniffer_use_mutex);
+        MsgManager_service.reset();
+        MsgManager_topic.reset();
+        sniffer.reset();
+        kind_cache = "unknown";
+    }
     state.store(StateMachine::UNCONNECTED, std::memory_order_release);
     return false;
 }
@@ -142,6 +159,9 @@ int main(int argc, char* argv[])
     uint32_t msg_id = static_cast<uint32_t>(parser.get<int>("--msg_id"));
     dzIPC::sniffer_info info;
     std::stringstream ss;
+    std::string req_str_cache, res_str_cache;
+    req_str_cache = "";
+    res_str_cache = "";
     std::thread pool__thread(
         [&pool, &topic_name, &ser_or_topic, &msg_id, &sniffer, &MsgManager_topic, &MsgManager_service, &state]()
         {
@@ -152,7 +172,6 @@ int main(int argc, char* argv[])
                 {
                     topic_in_use_cv.notify_all();
                 }
-
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         });
@@ -177,45 +196,68 @@ int main(int argc, char* argv[])
                 auto start = std::chrono::steady_clock::now();
                 {
                     std::unique_lock<std::mutex> lock(sniffer_use_mutex);
+                    // message可能在连接丢失时被重置为nullptr，因此需要在使用前检查片段
+                    if (!sniffer)
+                    {
+                        break;
+                    }
                     info = std::move(sniffer->try_recv());
                 }
                 if (ser_or_topic)
                 {
                     std::string req_str = dzIPC::msg_to_string(info.request);
                     std::string res_str = dzIPC::msg_to_string(info.response);
-                    if (!req_str.empty() || !res_str.empty())
+                    if (req_str.empty())
                     {
-                        ss.str("");
-                        ss.clear();
-                        ss << "\x1b[2J\x1b[H=====================================================\n\n";
-                        ss << "Topic: \033[32m" << topic_name << "\033[0m" << std::setw(20) << "Type: Service(\033[34m"
-                           << (link_type ? "SHM" : "SOCKET") << "\033[0m)" << std::setw(20) << "Msg ID: " << msg_id
-                           << "\n\n";
-                        ss << "------------------------------------------------------\n"
-                           << "Request:\n"
-                           << req_str << "\nResponse:\n"
-                           << res_str << std::endl;
-                        fprintf(stdout, "%s", ss.str().c_str());
-                        fflush(stdout);
+                        req_str = req_str_cache;
                     }
+                    else
+                    {
+                        req_str_cache = req_str;
+                    }
+                    if (res_str.empty())
+                    {
+                        res_str = res_str_cache;
+                    }
+                    else
+                    {
+                        res_str_cache = res_str;
+                    }
+                    ss.str("");
+                    ss.clear();
+                    ss << "\x1b[2J\x1b[H=====================================================\n\n";
+                    ss << "Topic: \033[32m" << topic_name << "\033[0m" << std::setw(20) << "Type: Service(\033[34m"
+                       << (link_type ? "SHM" : "SOCKET") << "\033[0m)" << std::setw(20) << "Msg ID: " << msg_id
+                       << "\n\n";
+                    ss << "------------------------------------------------------\n"
+                       << "Request:\n"
+                       << req_str << "\nResponse:\n"
+                       << res_str << std::endl;
+                    fprintf(stdout, "%s", ss.str().c_str());
+                    fflush(stdout);
                 }
                 else
                 {
                     std::string topic_str = dzIPC::msg_to_string(info.request);
-                    if (!topic_str.empty())
+                    if (topic_str.empty())
                     {
-                        ss.str("");
-                        ss.clear();
-                        ss << "\x1b[2J\x1b[H=====================================================\n\n";
-                        ss << "Topic: \033[32m" << topic_name << "\033[0m" << std::setw(20) << "Type: Topic(\033[34m"
-                           << (link_type ? "SHM" : "SOCKET") << "\033[0m)" << std::setw(20) << "Msg ID: " << msg_id
-                           << "\n\n";
-                        ss << "------------------------------------------------------\n"
-                           << "Message:\n"
-                           << topic_str << std::endl;
-                        fprintf(stdout, "%s", ss.str().c_str());
-                        fflush(stdout);
+                        topic_str = req_str_cache;
                     }
+                    else
+                    {
+                        req_str_cache = topic_str;
+                    }
+                    ss.str("");
+                    ss.clear();
+                    ss << "\x1b[2J\x1b[H=====================================================\n\n";
+                    ss << "Topic: \033[32m" << topic_name << "\033[0m" << std::setw(20) << "Type: Topic(\033[34m"
+                       << (link_type ? "SHM" : "SOCKET") << "\033[0m)" << std::setw(20) << "Msg ID: " << msg_id
+                       << "\n\n";
+                    ss << "------------------------------------------------------\n"
+                       << "Message:\n"
+                       << topic_str << std::endl;
+                    fprintf(stdout, "%s", ss.str().c_str());
+                    fflush(stdout);
                 }
                 auto end = std::chrono::steady_clock::now();
                 auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();

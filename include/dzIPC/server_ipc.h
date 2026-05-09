@@ -17,6 +17,7 @@ public:
     void reset_message(const std::shared_ptr<ServiceData>& msg);
     void reset_callback(std::function<void(std::shared_ptr<ServiceData>&)> callback);
     bool exit_flag() const;
+    bool handshake_completed() const;
 
 private:
     class server_ipc_impl_;
@@ -33,6 +34,7 @@ public:
     void reset_message(const std::shared_ptr<ServiceData>& msg);
     bool send_request(std::shared_ptr<ServiceData>& request, uint64_t rev_tm = std::numeric_limits<uint32_t>::max());
     bool exit_flag() const;
+    bool handshake_completed() const;
 
 private:
     class client_ipc_impl_;
