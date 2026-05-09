@@ -1,7 +1,8 @@
-# Cpp-IPC+： C++ IPC Library
+# Cpp-IPC+： C++ IPC Library Like **DDS**
 
 ## A high-performance inter-process communication library using shared memory and UDP on Linux/Windows
 
+- 🌟🌟🌟The communication method is similar to DDS
 - Compilers with C++17 support are recommended (msvc-2017/gcc-7/clang-4)
 - No other dependencies except STL.
 - Only lock-free or lightweight spin-lock is used.
