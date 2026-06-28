@@ -125,7 +125,7 @@ void shm_pub_ipc::pub_handshake()
         {
             pub_node.post();
             sub_cnt++;
-            // subscribed_.store(true, std::memory_order_release);
+            subscribed_.store(true, std::memory_order_release);
             if (verbose_)
                 std::cerr << "\033[32m[" << topic_name_
                           << "PubInfo] Publisher detected a "

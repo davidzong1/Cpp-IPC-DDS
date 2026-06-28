@@ -138,6 +138,7 @@ int main(int argc, char* argv[])
     parser.add_argument("--topic", "-t", "Topic name", ArgParser::Type::STRING, true);
     parser.add_argument("--ser_or_topic", "-s", "Service(true) or Publish(false) flag", ArgParser::Type::BOOL, true);
     parser.add_argument("--msg_id", "-m", "Message ID to filter (optional)", ArgParser::Type::INT, false, "0");
+    parser.add_argument("--freq", "-f", "Receive frequency in Hz (default: 20)", ArgParser::Type::INT, false, "0");
     try
     {
         parser.parse(argc, argv);
@@ -155,7 +156,15 @@ int main(int argc, char* argv[])
     std::unique_ptr<dzIPC::ServiceData> MsgManager_service;
     std::unique_ptr<dzIPC::sniffer> sniffer;
     auto& pool = dzIPC::info_pool::IpcInfoPool::instance();
-    uint64_t beat_pahse = 1'000 / RECV_FREQ;   //ms
+    uint64_t beat_pahse;//ms
+    if (parser.get<int>("--freq") > 0)
+    {
+        beat_pahse = 1'000 / parser.get<int>("--freq");
+    }
+    else
+    {
+        beat_pahse = 1'000 / RECV_FREQ;
+    }
     uint32_t msg_id = static_cast<uint32_t>(parser.get<int>("--msg_id"));
     dzIPC::sniffer_info info;
     std::stringstream ss;

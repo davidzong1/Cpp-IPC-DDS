@@ -1,6 +1,7 @@
 #include "dzIPC/dzipc.h"
 #include "ipc_msg/ipc_msg_base/ipc_msg_base.hpp"
 // AUTO_GENERATED_MSG_SRV_INCLUDES_BEGIN
+#include "ipc_msg/supervisor_info/supervisor.hpp"
 #include "ipc_msg/test_messages/complex_message.hpp"
 #include "ipc_msg/test_msg2/test_msg.hpp"
 #include "ipc_srv/request_response_test/request_response_test.hpp"
@@ -148,6 +149,11 @@ PYBIND11_MODULE(dzipc, m)
     m.def("IsShutdownRequested", &dzIPC::IsShutdownRequested);
 
     // AUTO_GENERATED_MSG_SRV_BINDINGS_BEGIN
+    py::class_<dzIPC::Msg::Supervisor, IpcMsgBase, std::shared_ptr<dzIPC::Msg::Supervisor>>(m, "Supervisor")
+        .def(py::init<>())
+        .def_readwrite("update_time", &dzIPC::Msg::Supervisor::update_time)
+        .def_readwrite("additional_info", &dzIPC::Msg::Supervisor::additional_info);
+
     py::class_<dzIPC::Msg::ComplexMessage, IpcMsgBase, std::shared_ptr<dzIPC::Msg::ComplexMessage>>(m, "ComplexMessage")
         .def(py::init<>())
         .def_readwrite("status", &dzIPC::Msg::ComplexMessage::status)
@@ -192,12 +198,14 @@ PYBIND11_MODULE(dzipc, m)
 
     m.def("message_types", []() {
         return std::vector<std::string>{
+            "Supervisor",
             "ComplexMessage",
             "TestMsg",
         };
     });
 
     m.def("create_message", [](const std::string &type_name) -> std::shared_ptr<IpcMsgBase> {
+        if (type_name == "Supervisor") return std::make_shared<dzIPC::Msg::Supervisor>();
         if (type_name == "ComplexMessage") return std::make_shared<dzIPC::Msg::ComplexMessage>();
         if (type_name == "TestMsg") return std::make_shared<dzIPC::Msg::TestMsg>();
         throw py::value_error("Unknown message type: " + type_name);

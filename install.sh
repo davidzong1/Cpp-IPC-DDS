@@ -27,7 +27,7 @@ else
     echo "Invalid configuration. Please choose 1, 2, 3, or 4."
     exit 1
 fi
-if ["$install_cpp"==true]
+if [ "$install_cpp" == true ]; then
     echo "Installing dzIPC..."
     echo "Removing old version if exists..."
     mkdir -p build
@@ -40,12 +40,14 @@ if ["$install_cpp"==true]
     sudo make -j10
     sudo make install
     echo -e "\033[32mdzIPC installed successfully.\033[0m"
+    cd ..
 fi
 if [ "$install_python" == true ]; then
     echo "Installing Python interface..."
     cd python
     pip install -e .
-    echo "\033[32mPython interface installed successfully.\033[0m"
+    echo -e "\033[32mPython interface installed successfully.\033[0m"
+    cd ..
 fi
 if [ "$uninstall" == true ]; then
     echo "Uninstalling dzIPC..."
@@ -54,5 +56,5 @@ if [ "$uninstall" == true ]; then
         sudo make uninstall
     fi
     pip uninstall dzIPC -y
-    echo "\033[32mdzIPC uninstalled successfully.\033[0m"
+    echo -e "\033[32mdzIPC uninstalled successfully.\033[0m"
 fi

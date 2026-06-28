@@ -49,6 +49,10 @@ class SubscriberIPC:
     def try_get(self, msg: TopicData) -> Tuple[bool, TopicData]: ...
 
 # AUTO_GENERATED_MSG_SRV_STUBS_BEGIN
+class Supervisor(IpcMsgBase):
+    update_time: str
+    additional_info: str
+
 class ComplexMessage(IpcMsgBase):
     status: bool
     tiny_int: int

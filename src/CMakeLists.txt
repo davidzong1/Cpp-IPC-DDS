@@ -71,7 +71,8 @@ set_target_properties(${PROJECT_NAME}
 set_target_properties(${PROJECT_NAME}
     PROPERTIES
     VERSION ${PACKAGE_VERSION}
-    SOVERSION 3)
+    SOVERSION 3
+    INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
 
 target_include_directories(${PROJECT_NAME}
   PUBLIC

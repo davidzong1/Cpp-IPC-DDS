@@ -145,7 +145,7 @@ public:
         {
             if (a.required && !a.present)
             {
-                printf("\033[31mMissing required parameter: %s\033[0m",
+                printf("\033[31mMissing required parameter: %s \n\033[0m",
                        (a.long_name.empty() ? a.short_name.c_str() : a.long_name.c_str()));
                 print_help();
                 std::exit(1);
