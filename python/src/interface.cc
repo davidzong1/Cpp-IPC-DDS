@@ -147,6 +147,7 @@ PYBIND11_MODULE(dzipc, m)
     m.def("StartShutdownMonitor", &dzIPC::StartShutdownMonitor);
     m.def("RequestShutdown", &dzIPC::RequestShutdown);
     m.def("IsShutdownRequested", &dzIPC::IsShutdownRequested);
+    m.def("CleanupIpcInstances", &dzIPC::CleanupIpcInstances);
 
     // AUTO_GENERATED_MSG_SRV_BINDINGS_BEGIN
     py::class_<dzIPC::Msg::Supervisor, IpcMsgBase, std::shared_ptr<dzIPC::Msg::Supervisor>>(m, "Supervisor")

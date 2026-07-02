@@ -32,7 +32,7 @@ std::unordered_set<std::shared_ptr<dzIPC::pimpl::publisher_ipc_impl>> publisher_
 std::unordered_set<std::shared_ptr<dzIPC::pimpl::subscriber_ipc_impl>>
     subscriber_ipc_instances;   // 存储订阅者实例的全局容器
 
-static void CleanupIpcInstances()
+void CleanupIpcInstances()
 {
     {
         std::lock_guard<std::mutex> lock(server_ipc_instance_mutex);
