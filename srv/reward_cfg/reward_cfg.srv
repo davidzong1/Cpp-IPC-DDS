@@ -1,5 +1,0 @@
-string[] reward_cfg_names
-float32[] reward_cfg_values
----
-bool success
-string message
