@@ -27,10 +27,10 @@ using ClientIPCPtr = std::shared_ptr<dzIPC::pimpl::client_ipc_impl>;            
 /* 服务客户通信-服务端类智能指针 */
 IPC_EXPORT ServerIPCPtr ServerIPCPtrMake(const std::string& topic_name_, const std::shared_ptr<ServiceData>& msg,
                                          ServerCallBackFun callback, size_t domain_id, IPCType ipc_type,
-                                         bool verbose = false);
+                                         bool verbose = false, bool enable_thread_qos = Qos::NotUseQos, int cpu_id = CPU_CORE::None, int thread_priority = DispatchPriority::LowPriority);
 /* 服务客户通信-客户端类智能指针 */
 IPC_EXPORT ClientIPCPtr ClientIPCPtrMake(const std::string& topic_name_, const std::shared_ptr<ServiceData>& msg,
-                                         size_t domain_id, IPCType ipc_type, bool verbose = false);
+                                         size_t domain_id, IPCType ipc_type, bool verbose = false, bool enable_thread_qos = Qos::NotUseQos, int cpu_id = CPU_CORE::None, int thread_priority = DispatchPriority::LowPriority);
 
 /* 服务数据智能指针创建函数定义 */
 template<typename T, typename U,
@@ -52,11 +52,13 @@ using PublisherIPCPtr = std::shared_ptr<dzIPC::pimpl::publisher_ipc_impl>;     /
 using SubscriberIPCPtr = std::shared_ptr<dzIPC::pimpl::subscriber_ipc_impl>;   // 订阅者类智能指针类型定义
 /* 发布订阅通信-发布者类智能指针 */
 IPC_EXPORT PublisherIPCPtr PublisherIPCPtrMake(const std::shared_ptr<TopicData>& msg, const std::string& topic_name,
-                                               size_t domain_id, IPCType ipc_type, bool verbose = false);
+                                               size_t domain_id, IPCType ipc_type, bool verbose = false, bool enable_thread_qos = Qos::NotUseQos,
+                                               int cpu_id = CPU_CORE::None, int thread_priority = DispatchPriority::LowPriority);
 /* 发布订阅通信-订阅者类智能指针 */
 IPC_EXPORT SubscriberIPCPtr SubscriberIPCPtrMake(const std::shared_ptr<TopicData>& msg, const std::string& topic_name,
                                                  size_t domain_id, const size_t queue_size, IPCType ipc_type,
-                                                 bool verbose = false);
+                                                 bool verbose = false, bool enable_thread_qos = Qos::NotUseQos,
+                                                 int cpu_id = CPU_CORE::None, int thread_priority = DispatchPriority::LowPriority);
 
 /* 话题数据智能指针创建函数定义 */
 template<typename T = IpcMsgBase, typename = std::enable_if_t<std::is_base_of<IpcMsgBase, T>::value>>
@@ -76,6 +78,4 @@ IPC_EXPORT void StartShutdownMonitor();
 IPC_EXPORT void RequestShutdown();
 // 查询是否已经请求退出
 IPC_EXPORT bool IsShutdownRequested();
-// 显式释放所有 IPC 实例，供 Python 退出前确定性清理 native 资源。
-IPC_EXPORT void CleanupIpcInstances();
 }   // namespace dzIPC

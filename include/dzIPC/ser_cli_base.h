@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
@@ -13,7 +14,7 @@ public:
                           std::function<void(std::shared_ptr<ServiceData>&)> callback, size_t domain_id, bool verbose)
     {}
 
-    ~ser_ipc_base() = default;
+    virtual ~ser_ipc_base() = 0;
     virtual void reset_message(const std::shared_ptr<ServiceData>& msg) = 0;
     virtual void reset_callback(std::function<void(std::shared_ptr<ServiceData>&)> callback) = 0;
     virtual void InitChannel(std::string extra_info) = 0;
@@ -28,11 +29,14 @@ public:
                           bool verbose)
     {}
 
-    ~cli_ipc_base() = default;
+    virtual ~cli_ipc_base() = 0;
     virtual void InitChannel(std::string extra_info) = 0;
     virtual void reset_message(const std::shared_ptr<ServiceData>& msg) = 0;
     virtual bool send_request(std::shared_ptr<ServiceData>& request, uint64_t rev_tm) = 0;
     virtual bool handshake_completed() const = 0;
     std::atomic<bool> exit_flag{false};
 };
+
+inline ser_ipc_base::~ser_ipc_base() = default;
+inline cli_ipc_base::~cli_ipc_base() = default;
 }   // namespace dzIPC

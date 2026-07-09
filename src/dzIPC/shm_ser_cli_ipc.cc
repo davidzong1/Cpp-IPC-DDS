@@ -2,35 +2,43 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <atomic>
+#include <chrono>
 #include <iostream>
 #include <memory>
 #include <thread>
 #include <typeinfo>
 #include "dzIPC/common/name_operator.h"
-#include "libipc/semaphore.h"
 
-// #include "dzIPC/common/thread_dispatch.h"
 namespace dzIPC {
 namespace shm {
-enum class State {
-    RunHS,
-    StopHS
-};
 using namespace ipc;
+using dzIPC::control_plane_shm::TopicState;
+
+namespace {
+
+std::string service_control_name_for(const std::string& topic_name)
+{
+    return "dz_ipc_" + topic_name + "_ser_control";
+}
+
+}   // namespace
 
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
 
 shm_ser_ipc::shm_ser_ipc(const std::string& topic_name, const std::shared_ptr<ServiceData>& msg,
-                         std::function<void(std::shared_ptr<ServiceData>&)> callback, size_t domain_id, bool verbose)
+                         std::function<void(std::shared_ptr<ServiceData>&)> callback, size_t domain_id, bool verbose,
+                         bool enable_thread_qos, int cpu_id, int thread_priority)
     : ser_ipc_base(topic_name, msg, callback, domain_id, verbose)
     , topic_name_(topic_name)
     , callback_(std::move(callback))
     , domain_id_(domain_id)
     , verbose_(verbose)
+    , thread_options_(dzIPC::ThreadDispatch::make_realtime_options(enable_thread_qos, cpu_id, thread_priority))
 {
     message_.reset(msg->clone());
+    dzIPC::ThreadDispatch::apply_current_thread_options(thread_options_, verbose_, topic_name_ + "_SerOwnerThread");
 }
 
 /******************************************************************************************************/
@@ -38,7 +46,14 @@ shm_ser_ipc::shm_ser_ipc(const std::string& topic_name, const std::shared_ptr<Se
 /******************************************************************************************************/
 void shm_ser_ipc::reset_message(const std::shared_ptr<ServiceData>& msg)
 {
-    message_.reset(msg->clone());
+    if (!msg)
+    {
+        return;
+    }
+    std::shared_ptr<ServiceData> new_msg;
+    new_msg.reset(msg->clone());
+    std::lock_guard<std::mutex> lock(message_mtx_);
+    message_ = std::move(new_msg);
 }
 
 /******************************************************************************************************/
@@ -46,6 +61,7 @@ void shm_ser_ipc::reset_message(const std::shared_ptr<ServiceData>& msg)
 /******************************************************************************************************/
 void shm_ser_ipc::reset_callback(std::function<void(std::shared_ptr<ServiceData>&)> callback)
 {
+    std::lock_guard<std::mutex> lock(callback_mtx_);
     callback_ = std::move(callback);
 }
 
@@ -91,23 +107,34 @@ void shm_ser_ipc::InitChannel(std::string extra_info)
     std::string r_name, w_name;
     r_name = "dz_ipc_" + topic_name_ + "_ser_r";
     w_name = "dz_ipc_" + topic_name_ + "_ser_w";
-    // 清理残留的共享内存
+    if (!control_plane_.open(service_control_name_for(topic_name_)))
+    {
+        throw std::runtime_error("failed to open service control plane");
+    }
+    control_plane_.begin_rebuild();
     ipc::server::clear_storage(r_name.c_str());
     ipc::server::clear_storage(w_name.c_str());
-    // 发送清理广播，等待客户端清理完成
     ipc_r_ptr_ = std::make_shared<ipc::server>(r_name.c_str(), ipc::receiver, verbose_);
     ipc_w_ptr_ = std::make_shared<ipc::server>(w_name.c_str(), ipc::sender, verbose_);
+    control_plane_.set_ready();
     handshake_thread_ = new std::thread(&shm_ser_ipc::ser_handshake, this);
-    std::string request_type_name = message_->request()
-                                        ? dzIPC::info_pool::demangle(typeid(*message_->request()).name())
-                                        : std::string{};
+    std::shared_ptr<ServiceData> message_template;
+    {
+        std::lock_guard<std::mutex> lock(message_mtx_);
+        message_template = message_;
+    }
+    std::string request_type_name =
+        (message_template && message_template->request())
+            ? dzIPC::info_pool::demangle(typeid(*message_template->request()).name())
+            : std::string{};
     request_type_name = extract_last_segment(request_type_name);
     pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmServer, topic_name_, request_type_name, "shm",
                       static_cast<int32_t>(domain_id_), extra_info});
     std::cerr << "\033[32m[" << topic_name_ << "_SerInfo] Server channel created for topic: " << topic_name_
               << "\033[0m" << std::endl;
     response_thread_ = new std::thread(&shm_ser_ipc::response_thread_func, this);
-    // ThreadDispatch::set_thread_priority(response_thread_, 20, verbose_, topic_name_ + "_SerResponseThread");
+    dzIPC::ThreadDispatch::apply_thread_options(response_thread_, thread_options_, verbose_,
+                                                topic_name_ + "_SerResponseThread");
 }
 
 /******************************************************************************************************/
@@ -116,74 +143,33 @@ void shm_ser_ipc::InitChannel(std::string extra_info)
 
 void shm_ser_ipc::ser_handshake()
 {
-    std::string sem_ser_name = "dz_ipc_" + topic_name_ + "_ser_post";
-    std::string sem_cli_name = "dz_ipc_" + topic_name_ + "_cli_post";
-    std::string sem_stop_name = "dz_ipc_" + topic_name_ + "_stop_post";
-    ipc::sync::semaphore sem_ser;
-    if (!sem_ser.open(sem_ser_name.c_str(), 0))
-    {
-        throw std::runtime_error("sem_open failed");
-    }
-    ipc::sync::semaphore sem_cli;
-    if (!sem_cli.open(sem_cli_name.c_str(), 0))
-    {
-        sem_ser.close();
-        throw std::runtime_error("sem_open failed");
-    }
-    ipc::sync::semaphore sem_stop;
-    if (!sem_stop.open(sem_stop_name.c_str(), 0))
-    {
-        sem_ser.close();
-        sem_cli.close();
-        throw std::runtime_error("sem_open failed");
-    }
-    auto st = State::RunHS;
-    while (sem_ser.try_wait())
-        ;   // 清空服务信号量
+    bool had_client = false;
     while (running.load(std::memory_order_acquire))
     {
-        if (st == State::RunHS)
+        control_plane_.heartbeat();
+        const bool has_client = control_plane_.peer_count() > 0;
+        handshake_completed_.store(has_client, std::memory_order_release);
+        if (has_client && !had_client && verbose_)
         {
-            while (sem_stop.try_wait())
-                ;
-            while (sem_ser.try_wait())
-                ;             // 清空信号量
-            sem_ser.post();   // 发送清理开始信号
-            if (!sem_cli.wait(100))
-            {
-                continue;
-            }
-            while (sem_ser.try_wait())
-                ;   // 清空服务信号量
-            st = State::StopHS;
-            handshake_completed_.store(true, std::memory_order_release);
+            std::cerr << "\033[32m[" << topic_name_ << "_SerInfo] Client connected to server: " << topic_name_
+                      << "\033[0m" << std::endl;
         }
-        else
+        if (!has_client && had_client && verbose_)
         {
-            if (!sem_stop.wait(100))
-            {
-                continue;   // 每隔100ms检查客户端是否发送请求，如果没有则继续等待
-            }
-            else
-            {
-                std::cerr << "\033[32m[" << topic_name_ << "_SerInfo] Client disconnected from server: " << topic_name_
-                          << "\033[0m" << std::endl;
-                st = State::RunHS;   // 进入重新连接状态
-                handshake_completed_.store(false, std::memory_order_release);
-            }
+            std::cerr << "\033[32m[" << topic_name_ << "_SerInfo] Client disconnected from server: " << topic_name_
+                      << "\033[0m" << std::endl;
         }
+        had_client = has_client;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    while (sem_stop.try_wait())
-        ;   // 清空服务信号量
+    handshake_completed_.store(false, std::memory_order_release);
+    control_plane_.set_stopping();
     if (verbose_)
     {
         std::cerr << "\033[32m[" << topic_name_
-                  << "_SerInfo] Server exiting, sending stop signal to client: " << topic_name_ << "\033[0m"
+                  << "_SerInfo] Server exiting, marking control plane stopping: " << topic_name_ << "\033[0m"
                   << std::endl;
     }
-    sem_stop.post();   // 发送停止信号，通知客户端退出等待
-    sem_ser.close();
-    sem_cli.close();
 }
 
 /******************************************************************************************************/
@@ -200,7 +186,16 @@ void shm_ser_ipc::response_thread_func()
             continue;
         }
         /* 身份判断 */
-        if (!message_->check_msg_id(raw_data))
+        std::shared_ptr<ServiceData> local_msg;
+        {
+            std::lock_guard<std::mutex> lock(message_mtx_);
+            if (!message_)
+            {
+                continue;
+            }
+            local_msg.reset(message_->clone());
+        }
+        if (!local_msg->check_msg_id(raw_data))
         {
             if (verbose_)
             {
@@ -210,9 +205,17 @@ void shm_ser_ipc::response_thread_func()
             continue;
         }
         /* 反序列转换为msg数据 */
-        message_->request()->deserialize(raw_data);
-        callback_(message_);
-        ipc::buffer response_data(std::move(message_->response()->serialize()));
+        local_msg->request()->deserialize(raw_data);
+        std::function<void(std::shared_ptr<ServiceData>&)> callback;
+        {
+            std::lock_guard<std::mutex> lock(callback_mtx_);
+            callback = callback_;
+        }
+        if (callback)
+        {
+            callback(local_msg);
+        }
+        ipc::buffer response_data(std::move(local_msg->response()->serialize()));
         int retry_count = 0;
         while (!ipc_w_ptr_->try_send(response_data.data(), response_data.size())
                && running.load(std::memory_order_acquire))
@@ -231,13 +234,16 @@ void shm_ser_ipc::response_thread_func()
 /******************************************************************************************************/
 
 shm_cli_ipc::shm_cli_ipc(const std::string& topic_name, const std::shared_ptr<ServiceData>& msg, size_t domain_id,
-                         bool verbose)
+                         bool verbose, bool enable_thread_qos, int cpu_id, int thread_priority)
     : cli_ipc_base(topic_name, msg, domain_id, verbose)
     , topic_name_(topic_name)
-    , message_(msg)
     , domain_id_(domain_id)
     , verbose_(verbose)
-{}
+    , thread_options_(dzIPC::ThreadDispatch::make_realtime_options(enable_thread_qos, cpu_id, thread_priority))
+{
+    message_.reset(msg->clone());
+    dzIPC::ThreadDispatch::apply_current_thread_options(thread_options_, verbose_, topic_name_ + "_CliOwnerThread");
+}
 
 shm_cli_ipc::~shm_cli_ipc()
 {
@@ -250,13 +256,16 @@ shm_cli_ipc::~shm_cli_ipc()
         }
         delete handshake_thread_;
     }
-    if (ipc_r_ptr_ && ipc_r_ptr_->valid())
     {
-        ipc_r_ptr_->release();
-    }
-    if (ipc_w_ptr_ && ipc_w_ptr_->valid())
-    {
-        ipc_w_ptr_->release();
+        std::lock_guard<std::mutex> lock(channel_mtx_);
+        if (ipc_r_ptr_ && ipc_r_ptr_->valid())
+        {
+            ipc_r_ptr_->release();
+        }
+        if (ipc_w_ptr_ && ipc_w_ptr_->valid())
+        {
+            ipc_w_ptr_->release();
+        }
     }
     exit_flag.store(true, std::memory_order_release);
 }
@@ -270,9 +279,15 @@ void shm_cli_ipc::InitChannel(std::string extra_info)
     // 等待服务端创建通道
     handshake_thread_ = new std::thread(&shm_cli_ipc::cli_handshake, this);
     // 等待握手完成
-    std::string response_type_name = message_->response()
-                                         ? dzIPC::info_pool::demangle(typeid(*message_->response()).name())
-                                         : std::string{};
+    std::shared_ptr<ServiceData> message_template;
+    {
+        std::lock_guard<std::mutex> lock(message_mtx_);
+        message_template = message_;
+    }
+    std::string response_type_name =
+        (message_template && message_template->response())
+            ? dzIPC::info_pool::demangle(typeid(*message_template->response()).name())
+            : std::string{};
     response_type_name = extract_last_segment(response_type_name);
     pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmClient, topic_name_, response_type_name, "shm",
                       static_cast<int32_t>(domain_id_), extra_info});
@@ -289,73 +304,95 @@ void shm_cli_ipc::InitChannel(std::string extra_info)
 
 void shm_cli_ipc::cli_handshake()
 {
-    std::string sem_ser_name = "dz_ipc_" + topic_name_ + "_ser_post";
-    std::string sem_cli_name = "dz_ipc_" + topic_name_ + "_cli_post";
-    std::string sem_stop_name = "dz_ipc_" + topic_name_ + "_stop_post";
-    ipc::sync::semaphore sem_ser;
-    if (!sem_ser.open(sem_ser_name.c_str(), 0))
+    if (!control_plane_.open(service_control_name_for(topic_name_)))
     {
-        throw std::runtime_error("sem_open failed");
+        throw std::runtime_error("control plane open failed");
     }
-    ipc::sync::semaphore sem_cli;
-    if (!sem_cli.open(sem_cli_name.c_str(), 0))
-    {
-        sem_ser.close();
-        throw std::runtime_error("sem_open failed");
-    }
-    ipc::sync::semaphore sem_stop;
-    if (!sem_stop.open(sem_stop_name.c_str(), 0))
-    {
-        sem_ser.close();
-        sem_cli.close();
-        throw std::runtime_error("sem_open failed");
-    }
-    auto st = State::RunHS;
-    while (sem_ser.try_wait())
-        ;   // 清空服务信号量
+    uint32_t attached_generation = 0;
+    bool peer_registered = false;
     while (running.load(std::memory_order_acquire))
     {
-        if (st == State::RunHS)
+        const uint32_t generation = control_plane_.generation();
+        const TopicState state = control_plane_.state();
+        if (state == TopicState::Ready && generation != 0)
         {
-            while (sem_stop.try_wait())
-                ;
-            while (sem_cli.try_wait())
-                ;   // 清空信号量
-            if (!sem_ser.wait(100))
+            if (!handshake_completed_.load(std::memory_order_acquire) || attached_generation != generation)
             {
-                continue;
-            }   // 等待服务端发送清理开始信号
-            // 创建新的通道
-            std::string r_name, w_name;
-            r_name = "dz_ipc_" + topic_name_ + "_ser_w";
-            w_name = "dz_ipc_" + topic_name_ + "_ser_r";
-            ipc_r_ptr_ = std::make_shared<ipc::server>(r_name.c_str(), ipc::receiver, verbose_);
-            ipc_w_ptr_ = std::make_shared<ipc::server>(w_name.c_str(), ipc::sender, verbose_);
-            sem_cli.post();   // 通知服务端连接完成
-            st = State::StopHS;
-            handshake_completed_.store(true, std::memory_order_release);
+                if (peer_registered)
+                {
+                    control_plane_.remove_peer(attached_generation);
+                    peer_registered = false;
+                }
+                std::string r_name, w_name;
+                r_name = "dz_ipc_" + topic_name_ + "_ser_w";
+                w_name = "dz_ipc_" + topic_name_ + "_ser_r";
+                {
+                    std::lock_guard<std::mutex> lock(channel_mtx_);
+                    if (ipc_r_ptr_ && ipc_r_ptr_->valid())
+                    {
+                        ipc_r_ptr_->release();
+                    }
+                    if (ipc_w_ptr_ && ipc_w_ptr_->valid())
+                    {
+                        ipc_w_ptr_->release();
+                    }
+                    ipc_r_ptr_ = std::make_shared<ipc::server>(r_name.c_str(), ipc::receiver, verbose_);
+                    ipc_w_ptr_ = std::make_shared<ipc::server>(w_name.c_str(), ipc::sender, verbose_);
+                }
+                attached_generation = generation;
+                if (!control_plane_.add_peer(attached_generation))
+                {
+                    std::lock_guard<std::mutex> lock(channel_mtx_);
+                    if (ipc_r_ptr_ && ipc_r_ptr_->valid())
+                    {
+                        ipc_r_ptr_->release();
+                    }
+                    if (ipc_w_ptr_ && ipc_w_ptr_->valid())
+                    {
+                        ipc_w_ptr_->release();
+                    }
+                    ipc_r_ptr_.reset();
+                    ipc_w_ptr_.reset();
+                    continue;
+                }
+                peer_registered = true;
+                handshake_completed_.store(true, std::memory_order_release);
+            }
         }
         else
         {
-            if (!sem_stop.wait(100))   // 等待服务端发送停止信号，若没有则继续等待
+            if (handshake_completed_.exchange(false, std::memory_order_acq_rel))
             {
-                continue;
+                if (peer_registered)
+                {
+                    control_plane_.remove_peer(attached_generation);
+                    peer_registered = false;
+                }
+                std::lock_guard<std::mutex> lock(channel_mtx_);
+                if (ipc_r_ptr_ && ipc_r_ptr_->valid())
+                {
+                    ipc_r_ptr_->release();
+                }
+                if (ipc_w_ptr_ && ipc_w_ptr_->valid())
+                {
+                    ipc_w_ptr_->release();
+                }
+                ipc_r_ptr_.reset();
+                ipc_w_ptr_.reset();
             }
-            st = State::RunHS;   // 进入重新连接状态
-            handshake_completed_.store(false, std::memory_order_release);
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    while (sem_stop.try_wait())
-        ;
+    if (peer_registered)
+    {
+        control_plane_.remove_peer(attached_generation);
+    }
     if (verbose_)
     {
         std::cerr << "\033[32m[" << topic_name_
-                  << "_CLiInfo] Client exiting, sending stop signal to server: " << topic_name_ << "\033[0m"
+                  << "_CLiInfo] Client exiting, detaching from server: " << topic_name_ << "\033[0m"
                   << std::endl;
     }
-    sem_stop.post();   // 发送停止信号，通知服务端退出等待
-    sem_ser.close();
-    sem_cli.close();
 }
 
 /******************************************************************************************************/
@@ -372,6 +409,20 @@ bool shm_cli_ipc::send_request(std::shared_ptr<ServiceData>& request, uint64_t r
                       << "_CLiInfo] Handshake not completed, cannot send request on topic: " << topic_name_ << "\033[0m"
                       << std::endl;
         }
+        return false;
+    }
+    std::shared_ptr<ServiceData> message_template;
+    {
+        std::lock_guard<std::mutex> lock(message_mtx_);
+        if (!message_)
+        {
+            return false;
+        }
+        message_template.reset(message_->clone());
+    }
+    std::lock_guard<std::mutex> channel_lock(channel_mtx_);
+    if (!handshake_completed_.load(std::memory_order_acquire) || !ipc_w_ptr_ || !ipc_r_ptr_)
+    {
         return false;
     }
     ipc::buffer request_data(std::move(request->request()->serialize()));
@@ -391,7 +442,7 @@ bool shm_cli_ipc::send_request(std::shared_ptr<ServiceData>& request, uint64_t r
         {
             return false;
         }
-        if (message_->check_msg_id(raw_response))   // 收到响应且ID正确,否则重新接收
+        if (message_template->check_msg_id(raw_response))   // 收到响应且ID正确,否则重新接收
         {
             request->response()->deserialize(raw_response);
             break;
@@ -405,7 +456,14 @@ bool shm_cli_ipc::send_request(std::shared_ptr<ServiceData>& request, uint64_t r
 /******************************************************************************************************/
 void shm_cli_ipc::reset_message(const std::shared_ptr<ServiceData>& msg)
 {
-    message_.reset(msg->clone());
+    if (!msg)
+    {
+        return;
+    }
+    std::shared_ptr<ServiceData> new_msg;
+    new_msg.reset(msg->clone());
+    std::lock_guard<std::mutex> lock(message_mtx_);
+    message_ = std::move(new_msg);
 }
 }   // namespace shm
 }   // namespace dzIPC

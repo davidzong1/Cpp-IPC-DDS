@@ -11,7 +11,8 @@ class IPC_EXPORT server_ipc_impl
 public:
     explicit server_ipc_impl(const std::string& topic_name_, const std::shared_ptr<ServiceData>& msg,
                              std::function<void(std::shared_ptr<ServiceData>&)> callback, size_t domain_id,
-                             IPCType ipc_type, bool verbose = false);
+                             IPCType ipc_type, bool verbose = false, bool enable_thread_qos = Qos::NotUseQos,
+                             int cpu_id = CPU_CORE::None, int thread_priority = DispatchPriority::LowPriority);
     ~server_ipc_impl();
     void InitChannel(std::string extra_info = "");
     void reset_message(const std::shared_ptr<ServiceData>& msg);
@@ -28,7 +29,8 @@ class IPC_EXPORT client_ipc_impl
 {
 public:
     explicit client_ipc_impl(const std::string& topic_name_, const std::shared_ptr<ServiceData>& msg, size_t domain_id,
-                             IPCType ipc_type, bool verbose = false);
+                             IPCType ipc_type, bool verbose = false, bool enable_thread_qos = Qos::NotUseQos,
+                             int cpu_id = CPU_CORE::None, int thread_priority = DispatchPriority::LowPriority);
     ~client_ipc_impl();
     void InitChannel(std::string extra_info = "");
     void reset_message(const std::shared_ptr<ServiceData>& msg);

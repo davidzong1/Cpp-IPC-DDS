@@ -164,13 +164,14 @@ public:
         uint32_t offset = 0;
         uint16_t page = 1;
 
-        // 序列化 status
+        // 序列化 status (bool类型特殊处理)
         int32_t status_name_size = 6;
         this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&status_name_size), page, offset, sizeof(status_name_size));
         this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>("status"), page, offset, status_name_size);
         uint8_t status_type = 1;
         this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&status_type), page, offset, sizeof(status_type));
-        this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&status), page, offset, sizeof(status));
+        uint8_t status_byte = status ? 1 : 0;
+        this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&status_byte), page, offset, sizeof(status_byte));
 
         // 序列化 tiny_int
         int32_t tiny_int_name_size = 8;
@@ -407,12 +408,14 @@ public:
     {
         uint32_t offset = 0;
         deserialize_data_cut(uint32_t(buffer.size()));
-        // 反序列化 status
+        // 反序列化 status (bool类型特殊处理)
         int32_t status_name_size;
         this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&status_name_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(status_name_size));
         offset += status_name_size;
         offset += sizeof(uint8_t); // 跳过类型标识
-        this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&status), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(status));
+        uint8_t status_byte;
+        this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&status_byte), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(status_byte));
+        status = (status_byte != 0);
 
         // 反序列化 tiny_int
         int32_t tiny_int_name_size;

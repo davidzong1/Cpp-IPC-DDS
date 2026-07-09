@@ -178,8 +178,8 @@ TEST(DzIpcSocket, RequestResponse)
 
     std::thread ser_thread(ser_thread_function);
     std::thread cli_thread(cli_thread_function);
-    ser_thread.join();
     cli_thread.join();
+    ser_thread.join();
 
     std::string error_snapshot;
     {

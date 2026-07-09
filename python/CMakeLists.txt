@@ -39,24 +39,24 @@ find_package(pybind11 CONFIG REQUIRED)
 # Unicode Support
 add_definitions(-DUNICODE -D_UNICODE)
 
-pybind11_add_module(dzipc MODULE src/interface.cc)
-add_dependencies(dzipc generate_ipc_messages)
+pybind11_add_module(_dzipc_core MODULE src/interface.cc)
+add_dependencies(_dzipc_core generate_ipc_messages)
 
-target_link_libraries(dzipc PRIVATE ipc)
-target_include_directories(dzipc PRIVATE ${LIBIPC_PROJECT_DIR}/include)
+target_link_libraries(_dzipc_core PRIVATE ipc)
+target_include_directories(_dzipc_core PRIVATE ${LIBIPC_PROJECT_DIR}/include)
 
-target_compile_features(dzipc PRIVATE cxx_std_17)
+target_compile_features(_dzipc_core PRIVATE cxx_std_17)
 if (MSVC)
-    target_compile_options(dzipc PRIVATE /utf-8)
+    target_compile_options(_dzipc_core PRIVATE /utf-8)
 endif()
-set_target_properties(dzipc PROPERTIES
+set_target_properties(_dzipc_core PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/python
 )
 
 if (NOT ROSBUILD)
-    install(TARGETS dzipc
-        LIBRARY DESTINATION lib/python
-        RUNTIME DESTINATION lib/python
-        ARCHIVE DESTINATION lib/python
+    install(TARGETS _dzipc_core
+        LIBRARY DESTINATION lib/python/dzipc
+        RUNTIME DESTINATION lib/python/dzipc
+        ARCHIVE DESTINATION lib/python/dzipc
     )
 endif()

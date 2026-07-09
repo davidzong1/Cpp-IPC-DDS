@@ -28,16 +28,18 @@ using namespace ipc;
 
 socket_ser_ipc::socket_ser_ipc(const std::string& topic_name, const std::shared_ptr<ServiceData>& msg,
                                std::function<void(std::shared_ptr<ServiceData>&)> callback, size_t domain_id,
-                               bool verbose)
+                               bool verbose, bool enable_thread_qos, int cpu_id, int thread_priority)
     : ser_ipc_base(topic_name, msg, callback, domain_id, verbose)
     , topic_name_(topic_name)
     , callback_(std::move(callback))
     , domain_id_(domain_id)
     , verbose_(verbose)
+    , thread_options_(dzIPC::ThreadDispatch::make_realtime_options(enable_thread_qos, cpu_id, thread_priority))
 {
     message_.reset(msg->clone());
     this->port_hash_ = dzIPC::common::udp_discovery_port_calculate(topic_name, domain_id_);
     this->ipaddr_ = dzIPC::common::udp_discovery_addr_calculate(topic_name);
+    dzIPC::ThreadDispatch::apply_current_thread_options(thread_options_, verbose_, topic_name_ + "_SocketSerOwnerThread");
 }
 
 /******************************************************************************************************/
@@ -45,7 +47,14 @@ socket_ser_ipc::socket_ser_ipc(const std::string& topic_name, const std::shared_
 /******************************************************************************************************/
 void socket_ser_ipc::reset_message(const std::shared_ptr<ServiceData>& msg)
 {
-    message_.reset(msg->clone());
+    if (!msg)
+    {
+        return;
+    }
+    std::shared_ptr<ServiceData> new_msg;
+    new_msg.reset(msg->clone());
+    std::lock_guard<std::mutex> lock(message_mtx_);
+    message_ = std::move(new_msg);
 }
 
 /******************************************************************************************************/
@@ -53,6 +62,7 @@ void socket_ser_ipc::reset_message(const std::shared_ptr<ServiceData>& msg)
 /******************************************************************************************************/
 void socket_ser_ipc::reset_callback(std::function<void(std::shared_ptr<ServiceData>&)> callback)
 {
+    std::lock_guard<std::mutex> lock(callback_mtx_);
     callback_ = std::move(callback);
 }
 
@@ -125,13 +135,21 @@ void socket_ser_ipc::InitChannel(std::string extra_info)
                       << "SerInfo] Failed to connect response UDP,reconnect affter 1 second...\033[0m" << std::endl;
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
-        std::string request_type_name = message_->request()
-                                            ? dzIPC::info_pool::demangle(typeid(*message_->request()).name())
-                                            : std::string{};
+        std::shared_ptr<ServiceData> message_template;
+        {
+            std::lock_guard<std::mutex> lock(message_mtx_);
+            message_template = message_;
+        }
+        std::string request_type_name =
+            (message_template && message_template->request())
+                ? dzIPC::info_pool::demangle(typeid(*message_template->request()).name())
+                : std::string{};
         request_type_name = extract_last_segment(request_type_name);
         pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketServer, topic_name_, request_type_name, "socket",
                           static_cast<int32_t>(domain_id_), extra_info});
         response_thread_ = new std::thread(&socket_ser_ipc::response_thread_func, this);
+        dzIPC::ThreadDispatch::apply_thread_options(response_thread_, thread_options_, verbose_,
+                                                    topic_name_ + "_SocketSerResponseThread");
         handshake_thread_ = new std::thread(&socket_ser_ipc::server_handshake, this);
     }
     catch (const std::exception& e)
@@ -226,12 +244,29 @@ void socket_ser_ipc::response_thread_func()
     while (running.load(std::memory_order_acquire))
     {
         /* 服务端等待请求,超时跳过 */
-        if (!chunk_rev_server(ipc_r_ptr_, message_, ServerRevTime, true))
+        std::shared_ptr<ServiceData> local_msg;
+        {
+            std::lock_guard<std::mutex> lock(message_mtx_);
+            if (!message_)
+            {
+                continue;
+            }
+            local_msg.reset(message_->clone());
+        }
+        if (!chunk_rev_server(ipc_r_ptr_, local_msg, ServerRevTime, true))
         {
             continue;
         }
-        callback_(message_);
-        ipc::buffer response_data(std::move(message_->response()->serialize()));
+        std::function<void(std::shared_ptr<ServiceData>&)> callback;
+        {
+            std::lock_guard<std::mutex> lock(callback_mtx_);
+            callback = callback_;
+        }
+        if (callback)
+        {
+            callback(local_msg);
+        }
+        ipc::buffer response_data(std::move(local_msg->response()->serialize()));
         if (!chunk_send(ipc_w_ptr_, response_data))
         {
             std::cerr << "\033[31m[" << topic_name_ << "SerInfo] Error sending response: Failed to send"
@@ -245,14 +280,16 @@ void socket_ser_ipc::response_thread_func()
 /******************************************************************************************************/
 
 socket_cli_ipc::socket_cli_ipc(const std::string& topic_name, const std::shared_ptr<ServiceData>& msg, size_t domain_id,
-                               bool verbose)
+                               bool verbose, bool enable_thread_qos, int cpu_id, int thread_priority)
     : cli_ipc_base(topic_name, msg, domain_id, verbose)
     , topic_name_(topic_name)
     , verbose_(verbose)
+    , thread_options_(dzIPC::ThreadDispatch::make_realtime_options(enable_thread_qos, cpu_id, thread_priority))
 {
     message_.reset(msg->clone());
     this->port_hash_ = dzIPC::common::udp_discovery_port_calculate(topic_name_, domain_id);
     this->ipaddr_ = dzIPC::common::udp_discovery_addr_calculate(topic_name_);
+    dzIPC::ThreadDispatch::apply_current_thread_options(thread_options_, verbose_, topic_name_ + "_SocketCliOwnerThread");
 }
 
 socket_cli_ipc::~socket_cli_ipc()
@@ -319,9 +356,15 @@ void socket_cli_ipc::InitChannel(std::string extra_info)
         return;
     }
     handshake_thread_ = new std::thread(&socket_cli_ipc::client_handshake, this);
-    std::string response_type_name = message_->response()
-                                         ? dzIPC::info_pool::demangle(typeid(*message_->response()).name())
-                                         : std::string{};
+    std::shared_ptr<ServiceData> message_template;
+    {
+        std::lock_guard<std::mutex> lock(message_mtx_);
+        message_template = message_;
+    }
+    std::string response_type_name =
+        (message_template && message_template->response())
+            ? dzIPC::info_pool::demangle(typeid(*message_template->response()).name())
+            : std::string{};
     response_type_name = extract_last_segment(response_type_name);
     pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketClient, topic_name_, response_type_name, "socket",
                       static_cast<int32_t>(domain_id_), extra_info});
@@ -449,7 +492,14 @@ bool socket_cli_ipc::send_request(std::shared_ptr<ServiceData>& request, uint64_
 /******************************************************************************************************/
 void socket_cli_ipc::reset_message(const std::shared_ptr<ServiceData>& msg)
 {
-    message_.reset(msg->clone());
+    if (!msg)
+    {
+        return;
+    }
+    std::shared_ptr<ServiceData> new_msg;
+    new_msg.reset(msg->clone());
+    std::lock_guard<std::mutex> lock(message_mtx_);
+    message_ = std::move(new_msg);
 }
 
 /******************************************************************************************************/

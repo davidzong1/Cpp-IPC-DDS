@@ -561,6 +561,42 @@ namespace
       return (info_of(h) == nullptr) ? nullptr : &(info_of(h)->que_);
     }
 
+    static void notify_readers(conn_info_t *info, std::true_type)
+    {
+      info->rd_waiter_.broadcast();
+    }
+
+    static void notify_readers(conn_info_t *info, std::false_type)
+    {
+      info->rd_waiter_.notify();
+    }
+
+    static void notify_readers(conn_info_t *info)
+    {
+      notify_readers(
+          info,
+          std::integral_constant<bool,
+                                 ipc::relat_trait<flag_t>::is_broadcast>{});
+    }
+
+    static void notify_writers(conn_info_t *info, std::true_type)
+    {
+      info->wt_waiter_.broadcast();
+    }
+
+    static void notify_writers(conn_info_t *info, std::false_type)
+    {
+      info->wt_waiter_.notify();
+    }
+
+    static void notify_writers(conn_info_t *info)
+    {
+      notify_writers(
+          info,
+          std::integral_constant<bool,
+                                 ipc::relat_trait<flag_t>::is_multi_producer>{});
+    }
+
     /* API implementations */
 
     static bool connect(ipc::handle_t *ph, ipc::prefix pref, char const *name,
@@ -770,7 +806,7 @@ namespace
                   return false;
                 }
               }
-              info->rd_waiter_.broadcast();
+              notify_readers(info);
               return true;
             };
           },
@@ -807,6 +843,14 @@ namespace
       }
       ipc::circ::cc_t conns =
           que->elems()->connections(std::memory_order_relaxed);
+      const bool sniffer_only = conns == 0;
+      if (sniffer_only && size > ipc::sniffer_payload_limit)
+      {
+        if (verbose)
+          ipc::error("fail: send, sniffer-only payload is too large: size = %zd, limit = %zd\n",
+                     size, static_cast<std::size_t>(ipc::sniffer_payload_limit));
+        return 0;
+      }
       // calc a new message id
       conn_info_t *inf = info_of(h);
       auto acc = inf->acc();
@@ -818,7 +862,7 @@ namespace
       }
       auto msg_id = acc->fetch_add(1, std::memory_order_relaxed);
       auto try_push = std::forward<F>(gen_push)(inf, que, msg_id);
-      if (size > ipc::large_msg_limit)
+      if (!sniffer_only && size > ipc::large_msg_limit)
       {
         auto dat = acquire_storage(inf, size, conns);
         void *buf = dat.second;
@@ -867,9 +911,22 @@ namespace
       return no_member_send(
           [tm, verbose](auto *info, auto *que, auto msg_id)
           {
-            return [tm, info, que, msg_id, verbose](std::int32_t remain, void const *data,
+            const bool sniffer_only = que->elems()->connections(std::memory_order_relaxed) == 0;
+            return [tm, info, que, msg_id, verbose, sniffer_only](std::int32_t remain, void const *data,
                                            std::size_t size)
             {
+              if (sniffer_only)
+              {
+                if (!que->push_sniffer(
+                        [](void *)
+                        { return true; },
+                        info->cc_id_, msg_id, remain, data, size))
+                {
+                  return false;
+                }
+                notify_readers(info);
+                return true;
+              }
               if (!wait_for(
                       info->wt_waiter_,
                       [&]
@@ -899,7 +956,7 @@ namespace
                   return false;
                 }
               }
-              info->rd_waiter_.broadcast();
+              notify_readers(info);
               return true;
             };
           },
@@ -928,7 +985,7 @@ namespace
               {
                 return false;
               }
-              info->rd_waiter_.broadcast();
+              notify_readers(info);
               return true;
             };
           },
@@ -954,22 +1011,28 @@ namespace
       {
         // pop a new message
         typename queue_t::value_t msg{};
+        bool writable = false;
         if (!wait_for(
                 inf->rd_waiter_,
-                [que, &msg, &h]
+                [que, &msg, &h, &writable]
                 {
                   if (!que->connected())
                   {
                     reconnect(&h, true);
                   }
-                  return !que->pop(msg);
+                  writable = false;
+                  return !que->pop(msg, [&writable](bool out)
+                                   { writable = out; });
                 },
                 tm))
         {
           // pop failed, just return.
           return {};
         }
-        inf->wt_waiter_.broadcast();
+        if (writable)
+        {
+          notify_writers(inf);
+        }
         if ((inf->acc() != nullptr) && (msg.cc_id_ == inf->cc_id_))
         {
           continue; // ignore message to self

@@ -43,8 +43,46 @@ shm_sniffer::~shm_sniffer()
 void shm_sniffer::create_sniffer(const std::string& topic_name, int domain_id, bool ser_or_topic, uint32_t msg_id)
 {
     stop_.store(false, std::memory_order_release);
+    topic_name_ = topic_name;
+    domain_id_ = domain_id;
     this->ser_or_topic_ = ser_or_topic;
     this->msg_id_ = msg_id;
+    std::string control_name =
+        ser_or_topic_ ? "dz_ipc_" + topic_name + "_ser_control" : "dz_ipc_" + topic_name + "_topic_control";
+    if (!control_plane_.open(control_name))
+    {
+        std::fprintf(stderr, "error: failed to open control plane '%s'\n", control_name.c_str());
+        std::exit(1);
+    }
+    generation_ = control_plane_.generation();
+    if (!open_channels(topic_name, domain_id, ser_or_topic))
+    {
+        std::exit(1);
+    }
+    ready.store(true, std::memory_order_release);
+    recv_thread_ = std::thread(
+        [this]()
+        {
+            while (!stop_.load(std::memory_order_acquire))
+            {
+                reopen_if_generation_changed();
+                sniffer_info got = recv_inner(50);
+                // Only refresh the cache when we actually received something, so a
+                // timeout in this iteration doesn't clobber a payload that the
+                // consumer hasn't picked up yet.
+                if (got.request.size() > 0 || got.response.size() > 0)
+                {
+                    auto msg_cache_cache = std::make_unique<sniffer_info>(std::move(got));
+                    std::lock_guard<std::mutex> lock(msg_mutex);
+                    msg_cache = std::move(msg_cache_cache);
+                }
+                std::this_thread::yield();
+            }
+        });
+}
+
+bool shm_sniffer::open_channels(const std::string& topic_name, int, bool ser_or_topic)
+{
     // The shm publishers/servers do NOT open a route/server with the raw topic
     // name — they mangle it the same way the regular sub/cli does. The sniffer
     // must apply the exact same scheme to attach to the right SHM region.
@@ -73,9 +111,9 @@ void shm_sniffer::create_sniffer(const std::string& topic_name, int domain_id, b
                      : opt.topo == ipc::sniffer::topology::route ? "route"
                                                                  : "channel");
 
-        std::exit(1);
+        return false;
     }
-    if (this->ser_or_topic_)
+    if (ser_or_topic)
     {
         std::string res_name = "dz_ipc_" + topic_name + "_ser_w";
         res_ = std::make_unique<ipc::sniffer>();
@@ -86,28 +124,34 @@ void shm_sniffer::create_sniffer(const std::string& topic_name, int domain_id, b
         {
             std::fprintf(stderr, "error: failed to open channel '%s' (prefix='%s', topology=%s)\n", res_name.c_str(),
                          opt.pref.c_str(), "server");
-            std::exit(1);
+            return false;
         }
     }
-    ready.store(true, std::memory_order_release);
-    recv_thread_ = std::thread(
-        [this]()
-        {
-            while (!stop_.load(std::memory_order_acquire))
-            {
-                sniffer_info got = recv_inner(50);
-                // Only refresh the cache when we actually received something, so a
-                // timeout in this iteration doesn't clobber a payload that the
-                // consumer hasn't picked up yet.
-                if (got.request.size() > 0 || got.response.size() > 0)
-                {
-                    auto msg_cache_cache = std::make_unique<sniffer_info>(std::move(got));
-                    std::lock_guard<std::mutex> lock(msg_mutex);
-                    msg_cache = std::move(msg_cache_cache);
-                }
-                std::this_thread::yield();
-            }
-        });
+    else
+    {
+        res_.reset();
+    }
+    return true;
+}
+
+void shm_sniffer::reopen_if_generation_changed()
+{
+    using dzIPC::control_plane_shm::TopicState;
+    if (!control_plane_.valid() || control_plane_.state() != TopicState::Ready)
+    {
+        return;
+    }
+    const std::uint32_t current_generation = control_plane_.generation();
+    if (current_generation == 0 || current_generation == generation_)
+    {
+        return;
+    }
+    if (open_channels(topic_name_, domain_id_, ser_or_topic_))
+    {
+        generation_ = current_generation;
+        std::lock_guard<std::mutex> lock(msg_mutex);
+        msg_cache.reset();
+    }
 }
 
 sniffer_info shm_sniffer::try_recv() noexcept

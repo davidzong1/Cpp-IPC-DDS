@@ -10,6 +10,7 @@
 #include <type_traits>
 #include <vector>
 #include "dzIPC/common/circularqueue.h"
+#include "dzIPC/common/thread_dispatch.h"
 #include "dzIPC/common/topic_data.h"
 #include "dzIPC/ipc_info_pool.h"
 #include "dzIPC/pub_sub_base.h"
@@ -24,7 +25,8 @@ class IPC_EXPORT socket_pub_ipc : public pub_ipc_base
 {
 public:
     explicit socket_pub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
-                            bool verbose = false);
+                            bool verbose = false, bool enable_thread_qos = false, int cpu_id = -1,
+                            int thread_priority = 20);
     ~socket_pub_ipc();
     void reset_message(const std::shared_ptr<TopicData>& msg);
     void InitChannel(std::string extra_info = "");
@@ -52,13 +54,15 @@ private:
     std::condition_variable sleep_cv;
     dzIPC::info_pool::ScopedRegistration pool_reg_;
     std::shared_ptr<TopicData> topic_msg_;
+    dzIPC::ThreadDispatch::ThreadOptions thread_options_;
 };
 
 class IPC_EXPORT socket_sub_ipc : public sub_ipc_base
 {
 public:
     explicit socket_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
-                            const size_t queue_size, bool verbose = false);
+                            const size_t queue_size, bool verbose = false, bool enable_thread_qos = false,
+                            int cpu_id = -1, int thread_priority = 20);
     ~socket_sub_ipc();
     void InitChannel(std::string extra_info = "");
     void reset_message(const std::shared_ptr<TopicData>& msg);
@@ -79,9 +83,11 @@ private:
     std::string ipaddr_;
     std::shared_ptr<ipc::socket::UDPNode> subscriber_;
     std::shared_ptr<TopicData> topic_msg_;
+    std::mutex topic_msg_mtx_;
     std::unique_ptr<CircularQueue<IpcMsgBase>> msg_queue_;
-    std::thread* subscribe_thread_;
+    std::thread* subscribe_thread_{nullptr};
     dzIPC::info_pool::ScopedRegistration pool_reg_;
+    dzIPC::ThreadDispatch::ThreadOptions thread_options_;
 };
 }   // namespace socket
 }   // namespace dzIPC

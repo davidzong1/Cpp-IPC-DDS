@@ -90,13 +90,14 @@ public:
             this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(str.data()), page, offset, str_size);
         }
 
-        // 序列化 data4
+        // 序列化 data4 (bool类型特殊处理)
         int32_t data4_name_size = 5;
         this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&data4_name_size), page, offset, sizeof(data4_name_size));
         this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>("data4"), page, offset, data4_name_size);
         uint8_t data4_type = 1;
         this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&data4_type), page, offset, sizeof(data4_type));
-        this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&data4), page, offset, sizeof(data4));
+        uint8_t data4_byte = data4 ? 1 : 0;
+        this->adapt_memcpy_tos(static_cast<uint8_t *>(buffer.data()), reinterpret_cast<const uint8_t *>(&data4_byte), page, offset, sizeof(data4_byte));
 
         this->add_tail_msg(static_cast<uint8_t *>(buffer.data()) + offset, page);
         return buffer;
@@ -148,12 +149,14 @@ public:
             data3.emplace_back(std::move(str));
         }
 
-        // 反序列化 data4
+        // 反序列化 data4 (bool类型特殊处理)
         int32_t data4_name_size;
         this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&data4_name_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(data4_name_size));
         offset += data4_name_size;
         offset += sizeof(uint8_t); // 跳过类型标识
-        this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&data4), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(data4));
+        uint8_t data4_byte;
+        this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&data4_byte), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(data4_byte));
+        data4 = (data4_byte != 0);
 
     }
 

@@ -282,6 +282,16 @@ struct prod_cons_impl<wr<relat::single, relat::multi, trans::broadcast>> {
         return true;
     }
 
+    template <typename W, typename F, typename E>
+    bool push_sniffer(W* /*wrapper*/, F&& f, E* elems) {
+        E* el = elems + circ::index_of(wt_.load(std::memory_order_relaxed));
+        epoch_ += ep_incr;
+        el->rc_.store(epoch_, std::memory_order_release);
+        std::forward<F>(f)(&(el->data_));
+        wt_.fetch_add(1, std::memory_order_release);
+        return true;
+    }
+
     template <typename W, typename F, typename R, typename E>
     bool pop(W* wrapper, circ::u2_t& cur, F&& f, R&& out, E* elems) {
         if (cur == cursor()) return false; // acquire

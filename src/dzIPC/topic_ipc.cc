@@ -14,16 +14,19 @@ public:
 };
 
 pimpl::publisher_ipc_impl::publisher_ipc_impl(const std::shared_ptr<TopicData>& msg, const std::string& topic_name,
-                                              size_t domain_id, IPCType ipc_type, bool verbose)
+                                              size_t domain_id, IPCType ipc_type, bool verbose,
+                                              bool enable_thread_qos, int cpu_id, int thread_priority)
     : p_(publisher_ipc_impl_::make())
 {
     if (ipc_type == IPCType::Shm)
     {
-        impl(p_)->ipc = std::make_unique<shm::shm_pub_ipc>(msg, topic_name, domain_id, verbose);
+        impl(p_)->ipc = std::make_unique<shm::shm_pub_ipc>(msg, topic_name, domain_id, verbose,
+                                                           enable_thread_qos, cpu_id, thread_priority);
     }
     else if (ipc_type == IPCType::Socket)
     {
-        impl(p_)->ipc = std::make_unique<socket::socket_pub_ipc>(msg, topic_name, domain_id, verbose);
+        impl(p_)->ipc = std::make_unique<socket::socket_pub_ipc>(msg, topic_name, domain_id, verbose,
+                                                                 enable_thread_qos, cpu_id, thread_priority);
     }
     else
     {
@@ -51,6 +54,21 @@ bool pimpl::publisher_ipc_impl::publish(std::shared_ptr<IpcMsgBase> msg)
     return impl(p_)->ipc->publish(msg);
 }
 
+bool pimpl::publisher_ipc_impl::publish_best_effort(std::shared_ptr<IpcMsgBase> msg)
+{
+    return impl(p_)->ipc->publish_best_effort(msg);
+}
+
+bool pimpl::publisher_ipc_impl::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm)
+{
+    return impl(p_)->ipc->publish_blocking(msg, tm);
+}
+
+bool pimpl::publisher_ipc_impl::publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg)
+{
+    return impl(p_)->ipc->publish_for_sniffer(msg);
+}
+
 bool pimpl::publisher_ipc_impl::has_subscribed() const
 {
     return impl(p_)->ipc->has_subscribed();
@@ -73,16 +91,18 @@ public:
 
 pimpl::subscriber_ipc_impl::subscriber_ipc_impl(const std::shared_ptr<TopicData>& msg, const std::string& topic_name,
                                                 size_t domain_id, const size_t queue_size, IPCType ipc_type,
-                                                bool verbose)
+                                                bool verbose, bool enable_thread_qos, int cpu_id, int thread_priority)
     : p_(subscriber_ipc_impl_::make())
 {
     if (ipc_type == IPCType::Shm)
     {
-        impl(p_)->ipc = std::make_unique<shm::shm_sub_ipc>(msg, topic_name, domain_id, queue_size, verbose);
+        impl(p_)->ipc = std::make_unique<shm::shm_sub_ipc>(msg, topic_name, domain_id, queue_size, verbose,
+                                                           enable_thread_qos, cpu_id, thread_priority);
     }
     else if (ipc_type == IPCType::Socket)
     {
-        impl(p_)->ipc = std::make_unique<socket::socket_sub_ipc>(msg, topic_name, domain_id, queue_size, verbose);
+        impl(p_)->ipc = std::make_unique<socket::socket_sub_ipc>(msg, topic_name, domain_id, queue_size, verbose,
+                                                                 enable_thread_qos, cpu_id, thread_priority);
     }
     else
     {

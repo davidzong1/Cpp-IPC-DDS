@@ -8,24 +8,32 @@
 
 namespace dzIPC {
 namespace shm {
-enum class State {
-    RunHS,
-    StopHS
-};
 using namespace ipc;
+using dzIPC::control_plane_shm::TopicState;
+
+namespace {
+
+std::string control_name_for(const std::string& data_name)
+{
+    return data_name + "_control";
+}
+
+}   // namespace
 
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
 shm_pub_ipc::shm_pub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
-                         bool verbose)
+                         bool verbose, bool enable_thread_qos, int cpu_id, int thread_priority)
     : pub_ipc_base(msg, topic_name, domain_id, verbose)
     , topic_name_("dz_ipc_" + topic_name + "_topic")
     , raw_topic_name_(topic_name)
     , domain_id_(domain_id)
     , verbose_(verbose)
+    , thread_options_(dzIPC::ThreadDispatch::make_realtime_options(enable_thread_qos, cpu_id, thread_priority))
 {
     topic_msg_.reset(msg->clone());
+    dzIPC::ThreadDispatch::apply_current_thread_options(thread_options_, verbose_, topic_name_ + "_PubOwnerThread");
 }
 
 /******************************************************************************************************/
@@ -61,8 +69,14 @@ void shm_pub_ipc::InitChannel(std::string extra_info)
 {
     try
     {
+        if (!control_plane_.open(control_name_for(topic_name_)))
+        {
+            throw std::runtime_error("failed to open topic control plane");
+        }
+        control_plane_.begin_rebuild();
         ipc::route::clear_storage(topic_name_.c_str());
         publisher_ = std::make_shared<ipc::route>(topic_name_.c_str(), ipc::sender, verbose_);
+        control_plane_.set_ready();
         publish_thread_ = new std::thread(&shm_pub_ipc::pub_handshake, this);
         std::string topic_type_name = topic_msg_->topic()
                                           ? dzIPC::info_pool::demangle(typeid(topic_msg_->topic()).name())
@@ -84,62 +98,26 @@ void shm_pub_ipc::InitChannel(std::string extra_info)
 /******************************************************************************************************/
 void shm_pub_ipc::pub_handshake()
 {
-    std::string pub_sem_name = "/" + topic_name_ + "_pub_node";
-    std::string sub_sem_name = "/" + topic_name_ + "_sub_node";
-    std::string stop_sem_name = "/" + topic_name_ + "_stop_node";
-    ipc::sync::semaphore pub_node;
-    ipc::sync::semaphore sub_node;
-    ipc::sync::semaphore stop_node;
-    int sub_cnt = 0;
-    if (!pub_node.open(pub_sem_name.c_str(), 0))
-    {
-        std::cerr << "\033[31m[" << topic_name_
-                  << "PubInfo] Error opening publisher semaphore for topic: " << topic_name_ << "\033[0m" << std::endl;
-        throw std::runtime_error("Fatal error: sem_open failed");
-    }
-    if (!sub_node.open(sub_sem_name.c_str(), 0))
-    {
-        pub_node.close();
-        std::cerr << "\033[31m[" << topic_name_
-                  << "PubInfo] Error opening subscriber semaphore for topic: " << topic_name_ << "\033[0m" << std::endl;
-        throw std::runtime_error("Fatal error: sem_open failed");
-    }
-    if (!stop_node.open(stop_sem_name.c_str(), 0))
-    {
-        pub_node.close();
-        sub_node.close();
-        std::cerr << "\033[31m[" << topic_name_ << "PubInfo] Error opening stop semaphore for topic: " << topic_name_
-                  << "\033[0m" << std::endl;
-        throw std::runtime_error("Fatal error: sem_open failed");
-    }
     if (verbose_)
         std::cerr << "\033[32m[" << topic_name_ << "PubInfo] Publisher has created topic: " << topic_name_ << "\033[0m"
                   << std::endl;
+    bool had_subscriber = false;
     while (running.load(std::memory_order_acquire))
     {
-        while (stop_node.try_wait())
-            ;   // 清空停止信号量，防止之前的残留信号影响后续的订阅检测
-        while (pub_node.try_wait())
-            ;                     // 清空发布者信号量，防止之前的残留信号影响后续的订阅检测
-        if (sub_node.wait(100))   // 每隔100ms检查一次订阅者是否存在
+        control_plane_.heartbeat();
+        const bool has_peer = control_plane_.peer_count() > 0;
+        subscribed_.store(has_peer, std::memory_order_release);
+        if (has_peer && !had_subscriber && verbose_)
         {
-            pub_node.post();
-            sub_cnt++;
-            subscribed_.store(true, std::memory_order_release);
-            if (verbose_)
-                std::cerr << "\033[32m[" << topic_name_
-                          << "PubInfo] Publisher detected a "
-                             "subscriber on topic: "
-                          << topic_name_ << "\033[0m" << std::endl;
+            std::cerr << "\033[32m[" << topic_name_
+                      << "PubInfo] Publisher detected a subscriber on topic: " << topic_name_ << "\033[0m"
+                      << std::endl;
         }
+        had_subscriber = has_peer;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    for (int i = 0; i < sub_cnt; i++)
-    {
-        stop_node.post();   // 发送停止信号，通知所有订阅者退出等待
-    }
-    stop_node.close();
-    pub_node.close();
-    sub_node.close();
+    subscribed_.store(false, std::memory_order_release);
+    control_plane_.set_stopping();
 }
 
 /******************************************************************************************************/
@@ -147,23 +125,48 @@ void shm_pub_ipc::pub_handshake()
 /******************************************************************************************************/
 bool shm_pub_ipc::publish(std::shared_ptr<IpcMsgBase> msg)
 {
+    return publish_best_effort(std::move(msg));
+}
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
+bool shm_pub_ipc::publish_best_effort(std::shared_ptr<IpcMsgBase> msg)
+{
+    return publish_for_sniffer(std::move(msg));
+}
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
+bool shm_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm)
+{
     try
     {
         ipc::buffer response_data(std::move(msg->serialize()));
-        int retry_count = 0;
-        // no member pass — 30 retries × 100ms timeout = up to 3s total wait
-        while (!publisher_->no_member_try_send(response_data.data(), response_data.size()))
+        if (publisher_->recv_count() == 0)
         {
-            retry_count++;
-            if (retry_count > 30)
-            {
-                std::cerr << "\033[31m[" << topic_name_
-                          << "PubInfo] Warning: Failed to publish message after 30 attempts on topic: " << topic_name_
-                          << "\033[0m" << std::endl;
-                return false;
-            }
-        };
-        return true;
+            return publisher_->no_member_try_send(response_data.data(), response_data.size(), 0);
+        }
+        return publisher_->try_send(response_data.data(), response_data.size(), tm);
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "\033[31m[" << topic_name_ << "PubInfo] Error publishing message: " << e.what() << "\033[0m"
+                  << std::endl;
+    }
+    return false;
+}
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
+bool shm_pub_ipc::publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg)
+{
+    try
+    {
+        ipc::buffer response_data(std::move(msg->serialize()));
+        return publisher_->no_member_try_send(response_data.data(), response_data.size(), 0);
     }
     catch (const std::exception& e)
     {
@@ -177,12 +180,14 @@ bool shm_pub_ipc::publish(std::shared_ptr<IpcMsgBase> msg)
 /******************************************************************************************************/
 /******************************************************************************************************/
 shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
-                         const size_t queue_size, bool verbose)
+                         const size_t queue_size, bool verbose, bool enable_thread_qos, int cpu_id,
+                         int thread_priority)
     : sub_ipc_base(msg, topic_name, domain_id, queue_size, verbose)
     , topic_name_("dz_ipc_" + topic_name + "_topic")
     , raw_topic_name_(topic_name)
     , domain_id_(domain_id)
     , verbose_(verbose)
+    , thread_options_(dzIPC::ThreadDispatch::make_realtime_options(enable_thread_qos, cpu_id, thread_priority))
 {
     topic_msg_.reset(msg->clone());
     msg_queue_ = std::make_unique<CircularQueue<IpcMsgBase>>(queue_size);
@@ -222,7 +227,14 @@ shm_sub_ipc::~shm_sub_ipc()
 /******************************************************************************************************/
 void shm_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
 {
-    topic_msg_.reset(msg->clone());
+    if (!msg)
+    {
+        return;
+    }
+    std::shared_ptr<TopicData> new_msg;
+    new_msg.reset(msg->clone());
+    std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+    topic_msg_ = std::move(new_msg);
 }
 
 /******************************************************************************************************/
@@ -230,69 +242,79 @@ void shm_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
 /******************************************************************************************************/
 void shm_sub_ipc::sub_handshake()
 {
-    std::string pub_sem_name = "/" + topic_name_ + "_pub_node";
-    std::string sub_sem_name = "/" + topic_name_ + "_sub_node";
-    std::string stop_sem_name = "/" + topic_name_ + "_stop_node";
-    ipc::sync::semaphore pub_node;
-    ipc::sync::semaphore sub_node;
-    ipc::sync::semaphore stop_node;
-    if (!pub_node.open(pub_sem_name.c_str(), 0))
+    if (!control_plane_.open(control_name_for(topic_name_)))
     {
-        std::cerr << "\033[31m[" << topic_name_
-                  << "SubInfo] Error opening publisher semaphore for topic: " << topic_name_ << "\033[0m" << std::endl;
-        throw std::runtime_error("Fatal error: sem_open failed");
-    }
-    if (!sub_node.open(sub_sem_name.c_str(), 0))
-    {
-        pub_node.close();
-        std::cerr << "\033[31m[" << topic_name_
-                  << "SubInfo] Error opening subscriber semaphore for topic: " << topic_name_ << "\033[0m" << std::endl;
-        throw std::runtime_error("Fatal error: sem_open failed");
-    }
-    if (!stop_node.open(stop_sem_name.c_str(), 0))
-    {
-        pub_node.close();
-        sub_node.close();
-        std::cerr << "\033[31m[" << topic_name_ << "SubInfo] Error opening stop semaphore for topic: " << topic_name_
+        std::cerr << "\033[31m[" << topic_name_ << "SubInfo] Error opening control plane for topic: " << topic_name_
                   << "\033[0m" << std::endl;
-        throw std::runtime_error("Fatal error: sem_open failed");
+        throw std::runtime_error("Fatal error: control plane open failed");
     }
-    auto st = State::RunHS;
+    uint32_t attached_generation = 0;
+    bool peer_registered = false;
     while (running.load(std::memory_order_acquire))
     {
-        if (st == State::RunHS)
+        const uint32_t generation = control_plane_.generation();
+        const TopicState state = control_plane_.state();
+        if (state == TopicState::Ready && generation != 0)
         {
-            sub_node.try_wait();
-            sub_node.post();   // 通知发布者自己已准备好
-            if (pub_node.wait(100))
+            if (!handshake_completed.load(std::memory_order_acquire) || attached_generation != generation)
             {
+                if (peer_registered)
+                {
+                    control_plane_.remove_peer(attached_generation);
+                    peer_registered = false;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(channel_mtx_);
+                    if (subscriber_ && subscriber_->valid())
+                    {
+                        subscriber_->release();
+                    }
+                    subscriber_.reset();
+                    subscriber_ = std::make_shared<ipc::route>(topic_name_.c_str(), ipc::receiver, verbose_);
+                }
+                attached_generation = generation;
+                if (!control_plane_.add_peer(attached_generation))
+                {
+                    std::lock_guard<std::mutex> lock(channel_mtx_);
+                    if (subscriber_ && subscriber_->valid())
+                    {
+                        subscriber_->release();
+                    }
+                    subscriber_.reset();
+                    continue;
+                }
+                peer_registered = true;
+                handshake_completed.store(true, std::memory_order_release);
                 if (verbose_)
+                {
                     std::cerr << "\033[32m[" << topic_name_
                               << "SubInfo] Subscriber has subscribed to topic: " << topic_name_ << "\033[0m"
                               << std::endl;
-                try
-                {
-                    subscriber_ = std::make_shared<ipc::route>(topic_name_.c_str(), ipc::receiver, verbose_);
                 }
-                catch (...)
-                {
-                    std::cerr << "\033[31m[" << topic_name_
-                              << "SubInfo] Error initializing subscriber channel: " << topic_name_ << "\033[0m"
-                              << std::endl;
-                    throw std::runtime_error("[SubscriberInfo] Error initializing subscriber channel: " + topic_name_);
-                }
-                handshake_completed.store(true, std::memory_order_release);
-                st = State::StopHS;
             }
         }
         else
         {
-            if (stop_node.wait(100))
+            if (handshake_completed.exchange(false, std::memory_order_acq_rel))
             {
-                st = State::RunHS;   // 进入重新连接状态
-                handshake_completed.store(false, std::memory_order_release);
+                if (peer_registered)
+                {
+                    control_plane_.remove_peer(attached_generation);
+                    peer_registered = false;
+                }
+                std::lock_guard<std::mutex> lock(channel_mtx_);
+                if (subscriber_ && subscriber_->valid())
+                {
+                    subscriber_->release();
+                }
+                subscriber_.reset();
             }
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (peer_registered)
+    {
+        control_plane_.remove_peer(attached_generation);
     }
 }
 
@@ -301,8 +323,15 @@ void shm_sub_ipc::sub_handshake()
 /******************************************************************************************************/
 void shm_sub_ipc::InitChannel(std::string extra_info)
 {
-    std::string topic_type_name = topic_msg_->topic() ? dzIPC::info_pool::demangle(typeid(topic_msg_->topic()).name())
-                                                      : std::string{};
+    std::shared_ptr<TopicData> topic_template;
+    {
+        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+        topic_template = topic_msg_;
+    }
+    std::string topic_type_name =
+        (topic_template && topic_template->topic())
+            ? dzIPC::info_pool::demangle(typeid(topic_template->topic()).name())
+            : std::string{};
     topic_type_name = extract_last_segment(topic_type_name);
     pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmSub, raw_topic_name_, topic_type_name, "shm",
                       static_cast<int32_t>(domain_id_), extra_info});
@@ -311,41 +340,47 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
         [this]()
         {
             /* 进入订阅循环 */
-            bool was_connected = false;
             while (running.load(std::memory_order_acquire))
             {
                 if (handshake_completed.load(std::memory_order_acquire))
                 {
-                    was_connected = true;
-                    buff_t raw_data = subscriber_->recv(50);
+                    buff_t raw_data;
+                    {
+                        std::lock_guard<std::mutex> lock(channel_mtx_);
+                        if (!subscriber_)
+                        {
+                            continue;
+                        }
+                        raw_data = subscriber_->recv(50);
+                    }
                     if (raw_data.empty())
                     {
                         continue;
                     }
-                    if (!topic_msg_->check_msg_id(raw_data))
+                    std::shared_ptr<TopicData> local_msg;
+                    {
+                        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+                        if (!topic_msg_)
+                        {
+                            continue;
+                        }
+                        local_msg.reset(topic_msg_->clone());
+                    }
+                    if (!local_msg->check_msg_id(raw_data))
                         continue;
-                    topic_msg_->topic()->deserialize(raw_data);
+                    local_msg->topic()->deserialize(raw_data);
                     std::shared_ptr<IpcMsgBase> ptr_cache;
-                    topic_msg_->swap(ptr_cache);
+                    local_msg->swap(ptr_cache);
                     msg_queue_->push(std::move(ptr_cache));
                 }
                 else
                 {
-                    // handshake 丢失时释放旧的 subscriber，
-                    // 清理 reader slot 锁，避免 publisher 的 push() 永久阻塞
-                    if (was_connected)
-                    {
-                        was_connected = false;
-                        if (subscriber_ && subscriber_->valid())
-                        {
-                            subscriber_->release();
-                        }
-                        subscriber_.reset();
-                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
             }
         });
+    dzIPC::ThreadDispatch::apply_thread_options(subscribe_thread_, thread_options_, verbose_,
+                                                topic_name_ + "_SubReceiveThread");
 }
 
 /******************************************************************************************************/

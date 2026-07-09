@@ -15,16 +15,19 @@ public:
 
 pimpl::server_ipc_impl::server_ipc_impl(const std::string& topic_name_, const std::shared_ptr<ServiceData>& msg,
                                         std::function<void(std::shared_ptr<ServiceData>&)> callback, size_t domain_id,
-                                        IPCType ipc_type, bool verbose)
+                                        IPCType ipc_type, bool verbose, bool enable_thread_qos, int cpu_id,
+                                        int thread_priority)
     : p_(server_ipc_impl_::make())
 {
     if (ipc_type == IPCType::Shm)
     {
-        impl(p_)->ipc = std::make_unique<shm::shm_ser_ipc>(topic_name_, msg, callback, domain_id, verbose);
+        impl(p_)->ipc = std::make_unique<shm::shm_ser_ipc>(topic_name_, msg, callback, domain_id, verbose,
+                                                           enable_thread_qos, cpu_id, thread_priority);
     }
     else if (ipc_type == IPCType::Socket)
     {
-        impl(p_)->ipc = std::make_unique<socket::socket_ser_ipc>(topic_name_, msg, callback, domain_id, verbose);
+        impl(p_)->ipc = std::make_unique<socket::socket_ser_ipc>(topic_name_, msg, callback, domain_id, verbose,
+                                                                 enable_thread_qos, cpu_id, thread_priority);
     }
     else
     {
@@ -73,16 +76,19 @@ public:
 };
 
 pimpl::client_ipc_impl::client_ipc_impl(const std::string& topic_name_, const std::shared_ptr<ServiceData>& msg,
-                                        size_t domain_id, IPCType ipc_type, bool verbose)
+                                        size_t domain_id, IPCType ipc_type, bool verbose, bool enable_thread_qos,
+                                        int cpu_id, int thread_priority)
     : p_(client_ipc_impl_::make())
 {
     if (ipc_type == IPCType::Shm)
     {
-        impl(p_)->ipc = std::make_unique<shm::shm_cli_ipc>(topic_name_, msg, domain_id, verbose);
+        impl(p_)->ipc = std::make_unique<shm::shm_cli_ipc>(topic_name_, msg, domain_id, verbose,
+                                                           enable_thread_qos, cpu_id, thread_priority);
     }
     else if (ipc_type == IPCType::Socket)
     {
-        impl(p_)->ipc = std::make_unique<socket::socket_cli_ipc>(topic_name_, msg, domain_id, verbose);
+        impl(p_)->ipc = std::make_unique<socket::socket_cli_ipc>(topic_name_, msg, domain_id, verbose,
+                                                                 enable_thread_qos, cpu_id, thread_priority);
     }
     else
     {

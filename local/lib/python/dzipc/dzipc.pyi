@@ -76,10 +76,6 @@ class SubscriberIPC:
     def try_get(self, msg: TopicData) -> Tuple[bool, TopicData]: ...
 
 # AUTO_GENERATED_MSG_SRV_STUBS_BEGIN
-class Supervisor(IpcMsgBase):
-    update_time: str
-    additional_info: str
-
 class ComplexMessage(IpcMsgBase):
     status: bool
     tiny_int: int
@@ -105,6 +101,22 @@ class ComplexMessage(IpcMsgBase):
     single_precision_array: List[float]
     double_precision_array: List[float]
     message_array: List[str]
+
+class Pose(IpcMsgBase):
+    x: float
+    y: float
+    z: float
+    frame_id: str
+
+class RobotState(IpcMsgBase):
+    name: str
+    current_pose: Pose
+    pose_history: List[Pose]
+    note: str
+
+class Supervisor(IpcMsgBase):
+    update_time: str
+    additional_info: str
 
 class TestMsg(IpcMsgBase):
     data1: List[float]

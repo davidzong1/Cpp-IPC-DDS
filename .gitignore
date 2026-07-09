@@ -13,6 +13,9 @@
 include/msg/**
 !include/msg/ipc_msg_base/
 !include/msg/ipc_msg_base/**
+include/ipc_msg/*
+!include/ipc_msg/ipc_msg_base/
+!include/ipc_msg/ipc_msg_base/**
 # Qt-es
 object_script.*.Release
 object_script.*.Debug
@@ -59,3 +62,17 @@ build/**
 *.venv/**
 build_py/**
 build_win/**
+
+local/**
+build/**
+
+msg/**
+!msg/test_messages
+!msg/test_messages/**
+!msg/test_msg2/
+!msg/test_msg2/**
+!msg/test_nested
+!msg/test_nested/**
+srv/**
+!srv/request_response_test
+!srv/request_response_test/**

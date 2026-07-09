@@ -1,15 +1,11 @@
 #include "dzIPC/dzipc.h"
 #include "ipc_msg/ipc_msg_base/ipc_msg_base.hpp"
-// AUTO_GENERATED_MSG_SRV_INCLUDES_BEGIN
-#include "ipc_msg/supervisor_info/supervisor.hpp"
-#include "ipc_msg/test_messages/complex_message.hpp"
-#include "ipc_msg/test_msg2/test_msg.hpp"
-#include "ipc_srv/request_response_test/request_response_test.hpp"
-// AUTO_GENERATED_MSG_SRV_INCLUDES_END
+#include "ipc_msg/ipc_msg_base/generic_message.hpp"
 
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <string>
@@ -17,7 +13,7 @@
 namespace py = pybind11;
 namespace info = dzIPC::info_pool;
 
-PYBIND11_MODULE(dzipc, m)
+PYBIND11_MODULE(_dzipc_core, m)
 {
     m.doc() = "pybind11 bindings for cpp-ipc (dzIPC)";
 
@@ -34,8 +30,162 @@ PYBIND11_MODULE(dzipc, m)
         .def("total_size", &IpcMsgBase::total_size)
         .def("total_page_cnt", &IpcMsgBase::total_page_cnt);
 
+    // ---- GenericMessage: 动态消息，替代所有具体 msg/srv 类型的绑定 ----
+    py::class_<dzIPC::GenericMessage, IpcMsgBase, std::shared_ptr<dzIPC::GenericMessage>>(
+        m, "GenericMessage")
+        .def(py::init<>())
+        .def("clear", &dzIPC::GenericMessage::clear)
+        .def("field_count", &dzIPC::GenericMessage::field_count)
+        .def("field_name", &dzIPC::GenericMessage::field_name)
+        .def("field_type", &dzIPC::GenericMessage::field_type)
+        // 标量 setters
+        .def("set_bool", &dzIPC::GenericMessage::set_bool,
+             py::arg("name"), py::arg("val"))
+        .def("set_int8", &dzIPC::GenericMessage::set_int8,
+             py::arg("name"), py::arg("val"))
+        .def("set_uint8", &dzIPC::GenericMessage::set_uint8,
+             py::arg("name"), py::arg("val"))
+        .def("set_int16", &dzIPC::GenericMessage::set_int16,
+             py::arg("name"), py::arg("val"))
+        .def("set_uint16", &dzIPC::GenericMessage::set_uint16,
+             py::arg("name"), py::arg("val"))
+        .def("set_int32", &dzIPC::GenericMessage::set_int32,
+             py::arg("name"), py::arg("val"))
+        .def("set_uint32", &dzIPC::GenericMessage::set_uint32,
+             py::arg("name"), py::arg("val"))
+        .def("set_int64", &dzIPC::GenericMessage::set_int64,
+             py::arg("name"), py::arg("val"))
+        .def("set_uint64", &dzIPC::GenericMessage::set_uint64,
+             py::arg("name"), py::arg("val"))
+        .def("set_float32", &dzIPC::GenericMessage::set_float32,
+             py::arg("name"), py::arg("val"))
+        .def("set_float64", &dzIPC::GenericMessage::set_float64,
+             py::arg("name"), py::arg("val"))
+        .def("set_string", &dzIPC::GenericMessage::set_string,
+             py::arg("name"), py::arg("val"))
+        .def("set_nested", &dzIPC::GenericMessage::set_nested,
+             py::arg("name"), py::arg("val"))
+        // 标量 getters
+        .def("get_bool", &dzIPC::GenericMessage::get_bool,
+             py::arg("name"))
+        .def("get_int8", &dzIPC::GenericMessage::get_int8,
+             py::arg("name"))
+        .def("get_uint8", &dzIPC::GenericMessage::get_uint8,
+             py::arg("name"))
+        .def("get_int16", &dzIPC::GenericMessage::get_int16,
+             py::arg("name"))
+        .def("get_uint16", &dzIPC::GenericMessage::get_uint16,
+             py::arg("name"))
+        .def("get_int32", &dzIPC::GenericMessage::get_int32,
+             py::arg("name"))
+        .def("get_uint32", &dzIPC::GenericMessage::get_uint32,
+             py::arg("name"))
+        .def("get_int64", &dzIPC::GenericMessage::get_int64,
+             py::arg("name"))
+        .def("get_uint64", &dzIPC::GenericMessage::get_uint64,
+             py::arg("name"))
+        .def("get_float32", &dzIPC::GenericMessage::get_float32,
+             py::arg("name"))
+        .def("get_float64", &dzIPC::GenericMessage::get_float64,
+             py::arg("name"))
+        .def("get_string", &dzIPC::GenericMessage::get_string,
+             py::arg("name"))
+        .def("get_nested", &dzIPC::GenericMessage::get_nested,
+             py::arg("name"))
+        // 数组 setters
+        .def("set_bool_array", &dzIPC::GenericMessage::set_bool_array,
+             py::arg("name"), py::arg("arr"))
+        .def("set_int8_array", &dzIPC::GenericMessage::set_int8_array,
+             py::arg("name"), py::arg("arr"))
+        .def("set_uint8_array", &dzIPC::GenericMessage::set_uint8_array,
+             py::arg("name"), py::arg("arr"))
+        .def("set_int16_array", &dzIPC::GenericMessage::set_int16_array,
+             py::arg("name"), py::arg("arr"))
+        .def("set_uint16_array", &dzIPC::GenericMessage::set_uint16_array,
+             py::arg("name"), py::arg("arr"))
+        .def("set_int32_array", &dzIPC::GenericMessage::set_int32_array,
+             py::arg("name"), py::arg("arr"))
+        .def("set_uint32_array", &dzIPC::GenericMessage::set_uint32_array,
+             py::arg("name"), py::arg("arr"))
+        .def("set_int64_array", &dzIPC::GenericMessage::set_int64_array,
+             py::arg("name"), py::arg("arr"))
+        .def("set_uint64_array", &dzIPC::GenericMessage::set_uint64_array,
+             py::arg("name"), py::arg("arr"))
+        .def("set_float32_array", &dzIPC::GenericMessage::set_float32_array,
+             py::arg("name"), py::arg("arr"))
+        .def("set_float64_array", &dzIPC::GenericMessage::set_float64_array,
+             py::arg("name"), py::arg("arr"))
+        .def("set_string_array", &dzIPC::GenericMessage::set_string_array,
+             py::arg("name"), py::arg("arr"))
+        .def("set_nested_array", &dzIPC::GenericMessage::set_nested_array,
+             py::arg("name"), py::arg("arr"))
+        // 数组 getters
+        .def("get_bool_array", &dzIPC::GenericMessage::get_bool_array,
+             py::arg("name"))
+        .def("get_int8_array", &dzIPC::GenericMessage::get_int8_array,
+             py::arg("name"))
+        .def("get_uint8_array", &dzIPC::GenericMessage::get_uint8_array,
+             py::arg("name"))
+        .def("get_int16_array", &dzIPC::GenericMessage::get_int16_array,
+             py::arg("name"))
+        .def("get_uint16_array", &dzIPC::GenericMessage::get_uint16_array,
+             py::arg("name"))
+        .def("get_int32_array", &dzIPC::GenericMessage::get_int32_array,
+             py::arg("name"))
+        .def("get_uint32_array", &dzIPC::GenericMessage::get_uint32_array,
+             py::arg("name"))
+        .def("get_int64_array", &dzIPC::GenericMessage::get_int64_array,
+             py::arg("name"))
+        .def("get_uint64_array", &dzIPC::GenericMessage::get_uint64_array,
+             py::arg("name"))
+        .def("get_float32_array", &dzIPC::GenericMessage::get_float32_array,
+             py::arg("name"))
+        .def("get_float64_array", &dzIPC::GenericMessage::get_float64_array,
+             py::arg("name"))
+        .def("get_string_array", &dzIPC::GenericMessage::get_string_array,
+             py::arg("name"))
+        .def("get_nested_array", &dzIPC::GenericMessage::get_nested_array,
+             py::arg("name"))
+        .def("serialize",
+             [](dzIPC::GenericMessage& self) -> py::bytes
+             {
+                 auto buf = self.serialize();
+                 if (buf.empty()) return py::bytes();
+                 return py::bytes(static_cast<const char*>(buf.data()), buf.size());
+             })
+        .def("serialize_bytes",
+             [](dzIPC::GenericMessage& self) -> py::bytes
+             {
+                 auto buf = self.serialize();
+                 if (buf.empty()) return py::bytes();
+                 return py::bytes(static_cast<const char*>(buf.data()), buf.size());
+             })
+        .def("deserialize",
+             [](dzIPC::GenericMessage& self, py::bytes data)
+             {
+                 std::string s = data;
+                 size_t sz = s.size();
+                 auto* copy = new uint8_t[sz];
+                 std::memcpy(copy, s.data(), sz);
+                 ipc::buffer buf(copy, sz, [](void* p, std::size_t) { delete[] static_cast<uint8_t*>(p); });
+                 self.deserialize(buf);
+             })
+        .def("deserialize_bytes",
+             [](dzIPC::GenericMessage& self, py::bytes data)
+             {
+                 std::string s = data;
+                 size_t sz = s.size();
+                 auto* copy = new uint8_t[sz];
+                 std::memcpy(copy, s.data(), sz);
+                 ipc::buffer buf(copy, sz, [](void* p, std::size_t) { delete[] static_cast<uint8_t*>(p); });
+                 self.deserialize(buf);
+             });
+
+    // ---- IPC 基础设施 ----
+
     py::class_<dzIPC::TopicData, std::shared_ptr<dzIPC::TopicData>>(m, "TopicData")
-        .def(py::init<const std::shared_ptr<IpcMsgBase>&, size_t>(), py::arg("topic"), py::arg("msg_id") = 0)
+        .def(py::init<const std::shared_ptr<IpcMsgBase>&, size_t>(),
+             py::arg("topic"), py::arg("msg_id") = 0)
         .def("topic", [](dzIPC::TopicData& self) { return self.topic(); })
         .def("update", &dzIPC::TopicData::update)
         .def("swap",
@@ -47,49 +197,53 @@ PYBIND11_MODULE(dzipc, m)
              });
 
     py::class_<dzIPC::ServiceData, std::shared_ptr<dzIPC::ServiceData>>(m, "ServiceData")
-        .def(py::init<const std::shared_ptr<IpcMsgBase>&, const std::shared_ptr<IpcMsgBase>&, uint32_t>(),
+        .def(py::init<const std::shared_ptr<IpcMsgBase>&, const std::shared_ptr<IpcMsgBase>&,
+                      uint32_t>(),
              py::arg("request"), py::arg("response"), py::arg("msg_id") = 0)
         .def("request", [](dzIPC::ServiceData& self) { return self.request(); })
         .def("response", [](dzIPC::ServiceData& self) { return self.response(); });
 
-    py::class_<dzIPC::pimpl::server_ipc_impl, std::shared_ptr<dzIPC::pimpl::server_ipc_impl>>(m, "ServerIPC")
-        // InitChannel 会建立 socket/shm 通道并可能等待对端，可能阻塞 → 释放 GIL
+    py::class_<dzIPC::pimpl::server_ipc_impl, std::shared_ptr<dzIPC::pimpl::server_ipc_impl>>(
+        m, "ServerIPC")
         .def("InitChannel", &dzIPC::pimpl::server_ipc_impl::InitChannel, py::arg("extra_info") = "",
              py::call_guard<py::gil_scoped_release>())
         .def("reset_message", &dzIPC::pimpl::server_ipc_impl::reset_message)
         .def("reset_callback", &dzIPC::pimpl::server_ipc_impl::reset_callback);
 
-    py::class_<dzIPC::pimpl::client_ipc_impl, std::shared_ptr<dzIPC::pimpl::client_ipc_impl>>(m, "ClientIPC")
-        // InitChannel 同上
+    py::class_<dzIPC::pimpl::client_ipc_impl, std::shared_ptr<dzIPC::pimpl::client_ipc_impl>>(
+        m, "ClientIPC")
         .def("InitChannel", &dzIPC::pimpl::client_ipc_impl::InitChannel, py::arg("extra_info") = "",
              py::call_guard<py::gil_scoped_release>())
         .def("reset_message", &dzIPC::pimpl::client_ipc_impl::reset_message)
-        // send_request 会阻塞等待 server 回包（带 rev_tm 超时）→ 必须释放 GIL
         .def(
             "send_request",
-            [](dzIPC::pimpl::client_ipc_impl& self, std::shared_ptr<dzIPC::ServiceData> request, uint64_t rev_tm)
-            { return self.send_request(request, rev_tm); }, py::arg("request"),
-            py::arg("rev_tm") = std::numeric_limits<uint32_t>::max(), py::call_guard<py::gil_scoped_release>());
+            [](dzIPC::pimpl::client_ipc_impl& self, std::shared_ptr<dzIPC::ServiceData> request,
+               uint64_t rev_tm)
+            { return self.send_request(request, rev_tm); },
+            py::arg("request"),
+            py::arg("rev_tm") = std::numeric_limits<uint32_t>::max(),
+            py::call_guard<py::gil_scoped_release>());
 
-    py::class_<dzIPC::pimpl::publisher_ipc_impl, std::shared_ptr<dzIPC::pimpl::publisher_ipc_impl>>(m, "PublisherIPC")
-        // InitChannel 同上
+    py::class_<dzIPC::pimpl::publisher_ipc_impl, std::shared_ptr<dzIPC::pimpl::publisher_ipc_impl>>(
+        m, "PublisherIPC")
         .def("InitChannel", &dzIPC::pimpl::publisher_ipc_impl::InitChannel, py::arg("extra_info") = "",
              py::call_guard<py::gil_scoped_release>())
         .def("reset_message", &dzIPC::pimpl::publisher_ipc_impl::reset_message)
-        // publish 涉及 socket/shm 写入，可能阻塞在内核发送缓冲或共享内存锁 → 释放 GIL
-        .def("publish", &dzIPC::pimpl::publisher_ipc_impl::publish, py::call_guard<py::gil_scoped_release>())
-        // has_subscribed 通常是轻量原子判断，不释放 GIL
+        .def("publish", &dzIPC::pimpl::publisher_ipc_impl::publish,
+             py::call_guard<py::gil_scoped_release>())
+        .def("publish_best_effort", &dzIPC::pimpl::publisher_ipc_impl::publish_best_effort,
+             py::call_guard<py::gil_scoped_release>())
+        .def("publish_blocking", &dzIPC::pimpl::publisher_ipc_impl::publish_blocking,
+             py::arg("msg"), py::arg("tm"), py::call_guard<py::gil_scoped_release>())
+        .def("publish_for_sniffer", &dzIPC::pimpl::publisher_ipc_impl::publish_for_sniffer,
+             py::call_guard<py::gil_scoped_release>())
         .def("has_subscribed", &dzIPC::pimpl::publisher_ipc_impl::has_subscribed);
 
-    py::class_<dzIPC::pimpl::subscriber_ipc_impl, std::shared_ptr<dzIPC::pimpl::subscriber_ipc_impl>>(m,
-                                                                                                      "SubscriberIPC")
-        // InitChannel 同上
+    py::class_<dzIPC::pimpl::subscriber_ipc_impl,
+               std::shared_ptr<dzIPC::pimpl::subscriber_ipc_impl>>(m, "SubscriberIPC")
         .def("InitChannel", &dzIPC::pimpl::subscriber_ipc_impl::InitChannel, py::arg("extra_info") = "",
              py::call_guard<py::gil_scoped_release>())
         .def("reset_message", &dzIPC::pimpl::subscriber_ipc_impl::reset_message)
-        // get 是阻塞型：等到消息才返回。**必须**释放 GIL，否则同进程发布线程会被饿死。
-        // 注意：只在 C++ IO 调用期间释放 GIL，返回值（Python 对象）的构造必须在持有 GIL 时进行，
-        // 否则 pybind11 会触发 "inc_ref() PyGILState_Check() failure" 断言。
         .def(
             "get",
             [](dzIPC::pimpl::subscriber_ipc_impl& self, std::shared_ptr<dzIPC::TopicData> msg)
@@ -101,7 +255,6 @@ PYBIND11_MODULE(dzipc, m)
                 return msg;
             },
             py::arg("msg"))
-        // try_get 非阻塞，但仍涉及 socket/shm 读、互斥锁；同样仅在 C++ 调用期间释放 GIL。
         .def(
             "try_get",
             [](dzIPC::pimpl::subscriber_ipc_impl& self, std::shared_ptr<dzIPC::TopicData> msg)
@@ -115,118 +268,45 @@ PYBIND11_MODULE(dzipc, m)
             },
             py::arg("msg"));
 
+    // 工厂函数
     m.def(
-        "make_topic_data", [](const std::shared_ptr<IpcMsgBase>& msg, int msg_id)
-        { return std::make_shared<dzIPC::TopicData>(msg, static_cast<size_t>(msg_id)); }, py::arg("msg"),
-        py::arg("msg_id") = 0);
+        "make_topic_data",
+        [](const std::shared_ptr<IpcMsgBase>& msg, int msg_id)
+        { return std::make_shared<dzIPC::TopicData>(msg, static_cast<size_t>(msg_id)); },
+        py::arg("msg"), py::arg("msg_id") = 0);
 
     m.def(
         "make_service_data",
-        [](const std::shared_ptr<IpcMsgBase>& request, const std::shared_ptr<IpcMsgBase>& response, int msg_id)
+        [](const std::shared_ptr<IpcMsgBase>& request, const std::shared_ptr<IpcMsgBase>& response,
+           int msg_id)
         { return std::make_shared<dzIPC::ServiceData>(request, response, static_cast<uint32_t>(msg_id)); },
         py::arg("request"), py::arg("response"), py::arg("msg_id") = 0);
 
-    // 4 个 *PtrMake 工厂在内部会建立 socket / 共享内存 / 多播订阅，可能阻塞 → 释放 GIL。
-    // 注意 ServerIPCPtrMake 接受 Python callback：构造期只是存指针，不会回调；
-    // 后续 server 工作线程触发 callback 时由 pybind11/functional.h 自行获取 GIL，安全。
-    m.def("ServerIPCPtrMake", &dzIPC::ServerIPCPtrMake, py::arg("topic_name"), py::arg("msg"), py::arg("callback"),
-          py::arg("domain_id"), py::arg("ipc_type"), py::arg("verbose") = false,
+    m.def("ServerIPCPtrMake", &dzIPC::ServerIPCPtrMake, py::arg("topic_name"), py::arg("msg"),
+          py::arg("callback"), py::arg("domain_id"), py::arg("ipc_type"),
+          py::arg("verbose") = false, py::arg("enable_thread_qos") = false,
+          py::arg("cpu_id") = -1, py::arg("thread_priority") = 0,
           py::call_guard<py::gil_scoped_release>());
 
-    m.def("ClientIPCPtrMake", &dzIPC::ClientIPCPtrMake, py::arg("topic_name"), py::arg("msg"), py::arg("domain_id"),
-          py::arg("ipc_type"), py::arg("verbose") = false, py::call_guard<py::gil_scoped_release>());
+    m.def("ClientIPCPtrMake", &dzIPC::ClientIPCPtrMake, py::arg("topic_name"), py::arg("msg"),
+          py::arg("domain_id"), py::arg("ipc_type"), py::arg("verbose") = false,
+          py::arg("enable_thread_qos") = false, py::arg("cpu_id") = -1,
+          py::arg("thread_priority") = 0,
+          py::call_guard<py::gil_scoped_release>());
 
     m.def("PublisherIPCPtrMake", &dzIPC::PublisherIPCPtrMake, py::arg("msg"), py::arg("topic_name"),
           py::arg("domain_id"), py::arg("ipc_type"), py::arg("verbose") = false,
+          py::arg("enable_thread_qos") = false, py::arg("cpu_id") = -1,
+          py::arg("thread_priority") = 0,
           py::call_guard<py::gil_scoped_release>());
 
     m.def("SubscriberIPCPtrMake", &dzIPC::SubscriberIPCPtrMake, py::arg("msg"), py::arg("topic_name"),
-          py::arg("domain_id"), py::arg("queue_size"), py::arg("ipc_type"), py::arg("verbose") = false,
+          py::arg("domain_id"), py::arg("queue_size"), py::arg("ipc_type"),
+          py::arg("verbose") = false, py::arg("enable_thread_qos") = false,
+          py::arg("cpu_id") = -1, py::arg("thread_priority") = 0,
           py::call_guard<py::gil_scoped_release>());
 
     m.def("StartShutdownMonitor", &dzIPC::StartShutdownMonitor);
     m.def("RequestShutdown", &dzIPC::RequestShutdown);
     m.def("IsShutdownRequested", &dzIPC::IsShutdownRequested);
-    m.def("CleanupIpcInstances", &dzIPC::CleanupIpcInstances);
-
-    // AUTO_GENERATED_MSG_SRV_BINDINGS_BEGIN
-    py::class_<dzIPC::Msg::Supervisor, IpcMsgBase, std::shared_ptr<dzIPC::Msg::Supervisor>>(m, "Supervisor")
-        .def(py::init<>())
-        .def_readwrite("update_time", &dzIPC::Msg::Supervisor::update_time)
-        .def_readwrite("additional_info", &dzIPC::Msg::Supervisor::additional_info);
-
-    py::class_<dzIPC::Msg::ComplexMessage, IpcMsgBase, std::shared_ptr<dzIPC::Msg::ComplexMessage>>(m, "ComplexMessage")
-        .def(py::init<>())
-        .def_readwrite("status", &dzIPC::Msg::ComplexMessage::status)
-        .def_readwrite("tiny_int", &dzIPC::Msg::ComplexMessage::tiny_int)
-        .def_readwrite("tiny_uint", &dzIPC::Msg::ComplexMessage::tiny_uint)
-        .def_readwrite("small_int", &dzIPC::Msg::ComplexMessage::small_int)
-        .def_readwrite("small_uint", &dzIPC::Msg::ComplexMessage::small_uint)
-        .def_readwrite("normal_int", &dzIPC::Msg::ComplexMessage::normal_int)
-        .def_readwrite("normal_uint", &dzIPC::Msg::ComplexMessage::normal_uint)
-        .def_readwrite("big_int", &dzIPC::Msg::ComplexMessage::big_int)
-        .def_readwrite("big_uint", &dzIPC::Msg::ComplexMessage::big_uint)
-        .def_readwrite("single_precision", &dzIPC::Msg::ComplexMessage::single_precision)
-        .def_readwrite("double_precision", &dzIPC::Msg::ComplexMessage::double_precision)
-        .def_readwrite("message", &dzIPC::Msg::ComplexMessage::message)
-        .def_readwrite("status_array", &dzIPC::Msg::ComplexMessage::status_array)
-        .def_readwrite("tiny_int_array", &dzIPC::Msg::ComplexMessage::tiny_int_array)
-        .def_readwrite("tiny_uint_array", &dzIPC::Msg::ComplexMessage::tiny_uint_array)
-        .def_readwrite("small_int_array", &dzIPC::Msg::ComplexMessage::small_int_array)
-        .def_readwrite("small_uint_array", &dzIPC::Msg::ComplexMessage::small_uint_array)
-        .def_readwrite("normal_int_array", &dzIPC::Msg::ComplexMessage::normal_int_array)
-        .def_readwrite("normal_uint_array", &dzIPC::Msg::ComplexMessage::normal_uint_array)
-        .def_readwrite("big_int_array", &dzIPC::Msg::ComplexMessage::big_int_array)
-        .def_readwrite("big_uint_array", &dzIPC::Msg::ComplexMessage::big_uint_array)
-        .def_readwrite("single_precision_array", &dzIPC::Msg::ComplexMessage::single_precision_array)
-        .def_readwrite("double_precision_array", &dzIPC::Msg::ComplexMessage::double_precision_array)
-        .def_readwrite("message_array", &dzIPC::Msg::ComplexMessage::message_array);
-
-    py::class_<dzIPC::Msg::TestMsg, IpcMsgBase, std::shared_ptr<dzIPC::Msg::TestMsg>>(m, "TestMsg")
-        .def(py::init<>())
-        .def_readwrite("data1", &dzIPC::Msg::TestMsg::data1)
-        .def_readwrite("data2", &dzIPC::Msg::TestMsg::data2)
-        .def_readwrite("data3", &dzIPC::Msg::TestMsg::data3)
-        .def_readwrite("data4", &dzIPC::Msg::TestMsg::data4);
-
-    py::class_<dzIPC::Srv::RequestResponseTestRequest, IpcMsgBase, std::shared_ptr<dzIPC::Srv::RequestResponseTestRequest>>(m, "RequestResponseTestRequest")
-        .def(py::init<>())
-        .def_readwrite("request", &dzIPC::Srv::RequestResponseTestRequest::request);
-
-    py::class_<dzIPC::Srv::RequestResponseTestResponse, IpcMsgBase, std::shared_ptr<dzIPC::Srv::RequestResponseTestResponse>>(m, "RequestResponseTestResponse")
-        .def(py::init<>())
-        .def_readwrite("response", &dzIPC::Srv::RequestResponseTestResponse::response);
-
-    m.def("message_types", []() {
-        return std::vector<std::string>{
-            "Supervisor",
-            "ComplexMessage",
-            "TestMsg",
-        };
-    });
-
-    m.def("create_message", [](const std::string &type_name) -> std::shared_ptr<IpcMsgBase> {
-        if (type_name == "Supervisor") return std::make_shared<dzIPC::Msg::Supervisor>();
-        if (type_name == "ComplexMessage") return std::make_shared<dzIPC::Msg::ComplexMessage>();
-        if (type_name == "TestMsg") return std::make_shared<dzIPC::Msg::TestMsg>();
-        throw py::value_error("Unknown message type: " + type_name);
-    });
-
-    m.def("service_types", []() {
-        return std::vector<std::string>{
-            "RequestResponseTest",
-        };
-    });
-
-    m.def("create_service_request", [](const std::string &service_name) -> std::shared_ptr<IpcMsgBase> {
-        if (service_name == "RequestResponseTest") return std::make_shared<dzIPC::Srv::RequestResponseTestRequest>();
-        throw py::value_error("Unknown service type: " + service_name);
-    });
-
-    m.def("create_service_response", [](const std::string &service_name) -> std::shared_ptr<IpcMsgBase> {
-        if (service_name == "RequestResponseTest") return std::make_shared<dzIPC::Srv::RequestResponseTestResponse>();
-        throw py::value_error("Unknown service type: " + service_name);
-    });
-
-// AUTO_GENERATED_MSG_SRV_BINDINGS_END
 }

@@ -24,7 +24,8 @@ uint64[]    21
 float32[]   22
 float64[]   23
 string[]    24
-
+nested      25
+nested[]    26
 
 
 
