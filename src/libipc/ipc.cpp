@@ -865,9 +865,9 @@ namespace
                                    std::uint64_t tm, bool verbose)
     {
       return no_member_send(
-          [tm](auto *info, auto *que, auto msg_id)
+          [tm, verbose](auto *info, auto *que, auto msg_id)
           {
-            return [tm, info, que, msg_id](std::int32_t remain, void const *data,
+            return [tm, info, que, msg_id, verbose](std::int32_t remain, void const *data,
                                            std::size_t size)
             {
               if (!wait_for(
@@ -881,7 +881,23 @@ namespace
                       },
                       tm))
               {
-                return false;
+                // push() timed out — fall back to force_push() which
+                // disconnects dead/stuck readers before retrying.
+                // This prevents a single slow reader from permanently
+                // blocking the publisher (mirrors send() behavior).
+                if (verbose)
+                  ipc::log("no_member_try_send force_push: msg_id = %zd, "
+                           "remain = %d, size = %zd\n",
+                           msg_id, remain, size);
+                if (!que->force_push(
+                        [info](void *p)
+                        {
+                          return clear_message<typename queue_t::value_t>(info, p);
+                        },
+                        info->cc_id_, msg_id, remain, data, size))
+                {
+                  return false;
+                }
               }
               info->rd_waiter_.broadcast();
               return true;

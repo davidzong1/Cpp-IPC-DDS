@@ -76,4 +76,6 @@ IPC_EXPORT void StartShutdownMonitor();
 IPC_EXPORT void RequestShutdown();
 // 查询是否已经请求退出
 IPC_EXPORT bool IsShutdownRequested();
+// 显式释放所有 IPC 实例，供 Python 退出前确定性清理 native 资源。
+IPC_EXPORT void CleanupIpcInstances();
 }   // namespace dzIPC

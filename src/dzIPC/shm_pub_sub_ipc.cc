@@ -151,16 +151,16 @@ bool shm_pub_ipc::publish(std::shared_ptr<IpcMsgBase> msg)
     {
         ipc::buffer response_data(std::move(msg->serialize()));
         int retry_count = 0;
-        // no member pass
+        // no member pass — 30 retries × 100ms timeout = up to 3s total wait
         while (!publisher_->no_member_try_send(response_data.data(), response_data.size()))
         {
             retry_count++;
-            if (retry_count > 10)
+            if (retry_count > 30)
             {
                 std::cerr << "\033[31m[" << topic_name_
-                          << "PubInfo] Warning: Failed to publish message after 10 attempts on topic: " << topic_name_
+                          << "PubInfo] Warning: Failed to publish message after 30 attempts on topic: " << topic_name_
                           << "\033[0m" << std::endl;
-                break;
+                return false;
             }
         };
         return true;
@@ -311,10 +311,12 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
         [this]()
         {
             /* 进入订阅循环 */
+            bool was_connected = false;
             while (running.load(std::memory_order_acquire))
             {
                 if (handshake_completed.load(std::memory_order_acquire))
                 {
+                    was_connected = true;
                     buff_t raw_data = subscriber_->recv(50);
                     if (raw_data.empty())
                     {
@@ -329,7 +331,18 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
                 }
                 else
                 {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));   // 每隔100ms检查一次发布者是否准备好
+                    // handshake 丢失时释放旧的 subscriber，
+                    // 清理 reader slot 锁，避免 publisher 的 push() 永久阻塞
+                    if (was_connected)
+                    {
+                        was_connected = false;
+                        if (subscriber_ && subscriber_->valid())
+                        {
+                            subscriber_->release();
+                        }
+                        subscriber_.reset();
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
             }
         });
