@@ -692,8 +692,8 @@ public:
 
         # 获取类名
         base_name = os.path.splitext(os.path.basename(msg_file_path))[0]
-        if not re.fullmatch(r"[a-z_]+", base_name):
-            raise ValueError("Msg file name must be lowercase letters and underscores only")
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", base_name):
+            raise ValueError("Msg file name must start with a lowercase letter and contain only lowercase letters, digits, and underscores")
 
         class_name = self._snake_to_pascal(base_name)
 

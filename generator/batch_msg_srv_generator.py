@@ -253,8 +253,8 @@ def collect_msg_files(msg_input_dir: str) -> List[str]:
 
 
 def snake_to_pascal_checked(name: str) -> str:
-    if not re.fullmatch(r"[a-z_]+", name):
-        raise ValueError("Msg file name must be lowercase letters and underscores only")
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+        raise ValueError("Msg file name must start with a lowercase letter and contain only lowercase letters, digits, and underscores")
     return snake_to_pascal(name)
 
 

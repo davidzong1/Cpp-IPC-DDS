@@ -35,16 +35,22 @@ def make_service_data(request, response, msg_id=0):
 
 # AUTO_GENERATED_MSG_SRV_IMPORTS_BEGIN
 from .gen_msgs import (
-    Supervisor,
+    StdColor,
+    StdHeader,
+    StdImage,
+    StdMarker,
+    StdPath,
+    StdPointCloud,
+    StdPose,
+    StdQuaternion,
+    StdRawMessage,
+    StdVector3d,
     ComplexMessage,
     TestMsg,
     Pose,
     RobotState,
-    TrainIterInfo,
     RequestResponseTestRequest,
     RequestResponseTestResponse,
-    RewardCfgRequest,
-    RewardCfgResponse,
 )
 # AUTO_GENERATED_MSG_SRV_IMPORTS_END
 

@@ -161,6 +161,7 @@ if "%uninstall%"=="true" (
         popd
     )
     if exist "%INSTALL_PREFIX%" rmdir /S /Q "%INSTALL_PREFIX%"
+    if exist "%ROOT_DIR%\python\dzipc\gen_msgs" rmdir /S /Q "%ROOT_DIR%\python\dzipc\gen_msgs"
     echo [OK] dzIPC uninstalled successfully.
 )
 

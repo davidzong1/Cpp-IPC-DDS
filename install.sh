@@ -123,5 +123,6 @@ if [ "$uninstall" == true ]; then
     cd ..
     rm -rf "$(cd "$(dirname "$0")" && pwd)/build"
     rm -rf "$(cd "$(dirname "$0")" && pwd)/local"
+    rm -rf "$(cd "$(dirname "$0")" && pwd)/python/dzipc/gen_msgs"
     echo -e "\033[32mdzIPC uninstalled successfully.\033[0m"
 fi

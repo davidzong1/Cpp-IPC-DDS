@@ -101,8 +101,8 @@ namespace dzIPC::Srv {{
 
     def generate_hpp_file(self, base_name: str) -> str:
         """生成完整的.hpp文件"""
-        if not re.fullmatch(r"[a-z_]+", base_name):
-            raise ValueError("Srv file name must be lowercase letters and underscores only")
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", base_name):
+            raise ValueError("Srv file name must start with a lowercase letter and contain only lowercase letters, digits, and underscores")
 
         class_name = self._snake_to_pascal(base_name)
         request_class_name = f"{class_name}Request"

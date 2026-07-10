@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dzIPC Visualizer</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">d</div>
+          <div>
+            <h1>dzIPC Visualizer</h1>
+            <p id="connectionText">Connecting</p>
+          </div>
+        </div>
+
+        <div class="sidebar-actions">
+          <button id="openAddDisplayBtn" class="primary-action" type="button">+ Add Display</button>
+        </div>
+
+        <section class="display-list-panel">
+          <div class="section-head">
+            <h2>Displays</h2>
+            <span id="topicCount">0</span>
+          </div>
+          <div id="topicList" class="display-list"></div>
+        </section>
+
+        <section class="config-panel">
+          <div class="section-head">
+            <h2>Config</h2>
+          </div>
+          <div class="config-actions">
+            <button id="exportConfigBtn" type="button">Export</button>
+            <button id="importConfigBtn" type="button">Import</button>
+            <button id="saveConfigBtn" type="button">Save</button>
+            <button id="loadConfigBtn" type="button">Load</button>
+            <input id="configFileInput" type="file" accept="application/json,.json" hidden />
+          </div>
+        </section>
+
+        <section class="status-panel">
+          <div class="section-head">
+            <h2>Status</h2>
+          </div>
+          <div id="eventLog" class="event-log"></div>
+        </section>
+      </aside>
+
+      <main class="viewport-shell">
+        <header class="viewport-toolbar">
+          <div>
+            <h2 id="activeTitle">3D View</h2>
+            <p id="activeMeta">Wheel to zoom. Right-drag to move camera. Left-drag to orbit.</p>
+          </div>
+          <div class="metrics">
+            <div><span>Zoom</span><strong id="zoomMetric">18.0</strong></div>
+            <div><span>Grid</span><strong>1 m</strong></div>
+            <div><span>Displays</span><strong id="displayMetric">0</strong></div>
+          </div>
+        </header>
+
+        <section class="scene-panel">
+          <canvas id="sceneCanvas"></canvas>
+          <div class="scene-overlay">
+            <div><strong>X</strong><span>red</span></div>
+            <div><strong>Y</strong><span>green</span></div>
+            <div><strong>Z</strong><span>blue</span></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="displayModal" class="modal-backdrop" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="displayModalTitle">
+        <div class="modal-head">
+          <h2 id="displayModalTitle">Add Display</h2>
+          <button id="closeDisplayModalBtn" class="icon-button" type="button" aria-label="Close">x</button>
+        </div>
+        <div class="modal-body">
+          <label>
+            Topic
+            <input id="topicInput" type="text" placeholder="robot_state" />
+          </label>
+          <div class="split">
+            <label>
+              Display Type
+              <select id="typeInput"></select>
+            </label>
+            <label>
+              Message Type
+              <select id="messageTypeInput" disabled></select>
+            </label>
+          </div>
+          <div class="split">
+            <label>
+              Domain
+              <input id="domainInput" type="number" min="0" step="1" />
+            </label>
+            <label>
+              Queue
+              <input id="queueInput" type="number" min="1" step="1" />
+            </label>
+          </div>
+          <div class="split">
+            <label>
+              Transport
+              <select id="transportInput">
+                <option value="socket">socket</option>
+                <option value="shm">shm</option>
+              </select>
+            </label>
+            <label>
+              Poll ms
+              <input id="pollInput" type="number" min="1" step="1" />
+            </label>
+          </div>
+          <label>
+            Extra
+            <input id="extraInput" type="text" placeholder="InitChannel extra" />
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button id="cancelDisplayBtn" type="button">Cancel</button>
+          <button id="addTopicBtn" class="primary-action" type="button">Add</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
