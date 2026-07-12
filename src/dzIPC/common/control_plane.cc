@@ -1,5 +1,6 @@
 #include "dzIPC/common/control_plane.h"
 #include <chrono>
+#include <thread>
 #include "libipc/shm.h"
 
 #if defined(_WIN32)
@@ -13,6 +14,8 @@ namespace control_plane_shm {
 namespace {
 
 constexpr uint32_t kMagic = 0x445A4350U;
+constexpr auto kRebuildPeerDrainTimeout = std::chrono::milliseconds(200);
+constexpr auto kRebuildPeerDrainPoll = std::chrono::milliseconds(2);
 
 int32_t current_pid()
 {
@@ -64,6 +67,13 @@ uint32_t TopicControlPlane::begin_rebuild()
     }
     control_->state.store(static_cast<uint32_t>(TopicState::Clearing), std::memory_order_release);
     control_->owner_pid.store(current_pid(), std::memory_order_release);
+    control_->heartbeat_ns.store(now_ns(), std::memory_order_release);
+    const auto deadline = std::chrono::steady_clock::now() + kRebuildPeerDrainTimeout;
+    while (control_->peer_count.load(std::memory_order_acquire) > 0
+           && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(kRebuildPeerDrainPoll);
+    }
     control_->peer_count.store(0, std::memory_order_release);
     control_->heartbeat_ns.store(now_ns(), std::memory_order_release);
     return control_->generation.fetch_add(1, std::memory_order_acq_rel) + 1;

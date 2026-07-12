@@ -67,8 +67,8 @@ class CMakeBuildExt(build_ext):
             for item in pkg_src.iterdir():
                 if item.is_file() and item.suffix == ".py":
                     shutil.copy2(item, pkg_dst / item.name)
-                elif item.is_dir() and item.name == "gen_msgs":
-                    gen_dst = pkg_dst / "gen_msgs"
+                elif item.is_dir() and item.name in {"gen_msgs", "gen_srv"}:
+                    gen_dst = pkg_dst / item.name
                     if gen_dst.exists():
                         shutil.rmtree(gen_dst)
                     shutil.copytree(item, gen_dst)

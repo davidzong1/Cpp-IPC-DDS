@@ -125,6 +125,8 @@ if "%install_python%"=="true" (
         xcopy /Y /Q "%ROOT_DIR%\python\dzipc\*.py" "%INSTALL_PREFIX%\lib\python\dzipc\" >nul
         if exist "%INSTALL_PREFIX%\lib\python\dzipc\gen_msgs" rmdir /S /Q "%INSTALL_PREFIX%\lib\python\dzipc\gen_msgs"
         xcopy /E /I /Y /Q "%ROOT_DIR%\python\dzipc\gen_msgs" "%INSTALL_PREFIX%\lib\python\dzipc\gen_msgs" >nul
+        if exist "%INSTALL_PREFIX%\lib\python\dzipc\gen_srv" rmdir /S /Q "%INSTALL_PREFIX%\lib\python\dzipc\gen_srv"
+        xcopy /E /I /Y /Q "%ROOT_DIR%\python\dzipc\gen_srv" "%INSTALL_PREFIX%\lib\python\dzipc\gen_srv" >nul
     )
     echo [OK] Python interface installed successfully.
 )
@@ -162,6 +164,8 @@ if "%uninstall%"=="true" (
     )
     if exist "%INSTALL_PREFIX%" rmdir /S /Q "%INSTALL_PREFIX%"
     if exist "%ROOT_DIR%\python\dzipc\gen_msgs" rmdir /S /Q "%ROOT_DIR%\python\dzipc\gen_msgs"
+    if exist "%ROOT_DIR%\python\dzipc\gen_srv" rmdir /S /Q "%ROOT_DIR%\python\dzipc\gen_srv"
+    if exist "%ROOT_DIR%\python\dzipc.pyi" del "%ROOT_DIR%\python\dzipc.pyi"
     echo [OK] dzIPC uninstalled successfully.
 )
 

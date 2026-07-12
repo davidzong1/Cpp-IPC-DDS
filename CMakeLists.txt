@@ -157,7 +157,11 @@ if(NOT ROSBUILD)
     )
     install(DIRECTORY python/dzipc/gen_msgs/
         DESTINATION lib/python/dzipc/gen_msgs
-        FILES_MATCHING PATTERN "*.py"
+        FILES_MATCHING PATTERN "*.py" PATTERN "*.pyi"
+    )
+    install(DIRECTORY python/dzipc/gen_srv/
+        DESTINATION lib/python/dzipc/gen_srv
+        FILES_MATCHING PATTERN "*.py" PATTERN "*.pyi"
     )
     install(FILES python/dzipc.pyi
         DESTINATION lib/python/dzipc

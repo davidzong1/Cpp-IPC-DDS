@@ -233,6 +233,56 @@ TEST(DzIpcShm, PubSub)
     ASSERT_GT(subscriber_count.load(), 0);
 }
 
+TEST(DzIpcShm, SubscriberRecoversAfterPublisherRestart)
+{
+    auto topic_msg = std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::Msg::TestMsg>());
+    dzIPC::shm::shm_sub_ipc subscriber(topic_msg, "/restart/recovery", 0, 4, false);
+    subscriber.InitChannel();
+
+    auto publish_once = [](const std::string& marker)
+    {
+        auto pub_topic = std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::Msg::TestMsg>());
+        dzIPC::shm::shm_pub_ipc publisher(pub_topic, "/restart/recovery", 0, false);
+        publisher.InitChannel();
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+        auto msg = std::make_shared<dzIPC::Msg::TestMsg>();
+        msg->data1 = {1.0};
+        msg->data2 = {1};
+        msg->data3 = {marker};
+        msg->data4 = true;
+        ASSERT_TRUE(publisher.publish(msg));
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    };
+
+    auto wait_for_marker = [&](const std::string& marker)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (subscriber.try_get(topic_msg))
+            {
+                auto received = topic_msg->topic()->msgcast<dzIPC::Msg::TestMsg>();
+                for (const auto& item : received->data3)
+                {
+                    if (item == marker)
+                    {
+                        return true;
+                    }
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return false;
+    };
+
+    publish_once("before_restart");
+    ASSERT_TRUE(wait_for_marker("before_restart"));
+
+    publish_once("after_restart");
+    ASSERT_TRUE(wait_for_marker("after_restart"));
+}
+
 TEST(DzIpcShm, ThreadDispatchCpuAffinityExample)
 {
 #if defined(__linux__)
@@ -325,6 +375,21 @@ TEST(DzIpcShm, PublishForSnifferWithoutSubscriber)
     ASSERT_FALSE(raw.empty());
     EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 500);
     EXPECT_EQ(sniffer.receiver_connections(), 0u);
+}
+
+TEST(DzIpcShm, PublishTopicWithSlashForSnifferWithoutSubscriber)
+{
+    std::shared_ptr<TopicData> topic_msg = std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::Msg::TestMsg>());
+    dzIPC::shm::shm_pub_ipc publisher(topic_msg, "/demo/depth_image", 0, false);
+    publisher.InitChannel();
+
+    auto msg = std::make_shared<dzIPC::Msg::TestMsg>();
+    msg->data1 = {1.1, 2.2};
+    msg->data2 = {1, 2};
+    msg->data3 = {"slash", "topic"};
+    msg->data4 = true;
+
+    ASSERT_TRUE(publisher.publish_for_sniffer(msg));
 }
 
 TEST(DzIpcShm, PublishLargeForSnifferWithoutSubscriber)

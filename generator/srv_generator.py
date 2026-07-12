@@ -66,9 +66,11 @@ class ServiceGenerator(MessageGenerator):
         return f"""#pragma once
 #include <string>
 #include <vector>
+#include <array>
 #include <cstring>
 #include <cstdint>
 #include <cstddef>
+#include <stdexcept>
 #include "ipc_msg/ipc_msg_base/ipc_msg_base.hpp"
 {nested_include_lines}
 namespace dzIPC::Srv {{

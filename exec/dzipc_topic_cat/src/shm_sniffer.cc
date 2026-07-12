@@ -10,6 +10,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include "dzIPC/common/name_operator.h"
 
 namespace dzIPC {
 struct shm_sniffer_options
@@ -48,7 +49,8 @@ void shm_sniffer::create_sniffer(const std::string& topic_name, int domain_id, b
     this->ser_or_topic_ = ser_or_topic;
     this->msg_id_ = msg_id;
     std::string control_name =
-        ser_or_topic_ ? "dz_ipc_" + topic_name + "_ser_control" : "dz_ipc_" + topic_name + "_topic_control";
+        ser_or_topic_ ? "dz_ipc_" + sanitize_topic_name(topic_name) + "_ser_control"
+                      : "dz_ipc_" + sanitize_topic_name(topic_name) + "_topic_control";
     if (!control_plane_.open(control_name))
     {
         std::fprintf(stderr, "error: failed to open control plane '%s'\n", control_name.c_str());
@@ -90,15 +92,16 @@ bool shm_sniffer::open_channels(const std::string& topic_name, int, bool ser_or_
     //   service mode: "dz_ipc_<topic>_ser_r" + "_ser_w" -> ipc::server
     shm_sniffer_options opt;
     opt.pref = "";
+    std::string sanitized = sanitize_topic_name(topic_name);
     if (ser_or_topic_)
     {
         opt.topo = ipc::sniffer::topology::server;
-        opt.name = "dz_ipc_" + topic_name + "_ser_r";
+        opt.name = "dz_ipc_" + sanitized + "_ser_r";
     }
     else
     {
         opt.topo = ipc::sniffer::topology::route;
-        opt.name = "dz_ipc_" + topic_name + "_topic";
+        opt.name = "dz_ipc_" + sanitized + "_topic";
     }
     req_ = std::make_unique<ipc::sniffer>();
     bool ok = opt.pref.empty() ? req_->open(opt.name.c_str(), opt.topo)
@@ -115,7 +118,7 @@ bool shm_sniffer::open_channels(const std::string& topic_name, int, bool ser_or_
     }
     if (ser_or_topic)
     {
-        std::string res_name = "dz_ipc_" + topic_name + "_ser_w";
+        std::string res_name = "dz_ipc_" + sanitized + "_ser_w";
         res_ = std::make_unique<ipc::sniffer>();
         bool ok = opt.pref.empty()
                       ? res_->open(res_name.c_str(), ipc::sniffer::topology::server)

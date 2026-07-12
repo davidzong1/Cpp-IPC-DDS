@@ -45,9 +45,6 @@ target_wrapper.*
 # QtCreator CMake
 CMakeLists.txt.user*
 
-# My output files
-build/**
-
 # vs
 .vs
 # .vscode
@@ -61,6 +58,10 @@ build_win/**
 local/**
 build/**
 
+# agnent
+tmux**
+
+
 # msg and srv files
 msg/*
 !msg/test_messages/
@@ -71,6 +72,7 @@ msg/*
 srv/*
 !srv/request_response_test/
 python/dzipc/gen_msgs/**
+python/dzipc/gen_srv/**
 include/ipc_msg/**
 include/ipc_srv/**
 !include/ipc_msg/ipc_msg_base/

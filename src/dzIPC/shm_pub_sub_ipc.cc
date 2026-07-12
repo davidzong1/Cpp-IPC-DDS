@@ -18,6 +18,20 @@ std::string control_name_for(const std::string& data_name)
     return data_name + "_control";
 }
 
+std::string shm_name_for_topic(const std::string& topic_name)
+{
+    return "dz_ipc_" + sanitize_topic_name(topic_name) + "_topic";
+}
+
+void wait_for_peer_drain(dzIPC::control_plane_shm::TopicControlPlane& control_plane)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    while (control_plane.peer_count() > 0 && std::chrono::steady_clock::now() < deadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+}
+
 }   // namespace
 
 /******************************************************************************************************/
@@ -26,7 +40,7 @@ std::string control_name_for(const std::string& data_name)
 shm_pub_ipc::shm_pub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
                          bool verbose, bool enable_thread_qos, int cpu_id, int thread_priority)
     : pub_ipc_base(msg, topic_name, domain_id, verbose)
-    , topic_name_("dz_ipc_" + topic_name + "_topic")
+    , topic_name_(shm_name_for_topic(topic_name))
     , raw_topic_name_(topic_name)
     , domain_id_(domain_id)
     , verbose_(verbose)
@@ -52,6 +66,7 @@ shm_pub_ipc::~shm_pub_ipc()
     }
     if (publisher_ && publisher_->valid())
     {
+        wait_for_peer_drain(control_plane_);
         publisher_->clear();
     }
     exit_flag.store(true, std::memory_order_release);
@@ -183,7 +198,7 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
                          const size_t queue_size, bool verbose, bool enable_thread_qos, int cpu_id,
                          int thread_priority)
     : sub_ipc_base(msg, topic_name, domain_id, queue_size, verbose)
-    , topic_name_("dz_ipc_" + topic_name + "_topic")
+    , topic_name_(shm_name_for_topic(topic_name))
     , raw_topic_name_(topic_name)
     , domain_id_(domain_id)
     , verbose_(verbose)
@@ -217,8 +232,9 @@ shm_sub_ipc::~shm_sub_ipc()
     }
     if (subscriber_ && subscriber_->valid())
     {
-        subscriber_->release();
+        subscriber_->disconnect();
     }
+    subscriber_.reset();
     exit_flag.store(true, std::memory_order_release);
 }
 
@@ -267,6 +283,10 @@ void shm_sub_ipc::sub_handshake()
                     std::lock_guard<std::mutex> lock(channel_mtx_);
                     if (subscriber_ && subscriber_->valid())
                     {
+                        // The publisher has already advanced to a new
+                        // generation when we reach this branch.  The old
+                        // route storage may have been cleared, so do not
+                        // operate on the old shared synchronization objects.
                         subscriber_->release();
                     }
                     subscriber_.reset();
@@ -278,7 +298,7 @@ void shm_sub_ipc::sub_handshake()
                     std::lock_guard<std::mutex> lock(channel_mtx_);
                     if (subscriber_ && subscriber_->valid())
                     {
-                        subscriber_->release();
+                        subscriber_->disconnect();
                     }
                     subscriber_.reset();
                     continue;
@@ -297,17 +317,19 @@ void shm_sub_ipc::sub_handshake()
         {
             if (handshake_completed.exchange(false, std::memory_order_acq_rel))
             {
+                {
+                    std::lock_guard<std::mutex> lock(channel_mtx_);
+                    if (subscriber_ && subscriber_->valid())
+                    {
+                        subscriber_->disconnect();
+                    }
+                    subscriber_.reset();
+                }
                 if (peer_registered)
                 {
                     control_plane_.remove_peer(attached_generation);
                     peer_registered = false;
                 }
-                std::lock_guard<std::mutex> lock(channel_mtx_);
-                if (subscriber_ && subscriber_->valid())
-                {
-                    subscriber_->release();
-                }
-                subscriber_.reset();
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));

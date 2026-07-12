@@ -1,4 +1,4 @@
-# !/bin/bash
+#!/bin/bash
 
 # 将终端内容推入 scrollback，在可视区顶部打印结果消息
 _dz_show_result() {
@@ -51,18 +51,23 @@ fi
 
 if [ "$install_cpp" == true ]; then
     echo "Installing dzIPC..."
-    echo "Removing old version if exists..."
+    echo "Installing into workspace-local prefix..."
+    _DZIPC_PREFIX="$(cd "$(dirname "$0")" && pwd)/local"
+    _DZIPC_PYTHON="$(command -v python3)"
     mkdir -p build
     cd build
-    if [ -d "/usr/local/include/dzIPC" ] || [ -d "/usr/local/lib/ipc_msg" ]||[ -d "/usr/local/lib/ipc_srv" ]||[ -d "/usr/local/lib/libipc" ]; then
-        make uninstall
-    fi
 
-    cmake .. -DCMAKE_BUILD_TYPE=Release
+    rm -f "$_DZIPC_PREFIX/lib/python/dzipc"/_dzipc_core*.so
+
+    cmake .. -DCMAKE_BUILD_TYPE=Release \
+             -DCMAKE_INSTALL_PREFIX="$_DZIPC_PREFIX" \
+             -DPython3_EXECUTABLE="$_DZIPC_PYTHON"
     make -j10
     make install
     echo -e "\033[32mdzIPC installed successfully.\033[0m"
     cd ..
+    unset _DZIPC_PREFIX
+    unset _DZIPC_PYTHON
 fi
 
 if [ "$install_python" == true ]; then
@@ -73,15 +78,19 @@ if [ "$install_python" == true ]; then
     if [ "$install_cpp" != true ]; then
         # 仅安装 Python 时：单独编译并复制模块到 local/
         _DZIPC_PREFIX="$(cd "$(dirname "$0")" && pwd)/local"
+        _DZIPC_PYTHON="$(command -v python3)"
         mkdir -p "$_DZIPC_PREFIX/lib/python/dzipc"
+        rm -f "$_DZIPC_PREFIX/lib/python/dzipc"/_dzipc_core*.so
 
         # 编译 Python 绑定模块
         cd python
-        python3 -c "import pybind11" 2>/dev/null || pip3 install pybind11
+        "$_DZIPC_PYTHON" -c "import pybind11" 2>/dev/null || "$_DZIPC_PYTHON" -m pip install pybind11
         mkdir -p ../build_py
         cd ../build_py
         cmake .. -DCMAKE_BUILD_TYPE=Release -DLIBIPC_BUILD_PYTHON=ON \
-                 -DLIBIPC_BUILD_TESTS=OFF -DLIBIPC_BUILD_DEMOS=OFF
+                 -DLIBIPC_BUILD_TESTS=OFF -DLIBIPC_BUILD_DEMOS=OFF \
+                 -DCMAKE_INSTALL_PREFIX="$_DZIPC_PREFIX" \
+                 -DPython3_EXECUTABLE="$_DZIPC_PYTHON"
         make -j10 _dzipc_core
         cp python/_dzipc_core*.so "$_DZIPC_PREFIX/lib/python/dzipc/"
         cd ..
@@ -89,8 +98,10 @@ if [ "$install_python" == true ]; then
         # 复制 Python 包文件
         cp -r python/dzipc/*.py "$_DZIPC_PREFIX/lib/python/dzipc/"
         cp -r python/dzipc/gen_msgs "$_DZIPC_PREFIX/lib/python/dzipc/"
+        cp -r python/dzipc/gen_srv "$_DZIPC_PREFIX/lib/python/dzipc/"
 
         unset _DZIPC_PREFIX
+        unset _DZIPC_PYTHON
     fi
     echo -e "\033[32mPython interface installed successfully.\033[0m"
 fi
@@ -115,14 +126,13 @@ fi
 
 if [ "$uninstall" == true ]; then
     echo "Uninstalling dzIPC..."
-    cd build
-    if [ -d "/usr/local/include/dzIPC" ] || [ -d "/usr/local/lib/ipc_msg" ]||[ -d "/usr/local/lib/ipc_srv" ]||[ -d "/usr/local/lib/libipc" ]; then
-        make uninstall
-    fi
-    # 删除本地安装目录
-    cd ..
+    _DZIPC_PREFIX="$(cd "$(dirname "$0")" && pwd)/local"
+    # 删除本地安装目录；不调用旧 build cache 中可能指向 /usr/local 的 uninstall target。
     rm -rf "$(cd "$(dirname "$0")" && pwd)/build"
-    rm -rf "$(cd "$(dirname "$0")" && pwd)/local"
+    rm -rf "$_DZIPC_PREFIX"
     rm -rf "$(cd "$(dirname "$0")" && pwd)/python/dzipc/gen_msgs"
+    rm -rf "$(cd "$(dirname "$0")" && pwd)/python/dzipc/gen_srv"
+    rm -rf "$(cd "$(dirname "$0")" && pwd)/python/dzipc.pyi"
     echo -e "\033[32mdzIPC uninstalled successfully.\033[0m"
+    unset _DZIPC_PREFIX
 fi

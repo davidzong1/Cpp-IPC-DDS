@@ -24,43 +24,57 @@ if [ ! -d "$_DZIPC_PREFIX" ]; then
     return 1
 fi
 
-# ---- 工具函数: 去重追加到环境变量 ----
-_dzipc_append() {
+# ---- 工具函数: 去重前置到环境变量，确保 local 隔离环境优先于系统安装 ----
+_dzipc_prepend() {
     local _var="$1"
     local _val="$2"
-    if [ -z "${!_var}" ]; then
+    local _cur="${!_var}"
+    if [ -z "$_cur" ]; then
+        export "$_var"="$_val"
+        return
+    fi
+
+    local _new=""
+    local _item
+    local IFS=:
+    for _item in $_cur; do
+        [ "$_item" = "$_val" ] && continue
+        if [ -z "$_new" ]; then
+            _new="$_item"
+        else
+            _new="$_new:$_item"
+        fi
+    done
+    if [ -z "$_new" ]; then
         export "$_var"="$_val"
     else
-        case ":${!_var}:" in
-            *:"$_val":*) ;;
-            *) export "$_var"="${!_var}:$_val" ;;
-        esac
+        export "$_var"="$_val:$_new"
     fi
 }
 
 # ---- 设置各环境变量 ----
 
 # PATH: 可执行文件 (dzipc_list, dzipc_topic_cat)
-_dzipc_append PATH             "$_DZIPC_PREFIX/bin"
+_dzipc_prepend PATH             "$_DZIPC_PREFIX/bin"
 
 # LD_LIBRARY_PATH: 运行时动态库 (libipc.so)
-_dzipc_append LD_LIBRARY_PATH  "$_DZIPC_PREFIX/lib"
+_dzipc_prepend LD_LIBRARY_PATH  "$_DZIPC_PREFIX/lib"
 
 # C/C++ 头文件路径 (gcc/g++ -I 自动查找)
-_dzipc_append CPLUS_INCLUDE_PATH "$_DZIPC_PREFIX/include"
-_dzipc_append C_INCLUDE_PATH     "$_DZIPC_PREFIX/include"
+_dzipc_prepend CPLUS_INCLUDE_PATH "$_DZIPC_PREFIX/include"
+_dzipc_prepend C_INCLUDE_PATH     "$_DZIPC_PREFIX/include"
 
 # CMAKE_PREFIX_PATH: CMake find_package(cpp-ipc) 查找
-_dzipc_append CMAKE_PREFIX_PATH "$_DZIPC_PREFIX"
+_dzipc_prepend CMAKE_PREFIX_PATH "$_DZIPC_PREFIX"
 
 # PYTHONPATH: Python import dzipc
-_dzipc_append PYTHONPATH       "$_DZIPC_PREFIX/lib/python"
+_dzipc_prepend PYTHONPATH       "$_DZIPC_PREFIX/lib/python"
 
 # LIBRARY_PATH: 编译时链接库查找
-_dzipc_append LIBRARY_PATH     "$_DZIPC_PREFIX/lib"
+_dzipc_prepend LIBRARY_PATH     "$_DZIPC_PREFIX/lib"
 
 # ---- 清理内部变量 ----
-unset _dzipc_append
+unset _dzipc_prepend
 unset _DZIPC_SETUP_DIR
 unset _DZIPC_PREFIX
 

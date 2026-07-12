@@ -23,8 +23,14 @@ default_srv_input_path = "./srv/"
 default_pyi_path = "./python/dzipc.pyi"
 
 # Python wrapper 输出目录
-PYTHON_WRAPPER_DIR = "./python/dzipc/gen_msgs"
-PYTHON_WRAPPER_INIT = os.path.join(PYTHON_WRAPPER_DIR, "__init__.py")
+PYTHON_MSG_WRAPPER_DIR = "./python/dzipc/gen_msgs"
+PYTHON_SRV_WRAPPER_DIR = "./python/dzipc/gen_srv"
+PYTHON_MSG_WRAPPER_INIT = os.path.join(PYTHON_MSG_WRAPPER_DIR, "__init__.py")
+PYTHON_SRV_WRAPPER_INIT = os.path.join(PYTHON_SRV_WRAPPER_DIR, "__init__.py")
+
+# 兼容旧变量名；外部脚本如果引用该常量，仍指向 msg 生成目录。
+PYTHON_WRAPPER_DIR = PYTHON_MSG_WRAPPER_DIR
+PYTHON_WRAPPER_INIT = PYTHON_MSG_WRAPPER_INIT
 
 AUTO_PYI_BEGIN = "# AUTO_GENERATED_MSG_SRV_STUBS_BEGIN"
 AUTO_PYI_END = "# AUTO_GENERATED_MSG_SRV_STUBS_END"
@@ -33,7 +39,7 @@ AUTO_PYI_END = "# AUTO_GENERATED_MSG_SRV_STUBS_END"
 _PYI_SKELETON = """from __future__ import annotations
 
 from enum import Enum
-from typing import Callable, List, Tuple
+from typing import Any, Callable, List, Tuple
 
 class IPCType(Enum):
     Shm: int
@@ -53,20 +59,54 @@ class GenericMessage(IpcMsgBase):
     def field_name(self, i: int) -> str: ...
     def field_type(self, i: int) -> int: ...
     def set_bool(self, name: str, val: bool) -> None: ...
+    def set_int8(self, name: str, val: int) -> None: ...
+    def set_uint8(self, name: str, val: int) -> None: ...
+    def set_int16(self, name: str, val: int) -> None: ...
+    def set_uint16(self, name: str, val: int) -> None: ...
     def set_int32(self, name: str, val: int) -> None: ...
+    def set_uint32(self, name: str, val: int) -> None: ...
+    def set_int64(self, name: str, val: int) -> None: ...
+    def set_uint64(self, name: str, val: int) -> None: ...
+    def set_float32(self, name: str, val: float) -> None: ...
     def set_float64(self, name: str, val: float) -> None: ...
     def set_string(self, name: str, val: str) -> None: ...
     def set_nested(self, name: str, val: GenericMessage) -> None: ...
+    def set_bool_array(self, name: str, arr: List[bool]) -> None: ...
+    def set_int8_array(self, name: str, arr: List[int]) -> None: ...
+    def set_uint8_array(self, name: str, arr: List[int]) -> None: ...
+    def set_int16_array(self, name: str, arr: List[int]) -> None: ...
+    def set_uint16_array(self, name: str, arr: List[int]) -> None: ...
     def set_int32_array(self, name: str, arr: List[int]) -> None: ...
+    def set_uint32_array(self, name: str, arr: List[int]) -> None: ...
+    def set_int64_array(self, name: str, arr: List[int]) -> None: ...
+    def set_uint64_array(self, name: str, arr: List[int]) -> None: ...
+    def set_float32_array(self, name: str, arr: List[float]) -> None: ...
     def set_float64_array(self, name: str, arr: List[float]) -> None: ...
     def set_string_array(self, name: str, arr: List[str]) -> None: ...
     def set_nested_array(self, name: str, arr: List[GenericMessage]) -> None: ...
     def get_bool(self, name: str) -> bool: ...
+    def get_int8(self, name: str) -> int: ...
+    def get_uint8(self, name: str) -> int: ...
+    def get_int16(self, name: str) -> int: ...
+    def get_uint16(self, name: str) -> int: ...
     def get_int32(self, name: str) -> int: ...
+    def get_uint32(self, name: str) -> int: ...
+    def get_int64(self, name: str) -> int: ...
+    def get_uint64(self, name: str) -> int: ...
+    def get_float32(self, name: str) -> float: ...
     def get_float64(self, name: str) -> float: ...
     def get_string(self, name: str) -> str: ...
     def get_nested(self, name: str) -> GenericMessage: ...
+    def get_bool_array(self, name: str) -> List[bool]: ...
+    def get_int8_array(self, name: str) -> List[int]: ...
+    def get_uint8_array(self, name: str) -> List[int]: ...
+    def get_int16_array(self, name: str) -> List[int]: ...
+    def get_uint16_array(self, name: str) -> List[int]: ...
     def get_int32_array(self, name: str) -> List[int]: ...
+    def get_uint32_array(self, name: str) -> List[int]: ...
+    def get_int64_array(self, name: str) -> List[int]: ...
+    def get_uint64_array(self, name: str) -> List[int]: ...
+    def get_float32_array(self, name: str) -> List[float]: ...
     def get_float64_array(self, name: str) -> List[float]: ...
     def get_string_array(self, name: str) -> List[str]: ...
     def get_nested_array(self, name: str) -> List[GenericMessage]: ...
@@ -116,10 +156,10 @@ class SubscriberIPC:
 # AUTO_GENERATED_MSG_SRV_STUBS_BEGIN
 {stubs}# AUTO_GENERATED_MSG_SRV_STUBS_END
 
-def make_topic_data(msg: IpcMsgBase, msg_id: int = 0) -> TopicData: ...
+def make_topic_data(msg: Any, msg_id: int = 0) -> TopicData: ...
 def make_service_data(
-    request: IpcMsgBase,
-    response: IpcMsgBase,
+    request: Any,
+    response: Any,
     msg_id: int = 0,
 ) -> ServiceData: ...
 def ServerIPCPtrMake(
@@ -129,6 +169,9 @@ def ServerIPCPtrMake(
     domain_id: int,
     ipc_type: IPCType,
     verbose: bool = False,
+    enable_thread_qos: bool = False,
+    cpu_id: int = -1,
+    thread_priority: int = 0,
 ) -> ServerIPC: ...
 def ClientIPCPtrMake(
     topic_name: str,
@@ -136,6 +179,9 @@ def ClientIPCPtrMake(
     domain_id: int,
     ipc_type: IPCType,
     verbose: bool = False,
+    enable_thread_qos: bool = False,
+    cpu_id: int = -1,
+    thread_priority: int = 0,
 ) -> ClientIPC: ...
 def PublisherIPCPtrMake(
     msg: TopicData,
@@ -143,6 +189,9 @@ def PublisherIPCPtrMake(
     domain_id: int,
     ipc_type: IPCType,
     verbose: bool = False,
+    enable_thread_qos: bool = False,
+    cpu_id: int = -1,
+    thread_priority: int = 0,
 ) -> PublisherIPC: ...
 def SubscriberIPCPtrMake(
     msg: TopicData,
@@ -151,6 +200,9 @@ def SubscriberIPCPtrMake(
     queue_size: int,
     ipc_type: IPCType,
     verbose: bool = False,
+    enable_thread_qos: bool = False,
+    cpu_id: int = -1,
+    thread_priority: int = 0,
 ) -> SubscriberIPC: ...
 def StartShutdownMonitor() -> None: ...
 def RequestShutdown() -> None: ...
@@ -211,6 +263,18 @@ def snake_to_pascal(name: str) -> str:
     return "".join(part.capitalize() for part in name.split("_") if part)
 
 
+def parse_field_type(field_type: str) -> Tuple[str, bool, bool, Optional[int]]:
+    fixed_array_match = re.fullmatch(r"(.+)\[(\d+)\]", field_type)
+    if fixed_array_match:
+        array_size = int(fixed_array_match.group(2))
+        if array_size <= 0:
+            raise ValueError(f"Fixed array size must be positive: {field_type}")
+        return fixed_array_match.group(1), True, True, array_size
+    if field_type.endswith("[]"):
+        return field_type[:-2], True, False, None
+    return field_type, False, False, None
+
+
 def parse_fields(lines: List[str]) -> List[str]:
     fields: List[str] = []
     for raw in lines:
@@ -235,8 +299,7 @@ def parse_typed_fields(lines: List[str], msg_type_registry: Optional[dict] = Non
         if len(parts) >= 2:
             field_type = parts[0]
             field_name = parts[1]
-            is_array = field_type.endswith("[]")
-            base_type = field_type[:-2] if is_array else field_type
+            base_type, is_array, _, _ = parse_field_type(field_type)
             nested_info = msg_type_registry.get(base_type)
             if nested_info:
                 py_base = nested_info.class_name
@@ -291,7 +354,7 @@ def parse_msg_dependencies(msg_file: str, msg_type_registry: dict) -> List[str]:
             if len(parts) < 2:
                 continue
             field_type = parts[0]
-            base_type = field_type[:-2] if field_type.endswith("[]") else field_type
+            base_type, _, _, _ = parse_field_type(field_type)
             nested_info = msg_type_registry.get(base_type)
             if not nested_info:
                 continue
@@ -442,14 +505,15 @@ class {class_name}:
 
 
 def generate_python_wrapper(class_name: str, fields: List[Tuple[str, str, str, bool, str]],
-                             namespace: str = "Msg") -> str:
+                             namespace: str = "Msg", nested_import_prefix: str = ".") -> str:
     """为一个消息/服务类型生成 Python 封装类"""
-    return _generate_wrapper(PY_WRAPPER_TEMPLATE, class_name, fields)
+    return _generate_wrapper(PY_WRAPPER_TEMPLATE, class_name, fields, nested_import_prefix)
 
 
-def generate_python_wrapper_no_header(class_name: str, fields: List[Tuple[str, str, str, bool, str]]) -> str:
+def generate_python_wrapper_no_header(class_name: str, fields: List[Tuple[str, str, str, bool, str]],
+                                      nested_import_prefix: str = ".") -> str:
     """生成 srv 响应类的 Python 封装（不含文件头，拼在请求类之后）"""
-    return _generate_wrapper(PY_WRAPPER_TEMPLATE_NO_HEADER, class_name, fields)
+    return _generate_wrapper(PY_WRAPPER_TEMPLATE_NO_HEADER, class_name, fields, nested_import_prefix)
 
 
 def _is_nested_base(base_type: str) -> bool:
@@ -462,7 +526,8 @@ def _nested_class_name(py_type: str, is_array: bool) -> str:
     return py_type
 
 
-def _nested_import_lines(class_name: str, fields: List[Tuple[str, str, str, bool, str]]) -> List[str]:
+def _nested_import_lines(class_name: str, fields: List[Tuple[str, str, str, bool, str]],
+                         nested_import_prefix: str = ".") -> List[str]:
     nested_imports = []
     for _, py_type, _, is_array, base_type in fields:
         if not _is_nested_base(base_type):
@@ -470,14 +535,15 @@ def _nested_import_lines(class_name: str, fields: List[Tuple[str, str, str, bool
         nested_class = _nested_class_name(py_type, is_array)
         if nested_class == "object" or nested_class == class_name:
             continue
-        import_line = f"from .{base_type} import {nested_class}"
+        import_line = f"from {nested_import_prefix}{base_type} import {nested_class}"
         if import_line not in nested_imports:
             nested_imports.append(import_line)
     return nested_imports
 
 
-def _generate_wrapper(template: str, class_name: str, fields: List[Tuple[str, str, str, bool, str]]) -> str:
-    nested_imports = _nested_import_lines(class_name, fields)
+def _generate_wrapper(template: str, class_name: str, fields: List[Tuple[str, str, str, bool, str]],
+                      nested_import_prefix: str = ".") -> str:
+    nested_imports = _nested_import_lines(class_name, fields, nested_import_prefix)
     extra_imports = "\n" + "\n".join(nested_imports) if nested_imports else ""
 
     slot_fields = ", ".join(f'"{f[0]}"' for f in fields)
@@ -553,19 +619,17 @@ def _generate_wrapper(template: str, class_name: str, fields: List[Tuple[str, st
     )
 
 
-def generate_registry_init(msg_files: List[str], srv_files: List[str],
-                           msg_root: str, srv_root: str) -> str:
-    """生成 gen_msgs/__init__.py — 类型注册表"""
+def generate_msg_registry_init(msg_files: List[str], msg_root: str) -> str:
+    """生成 gen_msgs/__init__.py — msg 类型注册表"""
     lines = [
-        '"""自动生成的类型注册表 — 每次修改 .msg/.srv 后由 batch_msg_srv_generator.py 更新"""',
+        '"""自动生成的 msg 类型注册表 — 每次修改 .msg 后由 batch_msg_srv_generator.py 更新"""',
         "from __future__ import annotations",
         "from typing import List",
         "",
-        "# 导入所有封装类",
+        "# 导入所有 msg 封装类",
     ]
 
     msg_classes = []
-    srv_classes = []
 
     msg_type_registry = build_msg_type_registry(msg_files, msg_root)
     sorted_msg_files = sort_msg_files_by_dependencies(msg_files, msg_type_registry)
@@ -577,23 +641,13 @@ def generate_registry_init(msg_files: List[str], srv_files: List[str],
         lines.append(f"from .{module_name} import {class_name}")
         msg_classes.append((class_name, module_name))
 
-    for srv_file in sorted(srv_files):
-        base_name = os.path.splitext(os.path.basename(srv_file))[0]
-        py_base = snake_to_pascal(base_name)
-        req_cls = f"{py_base}Request"
-        resp_cls = f"{py_base}Response"
-        module_name = base_name
-        lines.append(f"from .{module_name} import {req_cls}, {resp_cls}")
-        srv_classes.append((py_base, req_cls, resp_cls, module_name))
-
     lines.append("")
     lines.append("# 暴露到 dzipc 模块命名空间")
     lines.append("__all__ = [")
     for cn, _ in msg_classes:
         lines.append(f'    "{cn}",')
-    for _, req, resp, _ in srv_classes:
-        lines.append(f'    "{req}",')
-        lines.append(f'    "{resp}",')
+    lines.append('    "message_types",')
+    lines.append('    "create_message",')
     lines.append("]")
     lines.append("")
 
@@ -615,6 +669,42 @@ def generate_registry_init(msg_files: List[str], srv_files: List[str],
         lines.append(f'    if type_name == "{cn}":')
         lines.append(f"        return {cn}().to_generic()")
     lines.append('    raise ValueError("Unknown message type: " + type_name)')
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def generate_srv_registry_init(srv_files: List[str]) -> str:
+    """生成 gen_srv/__init__.py — srv 类型注册表"""
+    lines = [
+        '"""自动生成的 srv 类型注册表 — 每次修改 .srv 后由 batch_msg_srv_generator.py 更新"""',
+        "from __future__ import annotations",
+        "from typing import List",
+        "",
+        "# 导入所有 srv 封装类",
+    ]
+
+    srv_classes = []
+
+    for srv_file in sorted(srv_files):
+        base_name = os.path.splitext(os.path.basename(srv_file))[0]
+        py_base = snake_to_pascal(base_name)
+        req_cls = f"{py_base}Request"
+        resp_cls = f"{py_base}Response"
+        module_name = base_name
+        lines.append(f"from .{module_name} import {req_cls}, {resp_cls}")
+        srv_classes.append((py_base, req_cls, resp_cls, module_name))
+
+    lines.append("")
+    lines.append("# 暴露到 dzipc 模块命名空间")
+    lines.append("__all__ = [")
+    for _, req, resp, _ in srv_classes:
+        lines.append(f'    "{req}",')
+        lines.append(f'    "{resp}",')
+    lines.append('    "service_types",')
+    lines.append('    "create_service_request",')
+    lines.append('    "create_service_response",')
+    lines.append("]")
     lines.append("")
 
     # service_types()
@@ -656,18 +746,22 @@ def generate_pyi_blocks(msg_files: List[str], srv_files: List[str], msg_root: st
     msg_type_registry = build_msg_type_registry(msg_files, msg_root)
     sorted_msg_files = sort_msg_files_by_dependencies(msg_files, msg_type_registry)
 
+    def append_wrapper_stub(class_name: str, typed_fields: List[Tuple[str, str, str, bool, str]]) -> None:
+        stub_lines.append(f"class {class_name}:")
+        for fname, ftype, _, _, _ in typed_fields:
+            stub_lines.append(f"    {fname}: {ftype}")
+        stub_lines.append("    def __init__(self, generic: Any = ...) -> None: ...")
+        stub_lines.append("    def to_generic(self) -> GenericMessage: ...")
+        stub_lines.append("    @classmethod")
+        stub_lines.append(f"    def from_generic(cls, g: GenericMessage) -> \"{class_name}\": ...")
+        stub_lines.append("")
+
     for msg_file in sorted_msg_files:
         class_name = os.path.splitext(os.path.basename(msg_file))[0]
         py_name = snake_to_pascal(class_name)
         with open(msg_file, "r", encoding="utf-8") as f:
             typed_fields = parse_typed_fields(f.readlines(), msg_type_registry)
-        stub_lines.append(f"class {py_name}(IpcMsgBase):")
-        if typed_fields:
-            for fname, ftype, _, _, _ in typed_fields:
-                stub_lines.append(f"    {fname}: {ftype}")
-        else:
-            stub_lines.append("    pass")
-        stub_lines.append("")
+        append_wrapper_stub(py_name, typed_fields)
 
     for srv_file in sorted(srv_files):
         base_name = os.path.splitext(os.path.basename(srv_file))[0]
@@ -676,21 +770,8 @@ def generate_pyi_blocks(msg_files: List[str], srv_files: List[str], msg_root: st
         req_typed = parse_typed_fields(req_lines_raw, msg_type_registry)
         resp_typed = parse_typed_fields(resp_lines_raw, msg_type_registry)
 
-        stub_lines.append(f"class {py_base}Request(IpcMsgBase):")
-        if req_typed:
-            for fname, ftype, _, _, _ in req_typed:
-                stub_lines.append(f"    {fname}: {ftype}")
-        else:
-            stub_lines.append("    pass")
-        stub_lines.append("")
-
-        stub_lines.append(f"class {py_base}Response(IpcMsgBase):")
-        if resp_typed:
-            for fname, ftype, _, _, _ in resp_typed:
-                stub_lines.append(f"    {fname}: {ftype}")
-        else:
-            stub_lines.append("    pass")
-        stub_lines.append("")
+        append_wrapper_stub(f"{py_base}Request", req_typed)
+        append_wrapper_stub(f"{py_base}Response", resp_typed)
 
     if msg_files:
         stub_lines.append("def message_types() -> List[str]: ...")
@@ -797,9 +878,16 @@ def process_srv_directory(
             print(f"  错误: {e}")
 
 
+def _prepare_python_wrapper_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+    for py_file in glob.glob(os.path.join(path, "*.py")):
+        os.remove(py_file)
+
+
 def generate_python_wrappers(msg_input_dir: str, srv_input_dir: str) -> None:
-    """为所有 msg/srv 生成 Python 封装类到 python/dzipc/gen_msgs/"""
-    os.makedirs(PYTHON_WRAPPER_DIR, exist_ok=True)
+    """为 msg 生成到 gen_msgs，为 srv 生成到 gen_srv。"""
+    _prepare_python_wrapper_dir(PYTHON_MSG_WRAPPER_DIR)
+    _prepare_python_wrapper_dir(PYTHON_SRV_WRAPPER_DIR)
 
     msg_files = collect_msg_files(msg_input_dir)
     srv_files = sorted(glob.glob(os.path.join(srv_input_dir, "**/*.srv"), recursive=True))
@@ -815,7 +903,7 @@ def generate_python_wrappers(msg_input_dir: str, srv_input_dir: str) -> None:
             msg_type_registry)
 
         wrapper_code = generate_python_wrapper(class_name, typed_fields)
-        output_path = os.path.join(PYTHON_WRAPPER_DIR, f"{base_name}.py")
+        output_path = os.path.join(PYTHON_MSG_WRAPPER_DIR, f"{base_name}.py")
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(wrapper_code)
         # print(f"  Generate Python wrapper: {output_path}")
@@ -829,9 +917,17 @@ def generate_python_wrappers(msg_input_dir: str, srv_input_dir: str) -> None:
         resp_typed = parse_typed_fields(resp_lines, msg_type_registry)
 
         # Request
-        req_code = generate_python_wrapper(f"{py_base}Request", req_typed)
+        req_code = generate_python_wrapper(
+            f"{py_base}Request",
+            req_typed,
+            nested_import_prefix="dzipc.gen_msgs.",
+        )
         # Response 使用无头模板（拼在 Request 后面，共用文件头和 imports）
-        resp_code = generate_python_wrapper_no_header(f"{py_base}Response", resp_typed)
+        resp_code = generate_python_wrapper_no_header(
+            f"{py_base}Response",
+            resp_typed,
+            nested_import_prefix="dzipc.gen_msgs.",
+        )
 
         full_code = (
             req_code.rstrip()
@@ -839,7 +935,11 @@ def generate_python_wrappers(msg_input_dir: str, srv_input_dir: str) -> None:
             + resp_code
         )
         missing_imports = [
-            line for line in _nested_import_lines(f"{py_base}Response", resp_typed)
+            line for line in _nested_import_lines(
+                f"{py_base}Response",
+                resp_typed,
+                nested_import_prefix="dzipc.gen_msgs.",
+            )
             if line not in req_code
         ]
         if missing_imports:
@@ -848,16 +948,19 @@ def generate_python_wrappers(msg_input_dir: str, srv_input_dir: str) -> None:
                 "from dzipc._dzipc_core import GenericMessage\n" + "\n".join(missing_imports) + "\n",
                 1,
             )
-        output_path = os.path.join(PYTHON_WRAPPER_DIR, f"{base_name}.py")
+        output_path = os.path.join(PYTHON_SRV_WRAPPER_DIR, f"{base_name}.py")
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(full_code)
         # print(f"  Generate Python wrapper: {output_path}")
 
     # 生成注册表 __init__.py
-    init_code = generate_registry_init(msg_files, srv_files, msg_input_dir, srv_input_dir)
-    with open(PYTHON_WRAPPER_INIT, "w", encoding="utf-8") as f:
-        f.write(init_code)
-    # print(f"  Generate registry: {PYTHON_WRAPPER_INIT}")
+    msg_init_code = generate_msg_registry_init(msg_files, msg_input_dir)
+    with open(PYTHON_MSG_WRAPPER_INIT, "w", encoding="utf-8") as f:
+        f.write(msg_init_code)
+    srv_init_code = generate_srv_registry_init(srv_files)
+    with open(PYTHON_SRV_WRAPPER_INIT, "w", encoding="utf-8") as f:
+        f.write(srv_init_code)
+    # print(f"  Generate registry: {PYTHON_MSG_WRAPPER_INIT}, {PYTHON_SRV_WRAPPER_INIT}")
 
 
 def generate_python_stub_bindings(msg_input_dir: str, srv_input_dir: str,
@@ -866,21 +969,8 @@ def generate_python_stub_bindings(msg_input_dir: str, srv_input_dir: str,
     srv_files = glob.glob(os.path.join(srv_input_dir, "**/*.srv"), recursive=True)
 
     stub_block = generate_pyi_blocks(msg_files, srv_files, msg_input_dir)
-
-    if not os.path.exists(pyi_path):
-        # 文件不存在时自动创建（包含基础设施存根 + 锚点）
-        skeleton = _PYI_SKELETON.format(stubs=stub_block)
-        os.makedirs(os.path.dirname(pyi_path) or ".", exist_ok=True)
-        with open(pyi_path, "w", encoding="utf-8") as f:
-            f.write(skeleton)
-        print(f"  Create Python stub: {pyi_path}")
-        return
-
-    with open(pyi_path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    content = replace_block(content, AUTO_PYI_BEGIN, AUTO_PYI_END, stub_block)
-
+    content = _PYI_SKELETON.format(stubs=stub_block)
+    os.makedirs(os.path.dirname(pyi_path) or ".", exist_ok=True)
     with open(pyi_path, "w", encoding="utf-8") as f:
         f.write(content)
 
@@ -955,9 +1045,8 @@ def update_main_init():
     if not os.path.exists(main_init_path):
         return
 
-    # 收集 gen_msgs 所有类
-    gen_dir = PYTHON_WRAPPER_DIR
-    if not os.path.exists(gen_dir):
+    # 收集 gen_msgs/gen_srv 所有类
+    if not os.path.exists(PYTHON_MSG_WRAPPER_DIR) or not os.path.exists(PYTHON_SRV_WRAPPER_DIR):
         return
 
     msg_files = sorted(glob.glob(os.path.join(default_msg_path, "**/*.msg"), recursive=True))
@@ -967,6 +1056,8 @@ def update_main_init():
     for mf in msg_files:
         cn = snake_to_pascal(os.path.splitext(os.path.basename(mf))[0])
         import_lines.append(f"    {cn},")
+    import_lines.append(")")
+    import_lines.append("from .gen_srv import (")
     for sf in srv_files:
         py_base = snake_to_pascal(os.path.splitext(os.path.basename(sf))[0])
         import_lines.append(f"    {py_base}Request,")
@@ -977,8 +1068,8 @@ def update_main_init():
 
     # function redirects
     func_lines = [
-        "from .gen_msgs import (message_types, service_types,",
-        "    create_message, create_service_request, create_service_response)",
+        "from .gen_msgs import message_types, create_message",
+        "from .gen_srv import service_types, create_service_request, create_service_response",
     ]
     func_block = "\n".join(func_lines) + "\n"
 

@@ -4,6 +4,7 @@ dzIPC Python 包 — 将编译后的 C++ 模块与动态消息封装层组合。
 架构：
   _dzipc_core.so   — C++ pybind11 绑定（IPC 基础设施 + GenericMessage）
   gen_msgs/        — 自动生成的 Python 消息封装（纯 Python，无需编译）
+  gen_srv/         — 自动生成的 Python 服务封装（纯 Python，无需编译）
 """
 
 # 从编译后的 C++ 模块导入所有符号
@@ -35,26 +36,38 @@ def make_service_data(request, response, msg_id=0):
 
 # AUTO_GENERATED_MSG_SRV_IMPORTS_BEGIN
 from .gen_msgs import (
+    RobotState,
     StdColor,
+    StdDouble,
+    StdFloat,
     StdHeader,
     StdImage,
     StdMarker,
+    StdMatrix,
+    StdMatrix3d,
     StdPath,
     StdPointCloud,
     StdPose,
     StdQuaternion,
     StdRawMessage,
+    StdString,
+    StdTf,
+    StdVector,
     StdVector3d,
     ComplexMessage,
     TestMsg,
     Pose,
     RobotState,
+)
+from .gen_srv import (
     RequestResponseTestRequest,
     RequestResponseTestResponse,
+    StdStringRequest,
+    StdStringResponse,
 )
 # AUTO_GENERATED_MSG_SRV_IMPORTS_END
 
 # AUTO_GENERATED_MSG_SRV_FUNCS_BEGIN
-from .gen_msgs import (message_types, service_types,
-    create_message, create_service_request, create_service_response)
+from .gen_msgs import message_types, create_message
+from .gen_srv import service_types, create_service_request, create_service_response
 # AUTO_GENERATED_MSG_SRV_FUNCS_END

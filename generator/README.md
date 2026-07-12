@@ -57,6 +57,7 @@ res = ipc.create_service_response("RequestResponseTest")
 
 - 所有基本类型的数组，如 `int32[]` → `std::vector<int32_t>`
 - 字符串数组 `string[]` → `std::vector<std::string>`
+- 固定大小数组，如 `int32[10]` → `std::array<int32_t, 10>`
 
 ## 使用方法
 
@@ -162,7 +163,6 @@ g++ -std=c++14 -I../ test_generated_msg.cpp -o test_generated_msg
 当前版本不支持：
 
 - 嵌套消息类型
-- 固定大小数组（如`int32[10]`）
 - 常量定义
 - 服务定义
 

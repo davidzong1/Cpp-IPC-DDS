@@ -23,15 +23,15 @@ if not exist "%DZIPC_PREFIX%\" (
     endlocal & exit /b 1
 )
 
-call :append_env PATH "%DZIPC_PREFIX%\bin"
-call :append_env PATH "%DZIPC_PREFIX%\lib"
-call :append_env INCLUDE "%DZIPC_PREFIX%\include"
-call :append_env CPLUS_INCLUDE_PATH "%DZIPC_PREFIX%\include"
-call :append_env C_INCLUDE_PATH "%DZIPC_PREFIX%\include"
-call :append_env LIB "%DZIPC_PREFIX%\lib"
-call :append_env LIBRARY_PATH "%DZIPC_PREFIX%\lib"
-call :append_env CMAKE_PREFIX_PATH "%DZIPC_PREFIX%"
-call :append_env PYTHONPATH "%DZIPC_PREFIX%\lib\python"
+call :prepend_env PATH "%DZIPC_PREFIX%\bin"
+call :prepend_env PATH "%DZIPC_PREFIX%\lib"
+call :prepend_env INCLUDE "%DZIPC_PREFIX%\include"
+call :prepend_env CPLUS_INCLUDE_PATH "%DZIPC_PREFIX%\include"
+call :prepend_env C_INCLUDE_PATH "%DZIPC_PREFIX%\include"
+call :prepend_env LIB "%DZIPC_PREFIX%\lib"
+call :prepend_env LIBRARY_PATH "%DZIPC_PREFIX%\lib"
+call :prepend_env CMAKE_PREFIX_PATH "%DZIPC_PREFIX%"
+call :prepend_env PYTHONPATH "%DZIPC_PREFIX%\lib\python"
 
 echo.
 echo ============================================================
@@ -62,7 +62,7 @@ endlocal ^
 & set "PYTHONPATH=%PYTHONPATH%"
 exit /b 0
 
-:append_env
+:prepend_env
 set "__var=%~1"
 set "__val=%~2"
 if "%__val%"=="" exit /b 0
@@ -73,9 +73,21 @@ if not defined %__var% (
 )
 
 set "__cur=!%__var%!"
-set "__needle=;%__val%;"
-set "__haystack=;!__cur!;"
-if not "!__haystack:%__needle%=!"=="!__haystack!" exit /b 0
+set "__new="
 
-set "%__var%=!__cur!;%__val%"
+for %%P in ("!__cur:;=" "!") do (
+    if not "%%~P"=="%__val%" (
+        if defined __new (
+            set "__new=!__new!;%%~P"
+        ) else (
+            set "__new=%%~P"
+        )
+    )
+)
+
+if defined __new (
+    set "%__var%=%__val%;!__new!"
+) else (
+    set "%__var%=%__val%"
+)
 exit /b 0

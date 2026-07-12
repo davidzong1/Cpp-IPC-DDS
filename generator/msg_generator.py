@@ -31,6 +31,8 @@ class FieldInfo:
     cpp_type: str  # C++类型
     is_array: bool  # 是否为数组
     is_string: bool  # 是否为字符串
+    is_fixed_array: bool = False  # 是否为固定大小数组，如 int32[10]
+    array_size: Optional[int] = None  # 固定数组长度
     is_nested: bool = False  # 是否为自定义消息类型
     nested_info: Optional[NestedTypeInfo] = None
 
@@ -102,26 +104,59 @@ class MessageGenerator:
         return "\n".join(normalized_lines)
 
     def _get_type_index(self, field_type: str) -> int:
-        is_array = field_type.endswith("[]")
-        base_type = field_type[:-2] if is_array else field_type
+        base_type, is_array, _, _ = self._parse_field_type(field_type)
         if base_type in self.nested_types:
             return self.NESTED_ARRAY_TYPE_INDEX if is_array else self.NESTED_TYPE_INDEX
-        if field_type not in self.TYPE_INDEX:
+        type_key = f"{base_type}[]" if is_array else base_type
+        if type_key not in self.TYPE_INDEX:
             raise ValueError(f"Unsupported type index: {field_type}")
-        return self.TYPE_INDEX[field_type]
+        return self.TYPE_INDEX[type_key]
 
     @staticmethod
     def _snake_to_pascal(name: str) -> str:
         return "".join([part.capitalize() for part in name.split("_") if part])
 
+    @staticmethod
+    def _parse_field_type(field_type: str) -> Tuple[str, bool, bool, Optional[int]]:
+        fixed_array_match = re.fullmatch(r"(.+)\[(\d+)\]", field_type)
+        if fixed_array_match:
+            array_size = int(fixed_array_match.group(2))
+            if array_size <= 0:
+                raise ValueError(f"Fixed array size must be positive: {field_type}")
+            return fixed_array_match.group(1), True, True, array_size
+        if field_type.endswith("[]"):
+            return field_type[:-2], True, False, None
+        return field_type, False, False, None
+
+    def _cpp_array_type(self, cpp_base_type: str, is_fixed_array: bool, array_size: Optional[int]) -> str:
+        if is_fixed_array:
+            return f"std::array<{cpp_base_type}, {array_size}>"
+        return f"std::vector<{cpp_base_type}>"
+
+    def _cpp_base_type(self, field: FieldInfo) -> str:
+        if field.is_nested and field.nested_info:
+            return f"dzIPC::Msg::{field.nested_info.class_name}"
+        return self.TYPE_MAPPING[field.base_type]
+
+    def _array_count_expr(self, field: FieldInfo) -> str:
+        return str(field.array_size) if field.is_fixed_array else f"int32_t({field.field_name}.size())"
+
+    def _fixed_array_count_check(self, field: FieldInfo) -> str:
+        if not field.is_fixed_array:
+            return ""
+        return (
+            f"          if ({field.field_name}_count != {field.array_size}) {{\n"
+            f"              throw std::runtime_error(\"Fixed array field {field.field_name} expected size {field.array_size}\");\n"
+            f"          }}"
+        )
+
     def _resolve_field_info(self, field_type: str, field_name: str) -> FieldInfo:
-        is_array = field_type.endswith("[]")
-        base_type = field_type[:-2] if is_array else field_type
+        base_type, is_array, is_fixed_array, array_size = self._parse_field_type(field_type)
         is_string = base_type == "string"
 
         if base_type in self.TYPE_MAPPING:
             cpp_base_type = self.TYPE_MAPPING[base_type]
-            cpp_type = f"std::vector<{cpp_base_type}>" if is_array else cpp_base_type
+            cpp_type = self._cpp_array_type(cpp_base_type, is_fixed_array, array_size) if is_array else cpp_base_type
             return FieldInfo(
                 field_type=field_type,
                 base_type=base_type,
@@ -129,6 +164,8 @@ class MessageGenerator:
                 cpp_type=cpp_type,
                 is_array=is_array,
                 is_string=is_string,
+                is_fixed_array=is_fixed_array,
+                array_size=array_size,
             )
 
         nested_info = self.nested_types.get(base_type)
@@ -136,7 +173,7 @@ class MessageGenerator:
             if self.current_base_name and nested_info.field_type == self.current_base_name:
                 raise ValueError(f"Recursive nested message is not supported: {base_type}")
             cpp_base_type = f"dzIPC::Msg::{nested_info.class_name}"
-            cpp_type = f"std::vector<{cpp_base_type}>" if is_array else cpp_base_type
+            cpp_type = self._cpp_array_type(cpp_base_type, is_fixed_array, array_size) if is_array else cpp_base_type
             return FieldInfo(
                 field_type=field_type,
                 base_type=base_type,
@@ -144,6 +181,8 @@ class MessageGenerator:
                 cpp_type=cpp_type,
                 is_array=is_array,
                 is_string=False,
+                is_fixed_array=is_fixed_array,
+                array_size=array_size,
                 is_nested=True,
                 nested_info=nested_info,
             )
@@ -181,9 +220,11 @@ class MessageGenerator:
         return f"""#pragma once
 #include <string>
 #include <vector>
+#include <array>
 #include <cstring>
 #include <cstdint>
 #include <cstddef>
+#include <stdexcept>
 #include "ipc_msg/ipc_msg_base/ipc_msg_base.hpp"
 {nested_include_lines}namespace dzIPC::Msg {{
 class {class_name} : public IpcMsgBase
@@ -222,7 +263,7 @@ public:
                 lines.append(f"          ipc::buffer {field.field_name}_serialized = {field.field_name}.serialize();")
                 lines.append(f"          int32_t {field.field_name}_size = int32_t({field.field_name}_serialized.size());")
             elif field.is_nested and field.is_array:
-                lines.append(f"          int32_t {field.field_name}_count = int32_t({field.field_name}.size());")
+                lines.append(f"          int32_t {field.field_name}_count = {self._array_count_expr(field)};")
                 lines.append(f"          std::vector<ipc::buffer> {field.field_name}_serialized;")
                 lines.append(f"          std::vector<int32_t> {field.field_name}_sizes;")
                 lines.append(f"          {field.field_name}_serialized.reserve({field.field_name}_count);")
@@ -240,7 +281,7 @@ public:
                 )
             elif field.is_array and field.is_string:
                 lines.append(
-                    f"          int32_t {field.field_name}_count = int32_t({field.field_name}.size());"
+                    f"          int32_t {field.field_name}_count = {self._array_count_expr(field)};"
                 )
                 lines.append(f"         int32_t {field.field_name}_total_size_ = 0;")
                 lines.append(f"         for (const auto& str : {field.field_name}) {{")
@@ -249,17 +290,17 @@ public:
                 )
                 lines.append(f"         }}")
             elif field.is_array:
-                base_type = field.cpp_type[12:-1]  # 从 std::vector<type> 中提取 type
+                base_type = self._cpp_base_type(field)
                 if base_type == "bool":
                     lines.append(
-                        f"          int32_t {field.field_name}_count = int32_t({field.field_name}.size());"
+                        f"          int32_t {field.field_name}_count = {self._array_count_expr(field)};"
                     )
                     lines.append(
                         f"          int32_t {field.field_name}_size = int32_t({field.field_name}_count * sizeof(bool));"
                     )
                 else:
                     lines.append(
-                        f"          int32_t {field.field_name}_count = int32_t({field.field_name}.size());"
+                        f"          int32_t {field.field_name}_count = {self._array_count_expr(field)};"
                     )
                     lines.append(
                         f"          int32_t {field.field_name}_size = int32_t({field.field_name}_count * sizeof({base_type}));"
@@ -405,7 +446,7 @@ public:
                 )
             elif field.is_array:
                 # 基本类型数组
-                base_type = field.cpp_type[12:-1]  # 从 std::vector<type> 中提取 type
+                base_type = self._cpp_base_type(field)
                 # 特殊处理 std::vector<bool>
                 if base_type == "bool":
                     lines.extend(
@@ -524,8 +565,15 @@ public:
                         f"          offset += sizeof(uint8_t); // 跳过类型标识",
                         f"          int32_t {field.field_name}_count;",
                         f"          this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_count), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_count));",
-                        f"          {field.field_name}.clear();",
-                        f"          {field.field_name}.resize({field.field_name}_count);",
+                    ]
+                )
+                if field.is_fixed_array:
+                    lines.append(self._fixed_array_count_check(field))
+                else:
+                    lines.append(f"          {field.field_name}.clear();")
+                    lines.append(f"          {field.field_name}.resize({field.field_name}_count);")
+                lines.extend(
+                    [
                         f"          for (int32_t i = 0; i < {field.field_name}_count; ++i) {{",
                         f"              int32_t nested_size;",
                         f"              this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&nested_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(nested_size));",
@@ -567,21 +615,28 @@ public:
                         f"        offset += sizeof(uint8_t); // 跳过类型标识",
                         f"        int32_t {field.field_name}_count;",
                         f"        this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_count), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_count));",
-                        f"        {field.field_name}.clear();",
-                        f"        {field.field_name}.reserve({field.field_name}_count);",
+                    ]
+                )
+                if field.is_fixed_array:
+                    lines.append(self._fixed_array_count_check(field))
+                else:
+                    lines.append(f"        {field.field_name}.clear();")
+                    lines.append(f"        {field.field_name}.reserve({field.field_name}_count);")
+                lines.extend(
+                    [
                         f"        for (int32_t i = 0; i < {field.field_name}_count; ++i) {{",
                         f"            int32_t str_size;",
                         f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&str_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(str_size));",
                         f"            std::string str(str_size, '\\0');",
                         f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t*>(str.data()), static_cast<const uint8_t *>(buffer.data()), offset, str_size);",
-                        f"            {field.field_name}.emplace_back(std::move(str));",
+                        f"            {'{field}[i] = std::move(str);'.format(field=field.field_name) if field.is_fixed_array else field.field_name + '.emplace_back(std::move(str));'}",
                         f"        }}",
                         "",
                     ]
                 )
             elif field.is_array:
                 # 基本类型数组
-                base_type = field.cpp_type[12:-1]  # 从 std::vector<type> 中提取 type
+                base_type = self._cpp_base_type(field)
                 # 特殊处理 std::vector<bool>
                 if base_type == "bool":
                     lines.extend(
@@ -593,8 +648,15 @@ public:
                             f"          offset += sizeof(uint8_t); // 跳过类型标识",
                             f"          int32_t {field.field_name}_count;",
                             f"          this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_count), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_count));",
-                            f"          {field.field_name}.clear();",
-                            f"          {field.field_name}.resize({field.field_name}_count);",
+                        ]
+                    )
+                    if field.is_fixed_array:
+                        lines.append(self._fixed_array_count_check(field))
+                    else:
+                        lines.append(f"          {field.field_name}.clear();")
+                        lines.append(f"          {field.field_name}.resize({field.field_name}_count);")
+                    lines.extend(
+                        [
                             f"          if ({field.field_name}_count > 0) {{",
                             f"              std::vector<uint8_t> bool_byte({field.field_name}_count, 0);",
                             f"              this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(bool_byte.data()), static_cast<const uint8_t *>(buffer.data()), offset, {field.field_name}_count);",
@@ -615,7 +677,14 @@ public:
                             f"          offset += sizeof(uint8_t); // 跳过类型标识",
                             f"          int32_t {field.field_name}_count;",
                             f"          this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_count), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_count));",
-                            f"          {field.field_name}.resize({field.field_name}_count);",
+                        ]
+                    )
+                    if field.is_fixed_array:
+                        lines.append(self._fixed_array_count_check(field))
+                    else:
+                        lines.append(f"          {field.field_name}.resize({field.field_name}_count);")
+                    lines.extend(
+                        [
                             f"          if ({field.field_name}_count > 0) {{",
                             f"              this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>({field.field_name}.data()), static_cast<const uint8_t *>(buffer.data()), offset, {field.field_name}_count * sizeof({base_type}));",
                             f"          }}",

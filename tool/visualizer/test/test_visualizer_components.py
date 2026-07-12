@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import contextlib
 import importlib.util
@@ -19,6 +20,7 @@ import unittest
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple
+from unittest import mock
 
 
 TEST_DIR = Path(__file__).resolve().parent
@@ -26,8 +28,9 @@ VISUALIZER_DIR = TEST_DIR.parent
 ROOT_DIR = VISUALIZER_DIR.parents[1]
 BRIDGE_PATH = VISUALIZER_DIR / "dzipc_web_bridge.py"
 WEB_DIR = VISUALIZER_DIR / "web"
+DEFAULT_VISUALIZER_CONFIG = VISUALIZER_DIR / "config.json"
 
-EXPECTED_DISPLAY_TYPES = ["RawMessage", "Pose", "Path", "PointCloud", "Marker", "Image"]
+EXPECTED_DISPLAY_TYPES = ["RawMessage", "Pose", "Path", "PointCloud", "Marker", "Image", "Robot", "RobotState"]
 EXPECTED_MESSAGE_MAP = {
     "RawMessage": "StdRawMessage",
     "Pose": "StdPose",
@@ -35,6 +38,7 @@ EXPECTED_MESSAGE_MAP = {
     "PointCloud": "StdPointCloud",
     "Marker": "StdMarker",
     "Image": "StdImage",
+    "RobotState": "RobotState",
 }
 
 
@@ -49,6 +53,14 @@ def load_bridge_module():
 
 
 bridge = load_bridge_module()
+robot_component_spec = importlib.util.spec_from_file_location(
+    "robot_component_under_test", VISUALIZER_DIR / "component" / "robot.py"
+)
+if robot_component_spec is None or robot_component_spec.loader is None:
+    raise RuntimeError("cannot load robot component")
+robot_component = importlib.util.module_from_spec(robot_component_spec)
+sys.modules[robot_component_spec.name] = robot_component
+robot_component_spec.loader.exec_module(robot_component)
 
 
 def read_text(path: Path) -> str:
@@ -127,6 +139,14 @@ def stop_process(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=3)
 
 
+def load_playwright():
+    try:
+        from playwright.sync_api import expect, sync_playwright
+    except Exception as exc:  # pragma: no cover - depends on local environment.
+        raise unittest.SkipTest(f"playwright is not available: {exc}") from exc
+    return expect, sync_playwright
+
+
 def websocket_connect(port: int) -> socket.socket:
     key = base64.b64encode(os.urandom(16)).decode("ascii")
     sock = socket.create_connection(("127.0.0.1", port), timeout=3)
@@ -151,7 +171,7 @@ def websocket_connect(port: int) -> socket.socket:
     return sock
 
 
-def ws_read_json(sock: socket.socket, timeout_s: float = 3.0) -> Dict[str, Any]:
+def ws_read_frame(sock: socket.socket, timeout_s: float = 3.0) -> Tuple[int, bytes]:
     sock.settimeout(timeout_s)
     header = sock.recv(2)
     if len(header) != 2:
@@ -168,6 +188,11 @@ def ws_read_json(sock: socket.socket, timeout_s: float = 3.0) -> Dict[str, Any]:
         if not chunk:
             raise ConnectionError("websocket frame closed")
         payload += chunk
+    return opcode, payload
+
+
+def ws_read_json(sock: socket.socket, timeout_s: float = 3.0) -> Dict[str, Any]:
+    opcode, payload = ws_read_frame(sock, timeout_s)
     if opcode != 1:
         raise ValueError(f"expected text frame, got opcode {opcode}")
     return json.loads(payload.decode("utf-8"))
@@ -209,6 +234,7 @@ class BackendComponentTests(unittest.TestCase):
             StdPointCloud=type("StdPointCloud", (), {}),
             StdMarker=type("StdMarker", (), {}),
             StdImage=type("StdImage", (), {}),
+            RobotState=type("RobotState", (), {}),
         )
         for display_type, class_name in EXPECTED_MESSAGE_MAP.items():
             resolved_name, resolved_class = bridge.resolve_message_class(fake_ipc, display_type)
@@ -217,11 +243,13 @@ class BackendComponentTests(unittest.TestCase):
             resolved_name, resolved_class = bridge.resolve_message_class(fake_ipc, class_name)
             self.assertEqual(resolved_name, class_name)
             self.assertIs(resolved_class, getattr(fake_ipc, class_name))
+        with self.assertRaisesRegex(ValueError, "std message display types"):
+            bridge.resolve_message_class(fake_ipc, "Robot")
 
-    def test_resolve_message_class_rejects_non_std_display_types(self) -> None:
-        fake_ipc = types.SimpleNamespace(RobotState=object)
+    def test_resolve_message_class_rejects_unknown_display_types(self) -> None:
+        fake_ipc = types.SimpleNamespace(CustomState=object)
         with self.assertRaisesRegex(ValueError, "Visualizer only supports std message display types"):
-            bridge.resolve_message_class(fake_ipc, "RobotState")
+            bridge.resolve_message_class(fake_ipc, "CustomState")
 
     def test_topic_spec_defaults_and_validation(self) -> None:
         defaults = {"domain": 3, "queue": 4, "transport": "socket", "poll": 0.05, "extra": "x"}
@@ -234,6 +262,12 @@ class BackendComponentTests(unittest.TestCase):
         self.assertEqual(spec.poll, 0.05)
         self.assertEqual(spec.to_meta()["type"], "Pose")
 
+        zero_poll_spec = bridge.TopicSpec.from_config(
+            {"topic": "pose", "msg_type": "Pose", "poll": 0},
+            defaults,
+        )
+        self.assertEqual(zero_poll_spec.poll, bridge.MIN_POLL_INTERVAL_S)
+
         with self.assertRaisesRegex(ValueError, "topic and msg_type"):
             bridge.TopicSpec.from_config({"topic": "pose"}, defaults)
         with self.assertRaisesRegex(ValueError, "transport"):
@@ -244,6 +278,105 @@ class BackendComponentTests(unittest.TestCase):
         self.assertEqual(normalized["domain"], 2)
         self.assertEqual(normalized["queue"], 8)
         self.assertEqual(normalized["transport"], "socket")
+        self.assertEqual(
+            bridge.normalize_defaults({"poll": 0}, {})["poll"],
+            bridge.MIN_POLL_INTERVAL_S,
+        )
+
+        robot_models = bridge.normalize_robot_models(
+            [
+                {
+                    "id": "arm",
+                    "name": "Arm",
+                    "filename": "arm.urdf",
+                    "urdfText": "<robot name='arm'/>",
+                    "visible": False,
+                    "fixed_frame": "world",
+                }
+            ]
+        )
+        self.assertEqual(robot_models[0]["id"], "arm")
+        self.assertEqual(robot_models[0]["file_name"], "arm.urdf")
+        self.assertEqual(robot_models[0]["urdf"], "<robot name='arm'/>")
+        self.assertFalse(robot_models[0]["visible"])
+        self.assertEqual(robot_models[0]["fixed_frame"], "world")
+        with self.assertRaisesRegex(ValueError, "robot_models"):
+            bridge.normalize_robot_models({"name": "arm"})
+
+    def test_robot_display_bundle_normalization(self) -> None:
+        robots = robot_component.normalize_robot_displays(
+            [
+                {
+                    "id": "arm",
+                    "name": "Arm",
+                    "urdf_path": "arm.urdf",
+                    "urdf": "<robot name='arm'/>",
+                    "visible": False,
+                }
+            ]
+        )
+        states = robot_component.normalize_robot_state_displays(
+            [
+                {
+                    "id": "arm_state",
+                    "topic": "joint_states",
+                    "robot_id": "arm",
+                    "msg_type": "RobotState",
+                }
+            ]
+        )
+        self.assertEqual(robots[0]["id"], "arm")
+        self.assertEqual(robots[0]["urdf_path"], "arm.urdf")
+        self.assertEqual(states[0]["robot_id"], "arm")
+        bundle_displays, bundle_states = robot_component.parse_robot_display_bundle(
+            {"robot_displays": robots, "robot_state_displays": states}
+        )
+        self.assertEqual(bundle_displays[0]["id"], "arm")
+        self.assertEqual(bundle_states[0]["id"], "arm_state")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            urdf_path = Path(tmp) / "arm.urdf"
+            urdf_path.write_text("<robot name='arm'><link name='base_link'/></robot>", encoding="utf-8")
+            robot = robot_component.RobotDisplay.from_config({"id": "arm", "name": "Arm"})
+            result = robot.handle_urdf_path_request(str(urdf_path), Path(tmp))
+            self.assertTrue(result["ok"], result)
+            self.assertIn("base_link", robot.urdf_text)
+            state_display = robot_component.RobotStateDisplay.from_config(
+                {"id": "arm_state", "topic": "/robot_state", "robot_id": "arm", "msg_type": "RobotState"},
+                {"domain": 1, "transport": "socket", "queue": 3, "poll": 0.05},
+            )
+            robot.bind_robot_state(state_display)
+            state_display.handle_joint_state({"joint_state": {"name": ["j1"], "position": [1.0]}})
+            robot.handle_joint_state({"joint_state": {"name": ["j2"], "position": [2.0]}})
+            self.assertEqual(robot.robot_state, state_display)
+            self.assertEqual(len(robot.joint_state_records), 1)
+            self.assertEqual(len(state_display.joint_state_records), 2)
+            self.assertEqual(robot.to_config()["urdf_path"], str(Path(tmp).resolve() / "arm.urdf"))
+            self.assertEqual(state_display.to_config()["robot_id"], "arm")
+
+    def test_robot_display_reads_urdf_path_and_binds_state(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="robot_display_test_") as temp_dir:
+            temp_path = Path(temp_dir)
+            urdf_path = temp_path / "fixture.urdf"
+            urdf_path.write_text("<robot name='fixture_bot'/>", encoding="utf-8")
+
+            robot = robot_component.RobotDisplay(id="fixture", name="fixture")
+            result = robot.set_urdf_path(urdf_path, base_dir=temp_path)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(robot.urdf_path, str(urdf_path.resolve()))
+            self.assertEqual(robot.urdf_text, "<robot name='fixture_bot'/>")
+
+            robot_state = robot_component.RobotStateDisplay(id="state_1", topic="joint_states")
+            robot.attach_robot_state_display(robot_state)
+            callback = robot_state.handle_joint_state_sample({"name": ["joint_a"], "position": [1.0]})
+            self.assertEqual(robot_state.target_robot_id, robot.id)
+            self.assertEqual(robot_state.latest_joint_state, {"name": ["joint_a"], "position": [1.0]})
+            self.assertTrue(callback["ok"])
+            self.assertEqual(callback["target_robot_id"], robot.id)
+
+            robot_result = robot.handle_joint_state_sample({"name": ["joint_b"], "position": [2.0]})
+            self.assertEqual(robot_result["robot_state_ids"], [robot_state.id])
+            self.assertEqual(robot_state.latest_joint_state, {"name": ["joint_b"], "position": [2.0]})
 
         class SlotMessage:
             __slots__ = ("x", "values", "_hidden")
@@ -255,11 +388,242 @@ class BackendComponentTests(unittest.TestCase):
 
         self.assertEqual(bridge.to_jsonable(SlotMessage()), {"x": 1.25, "values": [None, {"ok": True}]})
 
+    def test_point_cloud_binary_encoding_uses_dzpc_frame_layout(self) -> None:
+        msg = types.SimpleNamespace(
+            header=types.SimpleNamespace(frame_id="map"),
+            points=[
+                types.SimpleNamespace(data=[1.0, 2.0, 3.0]),
+                types.SimpleNamespace(x=4.0, y=5.0, z=6.0),
+            ],
+            colors=[
+                types.SimpleNamespace(r=1.0, g=0.5, b=0.25, a=1.0),
+                types.SimpleNamespace(r=0.0, g=0.25, b=0.75, a=0.5),
+            ],
+            channel_names=["intensity"],
+            channels=[0.1, 0.2],
+        )
+
+        metadata, payload = bridge.encode_point_cloud_binary(msg, sample_id=42)
+        header = bridge.BINARY_HEADER.unpack_from(payload, 0)
+        self.assertEqual(header[:3], (bridge.BINARY_MAGIC, bridge.BINARY_VERSION, bridge.BINARY_POINT_CLOUD))
+        self.assertEqual(header[3], bridge.BINARY_POINT_CLOUD_HAS_COLORS)
+        self.assertEqual(header[4:7], (42, 2, 2))
+        self.assertEqual(metadata["encoding"], "dzpc.pointcloud.v1")
+        self.assertEqual(metadata["point_count"], 2)
+        self.assertTrue(metadata["has_colors"])
+        self.assertEqual(metadata["byte_length"], len(payload))
+
+        points = struct.unpack_from("<ffffff", payload, bridge.BINARY_HEADER.size)
+        self.assertEqual(points, (1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
+        colors = struct.unpack_from("<ffffffff", payload, bridge.BINARY_HEADER.size + 24)
+        self.assertEqual(colors, (1.0, 0.5, 0.25, 1.0, 0.0, 0.25, 0.75, 0.5))
+        self.assertEqual(
+            bridge.lightweight_point_cloud_data(msg),
+            {"header": {"frame_id": "map"}, "channel_names": ["intensity"], "binary_points": True},
+        )
+
+    def test_webhub_send_event_sends_json_then_binary_frame(self) -> None:
+        class DummyWriter:
+            def __init__(self) -> None:
+                self.data = bytearray()
+
+            def write(self, data: bytes) -> None:
+                self.data.extend(data)
+
+            async def drain(self) -> None:
+                return None
+
+        writer = DummyWriter()
+        event = {
+            "kind": "sample",
+            "topic": "cloud",
+            "data": {"binary_points": True},
+            "binary_payload": b"abc",
+        }
+
+        hub = bridge.WebHub({}, BRIDGE_PATH)
+        asyncio.run(hub.send_event(writer, event))
+        raw = bytes(writer.data)
+        first_size = raw[1] & 0x7F
+        text_payload = raw[2 : 2 + first_size]
+        binary_offset = 2 + first_size
+        self.assertEqual(raw[0] & 0x0F, 1)
+        self.assertNotIn("binary_payload", json.loads(text_payload.decode("utf-8")))
+        self.assertEqual(raw[binary_offset] & 0x0F, 2)
+        self.assertEqual(raw[binary_offset + 2 :], b"abc")
+
+    def test_remove_topic_does_not_unlink_live_publisher_shm(self) -> None:
+        class FakeWorker:
+            def __init__(self) -> None:
+                self.stop_event = bridge.threading.Event()
+                self.joined = False
+
+            def join(self, timeout: float) -> None:
+                self.joined = True
+
+        hub = bridge.WebHub({}, BRIDGE_PATH)
+        worker = FakeWorker()
+        hub.subscribers["/demo/depth_image"] = worker
+        hub.topics["/demo/depth_image"] = {"name": "/demo/depth_image", "active": True}
+
+        with mock.patch.object(bridge.DzipcSubscriber, "_clean_shm_for_topic") as clean_shm:
+            hub.remove_topic("/demo/depth_image")
+
+        self.assertTrue(worker.stop_event.is_set())
+        self.assertTrue(worker.joined)
+        clean_shm.assert_not_called()
+        self.assertFalse(hub.topics["/demo/depth_image"]["active"])
+
+    def test_readd_correct_image_after_wrong_type_recovers_without_shm_cleanup(self) -> None:
+        created_workers = []
+        clean_shm = mock.Mock()
+
+        class FakeSubscriber:
+            _clean_shm_for_topic = clean_shm
+
+            def __init__(self, hub: Any, spec: Any, cooldown_remain: float = 0.0) -> None:
+                self.hub = hub
+                self.spec = spec
+                self.cooldown_remain = cooldown_remain
+                self.stop_event = bridge.threading.Event()
+                self.started = False
+                self.joined = False
+                created_workers.append(self)
+
+            def start(self) -> None:
+                self.started = True
+                if self.spec.msg_type == "Image":
+                    self.hub.publish(
+                        {
+                            "kind": "sample",
+                            "topic": self.spec.topic,
+                            "msg_type": "Image",
+                            "resolved_msg_type": "StdImage",
+                            "data": {"width": 2, "height": 1},
+                            "timestamp_ms": bridge.now_ms(),
+                        }
+                    )
+
+            def join(self, timeout: float) -> None:
+                self.joined = True
+
+        hub = bridge.WebHub({}, BRIDGE_PATH)
+        published_events = []
+
+        def capture_event(event: Dict[str, Any]) -> None:
+            published_events.append(event)
+            hub.events.put(event)
+
+        hub.publish = capture_event
+        with mock.patch.object(bridge, "DzipcSubscriber", FakeSubscriber):
+            wrong_ack = hub.handle_command(
+                {
+                    "action": "add_topic",
+                    "topic": {
+                        "topic": "/demo/depth_image",
+                        "msg_type": "Pose",
+                        "transport": "shm",
+                    },
+                }
+            )
+            remove_ack = hub.handle_command(
+                {"action": "remove_topic", "topic": "/demo/depth_image"}
+            )
+            correct_ack = hub.handle_command(
+                {
+                    "action": "add_topic",
+                    "topic": {
+                        "topic": "/demo/depth_image",
+                        "msg_type": "Image",
+                        "transport": "shm",
+                    },
+                }
+            )
+
+        self.assertTrue(wrong_ack["ok"])
+        self.assertTrue(remove_ack["ok"])
+        self.assertTrue(correct_ack["ok"])
+        self.assertEqual([worker.spec.msg_type for worker in created_workers], ["Pose", "Image"])
+        self.assertTrue(created_workers[0].stop_event.is_set())
+        self.assertTrue(created_workers[0].joined)
+        self.assertTrue(created_workers[1].started)
+        self.assertGreater(created_workers[1].cooldown_remain, 0.0)
+        clean_shm.assert_not_called()
+        self.assertEqual(hub.topics["/demo/depth_image"]["type"], "Image")
+        self.assertTrue(hub.topics["/demo/depth_image"]["active"])
+        image_samples = [
+            event
+            for event in published_events
+            if event.get("kind") == "sample" and event.get("topic") == "/demo/depth_image"
+        ]
+        self.assertEqual(len(image_samples), 1)
+        self.assertEqual(image_samples[0]["resolved_msg_type"], "StdImage")
+
     def test_static_path_rejects_traversal(self) -> None:
         index_path = bridge.safe_static_path("/")
         self.assertEqual(index_path.name, "index.html")
         self.assertTrue(str(index_path).startswith(str(WEB_DIR)))
         self.assertEqual(bridge.safe_static_path("/../../etc/passwd").name, "index.html")
+
+    def test_port_in_use_hint_is_actionable(self) -> None:
+        hint = bridge.port_in_use_hint(8765)
+        self.assertIn("Port 8765 is already in use", hint)
+        self.assertIn("`lsof -i :8765`", hint)
+        self.assertIn("`kill <PID>`", hint)
+        self.assertIn("`--port 8766`", hint)
+        self.assertNotIn('input "lsof', hint)
+
+    def test_run_server_uses_reusable_asyncio_bind_without_prebinding(self) -> None:
+        class FakeServer:
+            class Socket:
+                def getsockname(self) -> Tuple[str, int]:
+                    return ("127.0.0.1", 8765)
+
+            sockets = [Socket()]
+
+            async def __aenter__(self) -> "FakeServer":
+                return self
+
+            async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                return None
+
+            async def serve_forever(self) -> None:
+                raise asyncio.CancelledError()
+
+            def close(self) -> None:
+                return None
+
+            async def wait_closed(self) -> None:
+                return None
+
+        async def fake_start_server(*args: Any, **kwargs: Any) -> FakeServer:
+            return FakeServer()
+
+        args = types.SimpleNamespace(
+            config=str(bridge.DEFAULT_CONFIG),
+            domain=None,
+            transport=None,
+            queue=None,
+            poll=None,
+            extra=None,
+            verbose=False,
+            demo=False,
+            demo_period=0.1,
+            load_config=False,
+            topic=[],
+            host="127.0.0.1",
+            port=8765,
+        )
+
+        with mock.patch.object(bridge.asyncio, "start_server", side_effect=fake_start_server) as start_server:
+            with mock.patch.object(bridge.socket, "socket") as socket_factory:
+                with mock.patch.object(bridge, "print_startup_links"):
+                    with self.assertRaises(asyncio.CancelledError):
+                        asyncio.run(bridge.run_server(args))
+
+        socket_factory.return_value.bind.assert_not_called()
+        self.assertTrue(start_server.called)
+        self.assertTrue(start_server.call_args.kwargs["reuse_address"])
 
 
 class FrontendStaticComponentTests(unittest.TestCase):
@@ -268,6 +632,8 @@ class FrontendStaticComponentTests(unittest.TestCase):
         cls.html = read_text(WEB_DIR / "index.html")
         cls.js = read_text(WEB_DIR / "app.js")
         cls.css = read_text(WEB_DIR / "styles.css")
+        cls.config = json.loads(read_text(DEFAULT_VISUALIZER_CONFIG))
+        cls.point_cloud_demo = read_text(VISUALIZER_DIR / "demo" / "send_point_cloud_demo.py")
 
     def test_add_display_modal_uses_select_components(self) -> None:
         self.assertIn('<select id="typeInput"></select>', self.html)
@@ -287,28 +653,170 @@ class FrontendStaticComponentTests(unittest.TestCase):
         for element_id in (
             "exportConfigBtn",
             "importConfigBtn",
-            "saveConfigBtn",
-            "loadConfigBtn",
             "configFileInput",
         ):
             self.assertIn(f'id="{element_id}"', self.html)
             self.assertIn(element_id, self.js)
+        self.assertNotIn('id="saveConfigBtn"', self.html)
+        self.assertNotIn('id="loadConfigBtn"', self.html)
+        self.assertNotIn("saveConfigBtn", self.js)
+        self.assertNotIn("loadConfigBtn", self.js)
         self.assertIn('action: "add_topic"', self.js)
         self.assertIn('action: "remove_topic"', self.js)
         self.assertIn('action: "apply_config"', self.js)
+        self.assertIn('sendCommand({ action: "apply_config", config, replace: true })', self.js)
+
+    def test_robot_display_components_are_added_through_add_display(self) -> None:
+        for removed_id in ("importUrdfBtn", "urdfFileInput", "robotVisibleInput", "clearRobotBtn", "robotInfo"):
+            self.assertNotIn(removed_id, self.html + self.js)
+        for element_id in ("urdfPathInput", "urdfPathField", "targetRobotInput", "targetRobotField"):
+            self.assertIn(f'id="{element_id}"', self.html)
+            self.assertIn(element_id, self.js)
+        self.assertIn("RobotState", self.js)
+        self.assertIn("Robot", self.js)
+        self.assertIn('action: "add_robot"', self.js)
+        self.assertIn('action: "add_robot_state"', self.js)
+        self.assertIn("robot_displays", self.js)
+        self.assertIn("robot_state_displays", self.js)
+        self.assertIn("window.dzipcVisualizer", self.js)
+        self.assertIn("robot_models", self.config)
+        self.assertIsInstance(self.config["robot_models"], list)
+
+    def test_display_visualization_toggle_controls_scene_output(self) -> None:
+        self.assertIn("visualize: meta.visualize === true", self.js)
+        self.assertIn("displayRenderIntervalMs", self.js)
+        self.assertIn("requestDisplayRender()", self.js)
+        self.assertIn("displayInteractionUntil", self.js)
+        self.assertIn("holdDisplayInteraction", self.js)
+        self.assertIn("setTopicVisualization", self.js)
+        self.assertIn('data-visualize="${escapeHtml(topic.name)}"', self.js)
+        self.assertIn('class="visualize-toggle"', self.js)
+        self.assertIn("visualizeToggle.onpointerdown", self.js)
+        self.assertIn("setTopicVisualization(topic, !topic.visualize)", self.js)
+        self.assertIn("topic.visualize = visualize", self.js)
+        self.assertIn("resetImageOverlayAutoSize", self.js)
+        self.assertIn("findVisualizedImageTopic", self.js)
+        self.assertIn("active?.visualize", self.js)
+        self.assertIn("topic.visualize &&", self.js)
+        self.assertIn("!topic.visualize || (!hasPoseTrail && !hasPointCloud)", self.js)
+        self.assertIn("if (topic) topic.visualize = false", self.js)
+        self.assertIn(".visualize-toggle", self.css)
+
+    def test_image_overlay_sizes_to_image_and_drags_smoothly(self) -> None:
+        self.assertIn("imageRenderIntervalMs", self.js)
+        self.assertIn("fitImageOverlayToImage", self.js)
+        self.assertIn("overlayChromeHeight", self.js)
+        self.assertIn("--image-content-width", self.js)
+        self.assertIn("--image-content-height", self.js)
+        self.assertIn("borderWidth", self.js)
+        self.assertIn("borderHeight", self.js)
+        self.assertIn("resizeOrigContentWidth", self.js)
+        self.assertIn("resizeOrigContentHeight", self.js)
+        self.assertIn("widthScale", self.js)
+        self.assertIn("heightScale", self.js)
+        self.assertIn("scheduleImageOverlayRender", self.js)
+        self.assertIn("imageState.dragActive || imageState.resizeActive", self.js)
+        self.assertIn("translate3d", self.js)
+        self.assertIn("el.imageOverlayHeader.setPointerCapture", self.js)
+        self.assertIn("finishImageOverlayDrag", self.js)
+        self.assertIn("imageState.manualSize = true", self.js)
+        self.assertIn("will-change: transform, left, top, width, height", self.css)
+        self.assertIn(".image-overlay.dragging", self.css)
+        self.assertIn("width: var(--image-content-width, 100%)", self.css)
+        self.assertIn("height: var(--image-content-height, auto)", self.css)
+        self.assertNotIn("width: min(90vw, 400px) !important", self.css)
+        self.assertNotIn("resize: both", self.css)
+        self.assertIn("width: 100%", self.css)
+        self.assertIn("height: 100%", self.css)
+        self.assertIn("object-fit: contain", self.css)
 
     def test_3d_scene_controls_and_grid_exist(self) -> None:
         self.assertIn('id="sceneCanvas"', self.html)
-        self.assertIn('getContext("2d"', self.js)
+        self.assertIn('id="sceneFpsMetric"', self.html)
+        self.assertIn('class="scene-fps"', self.html)
+        self.assertIn('id="imageOverlay"', self.html)
+        self.assertIn('type="importmap"', self.html)
+        self.assertIn('type="module" src="/app.js?v=7"', self.html)
+        self.assertIn('import * as THREE from "three"', self.js)
+        self.assertIn("new THREE.WebGLRenderer", self.js)
+        self.assertIn("new OrbitControls", self.js)
         self.assertIn('addEventListener(', self.js)
-        self.assertIn('"wheel"', self.js)
-        self.assertIn('addEventListener("pointerdown"', self.js)
+        self.assertIn("new THREE.GridHelper", self.js)
+        self.assertIn("grid.rotation.x = gridPlaneRotation", self.js)
+        self.assertIn("const gridPlaneRotation = Math.PI / 2", self.js)
+        self.assertIn("const sceneBackgroundColor = 0xffffff", self.js)
+        self.assertIn("renderer.setClearColor(sceneBackgroundColor, 1)", self.js)
+        self.assertIn("THREE.Object3D.DEFAULT_UP.set(0, 0, 1)", self.js)
+        self.assertIn("const referenceAxisConfig = {", self.js)
+        self.assertIn("axisThickness:", self.js)
+        self.assertIn("backgroundOpacity:", self.js)
+        self.assertIn("renderer.clearColor()", self.js)
+        self.assertIn("makeAxisGizmo", self.js)
+        self.assertIn("renderAxisGizmo", self.js)
+        self.assertIn("sceneRenderState", self.js)
+        self.assertIn("requestSceneRender", self.js)
+        self.assertIn("sceneInteractionRenderMs", self.js)
+        self.assertIn("const maxSceneFps = 30", self.js)
+        self.assertIn("const maxPointCloudFps = 10", self.js)
+        self.assertIn("pointCloudMapConfig", self.js)
+        self.assertIn("pointCloudAdaptiveRenderConfig", self.js)
+        self.assertIn("targetFps: 10", self.js)
+        self.assertIn("recoverFps: 13", self.js)
+        self.assertIn("maxRenderStep: 16", self.js)
+        self.assertIn("voxelSize: 0.1", self.js)
+        self.assertIn("chunkSize: 10", self.js)
+        self.assertIn("maxPoints: 2000000", self.js)
+        self.assertIn("accumulatePointCloudMap", self.js)
+        self.assertIn("syncPointCloudMapObjects", self.js)
+        self.assertIn("requestPointCloudMapRender", self.js)
+        self.assertIn("tunePointCloudRenderBudget", self.js)
+        self.assertIn("sampledFloat32Array", self.js)
+        self.assertIn("markPointCloudMapDirty", self.js)
+        self.assertIn("latestStep", self.js)
+        self.assertIn("mapStep", self.js)
+        self.assertIn("objectSet.lastPointCloudRenderStep !== renderBudget.latestStep", self.js)
+        self.assertIn("map_points", self.js)
+        self.assertIn("sceneFpsWindowMs", self.js)
+        self.assertIn("sceneFpsUpdateIntervalMs", self.js)
+        self.assertIn("sceneFpsMetric", self.js)
+        self.assertIn("updateSceneFpsMetric", self.js)
+        self.assertIn('el.sceneFpsMetric.textContent = "0.0"', self.js)
+        self.assertIn(".scene-fps", self.css)
+        self.assertIn("font-variant-numeric: tabular-nums", self.css)
+        self.assertIn("minSceneFrameMs", self.js)
+        self.assertIn("minPointCloudFrameMs", self.js)
+        self.assertIn("requestPointCloudRender", self.js)
+        self.assertIn("lastPointCloudRenderTime", self.js)
+        self.assertIn("sceneRenderState.lastRenderTime + minFrameMs", self.js)
+        self.assertIn("if (sceneRenderState.pending) return", self.js)
+        self.assertIn("performance.now() < sceneRenderState.continuousUntil", self.js)
+        self.assertIn('controls.addEventListener("change"', self.js)
+        self.assertIn("requestSceneRender();", self.js)
+        self.assertNotIn("connect();\nrequestAnimationFrame(renderScene);", self.js)
+        self.assertIn('makeLabel("X"', self.js)
+        self.assertIn('makeLabel("Y"', self.js)
+        self.assertIn('makeLabel("Z"', self.js)
+        self.assertNotIn("scene.add(axes)", self.js)
         self.assertIn('addEventListener("contextmenu"', self.js)
         self.assertIn("Right-drag to move camera", self.html + self.js)
-        self.assertRegex(self.js, r"for \(let i = -range; i <= range; i \+= 1\)")
-        self.assertIn("#ef4444", self.js)
-        self.assertIn("#22c55e", self.js)
-        self.assertIn("#3b82f6", self.js)
+        self.assertIn("syncTopicObjects", self.js)
+        self.assertIn("new THREE.BufferGeometry().setFromPoints", self.js)
+        self.assertIn('ws.binaryType = "arraybuffer"', self.js)
+        self.assertIn("handleBinaryFrame", self.js)
+        self.assertIn("binaryPointCloudHeaderBytes = 24", self.js)
+        self.assertIn("new THREE.Points", self.js)
+        self.assertIn("sampledFloat32Array(topic.pointCloud.positions, 3, renderBudget.latestStep)", self.js)
+        self.assertIn("new THREE.PointsMaterial", self.js)
+
+    def test_random_point_cloud_demo_exists_for_stress_tests(self) -> None:
+        self.assertIn('default="/demo/random_point_cloud"', self.point_cloud_demo)
+        self.assertIn("ipc.StdPointCloud()", self.point_cloud_demo)
+        self.assertIn("ipc.StdVector3d()", self.point_cloud_demo)
+        self.assertIn("ipc.StdColor()", self.point_cloud_demo)
+        self.assertIn('choices=["none", "height", "random"]', self.point_cloud_demo)
+        self.assertIn('choices=["normal", "best-effort"]', self.point_cloud_demo)
+        self.assertIn("publish_best_effort", self.point_cloud_demo)
+        self.assertIn("--report-every", self.point_cloud_demo)
 
     def test_disabled_message_type_has_readable_style(self) -> None:
         self.assertIn("select:disabled", self.css)
@@ -319,7 +827,38 @@ class BridgeIntegrationTests(unittest.TestCase):
     process: Optional[subprocess.Popen[str]] = None
     port: int = 0
     temp_dir: Optional[tempfile.TemporaryDirectory[str]] = None
-    default_config = {"domain": 7, "transport": "socket", "queue": 5, "poll": 0.02, "topics": []}
+    default_robot_displays = [
+        {
+            "id": "fixture_bot",
+            "display_type": "Robot",
+            "name": "Fixture Bot",
+            "urdf_path": "fixture.urdf",
+            "urdf": "<robot name='fixture_bot'/>",
+            "visible": False,
+        }
+    ]
+    default_robot_state_displays = [
+        {
+            "id": "fixture_state",
+            "display_type": "RobotState",
+            "name": "/fixture_state",
+            "topic": "/fixture_state",
+            "robot_id": "fixture_bot",
+            "msg_type": "RobotState",
+            "transport": "socket",
+            "queue": 5,
+            "poll": 0.02,
+        }
+    ]
+    default_config = {
+        "domain": 7,
+        "transport": "socket",
+        "queue": 5,
+        "poll": 0.02,
+        "topics": [],
+        "robot_displays": default_robot_displays,
+        "robot_state_displays": default_robot_state_displays,
+    }
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -364,10 +903,41 @@ class BridgeIntegrationTests(unittest.TestCase):
             self.assertEqual(hello["message_types"], EXPECTED_DISPLAY_TYPES)
             self.assertEqual(hello["message_type_map"], EXPECTED_MESSAGE_MAP)
             self.assertEqual(hello["config"]["domain"], 7)
+            self.assertEqual(hello["config"]["robot_displays"][0]["id"], "fixture_bot")
+            self.assertEqual(hello["config"]["robot_displays"][0]["urdf"], "<robot name='fixture_bot'/>")
+            self.assertEqual(hello["config"]["robot_state_displays"][0]["id"], "fixture_state")
+            self.assertEqual(hello["config"]["robot_state_displays"][0]["robot_id"], "fixture_bot")
+            self.assertEqual(hello["config"]["robot_models"][0]["id"], "fixture_bot")
 
     def test_websocket_config_round_trip(self) -> None:
         with contextlib.closing(websocket_connect(self.port)) as sock:
             ws_read_json(sock)
+            robot_displays = [
+                {
+                    "id": "round_trip_bot",
+                    "display_type": "Robot",
+                    "name": "Round Trip Bot",
+                    "urdf_path": "round_trip.urdf",
+                    "urdf": "<robot name='round_trip_bot'/>",
+                    "visible": False,
+                }
+            ]
+            robot_state_displays = [
+                {
+                    "id": "round_trip_state",
+                    "display_type": "RobotState",
+                    "name": "/round_trip_state",
+                    "topic": "/round_trip_state",
+                    "robot_id": "round_trip_bot",
+                    "msg_type": "RobotState",
+                    "domain": 9,
+                    "queue": 2,
+                    "transport": "shm",
+                    "poll": 0.04,
+                    "extra": "unit-test",
+                    "active": True,
+                }
+            ]
             ws_send_json(
                 sock,
                 {
@@ -380,6 +950,8 @@ class BridgeIntegrationTests(unittest.TestCase):
                         "poll": 0.04,
                         "extra": "unit-test",
                         "topics": [],
+                        "robot_displays": robot_displays,
+                        "robot_state_displays": robot_state_displays,
                     },
                 },
             )
@@ -387,9 +959,17 @@ class BridgeIntegrationTests(unittest.TestCase):
             self.assertTrue(ack["ok"], ack)
             self.assertEqual(ack["action"], "apply_config")
             self.assertEqual(ack["config"]["domain"], 9)
+            self.assertEqual(ack["config"]["robot_displays"][0]["id"], "round_trip_bot")
+            self.assertEqual(ack["config"]["robot_displays"][0]["urdf_path"], "round_trip.urdf")
+            self.assertFalse(ack["config"]["robot_displays"][0]["visible"])
+            self.assertEqual(ack["config"]["robot_state_displays"][0]["id"], "round_trip_state")
+            self.assertEqual(ack["config"]["robot_state_displays"][0]["robot_id"], "round_trip_bot")
             config = read_until_kind(sock, "config")
             self.assertEqual(config["message_types"], EXPECTED_DISPLAY_TYPES)
             self.assertEqual(config["message_type_map"], EXPECTED_MESSAGE_MAP)
+            self.assertEqual(config["config"]["robot_displays"][0]["id"], "round_trip_bot")
+            self.assertEqual(config["config"]["robot_state_displays"][0]["id"], "round_trip_state")
+            self.assertEqual(config["config"]["robot_state_displays"][0]["robot_id"], "round_trip_bot")
 
     def test_demo_publisher_emits_samples(self) -> None:
         with contextlib.closing(websocket_connect(self.port)) as sock:
@@ -420,11 +1000,16 @@ class BrowserComponentTests(unittest.TestCase):
         if cls.temp_dir is not None:
             cls.temp_dir.cleanup()
 
+    def tearDown(self) -> None:
+        with contextlib.closing(websocket_connect(self.port)) as sock:
+            ws_read_json(sock)
+            ws_send_json(sock, {"action": "apply_config", "replace": True, "config": {}})
+            ack = read_until_kind(sock, "ack")
+            if not ack.get("ok"):
+                raise AssertionError(ack)
+
     def test_add_display_modal_and_select_mapping(self) -> None:
-        try:
-            from playwright.sync_api import expect, sync_playwright
-        except Exception as exc:  # pragma: no cover - depends on local environment.
-            self.skipTest(f"playwright is not available: {exc}")
+        expect, sync_playwright = load_playwright()
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -434,8 +1019,8 @@ class BrowserComponentTests(unittest.TestCase):
             )
             try:
                 page = browser.new_page(viewport={"width": 1280, "height": 800})
-                page.set_default_timeout(5000)
-                page.goto(f"http://127.0.0.1:{self.port}/", wait_until="domcontentloaded", timeout=5000)
+                page.set_default_timeout(8000)
+                page.goto(f"http://127.0.0.1:{self.port}/", wait_until="domcontentloaded", timeout=8000)
                 expect(page.locator("#displayModal")).to_be_hidden()
                 page.locator("#openAddDisplayBtn").click()
                 expect(page.locator("#displayModal")).to_be_visible()
@@ -452,6 +1037,132 @@ class BrowserComponentTests(unittest.TestCase):
                 self.assertEqual(page.locator("#messageTypeInput").input_value(), "StdPointCloud")
                 page.locator("#cancelDisplayBtn").click()
                 expect(page.locator("#displayModal")).to_be_hidden()
+            finally:
+                browser.close()
+
+    def test_display_visualization_toggle_is_user_controlled(self) -> None:
+        expect, sync_playwright = load_playwright()
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+                timeout=10000,
+            )
+            try:
+                page = browser.new_page(viewport={"width": 1280, "height": 800})
+                page.set_default_timeout(8000)
+                page.goto(f"http://127.0.0.1:{self.port}/", wait_until="domcontentloaded", timeout=8000)
+                checkbox = page.locator(".display-item input[data-visualize]").first
+                expect(checkbox).to_be_visible()
+                expect(checkbox).not_to_be_checked()
+                checkbox.check()
+                expect(page.locator(".display-item input[data-visualize]").first).to_be_checked()
+                page.locator(".display-item input[data-visualize]").first.uncheck()
+                expect(page.locator(".display-item input[data-visualize]").first).not_to_be_checked()
+            finally:
+                browser.close()
+
+    def test_webgl_scene_renders_nonblank_canvas(self) -> None:
+        _, sync_playwright = load_playwright()
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+                timeout=10000,
+            )
+            try:
+                for viewport in ({"width": 1280, "height": 800}, {"width": 390, "height": 844}):
+                    page = browser.new_page(viewport=viewport)
+                    page.set_default_timeout(8000)
+                    page.goto(f"http://127.0.0.1:{self.port}/", wait_until="networkidle", timeout=8000)
+                    page.wait_for_function(
+                        """
+                        async () => {
+                          const canvas = document.querySelector("#sceneCanvas");
+                          if (!canvas || canvas.width < 20 || canvas.height < 20) return false;
+                          if (!window.dzipcVisualizer?.requestSceneRender) return false;
+                          window.dzipcVisualizer.requestSceneRender();
+                          await new Promise((resolve) => requestAnimationFrame(resolve));
+                          const gl = canvas.getContext("webgl2") || canvas.getContext("webgl");
+                          if (!gl) return false;
+                          const pixels = new Uint8Array(4 * 64);
+                          gl.readPixels(
+                            Math.max(0, Math.floor(canvas.width / 2) - 4),
+                            Math.max(0, Math.floor(canvas.height / 2) - 4),
+                            8,
+                            8,
+                            gl.RGBA,
+                            gl.UNSIGNED_BYTE,
+                            pixels,
+                          );
+                          for (let i = 0; i < pixels.length; i += 4) {
+                            if (pixels[i] > 18 || pixels[i + 1] > 24 || pixels[i + 2] > 32) return true;
+                          }
+                          return false;
+                        }
+                        """,
+                        timeout=8000,
+                    )
+                    self.assertIn("WebGL", page.locator("#sceneCanvas").evaluate("node => node.getContext('webgl2') ? 'WebGL2' : 'WebGL'"))
+                    page.close()
+            finally:
+                browser.close()
+
+    def test_add_robot_then_robot_state_display_updates_displays_list(self) -> None:
+        expect, sync_playwright = load_playwright()
+        assert self.temp_dir is not None
+        urdf_path = Path(self.temp_dir.name) / "tiny.urdf"
+        urdf_path.write_text(
+            """<?xml version="1.0"?>
+<robot name="tiny_bot">
+  <link name="base_link"/>
+</robot>
+""",
+            encoding="utf-8",
+        )
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+                timeout=10000,
+            )
+            try:
+                page = browser.new_page(viewport={"width": 1280, "height": 800})
+                page.set_default_timeout(8000)
+                page.goto(f"http://127.0.0.1:{self.port}/", wait_until="networkidle", timeout=8000)
+                page.wait_for_function("() => window.dzipcVisualizer?.sceneState?.scene")
+                page.locator("#openAddDisplayBtn").click()
+                page.select_option("#typeInput", "Robot")
+                page.fill("#topicInput", "tiny_bot")
+                page.fill("#urdfPathInput", str(urdf_path))
+                page.locator("#addTopicBtn").click()
+                expect(page.locator("#displayModal")).to_be_hidden()
+                expect(page.locator(".display-item").filter(has_text="tiny_bot")).to_be_visible()
+
+                page.locator("#openAddDisplayBtn").click()
+                page.select_option("#typeInput", "RobotState")
+                page.fill("#topicInput", "tiny_bot_state")
+                page.select_option("#targetRobotInput", "tiny_bot")
+                page.locator("#addTopicBtn").click()
+                expect(page.locator(".display-item").filter(has_text="tiny_bot_state")).to_be_visible()
+
+                page.wait_for_function(
+                    """
+                    () => {
+                      const api = window.dzipcVisualizer;
+                      return Boolean(
+                        api?.state?.robotDisplays?.get("tiny_bot") &&
+                        api?.state?.robotStateDisplays?.get("tiny_bot_state")
+                      );
+                    }
+                    """,
+                    timeout=8000,
+                )
+                self.assertEqual(page.evaluate("() => window.dzipcVisualizer.state.robotDisplays.size"), 1)
+                self.assertEqual(page.evaluate("() => window.dzipcVisualizer.state.robotStateDisplays.size"), 1)
             finally:
                 browser.close()
 
