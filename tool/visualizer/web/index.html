@@ -35,9 +35,9 @@
             <button class="collapse-toggle icon-button" type="button" aria-label="Expand">+</button>
           </div>
           <div class="config-actions">
+            <input id="configPathInput" type="text" placeholder="server config path" />
             <button id="exportConfigBtn" type="button">Export</button>
             <button id="importConfigBtn" type="button">Import</button>
-            <input id="configFileInput" type="file" accept="application/json,.json" hidden />
           </div>
         </section>
 
@@ -70,6 +70,15 @@
             <span>FPS</span>
             <strong id="sceneFpsMetric">0.0</strong>
           </div>
+          <!--
+            【右下角坐标轴蒙版容器 div.scene-overlay】
+            - 纯 CSS 定位的 HTML 元素，提供带圆角边框的半透明容器
+            - 它本身不渲染 3D 内容，仅作为视觉边框蒙版
+            - 3D 坐标轴箭头由 JS renderAxisGizmo() 通过 WebGL scissor/viewport
+              渲染在此容器坐标区域内，与 CSS 边框完全对齐
+            - 位置/尺寸由 CSS 变量 --reference-axis-inset / --reference-axis-size 控制
+            - 子 div 被 CSS clip 隐藏（X/Y/Z 标签仅无障碍语义，实际颜色由 3D 箭头渲染）
+          -->
           <div class="scene-overlay">
             <div><strong>X</strong><span>red</span></div>
             <div><strong>Y</strong><span>green</span></div>

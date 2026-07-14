@@ -1,0 +1,56 @@
+{
+  "domain": 0,
+  "transport": "shm",
+  "queue": 10,
+  "poll": 0.03,
+  "extra": "",
+  "verbose": false,
+  "topics": [
+    {
+      "topic": "/demo/robot_state",
+      "msg_type": "RobotState",
+      "domain": 0,
+      "queue": 10,
+      "transport": "shm",
+      "poll": 0.03,
+      "extra": "",
+      "verbose": false
+    },
+    {
+      "topic": "/demo/robot_urdf",
+      "msg_type": "RawMessage",
+      "domain": 0,
+      "queue": 10,
+      "transport": "shm",
+      "poll": 0.03,
+      "extra": "",
+      "verbose": false
+    }
+  ],
+  "robot_displays": [
+    {
+      "id": "demo_robot",
+      "name": "tiny_2dof_arm",
+      "urdf_path": "tool/visualizer/demo/robots/tiny_2dof_arm.urdf",
+      "urdf": "<?xml version=\"1.0\"?>\n<robot name=\"tiny_2dof_arm\">\n  <link name=\"base_link\">\n    <visual>\n      <origin xyz=\"0 0 0.04\"/>\n      <geometry><box size=\"0.42 0.32 0.08\"/></geometry>\n      <material name=\"base\"><color rgba=\"0.18 0.23 0.27 1\"/></material>\n    </visual>\n  </link>\n  <link name=\"shoulder_link\">\n    <visual>\n      <origin xyz=\"0.35 0 0\"/>\n      <geometry><box size=\"0.70 0.10 0.10\"/></geometry>\n      <material name=\"link_a\"><color rgba=\"0.12 0.52 0.72 1\"/></material>\n    </visual>\n  </link>\n  <link name=\"forearm_link\">\n    <visual>\n      <origin xyz=\"0.25 0 0\"/>\n      <geometry><box size=\"0.50 0.08 0.08\"/></geometry>\n      <material name=\"link_b\"><color rgba=\"0.90 0.55 0.14 1\"/></material>\n    </visual>\n  </link>\n  <link name=\"tool0\">\n    <visual>\n      <origin xyz=\"0.08 0 0\"/>\n      <geometry><box size=\"0.16 0.06 0.06\"/></geometry>\n      <material name=\"tool\"><color rgba=\"0.30 0.72 0.36 1\"/></material>\n    </visual>\n  </link>\n  <joint name=\"shoulder_pan\" type=\"revolute\">\n    <parent link=\"base_link\"/>\n    <child link=\"shoulder_link\"/>\n    <origin xyz=\"0 0 0.12\" rpy=\"0 0 0\"/>\n    <axis xyz=\"0 0 1\"/>\n    <limit lower=\"-2.6\" upper=\"2.6\" effort=\"10\" velocity=\"1.5\"/>\n  </joint>\n  <joint name=\"elbow_lift\" type=\"revolute\">\n    <parent link=\"shoulder_link\"/>\n    <child link=\"forearm_link\"/>\n    <origin xyz=\"0.70 0 0\" rpy=\"0 0 0\"/>\n    <axis xyz=\"0 1 0\"/>\n    <limit lower=\"-1.8\" upper=\"1.8\" effort=\"10\" velocity=\"1.5\"/>\n  </joint>\n  <joint name=\"tool_fixed\" type=\"fixed\">\n    <parent link=\"forearm_link\"/>\n    <child link=\"tool0\"/>\n    <origin xyz=\"0.50 0 0\" rpy=\"0 0 0\"/>\n  </joint>\n</robot>\n",
+      "fixed_frame": "world",
+      "visible": true
+    }
+  ],
+  "robot_state_displays": [
+    {
+      "id": "demo_robot_state",
+      "name": "demo_robot_state",
+      "topic": "/demo/robot_state",
+      "robot_id": "demo_robot",
+      "target_robot_id": "demo_robot",
+      "msg_type": "RobotState",
+      "domain": 0,
+      "queue": 10,
+      "transport": "shm",
+      "poll": 0.03,
+      "extra": "",
+      "visible": true
+    }
+  ]
+}

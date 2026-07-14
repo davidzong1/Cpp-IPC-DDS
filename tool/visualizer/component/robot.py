@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import json
+import math
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from urllib.parse import unquote, urlparse
+import xml.etree.ElementTree as ET
+
+from .kin.kinematics import RobotKinematics  # noqa: F401
 
 
 def _jsonable(value: Any) -> Any:
@@ -11,6 +18,144 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
     return value
+
+
+def _mesh_assets_mapping(value: Any) -> Dict[str, Dict[str, Any]]:
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(val) for key, val in value.items() if isinstance(val, Mapping)}
+    if isinstance(value, list):
+        assets: Dict[str, Dict[str, Any]] = {}
+        for item in value:
+            if not isinstance(item, Mapping):
+                continue
+            filename = str(item.get("filename") or "").strip()
+            if filename:
+                assets[filename] = _jsonable(dict(item))
+        return assets
+    return {}
+
+
+SUPPORTED_MESH_FORMATS = {"obj", "stl"}
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _package_search_roots(urdf_path: Optional[Path], root_dir: Optional[Path]) -> List[Path]:
+    roots: List[Path] = []
+    if urdf_path is not None:
+        roots.extend([urdf_path.parent, *urdf_path.parents])
+    if root_dir is not None:
+        roots.append(root_dir)
+    unique: List[Path] = []
+    seen: Set[str] = set()
+    for root in roots:
+        resolved = root.expanduser().resolve()
+        key = str(resolved)
+        if key in seen:
+            continue
+        unique.append(resolved)
+        seen.add(key)
+    return unique
+
+
+def resolve_urdf_mesh_path(
+    filename: str,
+    urdf_path: Optional[Path] = None,
+    root_dir: Optional[Path] = None,
+) -> Optional[Path]:
+    raw = unquote(str(filename or "").strip())
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    candidates: List[Path] = []
+    urdf_dir = urdf_path.parent.resolve() if urdf_path is not None else None
+
+    if parsed.scheme == "package":
+        package_name = parsed.netloc
+        package_rel = parsed.path.lstrip("/")
+        for root in _package_search_roots(urdf_path, root_dir):
+            if package_name:
+                candidates.append(root / package_name / package_rel)
+            if urdf_dir is not None and package_name == urdf_dir.name:
+                candidates.append(urdf_dir / package_rel)
+    elif parsed.scheme == "file":
+        file_path = Path(unquote(parsed.path or ""))
+        if file_path.is_absolute():
+            candidates.append(file_path)
+        elif urdf_dir is not None:
+            candidates.append(urdf_dir / file_path)
+    elif parsed.scheme:
+        return None
+    else:
+        mesh_path = Path(raw).expanduser()
+        if mesh_path.is_absolute():
+            candidates.append(mesh_path)
+        elif urdf_dir is not None:
+            candidates.append(urdf_dir / mesh_path)
+        elif root_dir is not None:
+            candidates.append(root_dir / mesh_path)
+
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if not resolved.is_file():
+            continue
+        if root_dir is not None and not _path_is_within(resolved, root_dir):
+            continue
+        return resolved
+    return None
+
+
+def collect_urdf_mesh_assets(
+    urdf_text: str,
+    urdf_path: Optional[str] = None,
+    root_dir: Optional[Path] = None,
+) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+    if not urdf_text:
+        return {}, []
+    urdf_file = Path(urdf_path).expanduser().resolve() if urdf_path else None
+    root = root_dir.expanduser().resolve() if root_dir is not None else None
+    assets: Dict[str, Dict[str, Any]] = {}
+    warnings: List[str] = []
+    try:
+        root_el = ET.fromstring(urdf_text)
+    except ET.ParseError as exc:
+        return {}, [f"cannot parse URDF for mesh assets: {exc}"]
+
+    for mesh_el in root_el.iter():
+        if _xml_local_name(mesh_el.tag) != "mesh":
+            continue
+        filename = str(mesh_el.attrib.get("filename") or mesh_el.attrib.get("url") or "").strip()
+        if not filename or filename in assets:
+            continue
+        mesh_path = resolve_urdf_mesh_path(filename, urdf_file, root)
+        if mesh_path is None:
+            warnings.append(f"mesh not found: {filename}")
+            continue
+        mesh_format = mesh_path.suffix.lower().lstrip(".")
+        if mesh_format not in SUPPORTED_MESH_FORMATS:
+            warnings.append(f"unsupported mesh format for {filename}: {mesh_path.suffix}")
+            continue
+        stat = mesh_path.stat()
+        digest = hashlib.sha256(f"{mesh_path}:{stat.st_size}:{stat.st_mtime_ns}".encode("utf-8")).hexdigest()
+        assets[filename] = {
+            "filename": filename,
+            "format": mesh_format,
+            "path": str(mesh_path),
+            "byte_length": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "hash": digest,
+        }
+    return assets, warnings
 
 
 def normalize_robot_models(raw: Any) -> List[Dict[str, Any]]:
@@ -47,6 +192,8 @@ def robot_model_to_display(model: Dict[str, Any]) -> Dict[str, Any]:
         "name": str(model.get("name") or model.get("id") or "robot").strip(),
         "urdf_path": str(model.get("file_name") or model.get("urdf_path") or "").strip(),
         "urdf": str(model.get("urdf") or "").strip(),
+        "mesh_assets": _mesh_assets_mapping(model.get("mesh_assets") or model.get("meshAssets") or {}),
+        "mesh_warnings": _jsonable(model.get("mesh_warnings") or model.get("meshWarnings") or []),
         "visible": model.get("visible") is not False,
         "fixed_frame": str(model.get("fixed_frame") or "world"),
     }
@@ -129,7 +276,99 @@ def parse_robot_display_bundle(raw: Any) -> Tuple[List[Dict[str, Any]], List[Dic
         normalize_robot_state_displays(raw.get("robot_state_displays", [])),
     )
 
-from .kin.kinematics import RobotKinematics  # noqa: F401
+
+def _field_value(value: Any, *names: str) -> Any:
+    for name in names:
+        if isinstance(value, Mapping) and name in value:
+            return value[name]
+        if hasattr(value, name):
+            return getattr(value, name)
+    return None
+
+
+def _sequence_values(value: Any, field_name: str) -> List[Any]:
+    if value is None:
+        raise ValueError(f"joint_state missing {field_name}")
+    if isinstance(value, (str, bytes, bytearray)):
+        raise ValueError(f"joint_state {field_name} must be an array")
+    if isinstance(value, Sequence):
+        return list(value)
+    try:
+        return list(value)
+    except TypeError as exc:
+        raise ValueError(f"joint_state {field_name} must be an array") from exc
+
+
+def _float_values(value: Any, field_name: str) -> List[float]:
+    values: List[float] = []
+    for item in _sequence_values(value, field_name):
+        try:
+            number = float(item)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"joint_state {field_name} contains a non-numeric value") from exc
+        if not math.isfinite(number):
+            raise ValueError(f"joint_state {field_name} contains a non-finite value")
+        values.append(number)
+    return values
+
+
+def _string_values(value: Any, field_name: str) -> List[str]:
+    return [str(item).strip() for item in _sequence_values(value, field_name)]
+
+
+def _joint_state_from_note(data: Any) -> Optional[Any]:
+    note = _field_value(data, "note")
+    if not isinstance(note, str) or not note.strip():
+        return None
+    try:
+        parsed = json.loads(note)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, Mapping):
+        return None
+    if "joint_state" in parsed:
+        return parsed["joint_state"]
+    if "position" in parsed or "joint_positions" in parsed:
+        positions = parsed.get("position", parsed.get("joint_positions"))
+        names = parsed.get("name", parsed.get("joint_names"))
+        state: Dict[str, Any] = {"position": positions}
+        if names is not None:
+            state["name"] = names
+        return state
+    return None
+
+
+def _unwrap_joint_state(data: Any) -> Any:
+    if isinstance(data, Mapping):
+        if "joint_state" in data:
+            return data["joint_state"]
+        note_state = _joint_state_from_note(data)
+        if note_state is not None:
+            return note_state
+        if "joint_positions" in data:
+            state: Dict[str, Any] = {"position": data["joint_positions"]}
+            names = data.get("joint_names")
+            if names is not None:
+                state["name"] = names
+            return state
+        return data
+
+    joint_state = getattr(data, "joint_state", None)
+    if joint_state is not None:
+        return joint_state
+    note_state = _joint_state_from_note(data)
+    if note_state is not None:
+        return note_state
+    joint_positions = getattr(data, "joint_positions", None)
+    if joint_positions is not None:
+        state = {"position": joint_positions}
+        joint_names = getattr(data, "joint_names", None)
+        if joint_names is not None:
+            state["name"] = joint_names
+        return state
+    return data
+
+
 @dataclass
 class RobotStateDisplay:
     id: str
@@ -149,6 +388,8 @@ class RobotStateDisplay:
     active: Optional[bool] = None
     source_fields: Set[str] = field(default_factory=set, repr=False)
     robotkin: Optional[RobotKinematics] = None
+    latest_link_states: List[Dict[str, Any]] = field(default_factory=list)
+    latest_error: str = ""
 
     @property
     def target_robot_id(self) -> str:
@@ -189,22 +430,34 @@ class RobotStateDisplay:
     def bind_robot_display(self, robot_display: Optional["RobotDisplay"]) -> None:
         self.robot_display = robot_display
 
-    def handle_joint_state(self, joint_state: Any) -> None:
+    def _record_joint_state(self, joint_state: Any, result: Optional[Dict[str, Any]] = None) -> None:
         self.joint_state_records.append(joint_state)
         self.latest_joint_state = joint_state
-        
+        self.latest_error = ""
+        if result is not None:
+            self.latest_link_states = list(result.get("link_states") or [])
+
+    def handle_joint_state(self, joint_state: Any) -> None:
+        self._record_joint_state(joint_state)
 
     on_joint_state = handle_joint_state
 
     def handle_joint_state_sample(self, data: Any) -> Dict[str, Any]:
-        if isinstance(data, dict):
-            joint_state = data.get("joint_state", data)
-        else:
-            joint_state = getattr(data, "joint_state", data)
-        self.handle_joint_state(joint_state)
-        if isinstance(joint_state, dict):
-            return {"ok": True, "target_robot_id": self.robot_id, **joint_state}
-        return {"ok": True, "target_robot_id": self.robot_id, "joint_state": joint_state}
+        joint_state = _unwrap_joint_state(data)
+        if self.robot_display is None:
+            self._record_joint_state(joint_state)
+            if isinstance(joint_state, dict):
+                return {"ok": True, "target_robot_id": self.robot_id, **joint_state}
+            return {"ok": True, "target_robot_id": self.robot_id, "joint_state": joint_state}
+
+        result = self.robot_display.compute_joint_state(joint_state)
+        result.update({"target_robot_id": self.robot_id, "robot_state_display_id": self.id})
+        if not result.get("ok"):
+            self.latest_error = str(result.get("message") or "invalid joint_state")
+            return result
+        self._record_joint_state(joint_state, result)
+        self.robot_display._record_valid_joint_state(joint_state, result, source=self)
+        return result
 
     def to_config(self) -> Dict[str, Any]:
         config = {
@@ -253,7 +506,16 @@ class RobotDisplay:
     robot_states: List[RobotStateDisplay] = field(default_factory=list)
     robot_state: Optional[RobotStateDisplay] = None
     joint_state_records: List[Any] = field(default_factory=list)
+    latest_joint_state: Optional[Any] = None
+    latest_link_states: List[Dict[str, Any]] = field(default_factory=list)
+    latest_joint_positions: List[float] = field(default_factory=list)
+    latest_robot_state_error: str = ""
+    mesh_assets: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    mesh_warnings: List[str] = field(default_factory=list)
     source_fields: Set[str] = field(default_factory=set, repr=False)
+    robotkin: Optional[RobotKinematics] = None
+    _robotkin_source: str = field(default="", init=False, repr=False)
+    _robotkin_error: str = field(default="", init=False, repr=False)
 
     @property
     def robot_state_displays(self) -> List[RobotStateDisplay]:
@@ -275,6 +537,8 @@ class RobotDisplay:
             urdf_text=urdf_text,
             visible=raw.get("visible") is not False,
             fixed_frame=str(raw.get("fixed_frame") or "world"),
+            mesh_assets=_mesh_assets_mapping(raw.get("mesh_assets") or raw.get("meshAssets") or {}),
+            mesh_warnings=list(raw.get("mesh_warnings") or raw.get("meshWarnings") or []),
             source_fields=set(raw.get("_source_fields") or raw.keys()),
         )
 
@@ -296,7 +560,15 @@ class RobotDisplay:
         self.urdf_path = str(path)
         if path.exists():
             self.urdf_text = path.read_text(encoding="utf-8")
-            return {"ok": True, "path": self.urdf_path, "urdf_text": self.urdf_text}
+            self.mesh_assets, self.mesh_warnings = collect_urdf_mesh_assets(self.urdf_text, str(path), root_dir)
+            self.reset_kinematics()
+            return {
+                "ok": True,
+                "path": self.urdf_path,
+                "urdf_text": self.urdf_text,
+                "mesh_assets": self.mesh_assets,
+                "mesh_warnings": self.mesh_warnings,
+            }
         return {"ok": False, "path": self.urdf_path, "message": f"URDF path does not exist: {path}"}
 
     def handle_urdf_path_request(self, urdf_path: str, root_dir: Optional[Path] = None) -> Dict[str, Any]:
@@ -308,25 +580,141 @@ class RobotDisplay:
             return
         robot_state.robot_id = self.id
         robot_state.robot_display = self
+        robot_state.robotkin = self.robotkin
         if robot_state not in self.robot_states:
             self.robot_states.append(robot_state)
 
     attach_robot_state_display = bind_robot_state
 
-    def handle_joint_state(self, joint_state: Any) -> None:
-        self.joint_state_records.append(joint_state)
+    def reset_kinematics(self) -> None:
+        self.robotkin = None
+        self._robotkin_source = ""
+        self._robotkin_error = ""
         for robot_state in self.robot_states:
-            robot_state.handle_joint_state(joint_state)
+            robot_state.robotkin = None
+
+    def ensure_kinematics(self) -> RobotKinematics:
+        if not self.urdf_text:
+            raise ValueError(f"robot {self.id} has no URDF")
+        if self.robotkin is not None and self._robotkin_source == self.urdf_text:
+            return self.robotkin
+        if self._robotkin_error and self._robotkin_source == self.urdf_text:
+            raise ValueError(self._robotkin_error)
+        try:
+            self.robotkin = RobotKinematics.from_urdf_string(self.urdf_text)
+        except Exception as exc:
+            self.robotkin = None
+            self._robotkin_source = self.urdf_text
+            self._robotkin_error = f"robot {self.id} kinematics unavailable: {exc}"
+            raise ValueError(self._robotkin_error) from exc
+        self._robotkin_source = self.urdf_text
+        self._robotkin_error = ""
+        for robot_state in self.robot_states:
+            robot_state.robotkin = self.robotkin
+        return self.robotkin
+
+    def _parse_joint_state(self, joint_state: Any, kin: RobotKinematics) -> Dict[str, Any]:
+        expected_names = list(kin.joint_names)
+        expected_count = len(expected_names)
+        raw_state = _unwrap_joint_state(joint_state)
+        names_raw = _field_value(raw_state, "name", "names", "joint_names", "jointNames")
+        positions_raw = _field_value(raw_state, "position", "positions", "pos", "joint_positions", "jointPositions")
+
+        if positions_raw is None and isinstance(raw_state, Mapping):
+            if all(name in raw_state for name in expected_names):
+                names = expected_names
+                positions = _float_values([raw_state[name] for name in expected_names], "position")
+            else:
+                raise ValueError("joint_state missing position")
+        else:
+            if positions_raw is None:
+                positions_raw = raw_state
+            positions = _float_values(positions_raw, "position")
+            names = _string_values(names_raw, "name") if names_raw is not None else []
+
+        if len(positions) != expected_count:
+            raise ValueError(
+                f"joint_state length mismatch for robot {self.id}: expected {expected_count} "
+                f"joint values, got {len(positions)}"
+            )
+
+        if names:
+            if len(names) != len(positions):
+                raise ValueError(
+                    f"joint_state name/position length mismatch for robot {self.id}: "
+                    f"{len(names)} names, {len(positions)} positions"
+                )
+            missing = [name for name in expected_names if name not in names]
+            extra = [name for name in names if name not in expected_names]
+            if missing or extra:
+                details = []
+                if missing:
+                    details.append(f"missing: {', '.join(missing)}")
+                if extra:
+                    details.append(f"extra: {', '.join(extra)}")
+                raise ValueError(f"joint_state names do not match robot {self.id} ({'; '.join(details)})")
+            supplied_map = dict(zip(names, positions))
+            ordered_positions = [float(supplied_map[name]) for name in expected_names]
+        else:
+            ordered_positions = [float(value) for value in positions]
+
+        return {
+            "joint_names": expected_names,
+            "positions": ordered_positions,
+            "joint_map": dict(zip(expected_names, ordered_positions)),
+        }
+
+    def compute_joint_state(self, joint_state: Any) -> Dict[str, Any]:
+        try:
+            kin = self.ensure_kinematics()
+            parsed = self._parse_joint_state(joint_state, kin)
+            link_states = kin.link_states(parsed["joint_map"])
+        except Exception as exc:
+            message = str(exc)
+            self.latest_robot_state_error = message
+            return {"ok": False, "robot_id": self.id, "message": message}
+        return {
+            "ok": True,
+            "robot_id": self.id,
+            "joint_state": {
+                "name": parsed["joint_names"],
+                "position": parsed["positions"],
+            },
+            "joint_names": parsed["joint_names"],
+            "joint_positions": parsed["positions"],
+            "link_states": link_states,
+        }
+
+    def _record_valid_joint_state(
+        self,
+        joint_state: Any,
+        result: Dict[str, Any],
+        source: Optional[RobotStateDisplay] = None,
+    ) -> None:
+        self.joint_state_records.append(joint_state)
+        self.latest_joint_state = joint_state
+        self.latest_link_states = list(result.get("link_states") or [])
+        self.latest_joint_positions = list(result.get("joint_positions") or [])
+        self.latest_robot_state_error = ""
+        for robot_state in self.robot_states:
+            if robot_state is not source:
+                robot_state._record_joint_state(joint_state, result)
+
+    def handle_joint_state(self, joint_state: Any) -> None:
+        result = self.compute_joint_state(joint_state)
+        if not result.get("ok"):
+            return
+        self._record_valid_joint_state(joint_state, result)
 
     on_joint_state = handle_joint_state
 
     def handle_joint_state_sample(self, joint_state: Any) -> Dict[str, Any]:
-        self.handle_joint_state(joint_state)
-        return {
-            "ok": True,
-            "robot_id": self.id,
-            "robot_state_ids": [robot_state.id for robot_state in self.robot_states],
-        }
+        result = self.compute_joint_state(joint_state)
+        result["robot_state_ids"] = [robot_state.id for robot_state in self.robot_states]
+        if not result.get("ok"):
+            return result
+        self._record_valid_joint_state(joint_state, result)
+        return result
 
     def to_config(self) -> Dict[str, Any]:
         config = {
@@ -342,6 +730,10 @@ class RobotDisplay:
             config["fixed_frame"] = self.fixed_frame
         if self.robot_state is not None:
             config["robot_state"] = self.robot_state.id
+        if self.mesh_assets:
+            config["mesh_assets"] = self.mesh_assets
+        if self.mesh_warnings:
+            config["mesh_warnings"] = self.mesh_warnings
         return config
 
     def to_legacy_robot_model(self) -> Dict[str, Any]:
@@ -350,6 +742,8 @@ class RobotDisplay:
             "name": self.name,
             "file_name": Path(self.urdf_path).name if self.urdf_path else "",
             "urdf": self.urdf_text,
+            "mesh_assets": self.mesh_assets,
+            "mesh_warnings": self.mesh_warnings,
             "visible": self.visible,
             "fixed_frame": self.fixed_frame,
         }
@@ -358,6 +752,7 @@ class RobotDisplay:
 __all__ = [
     "RobotDisplay",
     "RobotStateDisplay",
+    "collect_urdf_mesh_assets",
     "normalize_robot_models",
     "normalize_robot_displays",
     "normalize_robot_state_displays",

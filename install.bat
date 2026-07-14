@@ -128,6 +128,15 @@ if "%install_python%"=="true" (
         if exist "%INSTALL_PREFIX%\lib\python\dzipc\gen_srv" rmdir /S /Q "%INSTALL_PREFIX%\lib\python\dzipc\gen_srv"
         xcopy /E /I /Y /Q "%ROOT_DIR%\python\dzipc\gen_srv" "%INSTALL_PREFIX%\lib\python\dzipc\gen_srv" >nul
     )
+    pushd "%ROOT_DIR%\tool"
+    pip install -r requirements.txt
+    if errorlevel 1 (
+        echo Failed to install visualizer Python dependencies.
+        popd
+        exit /b 1
+    )
+    popd
+
     echo [OK] Python interface installed successfully.
 )
 

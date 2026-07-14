@@ -4,7 +4,8 @@
   "queue": 10,
   "poll": 0.03,
   "extra": "",
-  "verbose": false,
   "topics": [],
+  "robot_displays": [],
+  "robot_state_displays": [],
   "robot_models": []
 }

@@ -168,6 +168,32 @@ class RobotKinematics:
     def link_names(self) -> List[str]:
         return [frame.link.name for frame in self.chain if frame.link is not None]
 
+    def link_states(self, joints: JointInput, *, world: Any = None) -> List[Dict[str, Any]]:
+        """Return JSON-friendly transforms for every link in the chain."""
+
+        transforms = self.forward(joints, world=world, as_matrix=False)
+        if not isinstance(transforms, dict):
+            link_name = self.end_link or "end"
+            transforms = {link_name: transforms}
+
+        states: List[Dict[str, Any]] = []
+        names = self.link_names()
+        for name in names:
+            transform = transforms.get(name)
+            if transform is None:
+                continue
+            matrix = transform.matrix()
+            states.append(
+                {
+                    "name": name,
+                    "position": np.asarray(transform.pos, dtype=float).tolist(),
+                    "rotation": np.asarray(transform.rot, dtype=float).tolist(),
+                    "rpy": np.asarray(transform.rot_euler, dtype=float).tolist(),
+                    "matrix": np.asarray(matrix, dtype=float).tolist(),
+                }
+            )
+        return states
+
     @staticmethod
     def make_transform(
         pose: Union[Any, Mapping[str, Any], Sequence[float], np.ndarray],

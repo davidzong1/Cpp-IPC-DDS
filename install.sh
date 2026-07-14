@@ -100,6 +100,10 @@ if [ "$install_python" == true ]; then
         cp -r python/dzipc/gen_msgs "$_DZIPC_PREFIX/lib/python/dzipc/"
         cp -r python/dzipc/gen_srv "$_DZIPC_PREFIX/lib/python/dzipc/"
 
+        cd tool
+        pip install -r requirements.txt
+        cd ..
+
         unset _DZIPC_PREFIX
         unset _DZIPC_PYTHON
     fi

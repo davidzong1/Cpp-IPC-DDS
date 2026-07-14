@@ -28,9 +28,12 @@ VISUALIZER_DIR = TEST_DIR.parent
 ROOT_DIR = VISUALIZER_DIR.parents[1]
 BRIDGE_PATH = VISUALIZER_DIR / "dzipc_web_bridge.py"
 WEB_DIR = VISUALIZER_DIR / "web"
+DEMO_DIR = VISUALIZER_DIR / "demo"
 DEFAULT_VISUALIZER_CONFIG = VISUALIZER_DIR / "config.json"
+if str(DEMO_DIR) not in sys.path:
+    sys.path.insert(0, str(DEMO_DIR))
 
-EXPECTED_DISPLAY_TYPES = ["RawMessage", "Pose", "Path", "PointCloud", "Marker", "Image", "Robot", "RobotState"]
+EXPECTED_DISPLAY_TYPES = ["RawMessage", "Pose", "Path", "PointCloud", "Marker", "Image", "TF", "Robot", "RobotState"]
 EXPECTED_MESSAGE_MAP = {
     "RawMessage": "StdRawMessage",
     "Pose": "StdPose",
@@ -38,6 +41,7 @@ EXPECTED_MESSAGE_MAP = {
     "PointCloud": "StdPointCloud",
     "Marker": "StdMarker",
     "Image": "StdImage",
+    "TF": "StdTF",
     "RobotState": "RobotState",
 }
 
@@ -53,14 +57,45 @@ def load_bridge_module():
 
 
 bridge = load_bridge_module()
-robot_component_spec = importlib.util.spec_from_file_location(
-    "robot_component_under_test", VISUALIZER_DIR / "component" / "robot.py"
+from component import point_clouds as point_cloud_component  # noqa: E402
+from component import robot as robot_component  # noqa: E402
+
+robot_state_demo_spec = importlib.util.spec_from_file_location(
+    "robot_state_demo_under_test", VISUALIZER_DIR / "demo" / "send_robot_state.py"
 )
-if robot_component_spec is None or robot_component_spec.loader is None:
-    raise RuntimeError("cannot load robot component")
-robot_component = importlib.util.module_from_spec(robot_component_spec)
-sys.modules[robot_component_spec.name] = robot_component
-robot_component_spec.loader.exec_module(robot_component)
+if robot_state_demo_spec is None or robot_state_demo_spec.loader is None:
+    raise RuntimeError("cannot load robot state demo")
+robot_state_demo = importlib.util.module_from_spec(robot_state_demo_spec)
+sys.modules[robot_state_demo_spec.name] = robot_state_demo
+robot_state_demo_spec.loader.exec_module(robot_state_demo)
+
+
+KINPY_AVAILABLE = True
+try:
+    robot_component.RobotKinematics._require_kinpy()
+except RuntimeError:
+    KINPY_AVAILABLE = False
+
+
+ROBOT_KINEMATICS_URDF = """<?xml version="1.0"?>
+<robot name="arm">
+  <link name="base_link"/>
+  <link name="link1"/>
+  <link name="tool0"/>
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.141592653589793" upper="3.141592653589793" effort="1" velocity="1"/>
+  </joint>
+  <joint name="tool_fixed" type="fixed">
+    <parent link="link1"/>
+    <child link="tool0"/>
+    <origin xyz="1 0 0" rpy="0 0 0"/>
+  </joint>
+</robot>
+"""
 
 
 def read_text(path: Path) -> str:
@@ -234,6 +269,7 @@ class BackendComponentTests(unittest.TestCase):
             StdPointCloud=type("StdPointCloud", (), {}),
             StdMarker=type("StdMarker", (), {}),
             StdImage=type("StdImage", (), {}),
+            StdTF=type("StdTF", (), {}),
             RobotState=type("RobotState", (), {}),
         )
         for display_type, class_name in EXPECTED_MESSAGE_MAP.items():
@@ -303,6 +339,132 @@ class BackendComponentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "robot_models"):
             bridge.normalize_robot_models({"name": "arm"})
 
+    def test_robot_display_collects_embedded_mesh_assets(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="robot_mesh_assets_") as temp_dir:
+            temp_path = Path(temp_dir)
+            package_dir = temp_path / "go2"
+            assets_dir = package_dir / "assets"
+            assets_dir.mkdir(parents=True)
+            obj_path = assets_dir / "tri.obj"
+            obj_text = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"
+            obj_path.write_text(obj_text, encoding="utf-8")
+            stl_path = assets_dir / "tri.stl"
+            stl_text = (
+                "solid tri\n"
+                "facet normal 0 0 1\nouter loop\n"
+                "vertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\n"
+                "endloop\nendfacet\nendsolid tri\n"
+            )
+            stl_path.write_text(stl_text, encoding="utf-8")
+            urdf_path = package_dir / "go2.urdf"
+            urdf = """<robot name="go2">
+  <link name="base">
+    <visual><geometry><mesh filename="assets/tri.obj"/></geometry></visual>
+    <collision><geometry><mesh filename="package://go2/assets/tri.stl"/></geometry></collision>
+  </link>
+</robot>"""
+            urdf_path.write_text(urdf, encoding="utf-8")
+
+            robot = robot_component.RobotDisplay(id="go2", name="Go2")
+            result = robot.set_urdf_path(urdf_path, root_dir=temp_path)
+
+            self.assertTrue(result["ok"], result)
+            self.assertIn("assets/tri.obj", robot.mesh_assets)
+            self.assertIn("package://go2/assets/tri.stl", robot.mesh_assets)
+            self.assertEqual(robot.mesh_assets["assets/tri.obj"]["format"], "obj")
+            self.assertEqual(robot.mesh_assets["package://go2/assets/tri.stl"]["format"], "stl")
+            self.assertEqual(Path(robot.mesh_assets["assets/tri.obj"]["path"]).read_text(encoding="utf-8"), obj_text)
+            self.assertEqual(robot.to_config()["mesh_assets"]["assets/tri.obj"]["byte_length"], len(obj_text.encode("utf-8")))
+            self.assertNotIn("data", robot.to_config()["mesh_assets"]["assets/tri.obj"])
+
+    def test_webhub_hydrates_robot_urdf_path_with_mesh_assets(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="robot_mesh_assets_", dir=str(VISUALIZER_DIR)) as temp_dir:
+            temp_path = Path(temp_dir)
+            assets_dir = temp_path / "assets"
+            assets_dir.mkdir()
+            (assets_dir / "tri.obj").write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
+            urdf_path = temp_path / "mesh_bot.urdf"
+            urdf_path.write_text(
+                "<robot name='mesh_bot'><link name='base'><visual><geometry>"
+                "<mesh filename='assets/tri.obj'/></geometry></visual></link></robot>",
+                encoding="utf-8",
+            )
+            relative_urdf = str(urdf_path.relative_to(ROOT_DIR))
+            hub = bridge.WebHub(
+                {
+                    "domain": 1,
+                    "transport": "socket",
+                    "queue": 10,
+                    "poll": 0.03,
+                    "extra": "",
+                    "verbose": False,
+                    "robot_displays": [{"id": "mesh_bot", "name": "Mesh Bot", "urdf_path": relative_urdf}],
+                },
+                temp_path / "config.json",
+            )
+
+            exported = hub.export_config()["robot_displays"][0]
+            self.assertIn("<robot name='mesh_bot'>", exported["urdf"])
+            self.assertIn("assets/tri.obj", exported["mesh_assets"])
+            self.assertTrue(exported["mesh_assets"]["assets/tri.obj"]["url"].startswith("/robot_assets/"))
+            self.assertEqual(exported["mesh_assets"]["assets/tri.obj"]["type"], "obj")
+            self.assertNotIn("data", exported["mesh_assets"]["assets/tri.obj"])
+
+    def test_webhub_config_paths_are_resolved_on_backend(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dzipc_config_path_test_") as temp_dir:
+            temp_path = Path(temp_dir)
+            default_path = temp_path / "default.json"
+            default_path.write_text("{}", encoding="utf-8")
+            import_path = temp_path / "import.json"
+            import_path.write_text(
+                json.dumps({"domain": 12, "transport": "socket", "queue": 6, "poll": 0.05, "topics": []}),
+                encoding="utf-8",
+            )
+            export_path = temp_path / "export.json"
+            hub = bridge.WebHub(
+                {"domain": 1, "transport": "socket", "queue": 10, "poll": 0.03, "extra": "", "verbose": False},
+                default_path,
+            )
+
+            save_ack = hub.handle_command(
+                {
+                    "action": "save_config",
+                    "path": str(export_path),
+                    "config": {"domain": 4, "transport": "shm", "queue": 2, "poll": 0.04, "topics": []},
+                }
+            )
+            self.assertTrue(save_ack["ok"], save_ack)
+            self.assertEqual(save_ack["path"], str(export_path.resolve()))
+            self.assertEqual(json.loads(export_path.read_text(encoding="utf-8"))["domain"], 4)
+
+            load_ack = hub.handle_command({"action": "load_config", "path": str(import_path)})
+            self.assertTrue(load_ack["ok"], load_ack)
+            self.assertEqual(load_ack["path"], str(import_path.resolve()))
+            self.assertEqual(load_ack["config"]["domain"], 12)
+
+            directory_path = temp_path / "nested"
+            directory_path.mkdir()
+            self.assertEqual(hub.resolve_config_path(str(directory_path)), directory_path / "config.json")
+
+    def test_go2_robot_mesh_assets_are_exposed_as_backend_urls(self) -> None:
+        go2_urdf = VISUALIZER_DIR / "demo" / "robots" / "go2" / "go2.urdf"
+        if not go2_urdf.exists():
+            self.skipTest("go2 demo robot is not available")
+        hub = bridge.WebHub(
+            {"domain": 1, "transport": "socket", "queue": 10, "poll": 0.03, "extra": "", "verbose": False},
+            VISUALIZER_DIR / "config.json",
+        )
+        robot = hub.add_robot_display({"id": "go2", "name": "go2", "urdf_path": str(go2_urdf)})
+        self.assertGreater(len(robot.mesh_assets), 0)
+        base_asset = robot.mesh_assets.get("assets/base_0.obj")
+        self.assertIsNotNone(base_asset)
+        self.assertEqual(base_asset["format"], "obj")
+        self.assertTrue(base_asset["url"].startswith("/robot_assets/"))
+        self.assertIn("hash", base_asset)
+        self.assertGreater(base_asset["byte_length"], 0)
+        self.assertNotIn("data", base_asset)
+
+    @unittest.skipUnless(KINPY_AVAILABLE, "kinpy is not available")
     def test_robot_display_bundle_normalization(self) -> None:
         robots = robot_component.normalize_robot_displays(
             [
@@ -336,7 +498,7 @@ class BackendComponentTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             urdf_path = Path(tmp) / "arm.urdf"
-            urdf_path.write_text("<robot name='arm'><link name='base_link'/></robot>", encoding="utf-8")
+            urdf_path.write_text(ROBOT_KINEMATICS_URDF, encoding="utf-8")
             robot = robot_component.RobotDisplay.from_config({"id": "arm", "name": "Arm"})
             result = robot.handle_urdf_path_request(str(urdf_path), Path(tmp))
             self.assertTrue(result["ok"], result)
@@ -347,36 +509,39 @@ class BackendComponentTests(unittest.TestCase):
             )
             robot.bind_robot_state(state_display)
             state_display.handle_joint_state({"joint_state": {"name": ["j1"], "position": [1.0]}})
-            robot.handle_joint_state({"joint_state": {"name": ["j2"], "position": [2.0]}})
+            robot.handle_joint_state({"joint_state": {"name": ["joint1"], "position": [2.0]}})
             self.assertEqual(robot.robot_state, state_display)
             self.assertEqual(len(robot.joint_state_records), 1)
             self.assertEqual(len(state_display.joint_state_records), 2)
             self.assertEqual(robot.to_config()["urdf_path"], str(Path(tmp).resolve() / "arm.urdf"))
             self.assertEqual(state_display.to_config()["robot_id"], "arm")
 
+    @unittest.skipUnless(KINPY_AVAILABLE, "kinpy is not available")
     def test_robot_display_reads_urdf_path_and_binds_state(self) -> None:
         with tempfile.TemporaryDirectory(prefix="robot_display_test_") as temp_dir:
             temp_path = Path(temp_dir)
             urdf_path = temp_path / "fixture.urdf"
-            urdf_path.write_text("<robot name='fixture_bot'/>", encoding="utf-8")
+            urdf_path.write_text(ROBOT_KINEMATICS_URDF, encoding="utf-8")
 
             robot = robot_component.RobotDisplay(id="fixture", name="fixture")
             result = robot.set_urdf_path(urdf_path, base_dir=temp_path)
             self.assertTrue(result["ok"], result)
             self.assertEqual(robot.urdf_path, str(urdf_path.resolve()))
-            self.assertEqual(robot.urdf_text, "<robot name='fixture_bot'/>")
+            self.assertIn("<robot name=\"arm\">", robot.urdf_text)
 
             robot_state = robot_component.RobotStateDisplay(id="state_1", topic="joint_states")
             robot.attach_robot_state_display(robot_state)
-            callback = robot_state.handle_joint_state_sample({"name": ["joint_a"], "position": [1.0]})
+            callback = robot_state.handle_joint_state_sample({"name": ["joint1"], "position": [1.0]})
             self.assertEqual(robot_state.target_robot_id, robot.id)
-            self.assertEqual(robot_state.latest_joint_state, {"name": ["joint_a"], "position": [1.0]})
+            self.assertEqual(robot_state.latest_joint_state, {"name": ["joint1"], "position": [1.0]})
             self.assertTrue(callback["ok"])
             self.assertEqual(callback["target_robot_id"], robot.id)
+            self.assertEqual(callback["joint_names"], ["joint1"])
+            self.assertEqual({"base_link", "link1", "tool0"}, {item["name"] for item in callback["link_states"]})
 
-            robot_result = robot.handle_joint_state_sample({"name": ["joint_b"], "position": [2.0]})
+            robot_result = robot.handle_joint_state_sample({"name": ["joint1"], "position": [2.0]})
             self.assertEqual(robot_result["robot_state_ids"], [robot_state.id])
-            self.assertEqual(robot_state.latest_joint_state, {"name": ["joint_b"], "position": [2.0]})
+            self.assertEqual(robot_state.latest_joint_state, {"name": ["joint1"], "position": [2.0]})
 
         class SlotMessage:
             __slots__ = ("x", "values", "_hidden")
@@ -387,6 +552,76 @@ class BackendComponentTests(unittest.TestCase):
                 self._hidden = "skip"
 
         self.assertEqual(bridge.to_jsonable(SlotMessage()), {"x": 1.25, "values": [None, {"ok": True}]})
+
+    @unittest.skipUnless(KINPY_AVAILABLE, "kinpy is not available")
+    def test_robot_state_rejects_joint_length_mismatch_without_overwriting_latest_links(self) -> None:
+        robot = robot_component.RobotDisplay(id="arm", name="Arm", urdf_text=ROBOT_KINEMATICS_URDF)
+        robot_state = robot_component.RobotStateDisplay(id="arm_state", topic="/joint_states", robot_id="arm")
+        robot.attach_robot_state_display(robot_state)
+
+        ok = robot_state.handle_joint_state_sample({"name": ["joint1"], "position": [0.5]})
+        self.assertTrue(ok["ok"], ok)
+        latest_links = list(robot.latest_link_states)
+        self.assertTrue(latest_links)
+
+        bad = robot_state.handle_joint_state_sample({"name": ["joint1", "extra"], "position": [0.5, 1.0]})
+        self.assertFalse(bad["ok"])
+        self.assertIn("length mismatch", bad["message"])
+        self.assertEqual(robot.latest_link_states, latest_links)
+        self.assertEqual(robot_state.latest_link_states, latest_links)
+
+    @unittest.skipUnless(KINPY_AVAILABLE, "kinpy is not available")
+    def test_robot_state_extracts_joint_state_from_note_json(self) -> None:
+        robot = robot_component.RobotDisplay(id="arm", name="Arm", urdf_text=ROBOT_KINEMATICS_URDF)
+        robot_state = robot_component.RobotStateDisplay(id="arm_state", topic="/joint_states", robot_id="arm")
+        robot.attach_robot_state_display(robot_state)
+        sample = {
+            "name": "arm",
+            "note": json.dumps(
+                {
+                    "joint_state": {
+                        "name": ["joint1"],
+                        "position": [0.25],
+                    }
+                }
+            ),
+        }
+
+        result = robot_state.handle_joint_state_sample(sample)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["joint_names"], ["joint1"])
+        self.assertEqual(result["joint_positions"], [0.25])
+        self.assertTrue(result["link_states"])
+
+    def test_robot_state_demo_prepare_offline_config_and_urdf_topic(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="robot_state_demo_test_") as temp_dir:
+            temp_path = Path(temp_dir)
+            args = robot_state_demo.build_parser().parse_args(
+                [
+                    "--prepare-only",
+                    "--no-download",
+                    "--force-download",
+                    "--resource-dir",
+                    str(temp_path / "robots"),
+                    "--config-out",
+                    str(temp_path / "config.json"),
+                    "--topic",
+                    "/demo/test_robot_state",
+                    "--urdf-topic",
+                    "/demo/test_robot_urdf",
+                ]
+            )
+
+            robot_state_demo.publish_robot_states(args)
+
+            config = json.loads((temp_path / "config.json").read_text(encoding="utf-8"))
+            topics = {item["topic"]: item for item in config["topics"]}
+            self.assertEqual(topics["/demo/test_robot_state"]["msg_type"], "RobotState")
+            self.assertEqual(topics["/demo/test_robot_urdf"]["msg_type"], "RawMessage")
+            self.assertTrue((temp_path / "robots" / "tiny_2dof_arm.urdf").exists())
+            self.assertIn("<robot", config["robot_displays"][0]["urdf"])
+            self.assertEqual(config["robot_state_displays"][0]["topic"], "/demo/test_robot_state")
 
     def test_point_cloud_binary_encoding_uses_dzpc_frame_layout(self) -> None:
         msg = types.SimpleNamespace(
@@ -421,6 +656,10 @@ class BackendComponentTests(unittest.TestCase):
             bridge.lightweight_point_cloud_data(msg),
             {"header": {"frame_id": "map"}, "channel_names": ["intensity"], "binary_points": True},
         )
+        event_fields = point_cloud_component.PointCloudSampleEncoder().encode_event_fields(msg, sample_id=7)
+        self.assertEqual(event_fields["binary"]["sample_id"], 7)
+        self.assertEqual(event_fields["data"]["binary_points"], True)
+        self.assertIsInstance(event_fields["binary_payload"], bytes)
 
     def test_webhub_send_event_sends_json_then_binary_frame(self) -> None:
         class DummyWriter:
@@ -481,7 +720,11 @@ class BackendComponentTests(unittest.TestCase):
         class FakeSubscriber:
             _clean_shm_for_topic = clean_shm
 
-            def __init__(self, hub: Any, spec: Any, cooldown_remain: float = 0.0) -> None:
+            def __init__(self, hub: Any, spec: Any, cooldown_remain: float = 0.0,
+                         ipc_loader: Any = None, msg_resolver: Any = None,
+                         image_encoder: Any = None, data_serializer: Any = None,
+                         field_getter: Any = None, time_ms: Any = None,
+                         **_: Any) -> None:
                 self.hub = hub
                 self.spec = spec
                 self.cooldown_remain = cooldown_remain
@@ -634,6 +877,7 @@ class FrontendStaticComponentTests(unittest.TestCase):
         cls.css = read_text(WEB_DIR / "styles.css")
         cls.config = json.loads(read_text(DEFAULT_VISUALIZER_CONFIG))
         cls.point_cloud_demo = read_text(VISUALIZER_DIR / "demo" / "send_point_cloud_demo.py")
+        cls.robot_state_demo = read_text(VISUALIZER_DIR / "demo" / "send_robot_state.py")
 
     def test_add_display_modal_uses_select_components(self) -> None:
         self.assertIn('<select id="typeInput"></select>', self.html)
@@ -653,18 +897,24 @@ class FrontendStaticComponentTests(unittest.TestCase):
         for element_id in (
             "exportConfigBtn",
             "importConfigBtn",
-            "configFileInput",
+            "configPathInput",
         ):
             self.assertIn(f'id="{element_id}"', self.html)
             self.assertIn(element_id, self.js)
+        self.assertNotIn("reloadConfigBtn", self.html + self.js)
+        self.assertNotIn("configFileInput", self.html + self.js)
+        self.assertNotIn('type="file"', self.html)
         self.assertNotIn('id="saveConfigBtn"', self.html)
         self.assertNotIn('id="loadConfigBtn"', self.html)
         self.assertNotIn("saveConfigBtn", self.js)
         self.assertNotIn("loadConfigBtn", self.js)
         self.assertIn('action: "add_topic"', self.js)
         self.assertIn('action: "remove_topic"', self.js)
-        self.assertIn('action: "apply_config"', self.js)
-        self.assertIn('sendCommand({ action: "apply_config", config, replace: true })', self.js)
+        self.assertIn('action: "save_config"', self.js)
+        self.assertIn('action: "load_config"', self.js)
+        self.assertIn("backendConfigPath()", self.js)
+        self.assertNotIn("await file.text()", self.js)
+        self.assertNotIn("downloadJson", self.js)
 
     def test_robot_display_components_are_added_through_add_display(self) -> None:
         for removed_id in ("importUrdfBtn", "urdfFileInput", "robotVisibleInput", "clearRobotBtn", "robotInfo"):
@@ -681,6 +931,33 @@ class FrontendStaticComponentTests(unittest.TestCase):
         self.assertIn("window.dzipcVisualizer", self.js)
         self.assertIn("robot_models", self.config)
         self.assertIsInstance(self.config["robot_models"], list)
+
+    def test_robot_link_states_update_3d_robot_group(self) -> None:
+        self.assertIn("event.robot_link_states", self.js)
+        self.assertIn("applyRobotLinkStates", self.js)
+        self.assertIn("matrixFromRobotLinkState", self.js)
+        self.assertIn("updateRobotGroupFromLinkStates", self.js)
+        self.assertIn('group.getObjectByName("link_frames")', self.js)
+        self.assertIn('group.getObjectByName("link_segments")', self.js)
+        self.assertIn('group.getObjectByName("link_groups")', self.js)
+        self.assertIn("robot.latestLinkStates", self.js)
+        self.assertIn("latestJointState", self.js)
+        self.assertIn("latestError", self.js)
+
+    def test_robot_mesh_assets_are_loaded_through_backend_urls(self) -> None:
+        self.assertIn('import { OBJLoader }', self.js)
+        self.assertIn('import { STLLoader }', self.js)
+        self.assertIn("parseLinkVisuals", self.js)
+        self.assertIn("parseLinkCollisions", self.js)
+        self.assertIn("mesh_assets", self.js)
+        self.assertIn("normalizeRobotMeshAssets", self.js)
+        self.assertIn("objLoader.loadAsync", self.js)
+        self.assertIn("stlLoader.loadAsync", self.js)
+        self.assertIn("robotAssetForVisual", self.js)
+        self.assertIn("addRobotMeshToLinkGroup", self.js)
+        self.assertIn("state.assetCache", self.js)
+        self.assertIn('linkGroup.name = `link_group:${link.name}`', self.js)
+        self.assertNotIn("decodeBase64Bytes", self.js)
 
     def test_display_visualization_toggle_controls_scene_output(self) -> None:
         self.assertIn("visualize: meta.visualize === true", self.js)
@@ -748,9 +1025,9 @@ class FrontendStaticComponentTests(unittest.TestCase):
         self.assertIn("renderer.setClearColor(sceneBackgroundColor, 1)", self.js)
         self.assertIn("THREE.Object3D.DEFAULT_UP.set(0, 0, 1)", self.js)
         self.assertIn("const referenceAxisConfig = {", self.js)
-        self.assertIn("axisThickness:", self.js)
+        self.assertIn("axisRadius:", self.js)
         self.assertIn("backgroundOpacity:", self.js)
-        self.assertIn("renderer.clearColor()", self.js)
+        self.assertIn("renderer.render(axisScene, axisCamera)", self.js)
         self.assertIn("makeAxisGizmo", self.js)
         self.assertIn("renderAxisGizmo", self.js)
         self.assertIn("sceneRenderState", self.js)
@@ -817,6 +1094,17 @@ class FrontendStaticComponentTests(unittest.TestCase):
         self.assertIn('choices=["normal", "best-effort"]', self.point_cloud_demo)
         self.assertIn("publish_best_effort", self.point_cloud_demo)
         self.assertIn("--report-every", self.point_cloud_demo)
+
+    def test_robot_state_demo_exists_for_urdf_motion_tests(self) -> None:
+        self.assertIn('default="/demo/robot_state"', self.robot_state_demo)
+        self.assertIn('DEFAULT_URDF_TOPIC = "/demo/robot_urdf"', self.robot_state_demo)
+        self.assertIn("DOWNLOAD_CANDIDATES", self.robot_state_demo)
+        self.assertIn("FALLBACK_URDF", self.robot_state_demo)
+        self.assertIn("ipc.RobotState()", self.robot_state_demo)
+        self.assertIn("ipc.StdRawMessage()", self.robot_state_demo)
+        self.assertIn('"joint_state"', self.robot_state_demo)
+        self.assertIn("--prepare-only", self.robot_state_demo)
+        self.assertIn("--no-download", self.robot_state_demo)
 
     def test_disabled_message_type_has_readable_style(self) -> None:
         self.assertIn("select:disabled", self.css)

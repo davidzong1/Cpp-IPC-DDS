@@ -7,23 +7,20 @@ import base64
 import contextlib
 import ctypes
 import gc
-import glob
 import hashlib
 import importlib.machinery
 import json
 import math
 import mimetypes
-import os
 import queue
-import random
 import socket
 import struct
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import quote, unquote
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -36,10 +33,23 @@ if str(VISUALIZER_DIR) not in sys.path:
 from component.robot import (  # noqa: E402
     RobotDisplay,
     RobotStateDisplay,
+    collect_urdf_mesh_assets,
     normalize_robot_displays as component_normalize_robot_displays,
     normalize_robot_models as component_normalize_robot_models,
     normalize_robot_state_displays as component_normalize_robot_state_displays,
 )
+from component.point_clouds import (  # noqa: E402
+    DEFAULT_POINT_CLOUD_SAMPLE_ENCODER,
+    PointCloudBinaryCodec,
+)
+from component.subscriber import DzipcSubscriber  # noqa: E402
+from component.demo_publisher import DemoPublisher  # noqa: E402
+from component.topic_spec import (  # noqa: E402
+    MIN_POLL_INTERVAL_S,
+    TopicSpec,
+    normalize_poll_interval,
+)
+from component.tf import DEFAULT_TF_SAMPLE_ENCODER  # noqa: E402
 
 VISUALIZER_MESSAGE_ALIASES = {
     "RawMessage": "StdRawMessage",
@@ -48,22 +58,19 @@ VISUALIZER_MESSAGE_ALIASES = {
     "PointCloud": "StdPointCloud",
     "Marker": "StdMarker",
     "Image": "StdImage",
+    "TF": "StdTF",
     "RobotState": "RobotState",
 }
 
 VISUALIZER_MESSAGE_TYPES = list(VISUALIZER_MESSAGE_ALIASES.keys())
 VISUALIZER_DISPLAY_TYPES = VISUALIZER_MESSAGE_TYPES[:-1] + ["Robot", "RobotState"]
 
-BINARY_MAGIC = b"DZPC"
-BINARY_VERSION = 1
-BINARY_POINT_CLOUD = 1
-BINARY_POINT_CLOUD_HAS_COLORS = 1
-BINARY_HEADER = struct.Struct("<4sBBHIIII")
-MIN_POLL_INTERVAL_S = 0.005
-SUBSCRIBER_FIRST_SAMPLE_TIMEOUT_S = 3.0
-SUBSCRIBER_RETRY_BACKOFF_MAX_S = 5.0
-SHM_IDLE_RECONNECT_MIN_S = 2.0
-SHM_IDLE_RECONNECT_POLL_MULTIPLIER = 200.0
+BINARY_MAGIC = PointCloudBinaryCodec.BINARY_MAGIC
+BINARY_VERSION = PointCloudBinaryCodec.BINARY_VERSION
+BINARY_POINT_CLOUD = PointCloudBinaryCodec.BINARY_POINT_CLOUD
+BINARY_POINT_CLOUD_HAS_COLORS = PointCloudBinaryCodec.BINARY_POINT_CLOUD_HAS_COLORS
+BINARY_HEADER = PointCloudBinaryCodec.BINARY_HEADER
+POINT_CLOUD_ENCODER = DEFAULT_POINT_CLOUD_SAMPLE_ENCODER
 
 
 def compatible_dzipc_roots() -> List[Path]:
@@ -110,20 +117,11 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def normalize_poll_interval(value: Any, fallback: float = 0.03) -> float:
-    # `poll` is used on no-data paths; clamp it so poll=0 cannot busy-loop.
-    try:
-        poll = float(value)
-    except (TypeError, ValueError):
-        poll = fallback
-    if not math.isfinite(poll):
-        poll = fallback
-    return max(MIN_POLL_INTERVAL_S, poll)
-
-
 def to_jsonable(value: Any, depth: int = 0) -> Any:
     if depth > 16:
         return "<max-depth>"
+    if hasattr(value, "field_count") and hasattr(value, "field_name") and hasattr(value, "field_type"):
+        return generic_message_to_jsonable(value, depth + 1)
     if value is None or isinstance(value, (bool, int, float, str)):
         if isinstance(value, float) and not math.isfinite(value):
             return None
@@ -149,6 +147,55 @@ def to_jsonable(value: Any, depth: int = 0) -> Any:
     return str(value)
 
 
+def generic_message_to_jsonable(value: Any, depth: int = 0) -> Dict[str, Any]:
+    scalar_getters = {
+        1: "get_bool",
+        2: "get_int8",
+        3: "get_uint8",
+        4: "get_int16",
+        5: "get_uint16",
+        6: "get_int32",
+        7: "get_uint32",
+        8: "get_int64",
+        9: "get_uint64",
+        10: "get_float32",
+        11: "get_float64",
+        12: "get_string",
+    }
+    array_getters = {
+        13: "get_bool_array",
+        14: "get_int8_array",
+        15: "get_uint8_array",
+        16: "get_int16_array",
+        17: "get_uint16_array",
+        18: "get_int32_array",
+        19: "get_uint32_array",
+        20: "get_int64_array",
+        21: "get_uint64_array",
+        22: "get_float32_array",
+        23: "get_float64_array",
+        24: "get_string_array",
+    }
+    out: Dict[str, Any] = {}
+    for index in range(int(value.field_count())):
+        name = str(value.field_name(index))
+        field_type = int(value.field_type(index))
+        try:
+            if field_type in scalar_getters:
+                out[name] = to_jsonable(getattr(value, scalar_getters[field_type])(name), depth + 1)
+            elif field_type in array_getters:
+                out[name] = to_jsonable(list(getattr(value, array_getters[field_type])(name)), depth + 1)
+            elif field_type == 25:
+                out[name] = generic_message_to_jsonable(value.get_nested(name), depth + 1)
+            elif field_type == 26:
+                out[name] = [generic_message_to_jsonable(item, depth + 1) for item in value.get_nested_array(name)]
+            else:
+                out[name] = f"<unsupported-field-type:{field_type}>"
+        except Exception as exc:
+            out[name] = f"<decode-error:{exc}>"
+    return out
+
+
 def get_field(value: Any, name: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(name, default)
@@ -156,80 +203,21 @@ def get_field(value: Any, name: str, default: Any = None) -> Any:
 
 
 def vector_xyz(value: Any) -> Optional[Tuple[float, float, float]]:
-    data = get_field(value, "data")
-    if isinstance(data, (list, tuple)) and len(data) >= 3:
-        return float(data[0]), float(data[1]), float(data[2])
-    x = get_field(value, "x")
-    y = get_field(value, "y")
-    z = get_field(value, "z", 0.0)
-    if x is None or y is None:
-        return None
-    return float(x), float(y), float(z)
+    return PointCloudBinaryCodec.vector_xyz(value)
 
 
 def color_rgba(value: Any) -> Tuple[float, float, float, float]:
-    return (
-        float(get_field(value, "r", 1.0)),
-        float(get_field(value, "g", 1.0)),
-        float(get_field(value, "b", 1.0)),
-        float(get_field(value, "a", 1.0)),
-    )
+    return PointCloudBinaryCodec.color_rgba(value)
 
 
 def encode_point_cloud_binary(
     msg_obj: Any, sample_id: int
 ) -> Tuple[Dict[str, Any], bytes]:
-    points = get_field(msg_obj, "points", []) or []
-    colors = get_field(msg_obj, "colors", []) or []
-    if not hasattr(points, "__len__"):
-        points = list(points)
-    if not hasattr(colors, "__len__"):
-        colors = list(colors)
-    point_count = len(points)
-    has_colors = len(colors) == point_count and point_count > 0
-    flags = BINARY_POINT_CLOUD_HAS_COLORS if has_colors else 0
-    header_size = BINARY_HEADER.size
-    point_bytes = point_count * 3 * 4
-    color_bytes = point_count * 4 * 4 if has_colors else 0
-    payload = bytearray(header_size + point_bytes + color_bytes)
-    BINARY_HEADER.pack_into(
-        payload,
-        0,
-        BINARY_MAGIC,
-        BINARY_VERSION,
-        BINARY_POINT_CLOUD,
-        flags,
-        sample_id,
-        point_count,
-        point_count if has_colors else 0,
-        0,
-    )
-    offset = header_size
-    for point in points:
-        xyz = vector_xyz(point) or (0.0, 0.0, 0.0)
-        struct.pack_into("<fff", payload, offset, *xyz)
-        offset += 12
-    if has_colors:
-        for color in colors:
-            struct.pack_into("<ffff", payload, offset, *color_rgba(color))
-            offset += 16
-
-    metadata = {
-        "encoding": "dzpc.pointcloud.v1",
-        "sample_id": sample_id,
-        "point_count": point_count,
-        "has_colors": has_colors,
-        "byte_length": len(payload),
-    }
-    return metadata, bytes(payload)
+    return POINT_CLOUD_ENCODER.codec.encode(msg_obj, sample_id)
 
 
 def lightweight_point_cloud_data(msg_obj: Any) -> Dict[str, Any]:
-    return {
-        "header": to_jsonable(get_field(msg_obj, "header", {})),
-        "channel_names": to_jsonable(get_field(msg_obj, "channel_names", [])),
-        "binary_points": True,
-    }
+    return POINT_CLOUD_ENCODER.codec.lightweight_data(msg_obj)
 
 
 def encode_image_data(msg_obj: Any) -> Dict[str, Any]:
@@ -294,27 +282,49 @@ class WebHub:
         self.message_types = discover_message_types()
         self.robot_displays: Dict[str, RobotDisplay] = {}
         self.robot_state_displays: Dict[str, RobotStateDisplay] = {}
+        self.robot_asset_paths: Dict[str, Path] = {}
         self.apply_robot_display_config(defaults, replace=True, publish=False)
         # Track recently removed topics with timestamps to enforce
         # a cooldown period before re-add, ensuring C++ SHM cleanup
         # completes.  Key: topic_name, Value: removal timestamp (monotonic).
         self._removed_topics: Dict[str, float] = {}
 
+    def config_path_str(self) -> str:
+        return str(self.config_path)
+
+    def resolve_config_path(self, path: Any = None) -> Path:
+        if path is None or str(path).strip() == "":
+            target = self.config_path
+        else:
+            target = Path(str(path).strip()).expanduser()
+            if not target.is_absolute():
+                target = (ROOT_DIR / target).resolve()
+            else:
+                target = target.resolve()
+        if target.exists() and target.is_dir():
+            target = target / "config.json"
+        return target
+
     def publish(self, event: Dict[str, Any]) -> None:
         self.events.put(event)
 
     async def add_client(self, writer: asyncio.StreamWriter) -> None:
+        try:
+            await self.send(
+                writer,
+                {
+                    "kind": "hello",
+                    "topics": list(self.topics.values()),
+                    "config": self.export_config(),
+                    "config_path": self.config_path_str(),
+                    "message_types": self.message_types,
+                    "message_type_map": VISUALIZER_MESSAGE_ALIASES,
+                },
+            )
+        except Exception:
+            await self.remove_client(writer)
+            return
         self.clients.add(writer)
-        await self.send(
-            writer,
-            {
-                "kind": "hello",
-                "topics": list(self.topics.values()),
-                "config": self.export_config(),
-                "message_types": self.message_types,
-                "message_type_map": VISUALIZER_MESSAGE_ALIASES,
-            },
-        )
 
     async def remove_client(self, writer: asyncio.StreamWriter) -> None:
         self.clients.discard(writer)
@@ -362,9 +372,15 @@ class WebHub:
                 topic = self.topics.setdefault(event["topic"], {})
                 for state_display in self.robot_state_displays.values():
                     if state_display.topic == event["topic"]:
-                        state_display.handle_joint_state_sample(event.get("data", {}))
+                        robot_state_result = state_display.handle_joint_state_sample(event.get("data", {}))
                         event["robot_state_display_id"] = state_display.id
                         event["robot_id"] = state_display.target_robot_id
+                        if robot_state_result.get("ok"):
+                            event["robot_state"] = robot_state_result
+                            event["robot_joint_state"] = robot_state_result.get("joint_state", {})
+                            event["robot_link_states"] = robot_state_result.get("link_states", [])
+                        else:
+                            event["robot_state_error"] = robot_state_result
                 topic.update(
                     {
                         "name": event["topic"],
@@ -423,7 +439,16 @@ class WebHub:
                 cooldown_remain = cooldown - elapsed
             del self._removed_topics[spec.topic]
         self.topics[spec.topic] = spec.to_meta(active=True)
-        worker = DzipcSubscriber(self, spec, cooldown_remain)
+        worker = DzipcSubscriber(
+            self, spec, cooldown_remain,
+            ipc_loader=load_dzipc,
+            msg_resolver=resolve_message_class,
+            image_encoder=encode_image_data,
+            tf_encoder=DEFAULT_TF_SAMPLE_ENCODER,
+            data_serializer=to_jsonable,
+            field_getter=get_field,
+            time_ms=now_ms,
+        )
         self.subscribers[spec.topic] = worker
         worker.start()
         self.publish(
@@ -439,7 +464,8 @@ class WebHub:
         if worker is not None:
             worker.stop_event.set()
             worker.join(timeout=3.0)
-            if worker.is_alive():
+            is_alive = getattr(worker, "is_alive", None)
+            if callable(is_alive) and is_alive():
                 self.publish(
                     {
                         "kind": "error",
@@ -465,6 +491,8 @@ class WebHub:
         return [robot.to_legacy_robot_model() for robot in self.robot_displays.values()]
 
     def robot_display_configs(self) -> List[Dict[str, Any]]:
+        for robot in self.robot_displays.values():
+            self.ensure_robot_mesh_assets(robot)
         return [robot.to_config() for robot in self.robot_displays.values()]
 
     def robot_state_display_configs(self) -> List[Dict[str, Any]]:
@@ -490,6 +518,9 @@ class WebHub:
             RobotStateDisplay.from_config(raw, self.defaults) for raw in component_normalize_robot_state_displays(robot_state_display_configs)
         ]
         for robot in robot_displays:
+            if not robot.urdf and robot.urdf_path:
+                robot.set_urdf_path(robot.urdf_path, ROOT_DIR)
+            self.ensure_robot_mesh_assets(robot)
             self.robot_displays[robot.id] = robot
         for state_display in robot_state_displays:
             self.robot_state_displays[state_display.id] = state_display
@@ -501,6 +532,7 @@ class WebHub:
                 {
                     "kind": "config",
                     "config": self.export_config(),
+                    "config_path": self.config_path_str(),
                     "message_types": self.message_types,
                     "message_type_map": VISUALIZER_MESSAGE_ALIASES,
                     "timestamp_ms": now_ms(),
@@ -511,9 +543,57 @@ class WebHub:
         robot = RobotDisplay.from_config(raw)
         if not robot.urdf and robot.urdf_path:
             robot.set_urdf_path(robot.urdf_path, ROOT_DIR)
+        self.ensure_robot_mesh_assets(robot)
+        existing_states = [
+            state_display
+            for state_display in self.robot_state_displays.values()
+            if state_display.target_robot_id == robot.id
+        ]
         self.robot_displays[robot.id] = robot
+        for state_display in existing_states:
+            robot.attach_robot_state_display(state_display)
         self.publish({"kind": "robot_added", "robot": robot.to_config(), "timestamp_ms": now_ms()})
         return robot
+
+    def ensure_robot_mesh_assets(self, robot: RobotDisplay) -> None:
+        if not robot.urdf_text and robot.urdf_path:
+            robot.set_urdf_path(robot.urdf_path, ROOT_DIR)
+        if not robot.urdf_text:
+            return
+        raw_assets = robot.mesh_assets
+        warnings = list(getattr(robot, "mesh_warnings", []) or [])
+        if not raw_assets or any("path" not in asset for asset in raw_assets.values()):
+            raw_assets, warnings = collect_urdf_mesh_assets(robot.urdf_text, robot.urdf_path, ROOT_DIR)
+
+        manifest: Dict[str, Dict[str, Any]] = {}
+        root = ROOT_DIR.resolve()
+        for filename, asset in raw_assets.items():
+            try:
+                asset_path = Path(str(asset.get("path") or "")).expanduser().resolve()
+                asset_path.relative_to(root)
+                stat = asset_path.stat()
+            except (OSError, ValueError):
+                warnings.append(f"mesh not accessible: {filename}")
+                continue
+            suffix = asset_path.suffix.lower()
+            if suffix not in {".obj", ".stl"}:
+                warnings.append(f"unsupported mesh format for {filename}: {suffix}")
+                continue
+            digest = str(asset.get("hash") or hashlib.sha256(f"{asset_path}:{stat.st_size}:{stat.st_mtime_ns}".encode("utf-8")).hexdigest())
+            key = digest[:24] + suffix
+            self.robot_asset_paths[key] = asset_path
+            manifest[str(filename)] = {
+                "filename": str(filename),
+                "url": f"/robot_assets/{key}/{quote(asset_path.name)}",
+                "type": suffix.lstrip("."),
+                "format": suffix.lstrip("."),
+                "hash": digest,
+                "size": stat.st_size,
+                "byte_length": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+        robot.mesh_assets = manifest
+        robot.mesh_warnings = warnings
 
     def add_robot_state_display(self, raw: Dict[str, Any]) -> RobotStateDisplay:
         state_display = RobotStateDisplay.from_config(raw, self.defaults)
@@ -569,13 +649,14 @@ class WebHub:
             "robot_models": self.robot_models_compat(),
         }
 
-    def save_config(self, path: Optional[str] = None) -> Path:
-        target = Path(path).expanduser() if path else self.config_path
-        if not target.is_absolute():
-            target = (ROOT_DIR / target).resolve()
+    def save_config(self, path: Optional[str] = None, config: Optional[Dict[str, Any]] = None) -> Path:
+        target = self.resolve_config_path(path)
+        if config is not None and not isinstance(config, dict):
+            raise ValueError("config must be an object")
+        payload = config if config is not None else self.export_config()
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
-            json.dumps(self.export_config(), indent=2, ensure_ascii=False) + "\n",
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
         return target
@@ -593,6 +674,7 @@ class WebHub:
             {
                 "kind": "config",
                 "config": self.export_config(),
+                "config_path": self.config_path_str(),
                 "message_types": self.message_types,
                 "message_type_map": VISUALIZER_MESSAGE_ALIASES,
                 "timestamp_ms": now_ms(),
@@ -633,6 +715,7 @@ class WebHub:
                 {
                     "kind": "config",
                     "config": self.export_config(),
+                    "config_path": self.config_path_str(),
                     "message_types": self.message_types,
                     "message_type_map": VISUALIZER_MESSAGE_ALIASES,
                     "timestamp_ms": now_ms(),
@@ -653,6 +736,7 @@ class WebHub:
             if robot is None:
                 raise ValueError("robot_id is required")
             result = robot.handle_urdf_path_request(str(command.get("path", "")), ROOT_DIR)
+            self.ensure_robot_mesh_assets(robot)
             self.publish({"kind": "robot_updated", "robot": robot.to_config(), "timestamp_ms": now_ms()})
             return {"kind": "ack", "action": action, "ok": bool(result.get("ok")), **result, "config": self.export_config()}
         if action == "add_robot_state":
@@ -665,69 +749,20 @@ class WebHub:
             self.remove_robot_state_display(str(command.get("robot_state_id", "")))
             return {"kind": "ack", "action": action, "ok": True, "config": self.export_config()}
         if action == "save_config":
-            path = self.save_config(command.get("path"))
+            path = self.save_config(command.get("path"), command.get("config"))
             return {"kind": "ack", "action": action, "ok": True, "path": str(path)}
         if action == "load_config":
-            config = load_config_file(self.config_path)
+            config_path = self.resolve_config_path(command.get("path"))
+            config = load_config_file(config_path)
             self.apply_config(config, replace=True)
             return {
                 "kind": "ack",
                 "action": action,
                 "ok": True,
                 "config": self.export_config(),
+                "path": str(config_path),
             }
         raise ValueError(f"unknown action: {action}")
-
-
-@dataclass
-class TopicSpec:
-    topic: str
-    msg_type: str
-    domain: int
-    queue: int
-    transport: str
-    poll: float
-    extra: str = ""
-    verbose: bool = False
-
-    @classmethod
-    def from_config(cls, raw: Dict[str, Any], defaults: Dict[str, Any]) -> "TopicSpec":
-        topic = str(raw.get("topic") or raw.get("name") or "").strip()
-        msg_type = str(raw.get("msg_type") or raw.get("type") or "").strip()
-        if not topic or not msg_type:
-            raise ValueError("topic and msg_type are required")
-        transport = str(
-            raw.get("transport", defaults.get("transport", "socket"))
-        ).strip()
-        if transport not in {"shm", "socket"}:
-            raise ValueError("transport must be shm or socket")
-        return cls(
-            topic=topic,
-            msg_type=msg_type,
-            domain=int(raw.get("domain", defaults.get("domain", 1))),
-            queue=int(raw.get("queue", defaults.get("queue", 10))),
-            transport=transport,
-            poll=normalize_poll_interval(raw.get("poll", defaults.get("poll", 0.03))),
-            extra=str(raw.get("extra", defaults.get("extra", ""))),
-            verbose=bool(raw.get("verbose", defaults.get("verbose", False))),
-        )
-
-    def to_config(self) -> Dict[str, Any]:
-        return {
-            "topic": self.topic,
-            "msg_type": self.msg_type,
-            "domain": self.domain,
-            "queue": self.queue,
-            "transport": self.transport,
-            "poll": self.poll,
-            "extra": self.extra,
-            "verbose": self.verbose,
-        }
-
-    def to_meta(self, active: bool = True) -> Dict[str, Any]:
-        meta = self.to_config()
-        meta.update({"name": self.topic, "type": self.msg_type, "active": active})
-        return meta
 
 
 def parse_topic_spec(raw: str, defaults: Dict[str, Any]) -> TopicSpec:
@@ -793,344 +828,6 @@ def resolve_message_class(ipc: Any, msg_type: str) -> Tuple[str, Any]:
             + ", ".join(VISUALIZER_MESSAGE_TYPES)
         )
     return class_name, getattr(ipc, class_name)
-
-
-class DzipcSubscriber(threading.Thread):
-    def __init__(self, hub: WebHub, spec: TopicSpec, cooldown_remain: float = 0.0) -> None:
-        super().__init__(daemon=True)
-        self.hub = hub
-        self.spec = spec
-        self.stop_event = threading.Event()
-        self.sample_seq = 0
-        self._cooldown_remain = cooldown_remain
-
-    @staticmethod
-    def _sanitize_for_shm(topic: str) -> str:
-        """Mimic C++ sanitize_topic_name() character-level sanitisation.
-
-        Replaces every character that is NOT alphanumeric, '_', '-', or '.'
-        with '_', matching the C++ implementation in name_operator.cc.
-        This does NOT add the "dz_ipc_" prefix or "_topic" suffix.
-        """
-        result: List[str] = []
-        for ch in topic:
-            if ch.isalnum() or ch in ('_', '-', '.'):
-                result.append(ch)
-            else:
-                result.append('_')
-        return ''.join(result)
-
-    @staticmethod
-    def _clean_shm_for_topic(topic: str) -> None:
-        """Remove stale SHM connection files for *topic*.
-
-        This is a last-resort offline cleanup helper.  Normal display
-        removal must not call it because display removal does not own the
-        publisher's live SHM segments.  We match against the
-        C++-sanitised topic name to cover control-plane, queue, waiter,
-        and counter SHM segments when no publisher is running.
-
-        IMPORTANT: Do NOT call this while a publisher is still running on
-        the same topic — that would delete the publisher's live SHM files,
-        creating a split-brain where publisher writes to old (unlinked)
-        memory and the new subscriber reads from fresh (empty) files.
-        """
-        sanitised = DzipcSubscriber._sanitize_for_shm(topic)
-        for pat in (
-            f"/dev/shm/__IPC_SHM__*__dz_ipc__{sanitised}*",
-            f"/dev/shm/__IPC_SHM__*__dz_ipc_{sanitised}*",
-        ):
-            for path in glob.glob(pat):
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
-
-    def _retry_delay(self, attempt: int) -> float:
-        return min(SUBSCRIBER_RETRY_BACKOFF_MAX_S, 0.5 * (2 ** min(attempt, 4)))
-
-    def _idle_reconnect_timeout(self) -> float:
-        if self.spec.transport != "shm":
-            return 0.0
-        return max(
-            SHM_IDLE_RECONNECT_MIN_S,
-            self.spec.poll * SHM_IDLE_RECONNECT_POLL_MULTIPLIER,
-        )
-
-    def _cleanup_session(
-        self,
-        sub: Any,
-        topic_data: Any,
-        template: Any,
-        msg_cls: Any,
-        ipc: Any,
-    ) -> Tuple[None, None, None, None, None]:
-        del sub
-        del topic_data
-        del template
-        del msg_cls
-        del ipc
-        for _ in range(3):
-            gc.collect()
-        return None, None, None, None, None
-
-    def run(self) -> None:
-        # Outer retry loop: if the SHM ring-buffer has stale reader state
-        # from a previous (possibly different-type) subscriber, the new
-        # subscriber may fail to receive data even though InitChannel
-        # succeeds.  Keep retrying until the display is removed.
-
-        # Honour the cooldown period (deferred here from add_topic()
-        # to keep the asyncio event loop responsive).
-        if self._cooldown_remain > 0:
-            time.sleep(self._cooldown_remain)
-            gc.collect()
-
-        attempt = 0
-        while not self.stop_event.is_set():
-            if self.stop_event.is_set():
-                return
-            sub = None
-            ipc = None
-            topic_data = None
-            template = None
-            msg_cls = None
-            resolved_msg_type = ""
-            try:
-                # NOTE: Do NOT call _clean_shm_for_topic() here or from
-                # normal display removal. If a publisher is already
-                # running, deleting its live SHM files creates
-                # split-brain: the publisher keeps writing to old
-                # unlinked memory while the subscriber creates fresh
-                # files and never receives data.
-                ipc = load_dzipc()
-                resolved_msg_type, msg_cls = resolve_message_class(
-                    ipc, self.spec.msg_type
-                )
-                template = msg_cls()
-                topic_data = ipc.make_topic_data(template)
-                ipc_type = (
-                    ipc.IPC_SHM
-                    if self.spec.transport == "shm"
-                    else ipc.IPC_SOCKET
-                )
-                sub = ipc.SubscriberIPCPtrMake(
-                    topic_data,
-                    self.spec.topic,
-                    self.spec.domain,
-                    self.spec.queue,
-                    ipc_type,
-                    self.spec.verbose,
-                )
-                sub.InitChannel(self.spec.extra)
-            except Exception as exc:
-                self.hub.publish({
-                    "kind": "error", "topic": self.spec.topic,
-                    "message": f"init failed (attempt {attempt + 1}): {exc}",
-                    "timestamp_ms": now_ms(),
-                })
-                sub, topic_data, template, msg_cls, ipc = self._cleanup_session(
-                    sub, topic_data, template, msg_cls, ipc
-                )
-                if self.stop_event.wait(self._retry_delay(attempt)):
-                    return
-                attempt += 1
-                continue
-
-            # Wait for the first sample to confirm the channel is healthy.
-            # If we just re-created a subscriber for a topic whose previous
-            # (wrong-type) incarnation left stale reader state in the SHM
-            # ring buffer, try_get may never return data.
-            first_sample_deadline = (
-                time.monotonic() + SUBSCRIBER_FIRST_SAMPLE_TIMEOUT_S
-            )
-            got_data = False
-            while time.monotonic() < first_sample_deadline:
-                if self.stop_event.is_set():
-                    # Shutting down during health check – bail out
-                    sub, topic_data, template, msg_cls, ipc = self._cleanup_session(
-                        sub, topic_data, template, msg_cls, ipc
-                    )
-                    return
-                try:
-                    ok, out = sub.try_get(topic_data)
-                    if ok:
-                        got_data = True
-                        # Process this first sample immediately so the
-                        # frontend sees data without further delay.
-                        self._process_sample(
-                            sub, topic_data, out, msg_cls,
-                            resolved_msg_type,
-                        )
-                        break
-                    if self.stop_event.wait(self.spec.poll):
-                        sub, topic_data, template, msg_cls, ipc = self._cleanup_session(
-                            sub, topic_data, template, msg_cls, ipc
-                        )
-                        return
-                except Exception as exc:
-                    self.hub.publish({
-                        "kind": "error", "topic": self.spec.topic,
-                        "message": f"read failed during health check: {exc}",
-                        "timestamp_ms": now_ms(),
-                    })
-                    if self.stop_event.wait(self.spec.poll):
-                        sub, topic_data, template, msg_cls, ipc = self._cleanup_session(
-                            sub, topic_data, template, msg_cls, ipc
-                        )
-                        return
-
-            if not got_data:
-                self.hub.publish({
-                    "kind": "error", "topic": self.spec.topic,
-                    "message": f"no data received (attempt {attempt + 1}), retrying",
-                    "timestamp_ms": now_ms(),
-                })
-                # Destroy the C++ subscriber and give SHM a chance to
-                # settle before the next attempt.
-                sub, topic_data, template, msg_cls, ipc = self._cleanup_session(
-                    sub, topic_data, template, msg_cls, ipc
-                )
-                if self.stop_event.wait(max(2.0, self._retry_delay(attempt))):
-                    return
-                attempt += 1
-                continue
-
-            # --- healthy main loop ---
-            attempt = 0
-            last_sample_time = time.monotonic()
-            idle_reconnect_timeout = self._idle_reconnect_timeout()
-            try:
-                while not self.stop_event.is_set():
-                    try:
-                        ok, out = sub.try_get(topic_data)
-                        if not ok:
-                            if (
-                                idle_reconnect_timeout > 0
-                                and time.monotonic() - last_sample_time
-                                > idle_reconnect_timeout
-                            ):
-                                self.hub.publish({
-                                    "kind": "error",
-                                    "topic": self.spec.topic,
-                                    "message": (
-                                        "no samples received for "
-                                        f"{idle_reconnect_timeout:.1f}s; "
-                                        "rebuilding subscriber"
-                                    ),
-                                    "timestamp_ms": now_ms(),
-                                })
-                                break
-                            if self.stop_event.wait(self.spec.poll):
-                                return
-                            continue
-                        last_sample_time = time.monotonic()
-                        self._process_sample(
-                            sub, topic_data, out, msg_cls,
-                            resolved_msg_type,
-                        )
-                    except Exception as exc:
-                        self.hub.publish({
-                            "kind": "error", "topic": self.spec.topic,
-                            "message": str(exc), "timestamp_ms": now_ms(),
-                        })
-                        if self.stop_event.wait(
-                            timeout=max(self.spec.poll, 0.2)
-                        ):
-                            return
-            finally:
-                sub, topic_data, template, msg_cls, ipc = self._cleanup_session(
-                    sub, topic_data, template, msg_cls, ipc
-                )
-                if self.stop_event.wait(0.3):
-                    return
-
-    def _process_sample(
-        self, sub: Any, topic_data: Any, out: Any,
-        msg_cls: Any, resolved_msg_type: str,
-    ) -> None:
-        """Decode and publish one sample from the subscriber."""
-        msg_obj = out.topic() if out is not None else topic_data.topic()
-        if hasattr(msg_cls, "from_generic") and hasattr(msg_obj, "field_count"):
-            msg_obj = msg_cls.from_generic(msg_obj)
-        self.sample_seq = (self.sample_seq + 1) & 0xFFFFFFFF
-        event: Dict[str, Any] = {
-            "kind": "sample",
-            "topic": self.spec.topic,
-            "msg_type": self.spec.msg_type,
-            "resolved_msg_type": resolved_msg_type,
-            "transport": self.spec.transport,
-            "domain": self.spec.domain,
-            "queue": self.spec.queue,
-            "extra": self.spec.extra,
-            "timestamp_ms": now_ms(),
-        }
-        if resolved_msg_type == "StdPointCloud":
-            metadata, binary_payload = encode_point_cloud_binary(
-                msg_obj, self.sample_seq
-            )
-            event.update({
-                "data": lightweight_point_cloud_data(msg_obj),
-                "binary": metadata,
-                "binary_payload": binary_payload,
-            })
-        elif resolved_msg_type == "StdImage":
-            metadata = encode_image_data(msg_obj)
-            event.update({
-                "data": {
-                    "header": to_jsonable(get_field(msg_obj, "header", {})),
-                    "width": metadata["width"],
-                    "height": metadata["height"],
-                    "encoding": metadata["image_encoding"],
-                    "step": metadata["step"],
-                    "data_length": metadata["data_length"],
-                },
-                "binary": metadata,
-            })
-        else:
-            event["data"] = to_jsonable(msg_obj)
-        self.hub.publish(event)
-
-
-class DemoPublisher(threading.Thread):
-    def __init__(self, hub: WebHub, period_s: float) -> None:
-        super().__init__(daemon=True)
-        self.hub = hub
-        self.period_s = period_s
-        self.stop_event = threading.Event()
-        self.x = 0.0
-        self.y = 0.0
-        self.seq = 0
-
-    def run(self) -> None:
-        while not self.stop_event.is_set():
-            self.seq += 1
-            self.x += random.uniform(-0.08, 0.16)
-            self.y += random.uniform(-0.10, 0.10)
-            data = {
-                "name": "demo_robot",
-                "current_pose": {
-                    "x": round(self.x, 4),
-                    "y": round(self.y, 4),
-                    "z": 0.0,
-                    "frame_id": "map",
-                },
-                "battery": round(72.0 + 8.0 * math.sin(self.seq / 20.0), 3),
-                "temperature": round(36.0 + 3.0 * math.sin(self.seq / 13.0), 3),
-                "state": "RUNNING" if self.seq % 80 < 65 else "IDLE",
-            }
-            self.hub.publish(
-                {
-                    "kind": "sample",
-                    "topic": "demo_robot_state",
-                    "msg_type": "RobotState",
-                    "transport": "demo",
-                    "domain": 0,
-                    "timestamp_ms": now_ms(),
-                    "data": data,
-                }
-            )
-            time.sleep(self.period_s)
 
 
 def http_response(status: str, headers: Dict[str, str], body: bytes = b"") -> bytes:
@@ -1237,7 +934,36 @@ async def handle_client(
         writer.close()
         return
 
-    file_path = safe_static_path(path.split("?", 1)[0])
+    request_path = path.split("?", 1)[0]
+    if request_path.startswith("/robot_assets/"):
+        parts = request_path.split("/", 3)
+        asset_key = unquote(parts[2]) if len(parts) >= 3 else ""
+        asset_path = hub.robot_asset_paths.get(asset_key)
+        if asset_path is None or not asset_path.is_file():
+            writer.write(
+                http_response("404 Not Found", {"Content-Type": "text/plain"}, b"not found")
+            )
+            await writer.drain()
+            writer.close()
+            return
+        body = asset_path.read_bytes()
+        content_type = mimetypes.guess_type(asset_path.name)[0] or "application/octet-stream"
+        writer.write(
+            http_response(
+                "200 OK",
+                {
+                    "Content-Type": content_type,
+                    "ETag": f'"{asset_key}"',
+                    "Cache-Control": "public, max-age=31536000, immutable",
+                },
+                body,
+            )
+        )
+        await writer.drain()
+        writer.close()
+        return
+
+    file_path = safe_static_path(request_path)
     if not file_path.exists() or not file_path.is_file():
         writer.write(
             http_response("404 Not Found", {"Content-Type": "text/plain"}, b"not found")
@@ -1320,7 +1046,7 @@ async def run_server(args: argparse.Namespace) -> None:
 
     workers: List[threading.Thread] = []
     if args.demo:
-        worker = DemoPublisher(hub, args.demo_period)
+        worker = DemoPublisher(hub, args.demo_period, time_ms=now_ms)
         worker.start()
         workers.append(worker)
         hub.demo_workers["demo"] = worker

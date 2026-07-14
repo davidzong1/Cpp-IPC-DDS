@@ -1,1 +1,3 @@
 kinpy
+numpy
+scipy

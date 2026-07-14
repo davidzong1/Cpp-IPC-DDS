@@ -1,7 +1,8 @@
 :root {
   color-scheme: dark;
-  --reference-axis-size: 180px;
-  --reference-axis-inset: 22px;
+  /* 【右下角参考坐标轴蒙版】CSS 变量，与 JS 端 referenceAxisConfig 中的值保持同步 */
+  --reference-axis-size: 150px;   /* 蒙版容器宽高 */
+  --reference-axis-inset: 12px;   /* 距离 scene-panel 右下角的边距 */
   --bg: #0f1216;
   --sidebar: #171b22;
   --panel: #1e242d;
@@ -275,25 +276,26 @@ span {
 
 .section-head {
   display: flex;
-  height: 16px;             /* 由 22px 缩小，匹配紧凑条目风格 */
+  height: 28px;             /* 标题栏高度：增大以容纳上下 padding，让标题文字与面板边缘有呼吸空间 */
   align-items: center;
   justify-content: space-between;
   gap: 5px;
   border-bottom: 1px solid var(--border);
   background: var(--panel-2);
-  padding: 0 5px;
+  padding: 0 10px;          /* 左右内边距：5px → 10px，标题文字与左右边缘拉开距离 */
 }
 
 .section-head h2,
 .viewport-toolbar h2,
 .modal h2 {
-  font-size: 13px;
+  font-size: 16px;
+  height: 20px;
   line-height: 1.2;
 }
 
 .display-list,
 .event-log {
-  height: calc(100% - 16px); /* 匹配 section-head 实际高度 16px */
+  height: calc(100% - 28px); /* 匹配 section-head 高度，确保内容区不被标题栏遮挡 */
   overflow: auto;
 }
 
@@ -390,9 +392,23 @@ span {
 
 .config-actions {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 6px;
-  padding: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px 4px;
+  padding: 4px 6px;
+}
+
+#configPathInput {
+  grid-column: 1 / -1;
+  min-width: 0;
+  min-height: 24px;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.config-actions button {
+  min-height: 24px;
+  padding: 0 6px;
+  font-size: 11px;
 }
 
 /* status 面板内每条事件，紧凑排列 */
@@ -516,15 +532,13 @@ span {
   line-height: 1;
 }
 
+/* 右下角坐标轴容器：仅占位，无蒙版背景，3D 箭头由 JS renderAxisGizmo 渲染 */
 .scene-overlay {
   position: absolute;
   right: var(--reference-axis-inset);
   bottom: var(--reference-axis-inset);
   width: var(--reference-axis-size);
   height: var(--reference-axis-size);
-  border: 1px solid rgba(148, 163, 184, 0.28);
-  border-radius: 8px;
-  background: transparent;
   pointer-events: none;
 }
 

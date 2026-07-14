@@ -1,5 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
+import { STLLoader } from "three/addons/loaders/STLLoader.js";
 
 const state = {
   connected: false,
@@ -8,9 +10,10 @@ const state = {
   topics: new Map(),
   robotDisplays: new Map(),
   robotStateDisplays: new Map(),
+  assetCache: new Map(),
   pendingBinarySamples: [],
   events: [],
-  messageTypes: ["RawMessage", "Pose", "Path", "PointCloud", "Marker", "Image", "Robot", "RobotState"],
+  messageTypes: ["RawMessage", "Pose", "Path", "PointCloud", "Marker", "Image", "TF", "Robot", "RobotState"],
   robotStateMessageTypes: ["RobotState"],
   messageTypeMap: {
     RawMessage: "StdRawMessage",
@@ -19,6 +22,7 @@ const state = {
     PointCloud: "StdPointCloud",
     Marker: "StdMarker",
     Image: "StdImage",
+    TF: "StdTF",
     Robot: "",
     RobotState: "RobotState",
   },
@@ -33,6 +37,7 @@ const state = {
     robot_state_displays: [],
     robot_models: [],
   },
+  configPath: "",
 };
 
 const maxTrail = 300;
@@ -97,21 +102,38 @@ const binaryPointCloudHeaderBytes = 24;
 const binaryPointCloudMagic = "DZPC";
 const binaryPointCloudType = 1;
 const binaryPointCloudHasColors = 1;
+/*
+ * 【右下角参考坐标轴配置 referenceAxisConfig】
+ * ──────────────────────────────────────────────────────────────────────────
+ * 控制场景右下角 3D 坐标轴 Gizmo 的所有参数。
+ * 需要与 CSS 变量 --reference-axis-size / --reference-axis-inset 保持同步。
+ *
+ * 渲染流程：
+ *   1. initScene() 创建独立的 axisScene + axisCamera，放入 makeAxisGizmo()
+ *   2. 每帧 renderScene() 调用 renderAxisGizmo()
+ *   3. renderAxisGizmo() 使用 scissor + viewport 将 axisScene 渲染到
+ *      右下角蒙版区域（由 viewportSize/viewportInset 定义位置和大小）
+ *   4. CSS .scene-overlay 提供圆角边框蒙版，视觉上圈出该区域
+ * =========================================================================
+ */
 const referenceAxisConfig = {
-  viewportSize: 180,
-  viewportInset: 22,
-  axisSize: 1.0,
-  axisThickness: 50,
-  labelScale: 0.5,
-  cameraDistance: 4.2,
-  backgroundColor: 0xffffff,
-  backgroundOpacity: 0.72,
+  viewportSize: 150,           /* scissor/viewport 渲染区域的宽高（px），与 CSS --reference-axis-size 一致 */
+  viewportInset: 12,           /* 渲染区域距离 canvas 右下角的边距（px），与 CSS --reference-axis-inset 一致 */
+  axisSize: 1.0,               /* 每个轴的长度（3D 世界单位），箭头尖端在此位置 */
+  axisRadius: 0.035,            /* 【控制轴线粗细】圆柱体底面半径（WebGL 不支持宽线，改用 CylinderGeometry 实现可调粗细） */
+  labelScale: 0.5,             /* X/Y/Z 文字标签的 sprite 缩放比例 */
+  cameraDistance: 4.2,         /* 坐标轴相机到原点的距离，影响 Gizmo 在视口中的缩放感 */
+  backgroundColor: 0xffffff,   /* 坐标轴区域背景色（白色半透明，模拟参考卡片效果） */
+  backgroundOpacity: 0.72,     /* 背景不透明度 */
 };
+/* 坐标轴颜色：红=X、绿=Y、蓝=Z（与 CSS --red/--green/--blue 一致） */
 const axisColors = {
   x: 0xef4444,
   y: 0x22c55e,
   z: 0x3b82f6,
 };
+const objLoader = new OBJLoader();
+const stlLoader = new STLLoader();
 
 const imageState = {
   topic: null,
@@ -180,7 +202,7 @@ const el = {
   targetRobotInput: document.getElementById("targetRobotInput"),
   exportConfigBtn: document.getElementById("exportConfigBtn"),
   importConfigBtn: document.getElementById("importConfigBtn"),
-  configFileInput: document.getElementById("configFileInput"),
+  configPathInput: document.getElementById("configPathInput"),
   imageOverlay: document.getElementById("imageOverlay"),
   imageOverlayHeader: document.getElementById("imageOverlayHeader"),
   imageOverlayTitle: document.getElementById("imageOverlayTitle"),
@@ -321,6 +343,14 @@ function setConfig(config) {
   updateDisplayForm();
 }
 
+function setConfigPath(path, forceInput = false) {
+  if (!path) return;
+  state.configPath = path;
+  if (el.configPathInput && (forceInput || !el.configPathInput.value)) {
+    el.configPathInput.value = path;
+  }
+}
+
 function makeRobotPlaceholder(raw) {
   return {
     id: raw.id || raw.name || `robot_${robotState.nextId++}`,
@@ -328,6 +358,8 @@ function makeRobotPlaceholder(raw) {
     fileName: raw.file_name || raw.urdf_path || "",
     urdfPath: raw.urdf_path || raw.file_name || "",
     urdf: raw.urdf || "",
+    meshAssets: normalizeRobotMeshAssets(raw.mesh_assets || raw.meshAssets || {}),
+    meshWarnings: raw.mesh_warnings || raw.meshWarnings || [],
     visible: raw.visible !== false,
     links: [],
     joints: [],
@@ -338,6 +370,14 @@ function makeRobotPlaceholder(raw) {
   };
 }
 
+function normalizeRobotMeshAssets(raw) {
+  if (Array.isArray(raw)) {
+    return Object.fromEntries(raw.filter((asset) => asset?.filename).map((asset) => [asset.filename, asset]));
+  }
+  if (raw && typeof raw === "object") return raw;
+  return {};
+}
+
 function robotDisplayFromConfig(raw) {
   if (raw?.urdf) {
     const model = parseUrdfRobot(raw.urdf, raw.urdf_path || raw.file_name || raw.name || "");
@@ -345,6 +385,8 @@ function robotDisplayFromConfig(raw) {
     model.name = raw.name || model.name;
     model.fileName = raw.file_name || raw.urdf_path || model.fileName || "";
     model.urdfPath = raw.urdf_path || raw.file_name || "";
+    model.meshAssets = normalizeRobotMeshAssets(raw.mesh_assets || raw.meshAssets || {});
+    model.meshWarnings = raw.mesh_warnings || raw.meshWarnings || [];
     model.visible = raw.visible !== false;
     model.displayType = "Robot";
     return model;
@@ -509,6 +551,10 @@ function buildConfigFromUi() {
   };
 }
 
+function backendConfigPath() {
+  return (el.configPathInput?.value || state.configPath || "").trim();
+}
+
 function syncDisplayConfig() {
   state.config.robot_displays = currentRobotDisplayConfig();
   state.config.robot_state_displays = currentRobotStateDisplayConfig();
@@ -574,18 +620,6 @@ function upsertRobotStateDisplay(raw, options = {}) {
   return display;
 }
 
-function downloadJson(filename, data) {
-  const blob = new Blob([JSON.stringify(data, null, 2) + "\n"], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
 function getPath(obj, path) {
   const parts = path.split(".");
   let cur = obj;
@@ -631,6 +665,16 @@ function handleSample(event) {
     robotStateDisplay.latest = topic.latest;
     robotStateDisplay.lastTimestamp = topic.lastTimestamp;
     robotStateDisplay.rate = topic.rate;
+    if (event.robot_state) {
+      robotStateDisplay.latestRobotState = event.robot_state;
+      robotStateDisplay.latestJointState = event.robot_joint_state || event.robot_state.joint_state || {};
+      robotStateDisplay.latestLinkStates = event.robot_link_states || event.robot_state.link_states || [];
+    }
+    if (event.robot_state_error) {
+      robotStateDisplay.latestError = event.robot_state_error.message || "invalid robot state";
+    } else if (event.robot_state) {
+      robotStateDisplay.latestError = "";
+    }
   }
   topic.sampleTimes.push(topic.lastTimestamp);
   if (topic.sampleTimes.length > 80) topic.sampleTimes.shift();
@@ -663,6 +707,9 @@ function handleSample(event) {
     topic.imageTimes = topic.imageTimes || [];
     topic.imageTimes.push(topic.lastTimestamp);
     if (topic.imageTimes.length > 40) topic.imageTimes.shift();
+  }
+  if (event.robot_id && Array.isArray(event.robot_link_states)) {
+    applyRobotLinkStates(event.robot_id, event.robot_link_states);
   }
   if (!state.activeTopic) state.activeTopic = topic.name;
   requestDisplayRender();
@@ -922,6 +969,7 @@ function connect() {
     const event = JSON.parse(message.data);
     if (event.kind === "hello") {
       setConfig(event.config || {});
+      setConfigPath(event.config_path || "");
       setMessageTypes(event.message_types || [], event.message_type_map || null);
       (event.topics || []).forEach((topic) => ensureTopic(topic.name || topic.topic, topic));
       renderAll();
@@ -959,12 +1007,14 @@ function connect() {
       renderAll();
     } else if (event.kind === "config") {
       setConfig(event.config || {});
+      setConfigPath(event.config_path || "");
       setMessageTypes(event.message_types || state.messageTypes, event.message_type_map || null);
       addEvent("config", "configuration applied");
       renderAll();
     } else if (event.kind === "ack") {
       addEvent(event.ok ? "ack" : "error", event.ok ? `${event.action || "command"} ok` : event.message);
-      if (event.config) setConfig(event.config);
+      if (event.config) { setConfig(event.config); renderAll(); }
+      if (event.path) setConfigPath(event.path, true);
     } else if (event.kind === "error") {
       addEvent("error", `${event.topic || "bridge"}: ${event.message}`);
     }
@@ -1627,6 +1677,87 @@ function matrixPosition(matrix) {
   return new THREE.Vector3().setFromMatrixPosition(matrix);
 }
 
+function parseOriginMatrix(originEl) {
+  if (!originEl) return new THREE.Matrix4();
+  const xyz = parseNumberList(originEl.getAttribute("xyz"), [0, 0, 0]);
+  const rpy = parseNumberList(originEl.getAttribute("rpy"), [0, 0, 0]);
+  return matrixFromOrigin(xyz, rpy);
+}
+
+function parseScaleList(value) {
+  if (!value) return [1, 1, 1];
+  return parseNumberList(value, [1, 1, 1]);
+}
+
+function materialColor(name) {
+  const key = String(name || "").toLowerCase();
+  const colors = {
+    black: 0x111827,
+    white: 0xf8fafc,
+    gray: 0x8b95a1,
+    grey: 0x8b95a1,
+    metal: 0xb8c0cc,
+    collision: 0x64748b,
+    orange: 0xf97316,
+    red: 0xef4444,
+    green: 0x22c55e,
+    blue: 0x3b82f6,
+  };
+  return colors[key] ?? 0xa8b0bc;
+}
+
+function parseLinkMeshEntries(linkEl, tagName) {
+  const entries = [];
+  for (const meshParentEl of xmlChildrenByName(linkEl, tagName)) {
+    const geometryEl = xmlFirstChildByName(meshParentEl, "geometry");
+    const meshEl = geometryEl ? xmlFirstChildByName(geometryEl, "mesh") : null;
+    const filename = meshEl?.getAttribute("filename")?.trim() || meshEl?.getAttribute("url")?.trim() || "";
+    if (!filename) continue;
+    const materialEl = xmlFirstChildByName(meshParentEl, "material");
+    entries.push({
+      kind: tagName,
+      name: meshParentEl.getAttribute("name")?.trim() || "",
+      filename,
+      originMatrix: parseOriginMatrix(xmlFirstChildByName(meshParentEl, "origin")),
+      scale: parseScaleList(meshEl?.getAttribute("scale")),
+      material: materialEl?.getAttribute("name")?.trim() || (tagName === "collision" ? "collision" : ""),
+    });
+  }
+  return entries;
+}
+
+function parseLinkVisuals(linkEl) {
+  return parseLinkMeshEntries(linkEl, "visual");
+}
+
+function parseLinkCollisions(linkEl) {
+  return parseLinkMeshEntries(linkEl, "collision");
+}
+
+function matrixFromRobotLinkState(linkState) {
+  if (Array.isArray(linkState?.matrix) && linkState.matrix.length >= 4) {
+    const values = linkState.matrix.flat ? linkState.matrix.flat() : linkState.matrix;
+    if (values.length >= 16) {
+      return new THREE.Matrix4().set(
+        Number(values[0]), Number(values[1]), Number(values[2]), Number(values[3]),
+        Number(values[4]), Number(values[5]), Number(values[6]), Number(values[7]),
+        Number(values[8]), Number(values[9]), Number(values[10]), Number(values[11]),
+        Number(values[12]), Number(values[13]), Number(values[14]), Number(values[15]),
+      );
+    }
+  }
+  const position = Array.isArray(linkState?.position) ? linkState.position : [0, 0, 0];
+  const rotation = Array.isArray(linkState?.rotation) ? linkState.rotation : [1, 0, 0, 0];
+  const quaternion = rotation.length >= 4
+    ? new THREE.Quaternion(rotation[1], rotation[2], rotation[3], rotation[0])
+    : new THREE.Quaternion();
+  return new THREE.Matrix4().compose(
+    new THREE.Vector3(Number(position[0] || 0), Number(position[1] || 0), Number(position[2] || 0)),
+    quaternion,
+    new THREE.Vector3(1, 1, 1),
+  );
+}
+
 function parseUrdf(text, filename) {
   const doc = new DOMParser().parseFromString(text, "application/xml");
   const parseError = doc.querySelector("parsererror");
@@ -1645,7 +1776,11 @@ function parseUrdf(text, filename) {
       warnings.push("ignored unnamed link");
       continue;
     }
-    linksByName.set(name, { name });
+    linksByName.set(name, {
+      name,
+      visuals: parseLinkVisuals(linkEl),
+      collisions: parseLinkCollisions(linkEl),
+    });
   }
 
   const joints = [];
@@ -1764,6 +1899,47 @@ function makeLabel(text, color, scale = 0.65) {
   return sprite;
 }
 
+/*
+ * 【实心圆柱轴线 makeAxisCylinder】
+ * ──────────────────────────────────────────────────────────────────────────
+ * 用 CylinderGeometry（圆柱体 Mesh）替代 THREE.Line 绘制轴线。
+ *
+ * 为什么不用 Line：
+ *   WebGL 规范中 lineWidth 在绝大多数平台（Windows/Linux/macOS）被强制设为 1，
+ *   Three.js 的 LineBasicMaterial({ linewidth }) 参数在这些平台上完全无效，
+ *   永远只能画出 1px 的细线。改用圆柱体 Mesh 可真正控制轴线粗细。
+ *
+ * 参数：
+ *   start  - 轴线起点（如 Vector3(0, 0, 0)）
+ *   end    - 轴线终点（如 Vector3(size, 0, 0)）
+ *   color  - 轴线颜色
+ *   radius - 圆柱体底面半径，控制轴线粗细（默认 0.03，数据单位）
+ *
+ * 实现：
+ *   圆柱体默认沿 Y 轴从 -height/2 到 +height/2，
+ *   将其中点置于 start→end 线段中点，旋转到目标方向，使两端贴合起止点。
+ * =========================================================================
+ */
+function makeAxisCylinder(start, end, color, radius = 0.03) {
+  const direction = new THREE.Vector3().subVectors(end, start);
+  const length = direction.length();
+  if (length < 1e-9) return new THREE.Group();  /* 零长度，返回空组 */
+
+  const geometry = new THREE.CylinderGeometry(radius, radius, length, 8, 1);
+  const material = new THREE.MeshBasicMaterial({ color, depthTest: false, depthWrite: false });
+  const cylinder = new THREE.Mesh(geometry, material);
+
+  /* 将圆柱体中点置于线段中点 */
+  const midpoint = new THREE.Vector3().addVectors(start, end).multiplyScalar(0.5);
+  cylinder.position.copy(midpoint);
+
+  /* 圆柱体默认沿 Y 轴，旋转到目标方向 */
+  const dir = direction.normalize();
+  cylinder.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+
+  return cylinder;
+}
+
 function makeAxisLine(points, color, thickness = 2) {
   return new THREE.Line(
     new THREE.BufferGeometry().setFromPoints(points),
@@ -1771,18 +1947,73 @@ function makeAxisLine(points, color, thickness = 2) {
   );
 }
 
-function makeAxisGizmo(size = 1, labelScale = 0.34, thickness = 2) {
-  const group = new THREE.Group();
-  group.add(makeAxisLine([new THREE.Vector3(0, 0, 0), new THREE.Vector3(size, 0, 0)], axisColors.x, thickness));
-  group.add(makeAxisLine([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, size, 0)], axisColors.y, thickness));
-  group.add(makeAxisLine([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, size)], axisColors.z, thickness));
+/*
+ * 【箭头锥体 makeArrowHead】
+ * 在坐标轴末端创建圆锥体箭头。使用 ConeGeometry，默认尖朝 Y+，
+ * 通过 quaternion 旋转到目标方向。锥体中心置于 tipPosition 往回
+ * arrowLen*0.5 处，使锥体底面贴合轴末端位置。
+ *
+ * 参数：
+ *   color      - 箭头颜色（0xef4444红 / 0x22c55e绿 / 0x3b82f6蓝）
+ *   direction  - 箭头指向（单位向量，如 (1,0,0) 朝 X+）
+ *   tipPosition- 箭头尖端在 3D 空间中的位置
+ *   size       - 参考轴总长度，箭头尺寸按比例派生
+ *
+ * 箭头尺寸：
+ *   arrowLen    = size * 0.16   （箭头高度，约为轴长的 16%）
+ *   arrowRadius = size * 0.05   （箭头底面半径，约为轴长的 5%）
+ *   depthTest/depthWrite = false 使箭头始终在视觉最前方，不被遮挡
+ */
+function makeArrowHead(color, direction, tipPosition, size = 1) {
+  const arrowLen = size * 0.16;       /* 箭头长度，相对于 axisSize */
+  const arrowRadius = size * 0.05;    /* 箭头底面半径 */
+  const coneGeo = new THREE.ConeGeometry(arrowRadius, arrowLen, 8, 6);
+  const coneMat = new THREE.MeshBasicMaterial({ color, depthTest: false, depthWrite: false });
+  const cone = new THREE.Mesh(coneGeo, coneMat);
+  const dir = direction.clone().normalize();
+  /* 锥体几何体默认尖朝 Y+，旋转到目标方向；锥心置于尖端往回 halfLen，使底面贴合轴末端 */
+  cone.position.copy(tipPosition).addScaledVector(dir, arrowLen * 0.5);
+  cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+  return cone;
+}
 
+/*
+ * 【坐标轴 Gizmo 构建 makeAxisGizmo】
+ * ──────────────────────────────────────────────────────────────────────────
+ * 创建右下角参考坐标轴的完整 3D 对象组，包含：
+ *   1. 三条实心圆柱轴线（makeAxisCylinder，从原点沿 X/Y/Z 正向各延伸 size 长度）
+ *      粗细由 referenceAxisConfig.axisRadius 控制，默认 0.03
+ *   2. 三个箭头锥体（makeArrowHead，位于各轴末端，指示正方向）
+ *   3. 三个 Canvas Sprite 标签（"X"红色、"Y"绿色、"Z"蓝色）
+ *
+ * 标签位置在箭头尖端外侧（labelOffset = size * 1.34），留出呼吸空间。
+ *
+ * 此 Group 被添加到独立的 axisScene 中，每帧由 renderAxisGizmo()
+ * 渲染到右下角 scissor 区域。
+ * =========================================================================
+ */
+function makeAxisGizmo(size = 1, labelScale = 0.34, radius = 0.03) {
+  const group = new THREE.Group();
+  const origin = new THREE.Vector3(0, 0, 0);
+
+  /* 三条实心圆柱轴线：从原点出发，沿各轴正向延伸 size 长度，粗细由 radius 控制 */
+  group.add(makeAxisCylinder(origin, new THREE.Vector3(size, 0, 0), axisColors.x, radius));
+  group.add(makeAxisCylinder(origin, new THREE.Vector3(0, size, 0), axisColors.y, radius));
+  group.add(makeAxisCylinder(origin, new THREE.Vector3(0, 0, size), axisColors.z, radius));
+
+  /* 三个轴末端的箭头锥体 */
+  group.add(makeArrowHead(axisColors.x, new THREE.Vector3(1, 0, 0), new THREE.Vector3(size, 0, 0), size));
+  group.add(makeArrowHead(axisColors.y, new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, size, 0), size));
+  group.add(makeArrowHead(axisColors.z, new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, size), size));
+
+  /* 轴标签：位于箭头尖端外侧，留出呼吸空间 */
+  const labelOffset = size * 1.34;
   const xLabel = makeLabel("X", "#ef4444", labelScale);
-  xLabel.position.set(size * 1.16, 0, 0);
+  xLabel.position.set(labelOffset, 0, 0);
   const yLabel = makeLabel("Y", "#22c55e", labelScale);
-  yLabel.position.set(0, size * 1.16, 0);
+  yLabel.position.set(0, labelOffset, 0);
   const zLabel = makeLabel("Z", "#3b82f6", labelScale);
-  zLabel.position.set(0, 0, size * 1.16);
+  zLabel.position.set(0, 0, labelOffset);
   group.add(xLabel, yLabel, zLabel);
 
   return group;
@@ -1808,69 +2039,89 @@ function createRobotGroup(model) {
   group.name = `urdf:${model.name}`;
   group.userData.robotModelId = model.id;
 
-  const linkFrames = new THREE.Group();
-  linkFrames.name = "link_frames";
+  const linkGroups = new THREE.Group();
+  linkGroups.name = "link_groups";
+  let hasMesh = false;
   for (const link of model.links) {
     const pose = model.linkPoses.get(link.name);
     if (!pose) continue;
-    const frame = makeFrameAxes(0.32, 2);
-    frame.name = `link_frame:${link.name}`;
-    frame.matrixAutoUpdate = false;
-    frame.matrix.copy(pose);
-    linkFrames.add(frame);
+    const linkGroup = new THREE.Group();
+    linkGroup.name = `link_group:${link.name}`;
+    linkGroup.matrixAutoUpdate = false;
+    linkGroup.matrix.copy(pose);
+    const meshEntries = (link.visuals || []).length > 0 ? link.visuals : (link.collisions || []);
+    for (const visual of meshEntries) {
+      if (addRobotMeshToLinkGroup(model, linkGroup, visual)) hasMesh = true;
+    }
+    linkGroups.add(linkGroup);
   }
-  group.add(linkFrames);
+  if (hasMesh) group.add(linkGroups);
 
-  const segmentPoints = [];
-  for (const joint of model.joints) {
-    const parentPose = model.linkPoses.get(joint.parent);
-    const jointPose = model.jointPoses.get(joint.name);
-    if (!parentPose || !jointPose) continue;
-    segmentPoints.push(matrixPosition(parentPose), matrixPosition(jointPose));
-  }
-  if (segmentPoints.length > 0) {
-    const linkLines = new THREE.LineSegments(
-      new THREE.BufferGeometry().setFromPoints(segmentPoints),
-      new THREE.LineBasicMaterial({ color: 0x0f172a, transparent: true, opacity: 0.72 }),
-    );
-    linkLines.name = "link_segments";
-    group.add(linkLines);
-  }
+  const linkFrames = new THREE.Group();
+  linkFrames.name = "link_frames";
+  if (!hasMesh) {
+    for (const link of model.links) {
+      const pose = model.linkPoses.get(link.name);
+      if (!pose) continue;
+      const frame = makeFrameAxes(0.32, 2);
+      frame.name = `link_frame:${link.name}`;
+      frame.matrixAutoUpdate = false;
+      frame.matrix.copy(pose);
+      linkFrames.add(frame);
+    }
+    group.add(linkFrames);
 
-  const markerGeometry = new THREE.SphereGeometry(0.075, 16, 10);
-  for (const joint of model.joints) {
-    const jointPose = model.jointPoses.get(joint.name);
-    if (!jointPose) continue;
-    const position = matrixPosition(jointPose);
-    const color = jointColor(joint.type);
-    const marker = new THREE.Mesh(
-      markerGeometry.clone(),
-      new THREE.MeshStandardMaterial({
+    const segmentPoints = [];
+    for (const joint of model.joints) {
+      const parentPose = model.linkPoses.get(joint.parent);
+      const jointPose = model.jointPoses.get(joint.name);
+      if (!parentPose || !jointPose) continue;
+      segmentPoints.push(matrixPosition(parentPose), matrixPosition(jointPose));
+    }
+    if (segmentPoints.length > 0) {
+      const linkLines = new THREE.LineSegments(
+        new THREE.BufferGeometry().setFromPoints(segmentPoints),
+        new THREE.LineBasicMaterial({ color: 0x0f172a, transparent: true, opacity: 0.72 }),
+      );
+      linkLines.name = "link_segments";
+      group.add(linkLines);
+    }
+
+    const markerGeometry = new THREE.SphereGeometry(0.075, 16, 10);
+    for (const joint of model.joints) {
+      const jointPose = model.jointPoses.get(joint.name);
+      if (!jointPose) continue;
+      const position = matrixPosition(jointPose);
+      const color = jointColor(joint.type);
+      const marker = new THREE.Mesh(
+        markerGeometry.clone(),
+        new THREE.MeshStandardMaterial({
+          color,
+          emissive: color,
+          emissiveIntensity: 0.12,
+          roughness: 0.48,
+          metalness: 0.04,
+        }),
+      );
+      marker.name = `joint:${joint.name}`;
+      marker.position.copy(position);
+      group.add(marker);
+
+      const rotation = new THREE.Quaternion().setFromRotationMatrix(jointPose);
+      const axis = new THREE.Vector3(joint.axis[0], joint.axis[1], joint.axis[2]).applyQuaternion(rotation).normalize();
+      const axisLine = makeAxisLine(
+        [
+          position.clone().addScaledVector(axis, -0.18),
+          position.clone().addScaledVector(axis, 0.18),
+        ],
         color,
-        emissive: color,
-        emissiveIntensity: 0.12,
-        roughness: 0.48,
-        metalness: 0.04,
-      }),
-    );
-    marker.name = `joint:${joint.name}`;
-    marker.position.copy(position);
-    group.add(marker);
-
-    const rotation = new THREE.Quaternion().setFromRotationMatrix(jointPose);
-    const axis = new THREE.Vector3(joint.axis[0], joint.axis[1], joint.axis[2]).applyQuaternion(rotation).normalize();
-    const axisLine = makeAxisLine(
-      [
-        position.clone().addScaledVector(axis, -0.18),
-        position.clone().addScaledVector(axis, 0.18),
-      ],
-      color,
-      2,
-    );
-    axisLine.name = `joint_axis:${joint.name}`;
-    group.add(axisLine);
+        2,
+      );
+      axisLine.name = `joint_axis:${joint.name}`;
+      group.add(axisLine);
+    }
+    markerGeometry.dispose();
   }
-  markerGeometry.dispose();
 
   return group;
 }
@@ -1883,6 +2134,93 @@ function parseUrdfRobot(urdfText, fileName = "") {
   return model;
 }
 
+function normalizeAssetFilename(value) {
+  return String(value || "").replaceAll("\\", "/").replace(/^\.\//, "");
+}
+
+function robotAssetForVisual(robot, visual) {
+  const target = normalizeAssetFilename(visual.filename);
+  const assets = robot.meshAssets || {};
+  if (Array.isArray(assets)) {
+    return assets.find((asset) => normalizeAssetFilename(asset.filename) === target) || null;
+  }
+  if (assets[visual.filename]) return assets[visual.filename];
+  if (assets[target]) return assets[target];
+  const matchKey = Object.keys(assets).find((key) => normalizeAssetFilename(key) === target);
+  return matchKey ? assets[matchKey] : null;
+}
+
+function assetCacheKey(asset) {
+  return `${asset.url || asset.filename || ""}|${asset.hash || ""}|${asset.mtime_ns || ""}|${asset.byte_length || asset.size || ""}`;
+}
+
+function applyVisualMaterial(object, visual) {
+  const color = materialColor(visual.material);
+  const isCollision = visual.kind === "collision";
+  object.traverse((child) => {
+    if (!child.isMesh) return;
+    child.castShadow = false;
+    child.receiveShadow = true;
+    child.material = new THREE.MeshStandardMaterial({
+      color,
+      transparent: isCollision,
+      opacity: isCollision ? 0.36 : 1,
+      roughness: visual.material === "metal" ? 0.32 : 0.58,
+      metalness: visual.material === "metal" ? 0.45 : 0.04,
+      side: THREE.DoubleSide,
+    });
+  });
+}
+
+function cloneRobotMeshObject(source) {
+  const object = source.clone(true);
+  object.traverse((child) => {
+    if (child.isMesh && child.geometry) child.geometry = child.geometry.clone();
+  });
+  return object;
+}
+
+function loadAssetObject(asset) {
+  const key = assetCacheKey(asset);
+  if (!state.assetCache.has(key)) {
+    const type = String(asset.type || asset.format || "").toLowerCase();
+    const promise = (async () => {
+      if (!asset.url) throw new Error(`mesh asset has no backend URL: ${asset.filename || "unknown"}`);
+      if (type === "obj") return objLoader.loadAsync(asset.url);
+      if (type === "stl") {
+        const geometry = await stlLoader.loadAsync(asset.url);
+        geometry.computeVertexNormals();
+        return new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: 0xa8b0bc, roughness: 0.55, metalness: 0.08 }));
+      }
+      throw new Error(`unsupported mesh type: ${type || asset.filename || "unknown"}`);
+    })();
+    state.assetCache.set(key, promise);
+  }
+  return state.assetCache.get(key);
+}
+
+function addRobotMeshToLinkGroup(robot, linkGroup, visual) {
+  const asset = robotAssetForVisual(robot, visual);
+  if (!asset) return false;
+  const visualGroup = new THREE.Group();
+  visualGroup.name = `visual:${visual.filename}`;
+  visualGroup.matrixAutoUpdate = false;
+  visualGroup.matrix.copy(visual.originMatrix);
+  visualGroup.matrix.scale(new THREE.Vector3(visual.scale[0], visual.scale[1], visual.scale[2]));
+  linkGroup.add(visualGroup);
+  loadAssetObject(asset).then((source) => {
+    const robotGroup = sceneState.robotGroups.get(robot.id);
+    if (!robotGroup || !robotGroup.getObjectById(linkGroup.id)) return;
+    const object = cloneRobotMeshObject(source);
+    applyVisualMaterial(object, visual);
+    visualGroup.add(object);
+    requestSceneRender();
+  }).catch((error) => {
+    addEvent("error", `mesh load failed ${visual.filename}: ${error.message}`);
+  });
+  return true;
+}
+
 function buildRobotObject(robot) {
   return createRobotGroup(robot);
 }
@@ -1892,7 +2230,7 @@ function initScene() {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(sceneBackgroundColor);
 
-  const camera = new THREE.PerspectiveCamera(55, 1, 0.05, 1000);
+  const camera = new THREE.PerspectiveCamera(55, 1, 0.02, 1000);
   camera.up.set(0, 0, 1);
   camera.position.copy(defaultCameraPosition);
 
@@ -1910,7 +2248,7 @@ function initScene() {
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
   controls.screenSpacePanning = false;
-  controls.minDistance = 3;
+  controls.minDistance = 0.5;
   controls.maxDistance = 140;
   controls.maxPolarAngle = Math.PI * 0.48;
   controls.mouseButtons = {
@@ -1933,14 +2271,31 @@ function initScene() {
   grid.material.opacity = 0.66;
   scene.add(grid);
 
+  /*
+   * 【右下角坐标轴独立场景 axisScene】
+   * ──────────────────────────────────────────────────────────────────────
+   * 创建一个独立的 Scene + Camera 专用于渲染右下角参考坐标轴。
+   *
+   * 设计原因：
+   *   - 主场景使用 PerspectiveCamera(55°) 跟随用户视角旋转/平移
+   *   - 坐标轴需要始终以固定视角渲染（跟随主相机方向，但不随距离缩放）
+   *   - 使用独立场景 + scissor/viewport 将坐标轴渲染到右下角固定区域
+   *
+   * axisCamera:
+   *   - FOV=45°（比主相机略窄，使 Gizmo 看起来紧凑）
+   *   - aspect=1（正方形视口，与 180×180px 蒙版区域匹配）
+   *   - up=(0,0,1)（Z 轴朝上，与主场景一致）
+   *   - 每帧在 renderAxisGizmo() 中根据主相机方向更新位置
+   * ======================================================================
+   */
   const axisScene = new THREE.Scene();
   const axisCamera = new THREE.PerspectiveCamera(45, 1, 0.1, 20);
   axisCamera.up.set(0, 0, 1);
   axisScene.add(
     makeAxisGizmo(
-      referenceAxisConfig.axisSize,
-      referenceAxisConfig.labelScale,
-      referenceAxisConfig.axisThickness,
+      referenceAxisConfig.axisSize,       /* 轴长 1.0 */
+      referenceAxisConfig.labelScale,     /* 标签缩放 0.5 */
+      referenceAxisConfig.axisRadius,     /* 圆柱半径 0.03，控制轴线粗细 */
     ),
   );
 
@@ -2036,6 +2391,75 @@ function removeRobotObject(robotId) {
   sceneState.robotGroups.delete(robotId);
 }
 
+function updateRobotGroupFromLinkStates(robot, group) {
+  if (!robot || !group || !(robot.linkPoses instanceof Map)) return;
+  const linkGroups = group.getObjectByName("link_groups");
+  if (linkGroups) {
+    for (const linkGroup of linkGroups.children) {
+      if (!linkGroup.name.startsWith("link_group:")) continue;
+      const linkName = linkGroup.name.slice("link_group:".length);
+      const pose = robot.linkPoses.get(linkName);
+      if (!pose) continue;
+      linkGroup.matrixAutoUpdate = false;
+      linkGroup.matrix.copy(pose);
+    }
+  }
+
+  const linkFrameGroup = group.getObjectByName("link_frames");
+  if (linkFrameGroup) {
+    for (const frame of linkFrameGroup.children) {
+      if (!frame.name.startsWith("link_frame:")) continue;
+      const linkName = frame.name.slice("link_frame:".length);
+      const pose = robot.linkPoses.get(linkName);
+      if (!pose) continue;
+      frame.matrixAutoUpdate = false;
+      frame.matrix.copy(pose);
+    }
+  }
+
+  const segmentPoints = [];
+  for (const joint of robot.joints || []) {
+    const parentPose = robot.linkPoses.get(joint.parent);
+    const childPose = robot.linkPoses.get(joint.child);
+    if (!parentPose || !childPose) continue;
+    segmentPoints.push(matrixPosition(parentPose), matrixPosition(childPose));
+
+    const marker = group.getObjectByName(`joint:${joint.name}`);
+    if (marker) marker.position.copy(matrixPosition(childPose));
+
+    const axisLine = group.getObjectByName(`joint_axis:${joint.name}`);
+    if (axisLine?.geometry) {
+      const position = matrixPosition(childPose);
+      const rotation = new THREE.Quaternion().setFromRotationMatrix(childPose);
+      const axis = new THREE.Vector3(joint.axis[0], joint.axis[1], joint.axis[2]).applyQuaternion(rotation).normalize();
+      axisLine.geometry.dispose();
+      axisLine.geometry = new THREE.BufferGeometry().setFromPoints([
+        position.clone().addScaledVector(axis, -0.18),
+        position.clone().addScaledVector(axis, 0.18),
+      ]);
+    }
+  }
+
+  const linkLines = group.getObjectByName("link_segments");
+  if (linkLines?.geometry && segmentPoints.length > 0) {
+    linkLines.geometry.dispose();
+    linkLines.geometry = new THREE.BufferGeometry().setFromPoints(segmentPoints);
+  }
+}
+
+function applyRobotLinkStates(robotId, linkStates) {
+  const robot = state.robotDisplays.get(robotId);
+  if (!robot || !Array.isArray(linkStates)) return;
+  robot.latestLinkStates = linkStates;
+  for (const linkState of linkStates) {
+    if (!linkState?.name) continue;
+    robot.linkPoses.set(linkState.name, matrixFromRobotLinkState(linkState));
+  }
+  const group = sceneState.robotGroups.get(robot.id);
+  if (group) updateRobotGroupFromLinkStates(robot, group);
+  requestSceneRender();
+}
+
 function syncRobotObject() {
   const { scene } = sceneState;
   if (!scene) return;
@@ -2055,6 +2479,9 @@ function syncRobotObject() {
       scene.add(group);
     }
     group.visible = robot.visible !== false;
+    if (Array.isArray(robot.latestLinkStates) && robot.latestLinkStates.length > 0) {
+      updateRobotGroupFromLinkStates(robot, group);
+    }
   }
 }
 
@@ -2263,33 +2690,75 @@ function syncPointCloudMapObjects(topic, objectSet) {
   if (map.dirtyChunks.size > 0) requestPointCloudMapRender();
 }
 
+/*
+ * 【右下角坐标轴 Gizmo 渲染 renderAxisGizmo】
+ * ──────────────────────────────────────────────────────────────────────────
+ * 每帧在主场景渲染之后调用，将 axisScene 渲染到 canvas 右下角的固定区域。
+ *
+ * 渲染流程（Scissor + Viewport 双区域裁剪）：
+ *   1. 计算渲染区域：viewportInset=22 距离边缘，viewportSize=180 正方形
+ *      （自动适配小窗口：不超过 canvas 宽高的 32%，最小 64px）
+ *   2. 同步相机方向：axisCamera 跟随主相机方向，使坐标轴始终与用户视角一致
+ *   3. scissor 裁剪：限制清除和绘制范围仅在右下角正方形区域内
+ *   4. viewport 映射：将 axisCamera 的输出映射到该正方形区域
+ *   5. 清除背景为白色半透明（backgroundColor + backgroundOpacity），
+ *      与 CSS .scene-overlay 的圆角边框叠加形成最终视觉效果
+ *
+ * 与 CSS 蒙版的对应关系：
+ *   viewportInset  →  CSS --reference-axis-inset (22px)
+ *   viewportSize   →  CSS --reference-axis-size  (180px)
+ *   渲染区域的 (x, y, w, h) = (canvasWidth - size - inset, inset, size, size)
+ *   即：距离 canvas 右边缘 22px，距离 canvas 下边缘 22px（inset 在底部）
+ *       但 CSS 用 bottom，JS 用 top=inset —— 因为 viewport 坐标原点在左下角
+ *       viewport 的 y=inset 等价于 CSS 的 bottom=inset
+ * =========================================================================
+ */
 function renderAxisGizmo() {
   const { renderer, camera, controls, axisScene, axisCamera } = sceneState;
   if (!renderer || !camera || !controls || !axisScene || !axisCamera) return;
 
+  /*
+   * Step 1: 计算渲染区域大小
+   * viewportSize=180 是理想尺寸，但小窗口时自动缩小（不超过 32% 宽高，最小 64px）
+   */
   const renderSize = renderer.getSize(new THREE.Vector2());
   const width = renderSize.x;
   const height = renderSize.y;
-  const inset = referenceAxisConfig.viewportInset;
+  const inset = referenceAxisConfig.viewportInset;  /* 22px 边距 */
   const size = Math.min(
-    referenceAxisConfig.viewportSize,
-    Math.floor(width * 0.32),
-    Math.floor(height * 0.32),
+    referenceAxisConfig.viewportSize,   /* 理想 180px */
+    Math.floor(width * 0.32),           /* 不超过 canvas 宽度的 32% */
+    Math.floor(height * 0.32),          /* 不超过 canvas 高度的 32% */
   );
-  if (size < 64) return;
+  if (size < 64) return;                /* 太小不渲染，避免看不清 */
 
+  /*
+   * Step 2: 同步坐标轴相机方向
+   * 让 axisCamera 从主相机方向看向原点，使坐标轴始终与用户的观察视角一致。
+   * cameraDistance=4.2 固定相机距离，保证 Gizmo 缩放感不变。
+   */
   const direction = camera.position.clone().sub(controls.target).normalize();
   axisCamera.position.copy(direction.multiplyScalar(referenceAxisConfig.cameraDistance));
   axisCamera.lookAt(0, 0, 0);
 
+  /*
+   * Step 3: Scissor + Viewport 渲染
+   * clearDepth()  → 清除深度缓冲，让 Gizmo 绘制在主场景之上
+   * setScissorTest(true) → 启用裁剪测试
+   * setViewport(x, y, w, h) → 渲染目标：右下角正方形区域
+   *   x = width - size - inset  (从右边缘往左偏移 inset+size)
+   *   y = inset                  (从上边缘往下偏移 inset, 对应 CSS bottom=inset)
+   * setScissor(...) → 裁剪区域与 viewport 一致，防止溢出
+   * render(axisScene, axisCamera) → 直接绘制 3D 坐标轴（无背景蒙版）
+   *
+   * 最后恢复默认 viewport。
+   */
   renderer.clearDepth();
   renderer.setScissorTest(true);
   renderer.setViewport(width - size - inset, inset, size, size);
   renderer.setScissor(width - size - inset, inset, size, size);
-  renderer.setClearColor(referenceAxisConfig.backgroundColor, referenceAxisConfig.backgroundOpacity);
-  renderer.clearColor();
   renderer.render(axisScene, axisCamera);
-  renderer.setClearColor(sceneBackgroundColor, 1);
+  /* 恢复主场景渲染状态 */
   renderer.setScissorTest(false);
   renderer.setViewport(0, 0, width, height);
 }
@@ -2404,24 +2873,12 @@ for (const input of [el.topicInput, el.typeInput]) {
 el.typeInput.onchange = updateResolvedMessageType;
 
 el.exportConfigBtn.onclick = () => {
-  const config = buildConfigFromUi();
-  config.topics = currentTopicConfig();
-  downloadJson("dzipc_visualizer_config.json", config);
-  addEvent("config", "exported configuration");
+  syncDisplayConfig();
+  sendCommand({ action: "save_config", path: backendConfigPath(), config: buildConfigFromUi() });
 };
 
-el.importConfigBtn.onclick = () => el.configFileInput.click();
-el.configFileInput.onchange = async () => {
-  const file = el.configFileInput.files && el.configFileInput.files[0];
-  if (!file) return;
-  try {
-    const config = JSON.parse(await file.text());
-    sendCommand({ action: "apply_config", config, replace: true });
-  } catch (error) {
-    addEvent("error", `import failed: ${error.message}`);
-  } finally {
-    el.configFileInput.value = "";
-  }
+el.importConfigBtn.onclick = () => {
+  sendCommand({ action: "load_config", path: backendConfigPath() });
 };
 
 window.dzipcVisualizer = {
@@ -2430,6 +2887,7 @@ window.dzipcVisualizer = {
   robotState,
   parseUrdfRobot,
   buildRobotObject,
+  applyRobotLinkStates,
   syncRobotObject,
   requestSceneRender,
 };
