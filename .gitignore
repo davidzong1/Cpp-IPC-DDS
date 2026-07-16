@@ -71,6 +71,7 @@ msg/*
 !msg/std_msgs/
 srv/*
 !srv/request_response_test/
+!srv/std_srv/
 python/dzipc/gen_msgs/**
 python/dzipc/gen_srv/**
 include/ipc_msg/**
