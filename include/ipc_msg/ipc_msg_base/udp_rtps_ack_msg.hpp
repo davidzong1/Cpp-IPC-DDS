@@ -19,6 +19,7 @@ public:
     uint32_t total_size{0};
     uint32_t data_msg_id{0};
     uint32_t receiver_id{0};
+    uint32_t sequence{0};
     std::vector<uint16_t> missing_pages;
 
     bool check_nk_id(const ipc::buffer& data) const { return check_id(data, kRtpsNackMsgId); }
@@ -27,7 +28,8 @@ public:
     {
         const uint16_t miss_cnt = static_cast<uint16_t>(std::min(missing_pages.size(), kMaxMissingPages));
         const uint32_t total_size_ = sizeof(page_cnt) + sizeof(total_size) + sizeof(data_msg_id) + sizeof(receiver_id)
-                                     + sizeof(miss_cnt) + static_cast<uint32_t>(miss_cnt * sizeof(uint16_t));
+                                     + sizeof(sequence) + sizeof(miss_cnt)
+                                     + static_cast<uint32_t>(miss_cnt * sizeof(uint16_t));
 
         ipc::buffer data = serialize_data_cut(total_size_);
         uint32_t offset = 0;
@@ -41,6 +43,8 @@ public:
                          offset, sizeof(data_msg_id));
         adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&receiver_id), page,
                          offset, sizeof(receiver_id));
+        adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&sequence), page, offset,
+                         sizeof(sequence));
         adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&miss_cnt), page, offset,
                          sizeof(miss_cnt));
 
@@ -60,6 +64,7 @@ public:
         uint32_t offset = 0;
         uint16_t miss_cnt = 0;
 
+        deserialize_data_cut(uint32_t(buffer.size()));
         adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&page_cnt), static_cast<const uint8_t*>(buffer.data()), offset,
                           sizeof(page_cnt));
         adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&total_size), static_cast<const uint8_t*>(buffer.data()), offset,
@@ -68,6 +73,8 @@ public:
                           sizeof(data_msg_id));
         adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&receiver_id), static_cast<const uint8_t*>(buffer.data()), offset,
                           sizeof(receiver_id));
+        adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&sequence), static_cast<const uint8_t*>(buffer.data()), offset,
+                          sizeof(sequence));
         adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&miss_cnt), static_cast<const uint8_t*>(buffer.data()), offset,
                           sizeof(miss_cnt));
 
@@ -100,12 +107,16 @@ public:
     uint32_t total_size{0};
     uint32_t data_msg_id{0};
     uint32_t receiver_id{0};
+    uint32_t sequence{0};
+    uint8_t integrity_flags{0};
+    uint32_t payload_crc32c{0};
 
     bool check_ak_id(const ipc::buffer& data) const { return check_id(data, kRtpsAckMsgId); }
 
     ipc::buffer serialize() override
     {
-        const uint32_t total_size_ = sizeof(page_cnt) + sizeof(total_size) + sizeof(data_msg_id) + sizeof(receiver_id);
+        const uint32_t total_size_ = sizeof(page_cnt) + sizeof(total_size) + sizeof(data_msg_id) + sizeof(receiver_id)
+                                     + sizeof(sequence) + sizeof(integrity_flags) + sizeof(payload_crc32c);
 
         ipc::buffer data = serialize_data_cut(total_size_);
         uint32_t offset = 0;
@@ -119,6 +130,12 @@ public:
                          offset, sizeof(data_msg_id));
         adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&receiver_id), page,
                          offset, sizeof(receiver_id));
+        adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&sequence), page, offset,
+                         sizeof(sequence));
+        adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&integrity_flags), page,
+                         offset, sizeof(integrity_flags));
+        adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&payload_crc32c), page,
+                         offset, sizeof(payload_crc32c));
 
         add_tail_msg(static_cast<uint8_t*>(data.data()) + offset, page);
         return data;
@@ -128,6 +145,7 @@ public:
     {
         uint32_t offset = 0;
 
+        deserialize_data_cut(uint32_t(buffer.size()));
         adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&page_cnt), static_cast<const uint8_t*>(buffer.data()), offset,
                           sizeof(page_cnt));
         adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&total_size), static_cast<const uint8_t*>(buffer.data()), offset,
@@ -136,6 +154,36 @@ public:
                           sizeof(data_msg_id));
         adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&receiver_id), static_cast<const uint8_t*>(buffer.data()), offset,
                           sizeof(receiver_id));
+
+        // Sequence field: read if buffer large enough; back-compat with old-format ACK.
+        const std::size_t min_size_for_seq = sizeof(page_cnt) + sizeof(total_size) + sizeof(data_msg_id)
+                                             + sizeof(receiver_id) + sizeof(sequence) + sizeof(integrity_flags)
+                                             + sizeof(payload_crc32c) + 12;
+        if (buffer.size() >= min_size_for_seq)
+        {
+            adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&sequence), static_cast<const uint8_t*>(buffer.data()), offset,
+                              sizeof(sequence));
+        }
+
+        // Integrity fields: back-compat with old-format ACK that lacks integrity_flags + payload_crc32c.
+        const std::size_t min_size_for_crc = sizeof(page_cnt) + sizeof(total_size) + sizeof(data_msg_id)
+                                             + sizeof(receiver_id) + sizeof(sequence) + sizeof(integrity_flags)
+                                             + sizeof(payload_crc32c) + 12;
+        if (buffer.size() >= min_size_for_crc)
+        {
+            adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&integrity_flags), static_cast<const uint8_t*>(buffer.data()),
+                              offset, sizeof(integrity_flags));
+            adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&payload_crc32c), static_cast<const uint8_t*>(buffer.data()),
+                              offset, sizeof(payload_crc32c));
+        }
+        else if (buffer.size() >= min_size_for_seq + sizeof(integrity_flags) + sizeof(payload_crc32c))
+        {
+            // ACK without sequence but with integrity: skip sequence, read integrity.
+            adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&integrity_flags), static_cast<const uint8_t*>(buffer.data()),
+                              offset, sizeof(integrity_flags));
+            adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&payload_crc32c), static_cast<const uint8_t*>(buffer.data()),
+                              offset, sizeof(payload_crc32c));
+        }
     }
 
     IpcRtpsAckMsg* clone() const override { return new IpcRtpsAckMsg(*this); }

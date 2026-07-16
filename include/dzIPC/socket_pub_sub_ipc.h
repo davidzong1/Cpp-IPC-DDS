@@ -31,6 +31,8 @@ public:
     void reset_message(const std::shared_ptr<TopicData>& msg);
     void InitChannel(std::string extra_info = "");
     bool publish(std::shared_ptr<IpcMsgBase> msg);
+    bool publish_best_effort(std::shared_ptr<IpcMsgBase> msg) override;
+    bool publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm) override;
 
     bool has_subscribed() const { return subscribed_; }
 

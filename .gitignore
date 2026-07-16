@@ -8,7 +8,7 @@
 *.so
 *.dll
 *.dylib
-
+docs/**
 **/__pycache__/**
 
 # Qt-es
@@ -78,3 +78,9 @@ include/ipc_srv/**
 !include/ipc_msg/ipc_msg_base/
 !include/ipc_msg/ipc_msg_base/**
 python/dzipc.pyi
+
+
+.codex/**
+.claude/**
+.pytest_cache/**
+.agents/**

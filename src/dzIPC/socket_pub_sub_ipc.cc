@@ -90,13 +90,54 @@ void socket_pub_ipc::InitChannel(std::string extra_info)
 /******************************************************************************************************/
 bool socket_pub_ipc::publish(std::shared_ptr<IpcMsgBase> msg)
 {
+    return publish_best_effort(std::move(msg));
+}
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
+bool socket_pub_ipc::publish_best_effort(std::shared_ptr<IpcMsgBase> msg)
+{
     try
     {
         ipc::buffer response_data(std::move(msg->serialize()));
-        if (!chunk_send(publisher_, response_data))
+        SocketSendOptions options;
+        options.delivery = SocketDeliveryMode::BestEffort;
+        options.integrity = SocketIntegrityMode::None;
+        const SocketSendReport report = chunk_send_ex(publisher_, response_data, options);
+        if (!report.ok())
         {
             std::cerr << "\033[31m[" << topic_name_ << "PubInfo] Error publishing message: Failed to send"
                       << "\033[0m" << std::endl;
+            return false;
+        }
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "\033[31m[" << topic_name_ << "PubInfo] Error publishing message: " << e.what() << "\033[0m"
+                  << std::endl;
+        return false;
+    }
+    return true;
+}
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
+bool socket_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm)
+{
+    try
+    {
+        ipc::buffer response_data(std::move(msg->serialize()));
+        SocketSendOptions options;
+        options.delivery = SocketDeliveryMode::Reliable;
+        options.integrity = SocketIntegrityMode::CRC32C;
+        options.ack_timeout_ms = tm;
+        const SocketSendReport report = chunk_send_ex(publisher_, response_data, options);
+        if (!report.ok())
+        {
+            std::cerr << "\033[31m[" << topic_name_ << "PubInfo] Reliable publish failed with status "
+                      << static_cast<int>(report.status) << "\033[0m" << std::endl;
             return false;
         }
     }

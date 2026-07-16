@@ -20,6 +20,8 @@ file(GLOB SRC_FILES
     ${LIBIPC_PROJECT_DIR}/test/*.cpp
     # ${LIBIPC_PROJECT_DIR}/test/profiler/*.cpp
     )
+# Exclude benchmark from auto-test list (has its own main, not a gtest)
+list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/ipc_benchmark.cpp")
 file(GLOB HEAD_FILES ${LIBIPC_PROJECT_DIR}/test/*.h)
 
 # 查找 pthread 库
@@ -98,3 +100,17 @@ foreach(src_file ${SRC_FILES})
 endforeach()
 
 #target_link_libraries(${PROJECT_NAME} tcmalloc_minimal)
+
+# ================================================================
+# Standalone benchmark binary (not a gtest)
+# ================================================================
+add_executable(ipc_benchmark ${LIBIPC_PROJECT_DIR}/test/ipc_benchmark.cpp ${HEAD_FILES})
+target_compile_options(ipc_benchmark PRIVATE
+    $<$<CONFIG:Release>:-O2>
+    $<$<CONFIG:RelWithDebInfo>:-O2>
+    $<$<CONFIG:MinSizeRel>:-O2>
+)
+target_compile_definitions(ipc_benchmark PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+target_link_libraries(ipc_benchmark ipc Threads::Threads)
+set_target_properties(ipc_benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+message(STATUS "Created benchmark executable: ipc_benchmark")

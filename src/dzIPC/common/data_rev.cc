@@ -1,10 +1,12 @@
 #include "dzIPC/common/data_rev.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <thread>
 #include <unordered_set>
 #include <vector>
+#include "dzIPC/common/crc32c.h"
 #include "ipc_msg/ipc_msg_base/udp_rtps_ack_msg.hpp"
 
 namespace dzIPC {
@@ -17,13 +19,21 @@ constexpr int SEND_RETRY_MAX = 10;
 constexpr int RTPS_MAX_NACK_ROUND = 5;
 constexpr int SEND_BURST_BEFORE_YIELD = 64;
 constexpr uint64_t ACK_FAST_WAIT_MS = 5;
+constexpr uint8_t INTEGRITY_FLAG_CRC32C = 0x01;
 
 struct chunk_meta
 {
     uint16_t page_cnt{0};
     uint32_t total_size{0};
     uint32_t msg_id{0};
+    uint32_t sequence{0};
 };
+
+std::atomic<uint32_t>& msg_sequence_counter()
+{
+    static std::atomic<uint32_t> counter{0};
+    return counter;
+}
 
 uint32_t local_node_id()
 {
@@ -202,13 +212,16 @@ void drain_self_loopback(std::shared_ptr<ipc::socket::UDPNode>& node)
     }
 }
 
-void send_ack(std::shared_ptr<ipc::socket::UDPNode>& node, const chunk_meta& meta)
+void send_ack(std::shared_ptr<ipc::socket::UDPNode>& node, const chunk_meta& meta, uint32_t payload_crc32c)
 {
     IpcRtpsAckMsg ack_msg;
     ack_msg.page_cnt = meta.page_cnt;
     ack_msg.total_size = meta.total_size;
     ack_msg.data_msg_id = meta.msg_id;
     ack_msg.receiver_id = local_node_id();
+    ack_msg.sequence = meta.sequence;
+    ack_msg.integrity_flags = INTEGRITY_FLAG_CRC32C;
+    ack_msg.payload_crc32c = payload_crc32c;
     ipc::buffer ack_buf = ack_msg.serialize();
     send_chunk_with_retry(node, ack_buf);
 }
@@ -270,6 +283,7 @@ void send_nack_for_missing(std::shared_ptr<ipc::socket::UDPNode>& node, const ch
     nack_msg.total_size = meta.total_size;
     nack_msg.data_msg_id = meta.msg_id;
     nack_msg.receiver_id = local_node_id();
+    nack_msg.sequence = meta.sequence;
     nack_msg.missing_pages.clear();
 
     for (uint16_t i = 1; i <= meta.page_cnt; ++i)
@@ -317,7 +331,9 @@ bool recv_chunk_common(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_
         {
             return false;
         }
+        const uint32_t payload_crc32c = dzIPC::common::crc32c(first_page.data(), first_page.size());
         msg_ptr->deserialize(first_page);
+        send_ack(node, meta, payload_crc32c);
         return true;
     }
 
@@ -392,9 +408,10 @@ bool recv_chunk_common(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_
         return false;
     }
 
+    const uint32_t payload_crc32c = dzIPC::common::crc32c(assembled.data(), meta.total_size);
     ipc::buffer assembled_view(assembled.data(), meta.total_size);
     msg_ptr->deserialize(assembled_view);
-    send_ack(node, meta);
+    send_ack(node, meta, payload_crc32c);
     return true;
 }
 }   // namespace
@@ -575,11 +592,20 @@ ipc::buffer chunk_rev_sniff(ipc::socket::UDPNode& node, uint64_t tm)
     }
 }
 
-bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publish_data)
+SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publish_data,
+                               const SocketSendOptions& options)
 {
+    SocketSendReport report;
+    report.sequence = msg_sequence_counter().fetch_add(1, std::memory_order_relaxed);
+    if (options.integrity == SocketIntegrityMode::CRC32C)
+    {
+        report.crc32c = dzIPC::common::crc32c(publish_data.data(), publish_data.size());
+    }
+
     if (publish_data.empty() || publish_data.size() < TAIL_SIZE)
     {
-        return false;
+        report.status = SocketSendStatus::FailedInvalidArgument;
+        return report;
     }
 
     std::vector<ipc::buffer> chunks;
@@ -594,7 +620,8 @@ bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publis
     {
         if (chunks[i].size() < TAIL_SIZE)
         {
-            return false;
+            report.status = SocketSendStatus::FailedInvalidArgument;
+            return report;
         }
         write_now_page(chunks[i], static_cast<uint16_t>(i + 1));
     }
@@ -602,11 +629,13 @@ bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publis
     ipc_tail_msg first_tail;
     if (!parse_tail(chunks.front(), first_tail) || !valid_chunk_meta(first_tail))
     {
-        return false;
+        report.status = SocketSendStatus::FailedInvalidArgument;
+        return report;
     }
     if (static_cast<std::size_t>(first_tail.page_cnt) != chunks.size())
     {
-        return false;
+        report.status = SocketSendStatus::FailedInvalidArgument;
+        return report;
     }
 
     /* 入口排空：清掉上一轮 chunk_send 退出时还没来得及到达 / 处理的残留包
@@ -616,23 +645,31 @@ bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publis
 
     if (!send_all_chunks(node, chunks))
     {
-        return false;
+        report.status = SocketSendStatus::FailedLocalSend;
+        return report;
     }
 
-    if (chunks.size() <= 1)
+    if (chunks.size() <= 1 && options.delivery == SocketDeliveryMode::BestEffort)
     {
-        /* 单片消息没有 ACK 等待，本轮发出的 1 个 self-loopback 也要清掉，
-           否则会污染下一轮的 wait_first_data_chunk 或 ACK 等待。 */
+        /* Preserve the legacy single-datagram fast path: best-effort publish
+           reports that the payload was sent without waiting for a receiver ACK. */
         drain_self_loopback(node);
-        return true;
+        report.status = SocketSendStatus::SentUnconfirmed;
+        return report;
     }
 
-    const chunk_meta meta{first_tail.page_cnt, first_tail.total_size, first_tail.dz_ipc_msg_id};
+    const chunk_meta meta{first_tail.page_cnt, first_tail.total_size, first_tail.dz_ipc_msg_id, report.sequence};
     const uint64_t nack_wait_ms = calc_nack_wait_ms(meta.page_cnt);
+    const uint64_t ack_timeout_ms =
+        (options.ack_timeout_ms == ipc::invalid_value)
+            ? (ACK_FAST_WAIT_MS + nack_wait_ms * static_cast<uint64_t>(RTPS_MAX_NACK_ROUND))
+            : options.ack_timeout_ms;
     IpcRtpsNackMsg nack_msg;
     IpcRtpsAckMsg ack_msg;
 
-    for (int round = 0; round < RTPS_MAX_NACK_ROUND; ++round)
+    const auto ack_begin = std::chrono::steady_clock::now();
+    int round = 0;
+    while (true)
     {
         bool got_nack = false;
         bool got_ack = false;
@@ -642,12 +679,32 @@ bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publis
 
         while (true)
         {
+            if (options.delivery == SocketDeliveryMode::Reliable && elapsed_ms(ack_begin) >= ack_timeout_ms)
+            {
+                drain_self_loopback(node);
+                report.status = SocketSendStatus::FailedTimeout;
+                return report;
+            }
+
             const uint64_t used = elapsed_ms(round_begin);
             if (used >= round_wait_ms)
             {
                 break;
             }
-            ipc::buffer recv_buf = node->receive(round_wait_ms - used);
+            uint64_t wait_ms = round_wait_ms - used;
+            if (options.delivery == SocketDeliveryMode::Reliable)
+            {
+                const uint64_t total_used = elapsed_ms(ack_begin);
+                if (total_used >= ack_timeout_ms)
+                {
+                    drain_self_loopback(node);
+                    report.status = SocketSendStatus::FailedTimeout;
+                    return report;
+                }
+                wait_ms = std::min(wait_ms, ack_timeout_ms - total_used);
+            }
+
+            ipc::buffer recv_buf = node->receive(wait_ms);
             if (recv_buf.empty())
             {
                 break;
@@ -656,9 +713,10 @@ bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publis
             {
                 ack_msg.deserialize(recv_buf);
                 if (ack_msg.page_cnt == meta.page_cnt && ack_msg.total_size == meta.total_size
-                    && ack_msg.data_msg_id == meta.msg_id)
+                    && ack_msg.data_msg_id == meta.msg_id && ack_msg.sequence == meta.sequence)
                 {
                     got_ack = true;
+                    report.ack_crc32c = ack_msg.payload_crc32c;
                     break;
                 }
                 continue;
@@ -670,7 +728,7 @@ bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publis
 
             nack_msg.deserialize(recv_buf);
             if (nack_msg.page_cnt != meta.page_cnt || nack_msg.total_size != meta.total_size
-                || nack_msg.data_msg_id != meta.msg_id)
+                || nack_msg.data_msg_id != meta.msg_id || nack_msg.sequence != meta.sequence)
             {
                 continue;
             }
@@ -690,12 +748,24 @@ bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publis
             /* ACK 命中后立刻 return 会把队列里剩余的 self-loopback 数据片留给下一轮，
                下一轮会把它们当作本轮 self-loopback 误处理（meta 完全相同）。 */
             drain_self_loopback(node);
-            return true;
+            if (options.integrity == SocketIntegrityMode::CRC32C
+                && ((ack_msg.integrity_flags & INTEGRITY_FLAG_CRC32C) == 0 || report.ack_crc32c != report.crc32c))
+            {
+                report.status = SocketSendStatus::FailedIntegrity;
+                return report;
+            }
+            report.status = SocketSendStatus::DeliveredAcked;
+            return report;
         }
 
         if (!got_nack || missing_union.empty())
         {
-            break;
+            if (options.delivery == SocketDeliveryMode::BestEffort)
+            {
+                break;
+            }
+            ++round;
+            continue;
         }
 
         std::size_t resent = 0;
@@ -703,19 +773,36 @@ bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publis
         {
             if (!send_chunk_with_retry(node, chunks[miss - 1]))
             {
-                return false;
+                report.status = SocketSendStatus::FailedLocalSend;
+                return report;
             }
             if ((++resent % SEND_BURST_BEFORE_YIELD) == 0 && resent < missing_union.size())
             {
                 std::this_thread::yield();
             }
         }
+        ++round;
+
+        if (options.delivery == SocketDeliveryMode::BestEffort && round >= RTPS_MAX_NACK_ROUND)
+        {
+            break;
+        }
     }
 
     /* 所有 ACK round 走完仍未拿到 ACK（典型 5ms 静默退出）。本轮发出去的
        self-loopback 数据片此时还在队列里，必须清掉再返回。 */
     drain_self_loopback(node);
-    return true;
+    report.status = (options.delivery == SocketDeliveryMode::Reliable) ? SocketSendStatus::FailedTimeout
+                                                                        : SocketSendStatus::SentUnconfirmed;
+    return report;
+}
+
+bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publish_data)
+{
+    SocketSendOptions options;
+    options.delivery = SocketDeliveryMode::BestEffort;
+    options.integrity = SocketIntegrityMode::None;
+    return chunk_send_ex(node, publish_data, options).ok();
 }
 }   // namespace socket
 }   // namespace dzIPC
