@@ -62,6 +62,14 @@ from .gen_msgs import (
 from .gen_srv import (
     RequestResponseTestRequest,
     RequestResponseTestResponse,
+    StdBoolRequest,
+    StdBoolResponse,
+    StdDoubleRequest,
+    StdDoubleResponse,
+    StdFloatRequest,
+    StdFloatResponse,
+    StdIntRequest,
+    StdIntResponse,
     StdStringRequest,
     StdStringResponse,
 )

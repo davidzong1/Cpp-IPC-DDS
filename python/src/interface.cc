@@ -5,17 +5,66 @@
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include <cstring>
+#include <cstdint>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace py = pybind11;
 namespace info = dzIPC::info_pool;
 
+#define DZIPC_STRINGIFY_IMPL(value) #value
+#define DZIPC_STRINGIFY(value) DZIPC_STRINGIFY_IMPL(value)
+
+namespace {
+
+constexpr const char* kPybind11Version =
+    DZIPC_STRINGIFY(PYBIND11_VERSION_MAJOR) "."
+    DZIPC_STRINGIFY(PYBIND11_VERSION_MINOR) "."
+    DZIPC_STRINGIFY(PYBIND11_VERSION_PATCH);
+
+std::vector<uint8_t> BytesToVector(py::bytes data)
+{
+    char* raw = nullptr;
+    Py_ssize_t size = 0;
+    if (PyBytes_AsStringAndSize(data.ptr(), &raw, &size) != 0)
+    {
+        throw py::error_already_set();
+    }
+    if (size <= 0)
+    {
+        return {};
+    }
+    const auto* first = reinterpret_cast<const uint8_t*>(raw);
+    return {first, first + static_cast<std::size_t>(size)};
+}
+
+void DeserializeBytes(dzIPC::GenericMessage& self, py::bytes data)
+{
+    auto payload = BytesToVector(data);
+    ipc::buffer buf(payload.empty() ? nullptr : payload.data(), payload.size());
+    self.deserialize(buf);
+}
+
+template<typename T>
+T CheckedCast(std::uint64_t value, const char* name)
+{
+    if (value > static_cast<std::uint64_t>(std::numeric_limits<T>::max()))
+    {
+        throw py::value_error(std::string(name) + " is out of range");
+    }
+    return static_cast<T>(value);
+}
+
+}   // namespace
+
 PYBIND11_MODULE(_dzipc_core, m)
 {
     m.doc() = "pybind11 bindings for cpp-ipc (dzIPC)";
+    m.attr("__python_version__") = PY_VERSION;
+    m.attr("__pybind11_version__") = kPybind11Version;
 
     py::enum_<dzIPC::IPCType>(m, "IPCType")
         .value("Shm", dzIPC::IPCType::Shm)
@@ -161,25 +210,11 @@ PYBIND11_MODULE(_dzipc_core, m)
                  return py::bytes(static_cast<const char*>(buf.data()), buf.size());
              })
         .def("deserialize",
-             [](dzIPC::GenericMessage& self, py::bytes data)
-             {
-                 std::string s = data;
-                 size_t sz = s.size();
-                 auto* copy = new uint8_t[sz];
-                 std::memcpy(copy, s.data(), sz);
-                 ipc::buffer buf(copy, sz, [](void* p, std::size_t) { delete[] static_cast<uint8_t*>(p); });
-                 self.deserialize(buf);
-             })
+             [](dzIPC::GenericMessage& self, py::bytes data) { DeserializeBytes(self, data); },
+             py::arg("data"))
         .def("deserialize_bytes",
-             [](dzIPC::GenericMessage& self, py::bytes data)
-             {
-                 std::string s = data;
-                 size_t sz = s.size();
-                 auto* copy = new uint8_t[sz];
-                 std::memcpy(copy, s.data(), sz);
-                 ipc::buffer buf(copy, sz, [](void* p, std::size_t) { delete[] static_cast<uint8_t*>(p); });
-                 self.deserialize(buf);
-             });
+             [](dzIPC::GenericMessage& self, py::bytes data) { DeserializeBytes(self, data); },
+             py::arg("data"));
 
     // ---- IPC 基础设施 ----
 
@@ -271,15 +306,15 @@ PYBIND11_MODULE(_dzipc_core, m)
     // 工厂函数
     m.def(
         "make_topic_data",
-        [](const std::shared_ptr<IpcMsgBase>& msg, int msg_id)
-        { return std::make_shared<dzIPC::TopicData>(msg, static_cast<size_t>(msg_id)); },
+        [](const std::shared_ptr<IpcMsgBase>& msg, std::uint64_t msg_id)
+        { return std::make_shared<dzIPC::TopicData>(msg, CheckedCast<std::size_t>(msg_id, "msg_id")); },
         py::arg("msg"), py::arg("msg_id") = 0);
 
     m.def(
         "make_service_data",
         [](const std::shared_ptr<IpcMsgBase>& request, const std::shared_ptr<IpcMsgBase>& response,
-           int msg_id)
-        { return std::make_shared<dzIPC::ServiceData>(request, response, static_cast<uint32_t>(msg_id)); },
+           std::uint64_t msg_id)
+        { return std::make_shared<dzIPC::ServiceData>(request, response, CheckedCast<std::uint32_t>(msg_id, "msg_id")); },
         py::arg("request"), py::arg("response"), py::arg("msg_id") = 0);
 
     m.def("ServerIPCPtrMake", &dzIPC::ServerIPCPtrMake, py::arg("topic_name"), py::arg("msg"),
