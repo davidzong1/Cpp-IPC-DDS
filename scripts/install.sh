@@ -52,7 +52,7 @@ fi
 if [ "$install_cpp" == true ]; then
     echo "Installing dzIPC..."
     echo "Installing into workspace-local prefix..."
-    _DZIPC_PREFIX="$(cd "$(dirname "$0")" && pwd)/local"
+    _DZIPC_PREFIX="$(cd "$(dirname "$0")/.." && pwd)/local"
     _DZIPC_PYTHON="$(command -v python3)"
     mkdir -p build
     cd build
@@ -77,7 +77,7 @@ if [ "$install_python" == true ]; then
     # 使用方式: source setup.sh 后即可 import dzipc（通过 PYTHONPATH 隔离）
     if [ "$install_cpp" != true ]; then
         # 仅安装 Python 时：单独编译并复制模块到 local/
-        _DZIPC_PREFIX="$(cd "$(dirname "$0")" && pwd)/local"
+        _DZIPC_PREFIX="$(cd "$(dirname "$0")/.." && pwd)/local"
         _DZIPC_PYTHON="$(command -v python3)"
         mkdir -p "$_DZIPC_PREFIX/lib/python/dzipc"
         rm -f "$_DZIPC_PREFIX/lib/python/dzipc"/_dzipc_core*.so
@@ -130,13 +130,13 @@ fi
 
 if [ "$uninstall" == true ]; then
     echo "Uninstalling dzIPC..."
-    _DZIPC_PREFIX="$(cd "$(dirname "$0")" && pwd)/local"
+    _DZIPC_PREFIX="$(cd "$(dirname "$0")/.." && pwd)/local"
     # 删除本地安装目录；不调用旧 build cache 中可能指向 /usr/local 的 uninstall target。
-    rm -rf "$(cd "$(dirname "$0")" && pwd)/build"
+    rm -rf "$(cd "$(dirname "$0")/.." && pwd)/build"
     rm -rf "$_DZIPC_PREFIX"
-    rm -rf "$(cd "$(dirname "$0")" && pwd)/python/dzipc/gen_msgs"
-    rm -rf "$(cd "$(dirname "$0")" && pwd)/python/dzipc/gen_srv"
-    rm -rf "$(cd "$(dirname "$0")" && pwd)/python/dzipc.pyi"
+    rm -rf "$(cd "$(dirname "$0")/.." && pwd)/python/dzipc/gen_msgs"
+    rm -rf "$(cd "$(dirname "$0")/.." && pwd)/python/dzipc/gen_srv"
+    rm -rf "$(cd "$(dirname "$0")/.." && pwd)/python/dzipc.pyi"
     echo -e "\033[32mdzIPC uninstalled successfully.\033[0m"
     unset _DZIPC_PREFIX
 fi

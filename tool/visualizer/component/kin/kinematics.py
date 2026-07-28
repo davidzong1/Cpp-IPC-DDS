@@ -67,7 +67,7 @@ class RobotKinematics:
             raise RuntimeError(
                 "kinpy is required for RobotKinematics. Install it with "
                 "`python3 -m pip install -r tool/requirements.txt` and activate "
-                "the workspace with `source setup.sh`."
+                "the workspace with `source scripts/setup.sh`."
             ) from _KINPY_IMPORT_ERROR
 
     @staticmethod

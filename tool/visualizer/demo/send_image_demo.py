@@ -69,7 +69,7 @@ def load_dzipc():
             "[image-demo] Build/install the Python package first, then rerun this demo."
         )
         print("[image-demo] Example:")
-        print("  ./install.sh")
+        print("  ./scripts/install.sh")
         print("  python3 tool/visualizer/demo/send_image_demo.py")
         sys.exit(1)
     return ipc

@@ -79,7 +79,8 @@ include/ipc_srv/**
 !include/ipc_msg/ipc_msg_base/
 !include/ipc_msg/ipc_msg_base/**
 python/dzipc.pyi
-
+msg/external_paths.json
+srv/external_paths.json
 
 .codex/**
 .claude/**

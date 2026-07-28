@@ -94,7 +94,7 @@ void shm_pub_ipc::InitChannel(std::string extra_info)
         control_plane_.set_ready();
         publish_thread_ = new std::thread(&shm_pub_ipc::pub_handshake, this);
         std::string topic_type_name = topic_msg_->topic()
-                                          ? dzIPC::info_pool::demangle(typeid(topic_msg_->topic()).name())
+                                          ? dzIPC::info_pool::demangle(typeid(*topic_msg_->topic()).name())
                                           : std::string{};
         topic_type_name = extract_last_segment(topic_type_name);
         pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmPub, raw_topic_name_, topic_type_name, "shm",
@@ -352,7 +352,7 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
     }
     std::string topic_type_name =
         (topic_template && topic_template->topic())
-            ? dzIPC::info_pool::demangle(typeid(topic_template->topic()).name())
+            ? dzIPC::info_pool::demangle(typeid(*topic_template->topic()).name())
             : std::string{};
     topic_type_name = extract_last_segment(topic_type_name);
     pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmSub, raw_topic_name_, topic_type_name, "shm",

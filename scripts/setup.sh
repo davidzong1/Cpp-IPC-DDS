@@ -14,13 +14,13 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 fi
 
 # ---- 确定脚本所在目录 (DZIPC_ROOT) ----
-_DZIPC_SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_DZIPC_SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export DZIPC_ROOT="$_DZIPC_SETUP_DIR"
 _DZIPC_PREFIX="$DZIPC_ROOT/local"
 
 # ---- 检查是否已安装 ----
 if [ ! -d "$_DZIPC_PREFIX" ]; then
-    echo "[dzIPC] 尚未安装，请先运行 ./install.sh"
+    echo "[dzIPC] 尚未安装，请先运行 scripts/install.sh"
     return 1
 fi
 

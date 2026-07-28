@@ -24,7 +24,7 @@ class IpcMsgBase : public std::enable_shared_from_this<IpcMsgBase>
 
 public:
     IpcMsgBase() = default;
-    ~IpcMsgBase() = default;
+    virtual ~IpcMsgBase() = default;
 
     void set_msg_id(const uint32_t id) { dz_ipc_msg_id = id; }
 

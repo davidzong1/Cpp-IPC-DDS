@@ -43,9 +43,10 @@ if "%configuration%"=="1" (
     exit /b 1
 )
 
-REM Script root directory and default install prefix
+REM Script root directory and default install prefix (go up one level from scripts/)
 set ROOT_DIR=%~dp0
 if "%ROOT_DIR:~-1%"=="\" set ROOT_DIR=%ROOT_DIR:~0,-1%
+pushd "%ROOT_DIR%\.." 2>nul && set "ROOT_DIR=%CD%" && popd
 set INSTALL_PREFIX=%ROOT_DIR%\local
 
 if "%install_cpp%"=="true" (

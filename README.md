@@ -14,7 +14,7 @@
 
 - 增加类似与 dds 的话题通信模式以及 srv 通信模式，例程参考`test/test_dzipc.cpp`和`test/test_complex_msg.cpp`
 - 支持自动生成 msg 和 srv 头文件
-- 执行`install.sh`自动更新相关话题文件
+- 执行`scripts/install.sh`自动更新相关话题文件
 - 增加 ros2 构建选项
 - 增加python调用api
 
@@ -24,16 +24,21 @@
 
 #### Install
 
-直接执行`install.sh`或文件安装
+直接执行`scripts/install.sh`或文件安装
 
 
 #### C++ Interface
 
-与 dds 使用方法类似，在 msg 和 srv 文件夹下创建消息文件，然后运行`install.sh`编译安装后在自己项目上调用头文件即可，格式参考`test/test_dzipc.cpp`。
+与 dds 使用方法类似，在 msg 和 srv 文件夹下创建消息文件，然后运行`scripts/install.sh`编译安装后在自己项目上调用头文件即可，格式参考`test/test_dzipc.cpp`。
 
 #### Python Interface
 
 进入`python`文件夹后输入`pip install .`进行安装后在脚本中`import dzipc`即可，与 C++ 用法类似，参考`python/ipc_demo.py`
+
+#### TUI界面
+
+可以使用`tui.py`可视化实现脚本管理
+
 
 #### Tools(ubuntu下直接安装至`/usr/bin`中)
 
@@ -45,6 +50,24 @@
 - `-s`：服务模式还是话题模式通信(必选) **(True为service，False为Publish)**
 
 ---
+
+#### Update msg and srv
+
+可以使用`scripts/install.sh`脚本进行更新(只能更新默认目录)，也可以使用`scripts/update_msg_srv.sh`进行更新(可以传入外部路径)使用方法：
+```shell
+# 指定路径（累加到已有配置）
+scripts/update_msg_srv.sh --msg <PATH1> --srv <PATH2>
+scripts/update_msg_srv.sh --msg <PATH1> --msg <PATH2>   # 累加，不覆盖
+
+# 使用已保存配置更新
+scripts/update_msg_srv.sh
+
+# 清除配置
+scripts/update_msg_srv.sh --reset
+
+# 帮助
+scripts/update_msg_srv.sh --help
+```
 
 ## Test (TODO)
 

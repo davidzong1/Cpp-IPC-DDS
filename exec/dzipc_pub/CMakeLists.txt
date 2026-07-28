@@ -5,7 +5,9 @@ add_executable(dzipc_pub src/main.cc)
 target_include_directories(dzipc_pub
     PRIVATE
         ${LIBIPC_PROJECT_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        # shared CLI helpers (argparser.h, msg_type_identify.h)
+        ${LIBIPC_PROJECT_DIR}/exec/dzipc_topic_cat/include)
 
 target_compile_definitions(dzipc_pub
     PRIVATE

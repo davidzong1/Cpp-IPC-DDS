@@ -13,13 +13,14 @@ rem ============================================================================
 
 set "DZIPC_SETUP_DIR=%~dp0"
 if "%DZIPC_SETUP_DIR:~-1%"=="\" set "DZIPC_SETUP_DIR=%DZIPC_SETUP_DIR:~0,-1%"
+pushd "%DZIPC_SETUP_DIR%\.." 2>nul && set "DZIPC_SETUP_DIR=%CD%" && popd
 set "DZIPC_ROOT=%DZIPC_SETUP_DIR%"
 set "DZIPC_PREFIX=%DZIPC_ROOT%\local"
 
 if not exist "%DZIPC_PREFIX%\" (
     echo [dzIPC] local installation was not found.
     echo [dzIPC] Expected: "%DZIPC_PREFIX%"
-    echo [dzIPC] Please run install.bat first.
+    echo [dzIPC] Please run scripts\install.bat first.
     endlocal & exit /b 1
 )
 

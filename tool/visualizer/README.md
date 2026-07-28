@@ -371,4 +371,4 @@ python3 tool/visualizer/demo/send_robot_state.py \
 | 图像不显示 | 确认图像编码格式受支持（JPEG/PNG/RGB8/BGR8/RGBA8/BGRA8/Mono8） |
 | 机器人不显示 | 确认已先创建 Robot display（URDF 加载成功），再创建 RobotState display 并关联正确的 target_robot_id |
 | 机器人关节不更新 | 确认 RobotState 消息中包含 `joint_state.position` 数组，且长度与 URDF 定义的 movable joints 数量匹配 |
-| dzIPC 导入失败 | 执行 `./install.sh` 编译安装本地 Python 绑定；demo 脚本会自动搜索 `local/lib/python/dzipc` 或 `python/dzipc` |
+| dzIPC 导入失败 | 执行 `scripts/install.sh` 编译安装本地 Python 绑定；demo 脚本会自动搜索 `local/lib/python/dzipc` 或 `python/dzipc` |
