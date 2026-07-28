@@ -61,6 +61,8 @@ build/**
 # agnent
 tmux**
 
+.vscode/**
+.github/workflows/**
 
 # msg and srv files
 msg/*
