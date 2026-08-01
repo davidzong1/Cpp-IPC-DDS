@@ -10,6 +10,8 @@
 #include <type_traits>
 #include <vector>
 #include "dzIPC/common/circularqueue.h"
+#include "dzIPC/common/local_pub_sub_registry.h"
+#include "dzIPC/common/nodelet_config.h"
 #include "dzIPC/common/thread_dispatch.h"
 #include "dzIPC/common/topic_data.h"
 #include "dzIPC/ipc_info_pool.h"
@@ -33,6 +35,7 @@ public:
     bool publish(std::shared_ptr<IpcMsgBase> msg);
     bool publish_best_effort(std::shared_ptr<IpcMsgBase> msg) override;
     bool publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm) override;
+    bool publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg) override;
 
     bool has_subscribed() const { return subscribed_; }
 
@@ -57,6 +60,24 @@ private:
     dzIPC::info_pool::ScopedRegistration pool_reg_;
     std::shared_ptr<TopicData> topic_msg_;
     dzIPC::ThreadDispatch::ThreadOptions thread_options_;
+
+    // ---- intra-process fast-path state ----
+    // K=3 consecutive publishes with the same (key, local snapshot size,
+    // IpcInfoPool SocketSub count) must be observed before the fast path
+    // engages.  Any topology change resets the counter.
+    // Cross-process subs are detected by comparing the IpcInfoPool total
+    // SocketSub count (all processes) against the local registry count.
+    mutable std::mutex fast_path_mtx_;
+    ChannelKey last_fp_key_{};
+    size_t last_fp_snapshot_size_{0};
+    size_t last_fp_total_subs_{0};   // from IpcInfoPool snapshot
+    int fp_consecutive_{0};
+    static constexpr int kFastPathConfirm = 3;
+
+    // One-shot warning throttles (per instance, per reason).
+    bool warned_no_local_sub_{false};       // nodelet on but registry empty
+    bool warned_cross_process_{false};      // cross-process SocketSub detected
+    bool warned_pool_unavailable_{false};   // IpcInfoPool returned 0 total subs
 };
 
 class IPC_EXPORT socket_sub_ipc : public sub_ipc_base
@@ -86,10 +107,12 @@ private:
     std::shared_ptr<ipc::socket::UDPNode> subscriber_;
     std::shared_ptr<TopicData> topic_msg_;
     std::mutex topic_msg_mtx_;
-    std::unique_ptr<CircularQueue<IpcMsgBase>> msg_queue_;
+    std::shared_ptr<CircularQueue<IpcMsgBase>> msg_queue_;  // shared_ptr for fast-path fanout
     std::thread* subscribe_thread_{nullptr};
     dzIPC::info_pool::ScopedRegistration pool_reg_;
     dzIPC::ThreadDispatch::ThreadOptions thread_options_;
+    uint32_t msg_id_{0};             // current registration key msg_id
+    bool local_registered_{false};   // guarded by topic_msg_mtx_
 };
 }   // namespace socket
 }   // namespace dzIPC

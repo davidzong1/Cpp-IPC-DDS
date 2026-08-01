@@ -1,4 +1,5 @@
 #pragma once
+#include "dzIPC/common/nodelet_config.h"
 #include "dzIPC/server_ipc.h"
 #include "dzIPC/topic_ipc.h"
 #include "libipc/export.h"
@@ -78,4 +79,16 @@ IPC_EXPORT void StartShutdownMonitor();
 IPC_EXPORT void RequestShutdown();
 // 查询是否已经请求退出
 IPC_EXPORT bool IsShutdownRequested();
+
+/***********************************************************************************/
+/***********************************************************************************/
+/**********************************进程级开关***************************************/
+/***********************************************************************************/
+/***********************************************************************************/
+// Nodelet (进程内快速路径) 开关。默认 false。
+// 开启后 SHM pub/sub、IPC_SOCKET (UDP) pub/sub 与 SHM ser/cli
+// 各自在满足条件时尝试跳过序列化直接传递 shared_ptr；
+// 条件不满足时自动回退正常通信路径，并按实例/原因输出一次性 warning。
+// 线程安全，可在任意时刻调用。
+// 声明自 dzIPC/common/nodelet_config.h，实现在 nodelet_config.cc。
 }   // namespace dzIPC

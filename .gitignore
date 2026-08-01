@@ -8,7 +8,6 @@
 *.so
 *.dll
 *.dylib
-docs/**
 **/__pycache__/**
 
 # Qt-es
@@ -88,3 +87,5 @@ srv/external_paths.json
 .claude/**
 .pytest_cache/**
 .agents/**
+
+brainstorm/**

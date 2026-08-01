@@ -5,7 +5,9 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "dzIPC/common/circularqueue.h"
 #include "dzIPC/common/control_plane.h"
+#include "dzIPC/common/local_pub_sub_registry.h"
 #include "dzIPC/common/srv_data.h"
 #include "dzIPC/common/thread_dispatch.h"
 #include "dzIPC/ipc_info_pool.h"
@@ -58,6 +60,12 @@ private:
     dzIPC::info_pool::ScopedRegistration pool_reg_;
     dzIPC::control_plane_shm::TopicControlPlane control_plane_;
     dzIPC::ThreadDispatch::ThreadOptions thread_options_;
+
+    // Nodelet fast-path: server-side request queue for same-process delivery.
+    // Registered in LocalPubSubRegistry so clients can discover it.
+    std::shared_ptr<CircularQueue<IpcMsgBase>> fp_queue_;
+    bool fp_registered_{false};  // true after InitChannel registers in registry
+    uint32_t fp_msg_id_{0};      // msg_id used for current registration
 };
 
 class IPC_EXPORT shm_cli_ipc : public cli_ipc_base
@@ -96,6 +104,22 @@ private:
     dzIPC::info_pool::ScopedRegistration pool_reg_;
     dzIPC::control_plane_shm::TopicControlPlane control_plane_;
     dzIPC::ThreadDispatch::ThreadOptions thread_options_;
+
+    // Nodelet fast-path gating, serialized by fast_path_mtx_.
+    // Registry only stores server request queues (snapshot size must be 1).
+    // Client creates a per-request capacity-1 reply queue placed in the
+    // FastPathRequestEnvelope — no persistent client queue in registry.
+    // K=3 consecutive observations of a local server gates activation.
+    mutable std::mutex fast_path_mtx_;
+    ChannelKey last_fp_ser_key_{};
+    size_t last_fp_ser_snapshot_size_{0};
+    int fp_consecutive_{0};
+    static constexpr int kFastPathConfirm = 3;
+
+    // One-shot warning suppression per instance + per reason.
+    // std::atomic exchange(true) serves as both check-and-set in one operation.
+    mutable std::atomic<bool> nodelet_no_server_warned_{false};
+    mutable std::atomic<bool> nodelet_anomaly_warned_{false};
 };
 }   // namespace shm
 }   // namespace dzIPC

@@ -4,6 +4,7 @@
 #include <typeinfo>
 #include "dzIPC/common/data_rev.h"
 #include "dzIPC/common/hash.h"
+#include "dzIPC/common/local_pub_sub_registry.h"
 #include "dzIPC/common/name_operator.h"
 #include "ipc_msg/ipc_msg_base/udp_id_init_msg.hpp"
 #include "libipc/platform/detail.h"
@@ -51,6 +52,9 @@ socket_pub_ipc::~socket_pub_ipc()
 void socket_pub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
 {
     topic_msg_.reset(msg->clone());
+    // Reset fast-path state: new message type requires re-confirmation.
+    std::lock_guard<std::mutex> lock(fast_path_mtx_);
+    fp_consecutive_ = 0;
 }
 
 /******************************************************************************************************/
@@ -98,6 +102,129 @@ bool socket_pub_ipc::publish(std::shared_ptr<IpcMsgBase> msg)
 /******************************************************************************************************/
 bool socket_pub_ipc::publish_best_effort(std::shared_ptr<IpcMsgBase> msg)
 {
+    // --- Intra-process fast path (socket nodelet) ---
+    // Gated by the unified process-wide switch dzIPC::EnableNodelet(true).
+    // When enabled, verify via IpcInfoPool that ALL known SocketSub entries
+    // for this topic/domain reside in the current process.  Only then
+    // clone-once + fanout, skipping UDP serialize+send.
+    //
+    // ---- Detection boundary (critical) ----
+    // IpcInfoPool ONLY discovers subscribers registered through dzIPC's own
+    // ScopedRegistration (socket_sub_ipc::InitChannel).  Native UDP listeners,
+    // passive sniffers, raw-socket consumers, and any external tool reading
+    // the UDP stream are INVISIBLE to this check.  When EnableNodelet is true
+    // and the pool reports all-local, the fast path will bypass the UDP send
+    // entirely — those invisible consumers receive NOTHING for that message.
+    //
+    // For debugging/monitoring: keep EnableNodelet false (default), or use
+    // publish_for_sniffer() to force the UDP path for individual messages.
+    //
+    // ---- Stability gate ----
+    // K=3 consecutive publishes with the same (key, local snapshot size,
+    // IpcInfoPool SocketSub count) gates activation.  Any topology change
+    // resets K to 0.
+    //
+    // TOCTOU risk: between the IpcInfoPool snapshot and the queue pushes, a
+    // cross-process subscriber may join or leave.  K=3 dampens the window but
+    // does not close it.  A late-joining remote sub will miss that message
+    // (fast path skipped the UDP send).
+
+    if (dzIPC::IsNodeletEnabled())
+    {
+        ChannelKey key{topic_name_, domain_id_, msg->msg_id(), ChannelKind::SocketPubSub};
+        auto& reg = LocalPubSubRegistry::instance();
+        auto snapshot = reg.subscriber_snapshot(key);
+
+        // Query IpcInfoPool for total SocketSub count (all processes).
+        size_t total_socket_subs = 0;
+        {
+            auto pool_snap = info_pool::IpcInfoPool::instance().snapshot();
+            for (auto& entry : pool_snap)
+            {
+                if (entry.kind == info_pool::EntryKind::SocketSub
+                    && entry.topic_name == topic_name_
+                    && entry.domain_id == static_cast<int32_t>(domain_id_)
+                    && entry.alive && entry.in_use)
+                {
+                    ++total_socket_subs;
+                }
+            }
+        }
+
+        bool use_fast_path = false;
+        {
+            std::lock_guard<std::mutex> lock(fast_path_mtx_);
+
+            // Reset on any state change: key, local snapshot size, or pool count.
+            if (!(key == last_fp_key_) || snapshot.size() != last_fp_snapshot_size_
+                || total_socket_subs != last_fp_total_subs_)
+            {
+                fp_consecutive_ = 0;
+                last_fp_key_ = key;
+                last_fp_snapshot_size_ = snapshot.size();
+                last_fp_total_subs_ = total_socket_subs;
+            }
+
+            // All-local check: must have local subs, pool must be non-empty,
+            // and pool count must exactly match local count.
+            if (!snapshot.empty() && total_socket_subs > 0
+                && total_socket_subs == snapshot.size())
+            {
+                ++fp_consecutive_;
+                if (fp_consecutive_ >= kFastPathConfirm)
+                {
+                    use_fast_path = true;
+                }
+            }
+            else
+            {
+                fp_consecutive_ = 0;
+
+                // One-shot warnings (per instance, per reason).
+                if (snapshot.empty() && !warned_no_local_sub_)
+                {
+                    warned_no_local_sub_ = true;
+                    std::cerr << "\033[33m[" << topic_name_
+                              << "PubInfo] socket nodelet requested but unavailable "
+                              << "(no local subscribers); falling back to standard UDP path\033[0m"
+                              << std::endl;
+                }
+                else if (!snapshot.empty() && total_socket_subs == 0 && !warned_pool_unavailable_)
+                {
+                    warned_pool_unavailable_ = true;
+                    std::cerr << "\033[33m[" << topic_name_
+                              << "PubInfo] socket nodelet requested but unavailable "
+                              << "(IpcInfoPool returned 0 SocketSub entries — pool may be unavailable); "
+                              << "falling back to standard UDP path\033[0m"
+                              << std::endl;
+                }
+                else if (!snapshot.empty() && total_socket_subs > 0
+                         && total_socket_subs != snapshot.size() && !warned_cross_process_)
+                {
+                    warned_cross_process_ = true;
+                    std::cerr << "\033[33m[" << topic_name_
+                              << "PubInfo] socket nodelet requested but unavailable "
+                              << "(cross-process SocketSub detected: local=" << snapshot.size()
+                              << " total=" << total_socket_subs << "); "
+                              << "falling back to standard UDP path\033[0m"
+                              << std::endl;
+                }
+            }
+        }
+
+        if (use_fast_path)
+        {
+            // Clone once, fanout to all local queues.
+            std::shared_ptr<IpcMsgBase> cloned(msg->clone());
+            for (auto& q : snapshot)
+            {
+                q->push(cloned);
+            }
+            return true;
+        }
+    }
+
+    // Fallback: standard UDP path
     try
     {
         ipc::buffer response_data(std::move(msg->serialize()));
@@ -153,6 +280,35 @@ bool socket_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
+bool socket_pub_ipc::publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg)
+{
+    // Always use the standard UDP path — sniffers depend on UDP data.
+    try
+    {
+        ipc::buffer response_data(std::move(msg->serialize()));
+        SocketSendOptions options;
+        options.delivery = SocketDeliveryMode::BestEffort;
+        options.integrity = SocketIntegrityMode::None;
+        const SocketSendReport report = chunk_send_ex(publisher_, response_data, options);
+        if (!report.ok())
+        {
+            std::cerr << "\033[31m[" << topic_name_ << "PubInfo] Error publishing message (sniffer): Failed to send"
+                      << "\033[0m" << std::endl;
+            return false;
+        }
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "\033[31m[" << topic_name_ << "PubInfo] Error publishing message (sniffer): " << e.what() << "\033[0m"
+                  << std::endl;
+        return false;
+    }
+    return true;
+}
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
 socket_sub_ipc::socket_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
                                const size_t queue_size, bool verbose, bool enable_thread_qos, int cpu_id,
                                int thread_priority)
@@ -165,7 +321,8 @@ socket_sub_ipc::socket_sub_ipc(const std::shared_ptr<TopicData>& msg, const std:
     this->topic_msg_.reset(msg->clone());
     this->port_hash_ = dzIPC::common::udp_discovery_port_calculate(topic_name, domain_id);
     this->ipaddr_ = dzIPC::common::udp_discovery_addr_calculate(topic_name);
-    this->msg_queue_ = std::make_unique<CircularQueue<IpcMsgBase>>(queue_size);
+    this->msg_queue_ = std::make_shared<CircularQueue<IpcMsgBase>>(queue_size);
+    this->msg_id_ = topic_msg_->topic()->msg_id();
 }
 
 /******************************************************************************************************/
@@ -173,6 +330,18 @@ socket_sub_ipc::socket_sub_ipc(const std::shared_ptr<TopicData>& msg, const std:
 /******************************************************************************************************/
 socket_sub_ipc::~socket_sub_ipc()
 {
+    // Deregister BEFORE stopping threads so fast-path publisher snapshots
+    // can no longer include this queue while we shut down.
+    {
+        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+        if (local_registered_)
+        {
+            ChannelKey key{topic_name_, domain_id_, msg_id_, ChannelKind::SocketPubSub};
+            LocalPubSubRegistry::instance().unregister_subscriber(key, msg_queue_);
+            local_registered_ = false;
+        }
+    }
+
     running.store(false, std::memory_order_release);
     if (subscribe_thread_ != nullptr)
     {
@@ -198,8 +367,25 @@ void socket_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
     }
     std::shared_ptr<TopicData> new_msg;
     new_msg.reset(msg->clone());
-    std::lock_guard<std::mutex> lock(topic_msg_mtx_);
-    topic_msg_ = std::move(new_msg);
+    const uint32_t new_msg_id = new_msg->topic()->msg_id();
+
+    {
+        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+        topic_msg_ = std::move(new_msg);
+
+        // If already registered (InitChannel completed) and msg_id changed,
+        // re-register under the new key so publishers using the new msg_id
+        // can find us via the fast path.
+        if (local_registered_ && msg_id_ != new_msg_id)
+        {
+            auto& reg = LocalPubSubRegistry::instance();
+            ChannelKey old_key{topic_name_, domain_id_, msg_id_, ChannelKind::SocketPubSub};
+            ChannelKey new_key{topic_name_, domain_id_, new_msg_id, ChannelKind::SocketPubSub};
+            reg.unregister_subscriber(old_key, msg_queue_);
+            reg.register_subscriber(new_key, msg_queue_);
+        }
+        msg_id_ = new_msg_id;
+    }
 }
 
 /******************************************************************************************************/
@@ -261,6 +447,17 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
             });   // 占位线程，保持对象存活直到析构
         dzIPC::ThreadDispatch::apply_thread_options(subscribe_thread_, thread_options_, verbose_,
                                                     topic_name_ + "_SocketSubReceiveThread");
+
+        // Register for intra-process fast-path delivery (once only).
+        {
+            std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+            if (!local_registered_)
+            {
+                ChannelKey key{topic_name_, domain_id_, msg_id_, ChannelKind::SocketPubSub};
+                LocalPubSubRegistry::instance().register_subscriber(key, msg_queue_);
+                local_registered_ = true;
+            }
+        }
     }
     catch (const std::exception& e)
     {

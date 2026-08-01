@@ -4,7 +4,9 @@
 #include <cstring>
 #include <iostream>
 #include <typeinfo>
+#include "dzIPC/common/local_pub_sub_registry.h"
 #include "dzIPC/common/name_operator.h"
+#include "dzIPC/common/nodelet_config.h"
 
 namespace dzIPC {
 namespace shm {
@@ -75,6 +77,9 @@ shm_pub_ipc::~shm_pub_ipc()
 void shm_pub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
 {
     topic_msg_.reset(msg->clone());
+    // Reset fast-path state: new message type requires re-confirmation.
+    std::lock_guard<std::mutex> lock(fast_path_mtx_);
+    fp_consecutive_ = 0;
 }
 
 /******************************************************************************************************/
@@ -148,6 +153,96 @@ bool shm_pub_ipc::publish(std::shared_ptr<IpcMsgBase> msg)
 /******************************************************************************************************/
 bool shm_pub_ipc::publish_best_effort(std::shared_ptr<IpcMsgBase> msg)
 {
+    // --- Intra-process fast path ---
+    // When all observed peers are local (same process), clone once and fanout
+    // the same shared_ptr to every subscriber queue, skipping SHM serialize.
+    // K=3 consecutive matching observations gates activation to reduce the
+    // window where a remote peer may be completing handshake.
+    //
+    // Before any subscriber has completed handshake, recv_count() is 0 and
+    // the snapshot is empty — the first few messages still go through SHM
+    // so late joiners receive them correctly.
+    //
+    // Gated by the unified process-wide nodelet switch
+    // (dzIPC::IsNodeletEnabled()).
+
+    if (!dzIPC::IsNodeletEnabled())
+    {
+        return publish_for_sniffer(std::move(msg));
+    }
+
+    ChannelKey key{raw_topic_name_, domain_id_, msg->msg_id()};
+    auto& reg = LocalPubSubRegistry::instance();
+    auto snapshot = reg.subscriber_snapshot(key);
+    const auto shm_recv = publisher_->recv_count();
+
+    bool use_fast_path = false;
+    {
+        std::lock_guard<std::mutex> lock(fast_path_mtx_);
+        // Reset on any state change: different key, or counts diverged.
+        if (!(key == last_fp_key_) || snapshot.size() != last_fp_snapshot_size_
+            || shm_recv != last_fp_recv_count_)
+        {
+            fp_consecutive_ = 0;
+            last_fp_key_ = key;
+            last_fp_snapshot_size_ = snapshot.size();
+            last_fp_recv_count_ = shm_recv;
+        }
+
+        if (!snapshot.empty() && shm_recv == snapshot.size())
+        {
+            ++fp_consecutive_;
+            if (fp_consecutive_ >= kFastPathConfirm)
+            {
+                use_fast_path = true;
+            }
+        }
+        else
+        {
+            fp_consecutive_ = 0;
+        }
+    }
+
+    if (use_fast_path)
+    {
+        // Clone once, fanout to all local queues.
+        std::shared_ptr<IpcMsgBase> cloned(msg->clone());
+        for (auto& q : snapshot)
+        {
+            q->push(cloned);   // const& overload: copies shared_ptr
+        }
+        return true;
+    }
+
+    // Nodelet requested but unavailable: one-shot warning per reason.
+    // Atomic fetch_or prevents data races across concurrent publish calls
+    // and guarantees each reason fires at most once per instance lifetime.
+    enum : uint8_t
+    {
+        kWarnNoLocalSubs = 1 << 0,
+        kWarnMixedPeers = 1 << 1,
+    };
+    if (snapshot.empty())
+    {
+        if (!(nodelet_warned_.fetch_or(kWarnNoLocalSubs, std::memory_order_relaxed) & kWarnNoLocalSubs))
+        {
+            std::cerr << "\033[33m[" << raw_topic_name_
+                      << "] nodelet requested but unavailable; falling back to SHM path"
+                      << " (no local subscribers)\033[0m" << std::endl;
+        }
+    }
+    else if (shm_recv != snapshot.size())
+    {
+        if (!(nodelet_warned_.fetch_or(kWarnMixedPeers, std::memory_order_relaxed) & kWarnMixedPeers))
+        {
+            std::cerr << "\033[33m[" << raw_topic_name_
+                      << "] nodelet requested but unavailable; falling back to SHM path"
+                      << " (mixed local/remote peers: local=" << snapshot.size()
+                      << " shm=" << shm_recv << ")\033[0m" << std::endl;
+        }
+    }
+
+    // Fallback: old SHM path (serialize + shared-memory send)
     return publish_for_sniffer(std::move(msg));
 }
 
@@ -205,7 +300,8 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
     , thread_options_(dzIPC::ThreadDispatch::make_realtime_options(enable_thread_qos, cpu_id, thread_priority))
 {
     topic_msg_.reset(msg->clone());
-    msg_queue_ = std::make_unique<CircularQueue<IpcMsgBase>>(queue_size);
+    msg_id_ = topic_msg_->topic()->msg_id();
+    msg_queue_ = std::make_shared<CircularQueue<IpcMsgBase>>(queue_size);
 }
 
 /******************************************************************************************************/
@@ -213,6 +309,18 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
 /******************************************************************************************************/
 shm_sub_ipc::~shm_sub_ipc()
 {
+    // Deregister BEFORE stopping threads so fast-path publisher snapshots
+    // can no longer include this queue while we shut down.
+    {
+        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+        if (local_registered_)
+        {
+            ChannelKey key{raw_topic_name_, domain_id_, msg_id_};
+            LocalPubSubRegistry::instance().unregister_subscriber(key, msg_queue_);
+            local_registered_ = false;
+        }
+    }
+
     running.store(false, std::memory_order_release);
     if (subscribe_thread_ != nullptr)
     {
@@ -249,8 +357,25 @@ void shm_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
     }
     std::shared_ptr<TopicData> new_msg;
     new_msg.reset(msg->clone());
-    std::lock_guard<std::mutex> lock(topic_msg_mtx_);
-    topic_msg_ = std::move(new_msg);
+    const uint32_t new_msg_id = new_msg->topic()->msg_id();
+
+    {
+        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+        topic_msg_ = std::move(new_msg);
+
+        // If already registered (InitChannel completed) and msg_id changed,
+        // re-register under the new key so publishers using the new msg_id
+        // can find us via the fast path.
+        if (local_registered_ && msg_id_ != new_msg_id)
+        {
+            auto& reg = LocalPubSubRegistry::instance();
+            ChannelKey old_key{raw_topic_name_, domain_id_, msg_id_};
+            ChannelKey new_key{raw_topic_name_, domain_id_, new_msg_id};
+            reg.unregister_subscriber(old_key, msg_queue_);
+            reg.register_subscriber(new_key, msg_queue_);
+        }
+        msg_id_ = new_msg_id;
+    }
 }
 
 /******************************************************************************************************/
@@ -403,6 +528,17 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
         });
     dzIPC::ThreadDispatch::apply_thread_options(subscribe_thread_, thread_options_, verbose_,
                                                 topic_name_ + "_SubReceiveThread");
+
+    // Register for intra-process fast-path delivery (once only).
+    {
+        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+        if (!local_registered_)
+        {
+            ChannelKey key{raw_topic_name_, domain_id_, msg_id_};
+            LocalPubSubRegistry::instance().register_subscriber(key, msg_queue_);
+            local_registered_ = true;
+        }
+    }
 }
 
 /******************************************************************************************************/

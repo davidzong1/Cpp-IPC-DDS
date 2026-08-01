@@ -28,6 +28,8 @@ public:
 
     void set_msg_id(const uint32_t id) { dz_ipc_msg_id = id; }
 
+    uint32_t msg_id() const noexcept { return dz_ipc_msg_id; }
+
     bool check_id(const ipc::buffer& data, uint32_t expected_id) const
     {
         if (data.size() < 12)
