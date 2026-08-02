@@ -7,6 +7,16 @@
 ///   5. TransportPacket key fields present
 ///   6. Service request/response coverage
 ///   7. Stop after Stop is safe
+///   8. IpcInfoPool endpoint metadata
+///   9. Nodelet publish recording
+///   T0  Legacy 3-param API
+///   T1  max_memory_mb rotation
+///   T2  max_file_size_mb rotation
+///   T3  max_duration_sec rotation (idle timeout)
+///   T4  max_queue_size rotation + augmented capacity
+///   T5  Hysteresis prevents continuous re-rotation
+///   T6  max_queue=1 edge case
+///   T7  Cross-bag event uniqueness (no loss/dup)
 
 #include <gtest/gtest.h>
 
@@ -18,6 +28,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -112,6 +123,84 @@ std::map<std::string, std::vector<uint8_t>> record_fields(const std::vector<uint
 }
 
 // ---------------------------------------------------------------------------
+// Helper: list bag files matching a prefix and optional polling
+// ---------------------------------------------------------------------------
+std::vector<std::string> list_bags(const std::string& marker, int min_count = 0, int poll_ms = 0, int max_polls = 20)
+{
+    for (int attempt = 0; attempt <= max_polls; ++attempt)
+    {
+        std::vector<std::string> result;
+        for (auto& de : fs::directory_iterator(fs::temp_directory_path()))
+        {
+            auto name = de.path().filename().string();
+            if (name.find(marker) != std::string::npos && name.size() > 4 &&
+                name.compare(name.size() - 4, 4, ".bag") == 0)
+                result.push_back(de.path().string());
+        }
+        std::sort(result.begin(), result.end());
+        if (result.size() >= static_cast<size_t>(min_count)) return result;
+        if (poll_ms > 0 && attempt < max_polls)
+            std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
+    }
+    // Final attempt without min_count
+    std::vector<std::string> result;
+    for (auto& de : fs::directory_iterator(fs::temp_directory_path()))
+    {
+        auto name = de.path().filename().string();
+        if (name.find(marker) != std::string::npos && name.size() > 4 &&
+            name.compare(name.size() - 4, 4, ".bag") == 0)
+            result.push_back(de.path().string());
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+/// RAII guard: stops logger and removes only bags matching a unique marker string
+struct LogCleanup
+{
+    std::string marker_;
+    LogCleanup(std::string m) : marker_(std::move(m))
+    {
+        // Clean up any leftover from previous interrupted run
+        auto bags = list_bags(marker_);
+        for (auto& b : bags) { std::error_code ec; fs::remove(b, ec); }
+    }
+    ~LogCleanup()
+    {
+        logger::StopDzipcLog();
+        auto bags = list_bags(marker_);
+        for (auto& b : bags) { std::error_code ec; fs::remove(b, ec); }
+    }
+};
+
+/// Verify a single bag file has valid structure
+void verify_bag(const std::string& path)
+{
+    auto data = read_file(path);
+    ASSERT_GE(data.size(), 13u) << "Bag " << path << " too small";
+    ASSERT_EQ(std::string(reinterpret_cast<char*>(data.data()), 13), "#ROSBAG V2.0\n")
+        << "Bag " << path << " missing magic";
+
+    // File header record (at offset 13)
+    auto fh = record_fields(data, 13);
+    ASSERT_EQ(fh.at("op").size(), 1u) << "Bag " << path << " missing op field";
+    EXPECT_EQ(fh.at("op")[0], 0x03) << "Bag " << path << " FileHeader op != 0x03";
+    EXPECT_EQ(fh.at("conn_count").size(), 4u);
+    EXPECT_EQ(fh.at("chunk_count").size(), 4u);
+
+    // index_pos must be within file
+    ASSERT_EQ(fh.at("index_pos").size(), 8u);
+    uint64_t idx_pos = r64le(fh.at("index_pos").data(), 0);
+    EXPECT_GT(idx_pos, 0u) << "Bag " << path << " index_pos is 0 (not finalized)";
+    EXPECT_LT(idx_pos, data.size()) << "Bag " << path << " index_pos out of range";
+
+    // Connection record at index_pos
+    auto conn = record_fields(data, static_cast<size_t>(idx_pos));
+    EXPECT_EQ(conn.at("op").size(), 1u);
+    EXPECT_EQ(conn.at("op")[0], 0x07) << "Bag " << path << " Connection op != 0x07";
+}
+
+// ---------------------------------------------------------------------------
 // Test 1: Default — not recording
 // ---------------------------------------------------------------------------
 TEST(DzipcLog, NotRecordingByDefault) { EXPECT_FALSE(logger::IsDzipcLogRunning()); }
@@ -124,22 +213,15 @@ TEST(DzipcLog, StartStopIdempotent)
     auto path = (fs::temp_directory_path() / "test_idem.bag").string();
     std::remove(path.c_str());
 
-    // First start
     EXPECT_TRUE(logger::StartDzipcLog(path, 1, 100));
     EXPECT_TRUE(logger::IsDzipcLogRunning());
-
-    // Second start should fail (already running)
     EXPECT_FALSE(logger::StartDzipcLog(path, 1, 100));
 
-    // First stop
+    logger::StopDzipcLog();
+    EXPECT_FALSE(logger::IsDzipcLogRunning());
     logger::StopDzipcLog();
     EXPECT_FALSE(logger::IsDzipcLogRunning());
 
-    // Second stop should be safe
-    logger::StopDzipcLog();
-    EXPECT_FALSE(logger::IsDzipcLogRunning());
-
-    // Cleanup
     std::remove(path.c_str());
 }
 
@@ -151,33 +233,20 @@ TEST(DzipcLog, PublishGeneratesNonEmptyBag)
     auto path = (fs::temp_directory_path() / "test_pub.bag").string();
     std::remove(path.c_str());
 
-    // Start logger
     ASSERT_TRUE(logger::StartDzipcLog(path, 1, 50));
 
-    // Create a publisher via the public API factory
     auto td = TopicDataPtrMake<TestLogMsg>(42);
     auto pub = PublisherIPCPtrMake(td, "/test_log_topic", 0, IPC_SHM, false);
     pub->InitChannel();
-
-    // Give a moment for control plane to come up, then publish
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    auto msg = std::make_shared<TestLogMsg>();
-    pub->publish(msg);
-
-    // Small delay for logger to process, then stop
+    pub->publish(std::make_shared<TestLogMsg>());
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     logger::StopDzipcLog();
 
-    // Read file
     auto data = read_file(path);
-    EXPECT_GT(data.size(), 0u) << "Bag file should not be empty";
-
-    // Verify header
+    EXPECT_GT(data.size(), 0u);
     ASSERT_GE(data.size(), 13u);
-    std::string hdr(reinterpret_cast<char*>(data.data()), 13);
-    EXPECT_EQ(hdr, "#ROSBAG V2.0\n") << "Bag file should start with #ROSBAG V2.0";
-
-    // Cleanup
+    EXPECT_EQ(std::string(reinterpret_cast<char*>(data.data()), 13), "#ROSBAG V2.0\n");
     std::remove(path.c_str());
 }
 
@@ -190,13 +259,11 @@ TEST(DzipcLog, HeaderContainsRosbagV2)
     std::remove(path.c_str());
 
     ASSERT_TRUE(logger::StartDzipcLog(path, 1, 50));
-    // Stop immediately — should still produce a valid bag with header + metadata
     logger::StopDzipcLog();
 
     auto data = read_file(path);
     ASSERT_GE(data.size(), 13u);
     EXPECT_EQ(std::string(reinterpret_cast<char*>(data.data()), 13), "#ROSBAG V2.0\n");
-
     std::remove(path.c_str());
 }
 
@@ -215,28 +282,21 @@ TEST(DzipcLog, TransportPacketKeyFields)
     pub->InitChannel();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    auto msg = std::make_shared<TestLogMsg>();
-    pub->publish(msg);
-
+    pub->publish(std::make_shared<TestLogMsg>());
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     logger::StopDzipcLog();
 
     auto data = read_file(path);
     ASSERT_GT(data.size(), 13u);
 
-    // We have at least: header(13) + bag_header_record + conn0 + conn1 + chunk
-    // Inside chunk: msg sub-records. Search for the topic string in the binary.
     std::string topic_str = "/test_fields_topic";
-    // The topic name should appear somewhere in the serialized payload
     auto found = std::search(data.begin(), data.end(), topic_str.begin(), topic_str.end());
     EXPECT_NE(found, data.end()) << "Topic name not found in bag file";
 
-    // Also check for the TransportPacket type marker
     std::string tp_type = "dzipc_log/TransportPacket";
     found = std::search(data.begin(), data.end(), tp_type.begin(), tp_type.end());
     EXPECT_NE(found, data.end()) << "TransportPacket type not found in bag file";
 
-    // Verify the top-level ROS bag record structure and index pointer.
     const auto file_header = record_fields(data, 13);
     ASSERT_EQ(file_header.at("op").size(), 1u);
     EXPECT_EQ(file_header.at("op")[0], 0x03);
@@ -263,8 +323,6 @@ TEST(DzipcLog, ServiceRequestResponseRecords)
 
     ASSERT_TRUE(logger::StartDzipcLog(path, 1, 100));
 
-    // Create server + client for a unique service topic so stale SHM objects
-    // from an interrupted test cannot make the control-plane open fail.
     const std::string service_topic = "log_srv_" + std::to_string(logger::NowNs() % 1000000ULL);
     std::atomic<bool> req_received{false};
     auto srv_data = ServerDataPtrMake<TestLogMsg, TestLogMsg>(100);
@@ -272,7 +330,6 @@ TEST(DzipcLog, ServiceRequestResponseRecords)
     ServerCallBackFun cb = [&req_received](ServerDataPtr& sd)
     {
         req_received.store(true);
-        // Set response data (swap out the response msg)
         auto rsp = std::make_shared<TestLogMsg>();
         sd->response() = rsp;
     };
@@ -283,7 +340,6 @@ TEST(DzipcLog, ServiceRequestResponseRecords)
     {
         server = ServerIPCPtrMake(service_topic, srv_data, cb, 0, IPC_SHM, false);
         server->InitChannel();
-
         auto cli_data = ServerDataPtrMake<TestLogMsg, TestLogMsg>(100);
         client = ClientIPCPtrMake(service_topic, cli_data, 0, IPC_SHM, false);
         client->InitChannel("");
@@ -294,7 +350,6 @@ TEST(DzipcLog, ServiceRequestResponseRecords)
         throw;
     }
 
-    // Wait for handshake
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     auto req = std::make_shared<TestLogMsg>();
@@ -306,13 +361,10 @@ TEST(DzipcLog, ServiceRequestResponseRecords)
     logger::StopDzipcLog();
 
     auto data = read_file(path);
-    EXPECT_GT(data.size(), 0u) << "Bag file after service request should not be empty";
-
-    // Verify the service topic appears in the bag
+    EXPECT_GT(data.size(), 0u);
     std::string srv_topic = service_topic;
     auto found = std::search(data.begin(), data.end(), srv_topic.begin(), srv_topic.end());
     EXPECT_NE(found, data.end()) << "Service topic not found in bag";
-
     std::remove(path.c_str());
 }
 
@@ -326,10 +378,8 @@ TEST(DzipcLog, StopIdempotentAfterStop)
 
     ASSERT_TRUE(logger::StartDzipcLog(path));
     logger::StopDzipcLog();
-    // Should not crash or throw
     EXPECT_NO_THROW(logger::StopDzipcLog());
     EXPECT_NO_THROW(logger::StopDzipcLog());
-
     std::remove(path.c_str());
 }
 
@@ -341,7 +391,6 @@ TEST(DzipcLog, EndpointMetaWrittenOnStart)
     auto path = (fs::temp_directory_path() / "test_meta.bag").string();
     std::remove(path.c_str());
 
-    // Register an entry in IpcInfoPool before starting logger
     const auto slot = info_pool::IpcInfoPool::instance().register_entry(
         {info_pool::EntryKind::ShmPub, "/test_meta_topic", "TestType", "", 0, ""});
 
@@ -352,16 +401,17 @@ TEST(DzipcLog, EndpointMetaWrittenOnStart)
     auto data = read_file(path);
     EXPECT_GT(data.size(), 0u);
 
-    // The endpoint metadata topic should appear
     std::string meta_topic = "/test_meta_topic";
     auto found = std::search(data.begin(), data.end(), meta_topic.begin(), meta_topic.end());
     EXPECT_NE(found, data.end()) << "Metadata topic not found in bag";
 
     info_pool::IpcInfoPool::instance().unregister_entry(slot);
-
     std::remove(path.c_str());
 }
 
+// ---------------------------------------------------------------------------
+// Test 9: Nodelet publish is recorded
+// ---------------------------------------------------------------------------
 TEST(DzipcLog, NodeletEnabledPublishIsRecorded)
 {
     NodeletReset reset;
@@ -386,6 +436,232 @@ TEST(DzipcLog, NodeletEnabledPublishIsRecorded)
     const auto found = std::search(data.begin(), data.end(), topic.begin(), topic.end());
     EXPECT_NE(found, data.end());
     std::remove(path.c_str());
+}
+
+// =========================================================================
+// Rotation tests
+// =========================================================================
+
+// T0: Old 3-param API works, uses explicit .bag path
+TEST(DzipcLogRotation, OldApiSingleBag)
+{
+    const std::string marker = "T0oldapi";
+    auto path = (fs::temp_directory_path() / (marker + ".bag")).string();
+    LogCleanup cleanup(marker);
+
+    ASSERT_TRUE(logger::StartDzipcLog(path, 1, 50));
+    for (int i = 0; i < 5; ++i)
+        logger::RecordPublish("/t0", "T0", 0, i, logger::TransportKind::kShm, nullptr, 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    logger::StopDzipcLog();
+
+    verify_bag(path);
+}
+
+// T1: max_memory_mb triggers rotation — assert ≥ 2 bags
+TEST(DzipcLogRotation, MemoryBudgetRotates)
+{
+    const std::string marker = "T1mem";
+    auto path = (fs::temp_directory_path() / (marker + ".bag")).string();
+    LogCleanup cleanup(marker);
+
+    // 1 MB memory budget
+    ASSERT_TRUE(logger::StartDzipcLog(path, 1, 100000));
+
+    // 3 × 600 KB > 1 MiB — forces rotation
+    std::vector<uint8_t> big(600 * 1024, 0xAB);
+    for (int i = 0; i < 3; ++i)
+        logger::RecordPublish("/t1", "T1", 0, i, logger::TransportKind::kShm, big.data(), big.size());
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    logger::StopDzipcLog();
+
+    auto bags = list_bags(marker);
+    EXPECT_GE(bags.size(), 2u) << "Should rotate to at least 2 bags, got " << bags.size();
+    for (auto& b : bags) verify_bag(b);
+}
+
+// T2: max_file_size_mb triggers rotation — assert ≥ 2 bags
+TEST(DzipcLogRotation, FileSizeTriggersRotation)
+{
+    const std::string marker = "T2fs";
+    auto path = (fs::temp_directory_path() / (marker + ".bag")).string();
+    LogCleanup cleanup(marker);
+
+    logger::RotationOptions opts;
+    opts.max_file_size_mb = 1;  // rotate at 1 MiB
+    ASSERT_TRUE(logger::StartDzipcLog(path, 512, 100000, opts));
+
+    std::vector<uint8_t> big(60000, 0xCD);  // ~60 KB per event
+    for (int i = 0; i < 40; ++i)
+        logger::RecordPublish("/t2", "T2", 0, i, logger::TransportKind::kShm, big.data(), big.size());
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    logger::StopDzipcLog();
+
+    auto bags = list_bags(marker);
+    EXPECT_GE(bags.size(), 2u) << "Should rotate to at least 2 bags, got " << bags.size();
+    for (auto& b : bags) verify_bag(b);
+}
+
+// T3: max_duration_sec triggers rotation via idle timeout — assert ≥ 2 bags
+TEST(DzipcLogRotation, DurationTriggersRotation)
+{
+    const std::string marker = "T3dur";
+    auto path = (fs::temp_directory_path() / (marker + ".bag")).string();
+    LogCleanup cleanup(marker);
+
+    logger::RotationOptions opts;
+    opts.max_duration_sec = 1;  // 1 second
+    ASSERT_TRUE(logger::StartDzipcLog(path, 256, 100000, opts));
+
+    // Publish then sleep past deadline
+    logger::RecordPublish("/t3", "T3", 0, 0, logger::TransportKind::kShm, nullptr, 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+
+    // Publish again — should trigger duration-based rotation
+    logger::RecordPublish("/t3", "T3", 0, 1, logger::TransportKind::kShm, nullptr, 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    logger::StopDzipcLog();
+
+    auto bags = list_bags(marker);
+    EXPECT_GE(bags.size(), 2u) << "Duration should trigger rotation for >=2 bags, got " << bags.size();
+    for (auto& b : bags) verify_bag(b);
+}
+
+// T4: max_queue_size triggers rotation with augmented capacity — assert ≥ 2 bags
+TEST(DzipcLogRotation, QueueDepthTriggersRotation)
+{
+    const std::string marker = "T4q";
+    auto path = (fs::temp_directory_path() / (marker + ".bag")).string();
+    LogCleanup cleanup(marker);
+
+    ASSERT_TRUE(logger::StartDzipcLog(path, 256, 10));
+
+    // 64 KB payload so writer can't instantly drain — queue arms
+    std::vector<uint8_t> big(64 * 1024, 0xEF);
+
+    // Flood faster than writer can drain (12 > 10 base, < 15 augmented)
+    for (int round = 0; round < 4; ++round)
+    {
+        for (int i = 0; i < 12; ++i)
+            logger::RecordPublish("/t4", "T4", 0, i, logger::TransportKind::kShm, big.data(), big.size());
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    logger::StopDzipcLog();
+
+    auto bags = list_bags(marker);
+    EXPECT_GE(bags.size(), 2u) << "Queue depth should trigger rotation for >=2 bags, got " << bags.size();
+    for (auto& b : bags) verify_bag(b);
+}
+
+// T5: Hysteresis prevents rapid-fire re-rotation
+TEST(DzipcLogRotation, HysteresisPreventsChurn)
+{
+    const std::string marker = "T5hyst";
+    auto path = (fs::temp_directory_path() / (marker + ".bag")).string();
+    LogCleanup cleanup(marker);
+
+    ASSERT_TRUE(logger::StartDzipcLog(path, 256, 5));
+
+    // 64 KB payload so writer can't instantly drain
+    std::vector<uint8_t> big(64 * 1024, 0xCD);
+
+    for (int round = 0; round < 3; ++round)
+    {
+        for (int i = 0; i < 8; ++i)
+            logger::RecordPublish("/t5", "T5", 0, i, logger::TransportKind::kShm, big.data(), big.size());
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    logger::StopDzipcLog();
+
+    auto bags = list_bags(marker);
+    EXPECT_GE(bags.size(), 2u) << "Should produce at least 2 bags, got " << bags.size();
+    EXPECT_LE(bags.size(), 5u) << "Hysteresis should prevent excessive bag churn, got " << bags.size();
+    for (auto& b : bags) verify_bag(b);
+}
+
+// T6: max_queue=1 edge case — must not hang or stuck-at-zero watermark
+TEST(DzipcLogRotation, MaxQueueOneEdgeCase)
+{
+    const std::string marker = "T6q1";
+    auto path = (fs::temp_directory_path() / (marker + ".bag")).string();
+    LogCleanup cleanup(marker);
+
+    ASSERT_TRUE(logger::StartDzipcLog(path, 256, 1));
+
+    for (int i = 0; i < 5; ++i)
+    {
+        logger::RecordPublish("/t6", "T6", 0, i, logger::TransportKind::kShm, nullptr, 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    logger::StopDzipcLog();
+
+    auto bags = list_bags(marker);
+    EXPECT_GE(bags.size(), 1u);
+    for (auto& b : bags) verify_bag(b);
+}
+
+// T7: Cross-bag event uniqueness — verify no events lost or duplicated
+TEST(DzipcLogRotation, CrossBagNoLossNoDup)
+{
+    const std::string marker = "T7xbag";
+    auto path = (fs::temp_directory_path() / (marker + ".bag")).string();
+    LogCleanup cleanup(marker);
+
+    logger::RotationOptions opts;
+    opts.max_duration_sec = 1;
+    ASSERT_TRUE(logger::StartDzipcLog(path, 256, 100000, opts));
+
+    const std::string tag = "T7_UNIQ_" + std::to_string(logger::NowNs());
+    const int total_events = 20;
+    for (int i = 0; i < total_events; ++i)
+    {
+        // 用定宽零填充编号避免子串重叠（如 _1 误匹配 _10.._19）
+        char topic_buf[256];
+        std::snprintf(topic_buf, sizeof(topic_buf), "/t7_%s_%04d", tag.c_str(), i);
+        logger::RecordPublish(topic_buf, "T7", 0, i, logger::TransportKind::kShm, nullptr, 0);
+        if (i == 10) std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    logger::StopDzipcLog();
+
+    auto bags = list_bags(marker);
+    ASSERT_GE(bags.size(), 2u) << "Should have cross-bag rotation, got " << bags.size() << " bag(s)";
+
+    // Count occurrences of each unique needle across all bags
+    std::map<std::string, int> needle_counts;
+    for (int i = 0; i < total_events; ++i)
+    {
+        char needle_buf[256];
+        std::snprintf(needle_buf, sizeof(needle_buf), "/t7_%s_%04d", tag.c_str(), i);
+        needle_counts[needle_buf] = 0;
+    }
+
+    for (auto& b : bags)
+    {
+        verify_bag(b);
+        auto data = read_file(b);
+        for (auto& kv : needle_counts)
+        {
+            // Count all occurrences of needle in this bag's binary data
+            int count = 0;
+            auto it = data.begin();
+            while (true)
+            {
+                it = std::search(it, data.end(), kv.first.begin(), kv.first.end());
+                if (it == data.end()) break;
+                count++;
+                ++it;
+            }
+            kv.second += count;
+        }
+    }
+
+    for (auto& kv : needle_counts)
+    {
+        EXPECT_EQ(kv.second, 1) << "Needle " << kv.first << " found " << kv.second << " times (expected 1)";
+    }
 }
 
 }  // namespace

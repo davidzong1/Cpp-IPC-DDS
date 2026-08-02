@@ -62,19 +62,39 @@ dzIPC::EnableNodelet(false);
 
 ## dzipc_log（进程级通信日志）
 
-`dzipc_log` 默认关闭。启用后会自动记录由 dzIPC 公共工厂创建的 publisher、subscriber、server 和 client 通信，包括 Nodelet 快速路径，并在停止或退出时写入单个 `.bag` 文件：
+`dzipc_log` 默认关闭。启用后会自动记录由 dzIPC 公共工厂创建的 publisher、subscriber、server 和 client 通信，包括 Nodelet 快速路径，并在停止或退出时写入带时间戳命名的 `.bag` 文件（以 `.bag` 结尾的路径首包精确匹配，后续轮转文件自动追加时间戳和序号）：
 
 ```cpp
 #include "dzIPC/dzipc.h"
 
-dzIPC::logger::StartDzipcLog("/tmp/session.bag");
+// 基本：单 bag 文件
+dzIPC::logger::StartDzipcLog("/tmp/session.bag", 256, 100000);
 // 正常创建并使用 pub/sub、srv/cli
 dzIPC::logger::StopDzipcLog();
 ```
 
-也可通过 `StartDzipcLog(path, max_memory_mb, max_queue_size)` 设置 chunk 内存预算和待处理事件上限。队列满时日志事件会被丢弃，但通信不会被阻塞。输出采用 ROS1 bag v2.0、`compression=none`，业务 payload 以 `dzipc_log/TransportPacket` 中的 opaque bytes 保存；它不是 ROS 原生业务消息，需要按 dzIPC 消息定义解码。
+### 自动轮转
 
-完整 API、退出 flush 语义、Nodelet 性能影响和 bag 兼容边界见 [dzipc_log 文档](docs/dzipc_log.md)。
+四种独立阈值可触发 bag 轮转（finalize 当前文件 → 打开新文件），每个轮转出的 bag 均独立有效：
+
+```cpp
+dzIPC::logger::RotationOptions opts;
+opts.max_file_size_mb  = 1024;   // bag 超过 1 GiB 轮转
+opts.max_duration_sec  = 3600;   // bag 打开超过 1 小时轮转
+
+dzIPC::logger::StartDzipcLog("/tmp/events.bag", 256, 100000, opts);
+```
+
+| 阈值 | 来源 | 说明 |
+|------|------|------|
+| `max_memory_mb` | `StartDzipcLog` 参数 2 | chunk 内存 ≥ 限制 → 轮转 |
+| `max_queue_size` | `StartDzipcLog` 参数 3 | 队列深度 ≥ 限制 → 轮转 + 1.5× 增广容量 |
+| `max_file_size_mb` | `RotationOptions` | 预计文件大小 ≥ 限制 → 轮转 |
+| `max_duration_sec` | `RotationOptions` | bag 持续时间 ≥ 限制 → 轮转（空闲时通过 `cv_.wait_until` 唤醒） |
+
+轮转时文件 close/open 不持队列锁，`RecordEvent` 保持非阻塞。提供迟滞保护防止连续轮转风暴。输出采用 ROS1 bag v2.0、`compression=none`。`path` 以 `.bag` 结尾时首个文件使用精确路径，轮转文件以去掉后缀的前缀加时间戳和序号命名。
+
+完整 API、退出 flush 语义、文件名规则和 bag 兼容边界见 [dzipc_log 文档](docs/dzipc_log.md)。
 
 ---
 

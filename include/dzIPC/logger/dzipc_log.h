@@ -2,17 +2,28 @@
 /// \file dzipc_log.h
 /// \brief dzIPC logging module that records IPC events to ROS bag v2 files.
 ///
-/// Usage:
-///   dzIPC::logger::StartDzipcLog("/tmp/events.bag", 256, 100000);
+/// Quick start:
+///   dzIPC::logger::StartDzipcLog("/tmp/events", 256, 100000);
 ///   // ... run IPC operations ...
 ///   dzIPC::logger::StopDzipcLog();   // flushes + joins writer thread
 ///
-/// The module captures publishes, requests, responses, and IpcInfoPool
-/// endpoint metadata.  Events are buffered in memory and written to a
-/// single .bag file on Stop().
+/// Rotation (bag file splitting):
+///   dzIPC::logger::RotationOptions opts;
+///   opts.max_file_size_mb  = 1024;   // split after 1 GiB
+///   opts.max_duration_sec  = 3600;   // split every hour
+///   dzIPC::logger::StartDzipcLog("/tmp/events", 256, 100000, opts);
+///
+/// Any of the four thresholds - max_memory_mb, max_queue_size, max_file_size_mb,
+/// or max_duration_sec - triggers a bag rotation (finalize current file + open new
+/// one).  Rotation is handled by the writer thread; file close/open runs without
+/// the queue mutex so RecordEvent remains non-blocking.
+///
+/// Events are buffered in memory and written to timestamped .bag files.
+/// Each bag is independently valid and readable by standard ROS tools.
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -67,18 +78,50 @@ struct LogEvent
 };
 
 // ---------------------------------------------------------------------------
+// Rotation configuration
+// ---------------------------------------------------------------------------
+
+/// Controls automatic bag-file rotation driven by file size or elapsed time.
+/// Any threshold > 0 enables that trigger.  When a trigger fires the current
+/// bag is finalized (header/index/connection records written), closed, and a
+/// new timestamped bag is opened.  Multiple triggers firing simultaneously
+/// produce a single rotation.
+///
+/// Default (all-zero) disables size and duration rotation; memory and queue
+/// triggers from StartDzipcLog still apply independently.
+struct RotationOptions
+{
+    /// Rotate when the current bag file exceeds this many MiB (0 = disabled).
+    size_t max_file_size_mb = 0;
+
+    /// Rotate when the current bag has been open longer than this many
+    /// seconds (0 = disabled).
+    uint64_t max_duration_sec = 0;
+};
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Start the background logging thread.
-/// @param path           Output .bag file path (overwritten if exists).
-/// @param max_memory_mb  Soft memory budget before flushing a chunk (default 256 MiB).
-/// @param max_queue_size Max pending events before dropping (default 100k).
+/// Start the background logging thread (original three-parameter form).
+/// @param path           Output .bag file path or directory prefix.
+/// @param max_memory_mb  Memory budget before rotating (default 512 MiB; explicit 0 falls back to 256 MiB).
+/// @param max_queue_size Max pending events before triggering rotation + augmented capacity (default unlimited).
 /// @return true on success, false if already running or file cannot be opened.
-IPC_EXPORT bool StartDzipcLog(const std::string& path, size_t max_memory_mb = 256, size_t max_queue_size = 100000);
+IPC_EXPORT bool StartDzipcLog(const std::string& path, size_t max_memory_mb = 512,
+                              size_t max_queue_size = std::numeric_limits<size_t>::max());
+
+/// Start the background logging thread with rotation options.
+/// @param path           Output .bag file path or directory prefix.
+/// @param max_memory_mb  Memory budget before rotating (explicit 0 falls back to 256 MiB).
+/// @param max_queue_size Max pending events before triggering rotation + augmented capacity (0 = default 100k).
+/// @param rotation       File-size and duration rotation controls.
+/// @return true on success, false if already running or file cannot be opened.
+IPC_EXPORT bool StartDzipcLog(const std::string& path, size_t max_memory_mb, size_t max_queue_size,
+                              const RotationOptions& rotation);
 
 /// Stop the logger, flush remaining events, join the writer thread, and
-/// finalize the .bag file.  Idempotent and safe to call multiple times.
+/// finalize the current .bag file.  Idempotent and safe to call multiple times.
 IPC_EXPORT void StopDzipcLog();
 
 /// Query whether the logger is currently running.
