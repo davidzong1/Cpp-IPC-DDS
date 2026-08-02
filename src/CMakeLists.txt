@@ -13,6 +13,7 @@ aux_source_directory(${LIBIPC_PROJECT_DIR}/src/libipc/platform SRC_FILES)
 aux_source_directory(${LIBIPC_PROJECT_DIR}/src/libipc/socket SRC_FILES)
 aux_source_directory(${LIBIPC_PROJECT_DIR}/src/dzIPC SRC_FILES)
 aux_source_directory(${LIBIPC_PROJECT_DIR}/src/dzIPC/common SRC_FILES)
+aux_source_directory(${LIBIPC_PROJECT_DIR}/src/dzIPC/logger SRC_FILES)
 
 file(GLOB HEAD_FILES
   ${LIBIPC_PROJECT_DIR}/include/libipc/*.h

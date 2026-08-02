@@ -18,6 +18,7 @@
 - 增加 ros2 构建选项
 - 增加python调用api
 - 增加可手动开启的 Nodelet 同进程快速路径，支持 SHM/UDP pub-sub 与 SHM ser-cli
+- 增加进程级 `dzipc_log`，可把 pub/sub 与 srv/cli 通信记录为 ROS1 bag v2.0 文件
 
 ---
 
@@ -56,6 +57,24 @@ dzIPC::EnableNodelet(false);
 - 需要完整抓取通信数据时，应保持 Nodelet 关闭（默认状态）；也可以对指定消息调用 `publisher->publish_for_sniffer(msg)` 强制写入传输层。
 
 完整的判定机制、回退策略、测试结果和已知限制见 [Nodelet 设计文档](docs/shm_nodelet.md)。
+
+---
+
+## dzipc_log（进程级通信日志）
+
+`dzipc_log` 默认关闭。启用后会自动记录由 dzIPC 公共工厂创建的 publisher、subscriber、server 和 client 通信，包括 Nodelet 快速路径，并在停止或退出时写入单个 `.bag` 文件：
+
+```cpp
+#include "dzIPC/dzipc.h"
+
+dzIPC::logger::StartDzipcLog("/tmp/session.bag");
+// 正常创建并使用 pub/sub、srv/cli
+dzIPC::logger::StopDzipcLog();
+```
+
+也可通过 `StartDzipcLog(path, max_memory_mb, max_queue_size)` 设置 chunk 内存预算和待处理事件上限。队列满时日志事件会被丢弃，但通信不会被阻塞。输出采用 ROS1 bag v2.0、`compression=none`，业务 payload 以 `dzipc_log/TransportPacket` 中的 opaque bytes 保存；它不是 ROS 原生业务消息，需要按 dzIPC 消息定义解码。
+
+完整 API、退出 flush 语义、Nodelet 性能影响和 bag 兼容边界见 [dzipc_log 文档](docs/dzipc_log.md)。
 
 ---
 

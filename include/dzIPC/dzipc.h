@@ -1,5 +1,6 @@
 #pragma once
 #include "dzIPC/common/nodelet_config.h"
+#include "dzIPC/logger/dzipc_log.h"
 #include "dzIPC/server_ipc.h"
 #include "dzIPC/topic_ipc.h"
 #include "libipc/export.h"

@@ -46,6 +46,16 @@ void SignalHandler(int)
 {
     shutdown_requested.store(true, std::memory_order_relaxed);
 }
+
+void RecordEndpointMetaNoThrow()
+{
+    if (!logger::IsDzipcLogRunning()) return;
+    try {
+        logger::RecordEndpointMeta();
+    } catch (...) {
+        // Endpoint logging is diagnostic and must not break IPC construction.
+    }
+}
 }   // namespace
 
 std::mutex server_ipc_instance_mutex;                                                      // 保护IPC实例容器的互斥锁
@@ -92,6 +102,10 @@ void StartShutdownMonitor()
                                {
                                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                                }
+                               // Stop logging before IPC instances are torn down.  This is
+                               // deliberately outside the signal handler: StopDzipcLog performs
+                               // locking and file I/O, neither of which is signal-safe.
+                               dzIPC::logger::StopDzipcLog();
                                CleanupIpcInstances();
                                std::exit(0);
                            });
@@ -114,9 +128,11 @@ ServerIPCPtr ServerIPCPtrMake(const std::string& topic_name_, const std::shared_
                               bool enable_thread_qos, int cpu_id, int thread_priority)
 {
     EnsureShutdownMonitorStarted();
-    auto ptr = std::make_shared<dzIPC::pimpl::server_ipc_impl>(topic_name_, msg, callback, domain_id, ipc_type, verbose,
+
+    auto ptr = std::make_shared<dzIPC::pimpl::server_ipc_impl>(topic_name_, msg, std::move(callback), domain_id, ipc_type, verbose,
                                                                enable_thread_qos, cpu_id, thread_priority);
     RegisterIpcInstance(server_ipc_instances, server_ipc_instance_mutex, ptr);
+    RecordEndpointMetaNoThrow();
     return ptr;
 }
 
@@ -127,6 +143,7 @@ ClientIPCPtr ClientIPCPtrMake(const std::string& topic_name_, const std::shared_
     auto ptr = std::make_shared<dzIPC::pimpl::client_ipc_impl>(topic_name_, msg, domain_id, ipc_type, verbose,
                                                                enable_thread_qos, cpu_id, thread_priority);
     RegisterIpcInstance(client_ipc_instances, client_ipc_instance_mutex, ptr);
+    RecordEndpointMetaNoThrow();
     return ptr;
 }
 
@@ -138,6 +155,7 @@ PublisherIPCPtr PublisherIPCPtrMake(const std::shared_ptr<TopicData>& msg, const
     auto ptr = std::make_shared<dzIPC::pimpl::publisher_ipc_impl>(msg, topic_name, domain_id, ipc_type, verbose,
                                                                   enable_thread_qos, cpu_id, thread_priority);
     RegisterIpcInstance(publisher_ipc_instances, publisher_ipc_instance_mutex, ptr);
+    RecordEndpointMetaNoThrow();
     return ptr;
 }
 
@@ -150,6 +168,7 @@ SubscriberIPCPtr SubscriberIPCPtrMake(const std::shared_ptr<TopicData>& msg, con
                                                                    verbose, enable_thread_qos, cpu_id,
                                                                    thread_priority);
     RegisterIpcInstance(subscriber_ipc_instances, subscriber_ipc_instance_mutex, ptr);
+    RecordEndpointMetaNoThrow();
     return ptr;
 }
 
