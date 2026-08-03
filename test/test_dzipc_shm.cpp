@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -440,4 +441,78 @@ TEST(DzIpcShm, RejectOversizedPublishForSnifferWithoutSubscriber)
     EXPECT_FALSE(publisher.publish_for_sniffer(msg));
     const auto elapsed = std::chrono::steady_clock::now() - start;
     EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 50);
+}
+
+TEST(DzIpcShm, SnifferReopenAfterPublisherRestart)
+{
+    // Regression: old sniffer close() must NOT shm_unlink the SHM segments
+    // of a new publisher that reused the same topic name after restart.
+    //
+    // Correct lifecycle: pub1 exits → pub2 recreates same SHM names →
+    // old_sniffer closes → new_sniffer opens pub2's SHM → receives data.
+    //
+    // If old_sniffer's close() calls shm_unlink on the name (which now
+    // points to pub2's inode), pub2's SHM is deleted, and new_sniffer
+    // fails to open or receives nothing.
+
+    constexpr const char* topic = "SnifferReopenV2";
+
+    auto msg1 = std::make_shared<dzIPC::Msg::TestMsg>();
+    msg1->data1 = {1.0, 2.0};
+    msg1->data2 = {1, 2};
+
+    // --- Phase 1: open first publisher + first sniffer, verify sniffing works ---
+    std::shared_ptr<TopicData> td1 =
+        std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::Msg::TestMsg>());
+    auto pub1 = std::make_unique<dzIPC::shm::shm_pub_ipc>(td1, topic, 1, true);
+    pub1->InitChannel();
+
+    auto sniffer1 = std::make_unique<ipc::sniffer>();
+    ASSERT_TRUE(sniffer1->open("dz_ipc_SnifferReopenV2_topic", ipc::sniffer::topology::route));
+    EXPECT_TRUE(sniffer1->try_recv().empty());
+
+    ASSERT_TRUE(pub1->publish_for_sniffer(msg1));
+    {
+        ipc::buffer raw = sniffer1->recv(500);
+        ASSERT_FALSE(raw.empty());
+    }
+
+    // --- Phase 2: destroy pub1 (publisher exits, cleans up its own SHM) ---
+    pub1.reset();
+
+    // --- Phase 3: create pub2 on same topic (new SHM generation) ---
+    // This is the critical window: pub2's SHM segments now own the names
+    // that sniffer1 still holds fds to (old inodes).
+    std::shared_ptr<TopicData> td2 =
+        std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::Msg::TestMsg>());
+    auto pub2 = std::make_unique<dzIPC::shm::shm_pub_ipc>(td2, topic, 1, true);
+    pub2->InitChannel();
+
+    // --- Phase 4: NOW close old sniffer1 ---
+    // Its close()/destructor must NOT shm_unlink pub2's SHM segments.
+    sniffer1.reset();
+
+    // --- Phase 5: open new sniffer2 on pub2's SHM, verify it receives data ---
+    auto sniffer2 = std::make_unique<ipc::sniffer>();
+    ASSERT_TRUE(sniffer2->open("dz_ipc_SnifferReopenV2_topic", ipc::sniffer::topology::route))
+        << "sniffer2 failed to open — old sniffer may have unlinked pub2's SHM";
+    EXPECT_TRUE(sniffer2->try_recv().empty());
+
+    auto msg2 = std::make_shared<dzIPC::Msg::TestMsg>();
+    msg2->data1 = {3.0, 4.0};
+    msg2->data2 = {3, 4};
+
+    ASSERT_TRUE(pub2->publish_for_sniffer(msg2));
+    {
+        ipc::buffer raw = sniffer2->recv(500);
+        ASSERT_FALSE(raw.empty()) << "sniffer2 received nothing — pub2's SHM may have been unlinked";
+
+        auto received = std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::Msg::TestMsg>());
+        ASSERT_TRUE(received->check_msg_id(raw));
+        received->topic()->deserialize(raw);
+        auto out_msg = received->topic()->msgcast<dzIPC::Msg::TestMsg>();
+        ASSERT_EQ(out_msg->data1.size(), 2u);
+        EXPECT_DOUBLE_EQ(out_msg->data1[0], 3.0);
+        EXPECT_DOUBLE_EQ(out_msg->data1[1], 4.0);
+    }
 }

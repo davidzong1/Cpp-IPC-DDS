@@ -143,6 +143,15 @@ struct typed_reader final : reader_iface {
     ipc::shm::handle h_;
     elems_t*         elems_ = nullptr;
 
+    ~typed_reader() {
+        // Release the SHM handle without unlinking the name.
+        // The sniffer is a passive observer — it must never delete the
+        // publisher's SHM segment when it closes or reopens.  On POSIX,
+        // release_no_unlink() only munmap/free/ref-decrement, skipping
+        // shm_unlink entirely.
+        h_.release_no_unlink();
+    }
+
     bool open(char const* shm_name) {
         if (!h_.acquire(shm_name, sizeof(elems_t))) return false;
         elems_ = static_cast<elems_t*>(h_.get());
@@ -236,10 +245,10 @@ public:
             return false;
         }
 
-        // Open the rd_waiter for efficient blocking recv. Failure is
-        // non-fatal — we just fall back to short-sleep polling.
-        rd_waiter_.open(
-            ipc::make_prefix(prefix_, {"RD_CONN__", name_}).c_str());
+        // Open the rd_waiter lazily — the first call to recv() will open it.
+        // This ensures that try_recv()-only users (e.g. dzplot polling loop)
+        // never open the waiter SHM at all, avoiding its close() path
+        // entirely.
 
         primed_ = false;
         cur_ = 0;
@@ -250,6 +259,11 @@ public:
 
     void close() noexcept {
         frags_.clear();
+        // Release chunk handles without shm_unlink — the sniffer must never
+        // delete the publisher's SHM segments.
+        for (auto& kv : chunk_handles_) {
+            kv.second.release_no_unlink();
+        }
         chunk_handles_.clear();
         rd_waiter_.close();
         reader_.reset();
@@ -485,6 +499,14 @@ buff_t sniffer::recv(std::uint64_t timeout_ms, meta* out_meta) noexcept {
 
     auto first = p_->try_recv_one(out_meta);
     if (!first.empty()) return first;
+
+    // Lazy-open the waiter on first blocking call.
+    // try_recv()-only users (e.g. dzplot polling) never reach here.
+    if (!p_->rd_waiter_.valid()) {
+        p_->rd_waiter_.open(
+            ipc::make_prefix(p_->prefix_, {"RD_CONN__", p_->name_}).c_str());
+        // Failure is non-fatal — we fall back to short-sleep polling below.
+    }
 
     auto t0 = std::chrono::steady_clock::now();
     auto deadline_reached = [&]() {

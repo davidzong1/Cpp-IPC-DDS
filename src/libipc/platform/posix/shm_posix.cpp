@@ -171,7 +171,7 @@ std::int32_t release(id_t id) noexcept {
     std::int32_t ret = -1;
     auto ii = static_cast<id_info_t*>(id);
     if (ii->mem_ == nullptr || ii->size_ == 0) {
-        ipc::error("fail release: invalid id (mem = %p, size = %zd), name = %s\n", 
+        ipc::error("fail release: invalid id (mem = %p, size = %zd), name = %s\n",
                     ii->mem_, ii->size_, ii->name_.c_str());
     }
     else if ((ret = acc_of(ii->mem_, ii->size_).fetch_sub(1, std::memory_order_acq_rel)) <= 1) {
@@ -183,6 +183,24 @@ std::int32_t release(id_t id) noexcept {
     else ::munmap(ii->mem_, ii->size_);
     mem::free(ii);
     return ret;
+}
+
+std::int32_t release_no_unlink(id_t id) noexcept {
+    if (id == nullptr) {
+        ipc::error("fail release_no_unlink: invalid id (null)\n");
+        return -1;
+    }
+    auto ii = static_cast<id_info_t*>(id);
+    if (ii->mem_ == nullptr || ii->size_ == 0) {
+        ipc::error("fail release_no_unlink: invalid id (mem = %p, size = %zd), name = %s\n",
+                    ii->mem_, ii->size_, ii->name_.c_str());
+    }
+    else {
+        acc_of(ii->mem_, ii->size_).fetch_sub(1, std::memory_order_acq_rel);
+        ::munmap(ii->mem_, ii->size_);
+    }
+    mem::free(ii);
+    return 0;
 }
 
 void remove(id_t id) noexcept {

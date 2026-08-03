@@ -1,0 +1,6 @@
+{
+  "fps": 60,
+  "transport": "shm",
+  "domain": 0,
+  "topics": []
+}

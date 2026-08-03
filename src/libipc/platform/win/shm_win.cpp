@@ -120,6 +120,12 @@ std::int32_t release(id_t id) noexcept {
     return 0;
 }
 
+std::int32_t release_no_unlink(id_t id) noexcept {
+    // On Windows, release() does not unlink any named kernel object,
+    // so release_no_unlink is semantically identical.
+    return release(id);
+}
+
 void remove(id_t id) noexcept {
     if (id == nullptr) {
         ipc::error("fail release: invalid id (null)\n");

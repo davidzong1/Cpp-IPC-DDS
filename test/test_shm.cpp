@@ -131,4 +131,60 @@ TEST(SHM, remove) {
     }
 }
 
+TEST(SHM, release_no_unlink_preserves_name) {
+    handle shm_hd;
+    EXPECT_TRUE(shm_hd.acquire("rnl-test", 1024));
+    EXPECT_TRUE(ipc_ut::expect_exist("rnl-test", true));
+
+    // release_no_unlink should detach but NOT unlink the SHM name
+    shm_hd.release_no_unlink();
+    EXPECT_FALSE(shm_hd.valid());
+    EXPECT_TRUE(ipc_ut::expect_exist("rnl-test", true));
+
+    // Clean up
+    ipc::shm::remove("rnl-test");
+    EXPECT_TRUE(ipc_ut::expect_exist("rnl-test", false));
+}
+
+TEST(SHM, release_no_unlink_allows_reacquire) {
+    // Simulates the sniffer close + publisher restart scenario:
+    // 1. Create SHM (like a publisher)
+    // 2. Another handle opens it (like a sniffer)
+    // 3. Sniffer releases without unlink
+    // 4. Original is removed and recreated (publisher restart)
+    // 5. New sniffer can still open the same name
+
+    handle pub_hd;
+    EXPECT_TRUE(pub_hd.acquire("rnl-reopen", 1024));
+    EXPECT_TRUE(ipc_ut::expect_exist("rnl-reopen", true));
+
+    // Sniffer acquires the same SHM
+    handle sniff_hd;
+    EXPECT_TRUE(sniff_hd.acquire("rnl-reopen", 1024, ipc::shm::open));
+    EXPECT_TRUE(sniff_hd.valid());
+
+    // Sniffer closes — must NOT unlink the publisher's SHM
+    sniff_hd.release_no_unlink();
+    EXPECT_FALSE(sniff_hd.valid());
+    EXPECT_TRUE(ipc_ut::expect_exist("rnl-reopen", true));
+
+    // Publisher restarts: remove old, create new
+    pub_hd.release(); // this WILL unlink (publisher owns the name)
+    EXPECT_FALSE(ipc_ut::expect_exist("rnl-reopen", true));
+
+    handle new_pub_hd;
+    EXPECT_TRUE(new_pub_hd.acquire("rnl-reopen", 2048));
+    EXPECT_TRUE(ipc_ut::expect_exist("rnl-reopen", true));
+
+    // New sniffer can open the recreated SHM
+    handle new_sniff_hd;
+    EXPECT_TRUE(new_sniff_hd.acquire("rnl-reopen", 2048, ipc::shm::open));
+    EXPECT_TRUE(new_sniff_hd.valid());
+
+    // Clean up
+    new_sniff_hd.release_no_unlink();
+    new_pub_hd.release();
+    EXPECT_FALSE(ipc_ut::expect_exist("rnl-reopen", true));
+}
+
 } // internal-linkage

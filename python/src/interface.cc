@@ -1,3 +1,4 @@
+#include "dzIPC/common/control_plane.h"
 #include "dzIPC/dzipc.h"
 #include "ipc_msg/ipc_msg_base/ipc_msg_base.hpp"
 #include "ipc_msg/ipc_msg_base/generic_message.hpp"
@@ -216,6 +217,26 @@ PYBIND11_MODULE(_dzipc_core, m)
              [](dzIPC::GenericMessage& self, py::bytes data) { DeserializeBytes(self, data); },
              py::arg("data"));
 
+    // ---- Control Plane (read-only) for publisher-restart detection ----
+    // Mirrors exec/dzipc_topic_cat/src/shm_sniffer.cc:140-158.
+    // Only exposes read-only methods: open, valid, generation, state.
+    // Write operations (begin_rebuild, set_ready, set_stopping, etc.)
+    // are deliberately NOT bound — they belong to the publisher side.
+
+    py::enum_<dzIPC::control_plane_shm::TopicState>(m, "TopicState")
+        .value("Empty", dzIPC::control_plane_shm::TopicState::Empty)
+        .value("Clearing", dzIPC::control_plane_shm::TopicState::Clearing)
+        .value("Ready", dzIPC::control_plane_shm::TopicState::Ready)
+        .value("Stopping", dzIPC::control_plane_shm::TopicState::Stopping)
+        .export_values();
+
+    py::class_<dzIPC::control_plane_shm::TopicControlPlane>(m, "TopicControlPlane")
+        .def(py::init<>())
+        .def("open", &dzIPC::control_plane_shm::TopicControlPlane::open, py::arg("name"))
+        .def("valid", &dzIPC::control_plane_shm::TopicControlPlane::valid)
+        .def("generation", &dzIPC::control_plane_shm::TopicControlPlane::generation)
+        .def("state", &dzIPC::control_plane_shm::TopicControlPlane::state);
+
     // ---- IPC 基础设施 ----
 
     py::class_<dzIPC::TopicData, std::shared_ptr<dzIPC::TopicData>>(m, "TopicData")
@@ -344,4 +365,71 @@ PYBIND11_MODULE(_dzipc_core, m)
     m.def("StartShutdownMonitor", &dzIPC::StartShutdownMonitor);
     m.def("RequestShutdown", &dzIPC::RequestShutdown);
     m.def("IsShutdownRequested", &dzIPC::IsShutdownRequested);
+
+    // ---- Passive sniffer (ipc::sniffer) ----
+    // Read-only hook into SHM channels — does NOT register as receiver,
+    // does not affect publisher behaviour.  Same sniffer used by
+    // dzipc_topic_cat.
+
+    py::enum_<ipc::sniffer::topology>(m, "SnifferTopology")
+        .value("server", ipc::sniffer::topology::server)
+        .value("route", ipc::sniffer::topology::route)
+        .value("channel", ipc::sniffer::topology::channel)
+        .export_values();
+
+    py::class_<ipc::sniffer>(m, "Sniffer")
+        .def(py::init<>())
+        .def("open",
+             [](ipc::sniffer& self, const char* name, ipc::sniffer::topology t) {
+                 return self.open(name, t);
+             },
+             py::arg("name"), py::arg("topology") = ipc::sniffer::topology::route,
+             "Attach to a channel by name. Returns True on success.")
+        .def("open_prefixed",
+             [](ipc::sniffer& self, const char* pref, const char* name,
+                ipc::sniffer::topology t) {
+                 return self.open(ipc::prefix{pref}, name, t);
+             },
+             py::arg("pref"), py::arg("name"),
+             py::arg("topology") = ipc::sniffer::topology::route,
+             "Attach with an explicit SHM prefix (e.g. domain id string).")
+        .def("close", &ipc::sniffer::close)
+        .def("valid", &ipc::sniffer::valid)
+        .def("name", &ipc::sniffer::name,
+             "Channel name, or empty string if not open.")
+        .def("dropped", &ipc::sniffer::dropped,
+             "Total dropped messages since open().")
+        .def("skip_to_latest", &ipc::sniffer::skip_to_latest,
+             "Discard backlog, resume from publisher's current write index.")
+        .def("receiver_connections", &ipc::sniffer::receiver_connections,
+             "Bit-set of currently-registered receivers (lower 32 bits).")
+        .def("try_recv",
+             [](ipc::sniffer& self) -> py::object {
+                 ipc::sniffer::meta m{};
+                 auto buf = self.try_recv(&m);
+                 if (buf.empty()) return py::none();
+                 return py::dict(
+                     py::arg("data") = py::bytes(
+                         static_cast<const char*>(buf.data()), buf.size()),
+                     py::arg("cc_id") = m.cc_id,
+                     py::arg("msg_id") = m.msg_id,
+                     py::arg("dropped") = m.dropped);
+             },
+             "Non-blocking read. Returns None if no message, else dict "
+             "with keys: data (bytes), cc_id, msg_id, dropped.")
+        .def("recv",
+             [](ipc::sniffer& self, std::uint64_t timeout_ms) -> py::object {
+                 ipc::sniffer::meta m{};
+                 auto buf = self.recv(timeout_ms, &m);
+                 if (buf.empty()) return py::none();
+                 return py::dict(
+                     py::arg("data") = py::bytes(
+                         static_cast<const char*>(buf.data()), buf.size()),
+                     py::arg("cc_id") = m.cc_id,
+                     py::arg("msg_id") = m.msg_id,
+                     py::arg("dropped") = m.dropped);
+             },
+             py::arg("timeout_ms") = static_cast<std::uint64_t>(ipc::invalid_value),
+             "Blocking read with timeout. Returns None on timeout, else "
+             "dict with keys: data (bytes), cc_id, msg_id, dropped.");
 }
