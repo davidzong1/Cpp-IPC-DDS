@@ -37,6 +37,17 @@ public:
     bool publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm) override;
     bool publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg) override;
 
+    /* 是否已有订阅者。
+     *
+     * 与 SHM 的语义对齐(SHM 由 pub_handshake() 线程从控制面回填), socket 侧
+     * 由 discovery_loop() 线程每 kDiscoveryPollMs 毫秒从 IpcInfoPool 统计本
+     * topic/domain 下存活的 SocketSub 条目数回填。
+     *
+     * ---- 探测边界(与 nodelet 快路径相同) ----
+     * IpcInfoPool 只能看到通过 dzIPC 自身 socket_sub_ipc::InitChannel 注册的
+     * 订阅者。原生 UDP 监听程序、抓包工具、外部组播消费者对它不可见, 因此本
+     * 接口返回 false 不代表组播上真的没有接收方。仅可用作"是否有 dzIPC 订阅
+     * 者"的判据, 不可用作是否发送的开关。 */
     bool has_subscribed() const { return subscribed_; }
 
     bool client_subscribed() const { return cli_cnt; }
@@ -46,6 +57,11 @@ public:
     socket_pub_ipc& operator=(const socket_pub_ipc&) = delete;
 
 private:
+    /* 订阅者发现线程: 周期性从 IpcInfoPool 回填 subscribed_。
+     * UDP 组播没有反向发现通道, 只能靠这个进程外共享的信息池。 */
+    void discovery_loop();
+    static constexpr int kDiscoveryPollMs = 50;
+
     size_t domain_id_{0};
     int cli_cnt{0};
     std::atomic<bool> subscribed_{false};
@@ -57,6 +73,7 @@ private:
     std::string ipaddr_;
     std::mutex sleep_mtx;
     std::condition_variable sleep_cv;
+    std::thread* discovery_thread_{nullptr};
     dzIPC::info_pool::ScopedRegistration pool_reg_;
     std::shared_ptr<TopicData> topic_msg_;
     dzIPC::ThreadDispatch::ThreadOptions thread_options_;

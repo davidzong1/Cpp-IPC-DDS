@@ -1,3 +1,0 @@
-kinpy
-numpy
-scipy

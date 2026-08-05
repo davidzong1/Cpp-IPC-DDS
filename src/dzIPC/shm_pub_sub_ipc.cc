@@ -17,7 +17,10 @@ namespace {
 
 std::string control_name_for(const std::string& data_name)
 {
-    return data_name + "_control";
+    /* "_control2": TopicControl 增加 PeerSlot 表后结构体变大, 沿用旧名会让
+     * ipc::shm::handle::acquire() 在已存在的小段上 mmap 出超出文件长度的区域,
+     * 访问越界部分直接 SIGBUS。换名等于强制新建一段, 同时也隔离了新旧版本进程。*/
+    return data_name + "_control2";
 }
 
 std::string shm_name_for_topic(const std::string& topic_name)
@@ -125,6 +128,27 @@ void shm_pub_ipc::pub_handshake()
     while (running.load(std::memory_order_acquire))
     {
         control_plane_.heartbeat();
+        /* 死连接回收。
+         *
+         * libipc 的 force_push 以前在队列满时用 disconnect_receiver() 踢掉
+         * "还没读完这一格"的订阅者 —— 那个判据区分不了慢和死, 会把活的慢
+         * 订阅者永久摘下线。现在写路径只覆写不踢人, 回收改由这里驱动: 只有
+         * 心跳停了 kPeerDeadTimeout 的订阅者才被判死。
+         *
+         * 超时取 2s = 200 个心跳周期(订阅端 10ms 一次), 留足余量, 宁可晚回收
+         * 也不要误杀 —— 误杀正是这次要修掉的问题。 */
+        constexpr int64_t kPeerDeadTimeoutNs = 2'000'000'000LL;
+        const uint32_t stale = control_plane_.collect_stale_peers(kPeerDeadTimeoutNs);
+        if (stale != 0 && publisher_ && publisher_->valid())
+        {
+            publisher_->disconnect_receivers(stale);
+            if (verbose_)
+            {
+                std::cerr << "\033[33m[" << topic_name_
+                          << "PubInfo] reaped dead subscriber connection(s), cc_ids = 0x" << std::hex << stale
+                          << std::dec << "\033[0m" << std::endl;
+            }
+        }
         const bool has_peer = control_plane_.peer_count() > 0;
         subscribed_.store(has_peer, std::memory_order_release);
         if (has_peer && !had_subscriber && verbose_)
@@ -402,6 +426,8 @@ void shm_sub_ipc::sub_handshake()
                 if (peer_registered)
                 {
                     control_plane_.remove_peer(attached_generation);
+                    control_plane_.release_peer_slot(peer_slot_);
+                    peer_slot_ = -1;
                     peer_registered = false;
                 }
                 {
@@ -429,6 +455,23 @@ void shm_sub_ipc::sub_handshake()
                     continue;
                 }
                 peer_registered = true;
+                /* 向控制面登记本订阅者的 libipc 连接 bit, 并由下面的循环持续
+                 * 刷新心跳。发布端据此判定死连接 —— 取代了 force_push 里那套
+                 * "没读完就算无效读者"的误伤逻辑。 */
+                {
+                    std::lock_guard<std::mutex> lock(channel_mtx_);
+                    const uint32_t cc_id = (subscriber_ && subscriber_->valid())
+                                               ? subscriber_->connected_id()
+                                               : 0u;
+                    peer_slot_ = control_plane_.acquire_peer_slot(attached_generation, cc_id);
+                }
+                if (peer_slot_ < 0 && verbose_)
+                {
+                    std::cerr << "\033[33m[" << topic_name_
+                              << "SubInfo] no free peer slot in control plane; this subscriber "
+                                 "will not be reaped automatically if it dies\033[0m"
+                              << std::endl;
+                }
                 handshake_completed.store(true, std::memory_order_release);
                 if (verbose_)
                 {
@@ -453,16 +496,23 @@ void shm_sub_ipc::sub_handshake()
                 if (peer_registered)
                 {
                     control_plane_.remove_peer(attached_generation);
+                    control_plane_.release_peer_slot(peer_slot_);
+                    peer_slot_ = -1;
                     peer_registered = false;
                 }
             }
         }
+        /* 心跳: 只要本订阅者进程还活着, 这里就会每 10ms 刷新一次。
+         * 进程崩溃后心跳停止, 发布端超时即可安全回收其连接。 */
+        control_plane_.peer_heartbeat(peer_slot_);
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     if (peer_registered)
     {
         control_plane_.remove_peer(attached_generation);
     }
+    control_plane_.release_peer_slot(peer_slot_);
+    peer_slot_ = -1;
 }
 
 /******************************************************************************************************/

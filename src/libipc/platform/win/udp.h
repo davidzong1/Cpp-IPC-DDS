@@ -2,6 +2,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include "libipc/buffer.h"
 
@@ -114,6 +115,40 @@ public:
         temp_buffer.resize(1'472);   // 预分配最大UDP报文长度
     }
 
+    /* 检查内核是否把请求的 socket 缓冲截断了, 截断则打一次警告。
+     * 与 posix/udp.h 的同名函数对应, 详见那边的注释。
+     *
+     * Windows 没有 net.core.rmem_max 这样的全局上限, 通常能拿到请求的值;
+     * 但驱动或系统资源紧张时仍可能返回更小的值, 所以同样做检查。
+     * Winsock 的 getsockopt 直接返回实际值, 不像 Linux 那样翻倍。 */
+    static void warn_if_buffer_truncated(SOCKET fd, int want_recv)
+    {
+        static bool warned = false;
+        if (warned)
+        {
+            return;
+        }
+
+        int actual = 0;
+        int len = sizeof(actual);
+        if (::getsockopt(fd, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&actual), &len) != 0)
+        {
+            return;   // 读不回来就不判断, 不要凭猜测报警
+        }
+        if (actual >= want_recv)
+        {
+            return;
+        }
+
+        warned = true;
+        std::fprintf(stderr,
+                     "[dzIPC][warn] UDP socket receive buffer truncated by the OS:\n"
+                     "  SO_RCVBUF: requested %d B, got %d B\n"
+                     "  Large multi-fragment messages may lose fragments (a 1 MB payload is 713\n"
+                     "  fragments of 1472 B).\n",
+                     want_recv, actual);
+    }
+
     bool connect()
     {
         if (!ensure_wsa())
@@ -135,6 +170,7 @@ public:
         BOOL reuse = TRUE;
         int nRecvBuf = 1'024 * 1'024;   // 1MB
         ::setsockopt(server_fd, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&nRecvBuf), sizeof(nRecvBuf));
+        warn_if_buffer_truncated(server_fd, nRecvBuf);
         ::setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<char*>(&reuse), sizeof(reuse));
 #ifdef SO_REUSEPORT
         ::setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, reinterpret_cast<char*>(&reuse), sizeof(reuse));

@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <chrono>
+#include <cstdio>
 #include "libipc/buffer.h"
 
 namespace ipc {
@@ -39,6 +40,72 @@ public:
                                   { delete[] static_cast<uint8_t*>(p); });   // 预分配最大UDP报文长度
     }
 
+    /* 检查内核是否把请求的 socket 缓冲截断了, 截断则打一次警告。
+     *
+     * setsockopt(SO_RCVBUF) 不会因为超过 net.core.rmem_max 而失败 —— 它静默地
+     * 把值压到上限。Linux 默认 rmem_max = 212992 (208 KB), 于是这里请求的 1 MB
+     * 实际只拿到 208 KB, 而调用方无从知道。
+     *
+     * 后果是大包收不全: 1 MB 消息 = 713 个 1472 B 分片, 发送端几百微秒就灌完,
+     * 208 KB 缓冲只装得下约 141 片, 其余全被内核丢弃。表现为"消息级丢包率很高
+     * 但链路明明没问题" —— 实测 1 MB 丢包 66%, 而同链路 64 KB 能跑 112 MB/s。
+     *
+     * 所有靠 UDP 传大包的中间件都要求调这个参数(Cyclone DDS 有
+     * MinimumSocketReceiveBufferSize, ROS 2 / Autoware 的部署文档第一条就是
+     * 把 rmem_max 调大), 区别只在于它们会告诉你, 而不是静默降级。
+     *
+     * 内核返回的值是请求值的两倍(用于记账开销), 所以按 actual/2 比较。 */
+    static void warn_if_buffer_truncated(int fd, int want_recv, int want_send)
+    {
+        /* 每个进程只警告一次: connect() 会被每个 topic 的每条通道调用,
+         * 逐次打印会淹没真正的日志。 */
+        static bool warned = false;
+        if (warned)
+        {
+            return;
+        }
+
+        auto effective = [fd](int optname) -> int {
+            int actual = 0;
+            socklen_t len = sizeof(actual);
+            if (::getsockopt(fd, SOL_SOCKET, optname, &actual, &len) < 0)
+            {
+                return -1;   // 读不回来就不判断, 不要凭猜测报警
+            }
+            return actual / 2;
+        };
+
+        const int recv_got = effective(SO_RCVBUF);
+        const int send_got = effective(SO_SNDBUF);
+        const bool recv_short = recv_got >= 0 && recv_got < want_recv;
+        const bool send_short = send_got >= 0 && send_got < want_send;
+        if (!recv_short && !send_short)
+        {
+            return;
+        }
+
+        warned = true;
+        std::fprintf(stderr,
+                     "\033[33m[dzIPC][warn] UDP socket buffer truncated by the kernel:\n");
+        if (recv_short)
+        {
+            std::fprintf(stderr, "  SO_RCVBUF: requested %d B, got %d B (net.core.rmem_max)\n", want_recv,
+                         recv_got);
+        }
+        if (send_short)
+        {
+            std::fprintf(stderr, "  SO_SNDBUF: requested %d B, got %d B (net.core.wmem_max)\n", want_send,
+                         send_got);
+        }
+        std::fprintf(stderr,
+                     "  Large multi-fragment messages will lose fragments (a 1 MB payload is 713\n"
+                     "  fragments of 1472 B; a 208 KB buffer holds only ~141 of them).\n"
+                     "  Fix by raising the kernel limits, e.g.:\n"
+                     "    sudo sysctl -w net.core.rmem_max=67108864\n"
+                     "    sudo sysctl -w net.core.wmem_max=67108864\n"
+                     "  Persist in /etc/sysctl.conf (or /etc/sysctl.d/) to survive reboot.\033[0m\n");
+    }
+
     bool connect()
     {
         if (server_fd >= 0)
@@ -57,6 +124,7 @@ public:
         int nSendBuf = 1'024 * 1'024;   // 1MB
         ::setsockopt(server_fd, SOL_SOCKET, SO_RCVBUF, &nRecvBuf, sizeof(nRecvBuf));
         ::setsockopt(server_fd, SOL_SOCKET, SO_SNDBUF, &nSendBuf, sizeof(nSendBuf));
+        warn_if_buffer_truncated(server_fd, nRecvBuf, nSendBuf);
         ::setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 #ifdef SO_REUSEPORT
         ::setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));

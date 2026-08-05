@@ -39,6 +39,15 @@ socket_pub_ipc::~socket_pub_ipc()
         running.store(false, std::memory_order_release);
     }
     sleep_cv.notify_all();   // 立即唤醒正在 wait_for 的线程
+    if (discovery_thread_ != nullptr)
+    {
+        if (discovery_thread_->joinable())
+        {
+            discovery_thread_->join();
+        }
+        delete discovery_thread_;
+        discovery_thread_ = nullptr;
+    }
     if (publisher_)
     {
         publisher_->close();
@@ -81,12 +90,77 @@ void socket_pub_ipc::InitChannel(std::string extra_info)
         topic_type_name = extract_last_segment(topic_type_name);
         pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketPub, topic_name_, topic_type_name, "socket",
                           static_cast<int32_t>(domain_id_), extra_info});
+        /* 本进程的 SocketPub 条目注册完成后再启动发现线程, 避免它先于
+         * rebind 拿到不完整的池快照。重复 InitChannel 不再重复起线程。 */
+        if (discovery_thread_ == nullptr)
+        {
+            discovery_thread_ = new std::thread(&socket_pub_ipc::discovery_loop, this);
+        }
     }
     catch (const std::exception& e)
     {
         std::cerr << "\033[31m[" << topic_name_ << "PubInfo] Error initializing channel: " << e.what() << "\033[0m"
                   << std::endl;
     }
+}
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
+void socket_pub_ipc::discovery_loop()
+{
+    /* UDP 组播是单向的: 发布端把包投进组地址, 协议本身不会告诉它谁加入了组。
+     * 因此这里退而求其次, 用进程外共享的 IpcInfoPool 统计本 topic/domain 下
+     * 存活的 SocketSub 条目, 语义上对齐 SHM 的 shm_pub_ipc::pub_handshake()。
+     *
+     * 探测边界见头文件 has_subscribed() 注释: 池只覆盖走 dzIPC 注册的订阅者。*/
+    bool had_subscriber = false;
+    while (running.load(std::memory_order_acquire))
+    {
+        size_t total_subs = 0;
+        bool pool_ok = true;
+        try
+        {
+            auto pool_snap = info_pool::IpcInfoPool::instance().snapshot();
+            for (auto& entry : pool_snap)
+            {
+                if (entry.kind == info_pool::EntryKind::SocketSub && entry.topic_name == topic_name_
+                    && entry.domain_id == static_cast<int32_t>(domain_id_) && entry.alive && entry.in_use)
+                {
+                    ++total_subs;
+                }
+            }
+        }
+        catch (const std::exception& e)
+        {
+            /* 池暂时不可用: 保持上一次的判定, 不要误报为"无订阅者" */
+            pool_ok = false;
+            if (verbose_)
+            {
+                std::cerr << "\033[33m[" << topic_name_ << "PubInfo] IpcInfoPool snapshot failed: " << e.what()
+                          << "; keeping previous has_subscribed() state\033[0m" << std::endl;
+            }
+        }
+
+        if (pool_ok)
+        {
+            const bool has_peer = total_subs > 0;
+            subscribed_.store(has_peer, std::memory_order_release);
+            if (has_peer != had_subscriber && verbose_)
+            {
+                std::cerr << "\033[32m[" << topic_name_ << "PubInfo] "
+                          << (has_peer ? "Publisher detected a subscriber on topic: "
+                                       : "Publisher lost all subscribers on topic: ")
+                          << topic_name_ << "\033[0m" << std::endl;
+            }
+            had_subscriber = has_peer;
+        }
+
+        std::unique_lock<std::mutex> lock(sleep_mtx);
+        sleep_cv.wait_for(lock, std::chrono::milliseconds(kDiscoveryPollMs),
+                          [this] { return !running.load(std::memory_order_acquire); });
+    }
+    subscribed_.store(false, std::memory_order_release);
 }
 
 /******************************************************************************************************/
@@ -229,6 +303,28 @@ bool socket_pub_ipc::publish_best_effort(std::shared_ptr<IpcMsgBase> msg)
     {
         ipc::buffer response_data(std::move(msg->serialize()));
         SocketSendOptions options;
+        /* pub-sub 恒定 BestEffort, 不做"大包自动升级 Reliable"。
+         *
+         * 曾经尝试按 payload 尺寸自动切到 Reliable+CRC32C 以压低大包丢包率
+         * (1 MB 时实测 4.7-7.4%), 但在 pub-sub 上不成立, 已撤销。两个原因:
+         *
+         * 1) ACK 收不到。pub-sub 收发共用同一条组播 socket 且 IP_MULTICAST_LOOP=1,
+         *    发布端发出的分片会全部回绕到自己的接收队列 (64 KB = 45 片,
+         *    1 MB = 713 片)。订阅端回的 ACK 排在这些 loopback 分片之后, 首轮
+         *    等待窗口 (RTT 自适应后约 1 ms) 根本轮不到它 -> 每条消息都等满
+         *    超时预算才失败。实测吞吐塌到 1 msg/s, 而丢包率仍是 0.00% ——
+         *    数据面是通的, 坏的是确认机制本身。
+         *
+         * 2) 组播下 ACK 语义不成立。N 个订阅者时, chunk_send_ex 收到任意一个
+         *    匹配 ACK 即判定 DeliveredAcked, 无法表达"谁收到了、谁没收到"。
+         *
+         * 结论: pub-sub 的可靠性不能靠反向 ACK 实现。要提升大包到达率, 正确
+         * 方向是扩大接收端 net.core.rmem_max (实测丢包是缓冲溢出型突发, 64 MB
+         * 缓冲下 1 MB payload 可跑满 110 MB/s 且零丢包), 或发送端限速, 或由
+         * 业务侧切成小块各自独立投递。
+         *
+         * 同一缺陷也存在于 publish_blocking() —— 它在 socket 上走 Reliable,
+         * 在 pub-sub 的单组播通道上同样收不到 ACK。 */
         options.delivery = SocketDeliveryMode::BestEffort;
         options.integrity = SocketIntegrityMode::None;
         const SocketSendReport report = chunk_send_ex(publisher_, response_data, options);

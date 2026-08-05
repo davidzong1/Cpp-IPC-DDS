@@ -120,6 +120,10 @@ private:
     // std::atomic exchange(true) serves as both check-and-set in one operation.
     mutable std::atomic<bool> nodelet_no_server_warned_{false};
     mutable std::atomic<bool> nodelet_anomaly_warned_{false};
+
+    /* 本客户端在控制面 PeerSlot 表中的槽位下标, -1 表示未登记。
+     * 由 cli_handshake() 线程独占访问。 */
+    int peer_slot_{-1};
 };
 }   // namespace shm
 }   // namespace dzIPC

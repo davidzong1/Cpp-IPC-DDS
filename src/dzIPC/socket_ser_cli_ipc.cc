@@ -267,6 +267,8 @@ void socket_ser_ipc::response_thread_func()
             callback(local_msg);
         }
         ipc::buffer response_data(std::move(local_msg->response()->serialize()));
+        /* 响应与请求同理, 走 BestEffort。ipc_w_ptr_ 同样是组播 socket, 在它上面
+         * 等 ACK 会撞上自己分片的 loopback 回绕。原因详见 send_request()。 */
         if (!chunk_send(ipc_w_ptr_, response_data))
         {
             std::cerr << "\033[31m[" << topic_name_ << "SerInfo] Error sending response: Failed to send"
@@ -467,6 +469,17 @@ bool socket_cli_ipc::send_request(std::shared_ptr<ServiceData>& request, uint64_
     if (handshake_completed_.load(std::memory_order_acquire))
     {
         ipc::buffer request_data(std::move(request->request()->serialize()));
+        /* ser-cli 两端都用 BestEffort (chunk_send), 不等 ACK。
+         *
+         * 之前改成 chunk_send_reliable 是为了修 1 MB 失败, 但那是错误方向:
+         *   1. chunk_send_reliable 在 ipc_r_ptr_ 上等 ACK, 而 ipc_r_ptr_ 是组播
+         *      socket 且 IP_MULTICAST_LOOP=1 —— 自己发的分片会回绕进自己的队列,
+         *      和 pub-sub 单通道的失败模式完全相同。
+         *   2. 1 MB 的原始失败出现在 "Error receiving response", 不是 "Failed to send"
+         *      —— 发送端从没有问题, 是接收端 rmem_max=208KB 的缓冲溢出导致片丢。
+         *
+         * 正确方向是发送端限速(--rate-limit), 让 713 个分片摊到时间上不瞬时灌满
+         * 对端缓冲。BestEffort 发送即触发限速, 不需要也不应该等 ACK。 */
         if (!chunk_send(ipc_r_ptr_, request_data))
         {
             std::cerr << "\033[31m[" << topic_name_ << "CliInfo] Error sending request: Failed to send"

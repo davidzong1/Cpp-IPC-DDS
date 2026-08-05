@@ -262,13 +262,30 @@ struct prod_cons_impl<wr<relat::single, relat::multi, trans::broadcast>> {
             circ::cc_t cc = wrapper->elems()->connections(std::memory_order_relaxed);
             if (cc == 0) return false; // no reader
             el = elems + circ::index_of(wt_.load(std::memory_order_relaxed));
-            // check all consumers have finished reading this element
             auto cur_rc = el->rc_.load(std::memory_order_acquire);
             circ::cc_t rem_cc = cur_rc & ep_mask;
+            // 覆写一个仍被订阅者持有的槽位。
+            //
+            // 这里曾经调用 disconnect_receiver(rem_cc) 把这些订阅者强制踢下线,
+            // 注释称其为 "invalid readers" —— 但 rem_cc 的真实语义只是"尚未释放
+            // 这一格", 慢了一格的活订阅者和已死的进程在这个判据下无法区分。被踢
+            // 掉的一方会被永久摘出连接位图且收不到任何通知, 表现为链路直接断掉。
+            // 丢一帧可恢复, 断连不可恢复, 与 force_push 想要的 best-effort 语义
+            // 也不符。故不再断开: 上面已自增 epoch_, 本格残留的读计数必然属于更老
+            // 的世代, 直接 CAS 覆盖即可, 慢订阅者保持连接、只丢失被套圈的消息。
+            // 真正死掉的连接交由上层心跳清理, 不在写路径上判定。
+            //
+            // 注意: 覆写与 pop() 的拷贝之间仍无互斥, 对方可能正在读本格 → 数据
+            // 撕裂风险尚未消除(需在 pop() 侧增加覆写检测), 故此处限量告警。
             if (cc & rem_cc) {
-                ipc::log("force_push: k = %u, cc = %u, rem_cc = %u\n", k, cc, rem_cc);
-                cc = wrapper->elems()->disconnect_receiver(rem_cc); // disconnect all invalid readers
-                if (cc == 0) return false; // no reader
+                static std::atomic<unsigned> warned{0};
+                const unsigned n = warned.fetch_add(1, std::memory_order_relaxed);
+                if (n < 8) {
+                    ipc::log("force_push: overwriting slot still held by reader(s); "
+                             "k = %u, cc = %u, rem_cc = %u\n", k, cc, rem_cc);
+                } else if (n == 8) {
+                    ipc::log("force_push: further overwrite warnings suppressed\n");
+                }
             }
             // just compare & exchange
             if (el->rc_.compare_exchange_weak(
@@ -403,10 +420,17 @@ struct prod_cons_impl<wr<relat::multi, relat::multi, trans::broadcast>> {
             // check all consumers have finished reading this element
             auto cur_rc = el->rc_.load(std::memory_order_acquire);
             circ::cc_t rem_cc = cur_rc & rc_mask;
+            // 同 <single,multi,broadcast>::force_push: 只覆写, 不再 disconnect_receiver。
+            // 详细理由见该处注释。
             if (cc & rem_cc) {
-                ipc::log("force_push: k = %u, cc = %u, rem_cc = %u\n", k, cc, rem_cc);
-                cc = wrapper->elems()->disconnect_receiver(rem_cc); // disconnect all invalid readers
-                if (cc == 0) return false; // no reader
+                static std::atomic<unsigned> warned{0};
+                const unsigned n = warned.fetch_add(1, std::memory_order_relaxed);
+                if (n < 8) {
+                    ipc::log("force_push: overwriting slot still held by reader(s); "
+                             "k = %u, cc = %u, rem_cc = %u\n", k, cc, rem_cc);
+                } else if (n == 8) {
+                    ipc::log("force_push: further overwrite warnings suppressed\n");
+                }
             }
             // just compare & exchange
             if (el->rc_.compare_exchange_weak(

@@ -13,7 +13,7 @@ namespace dzIPC {
 namespace control_plane_shm {
 namespace {
 
-constexpr uint32_t kMagic = 0x445A4350U;
+constexpr uint32_t kMagic = 0x445A4351U;   // v2: TopicControl 增加 PeerSlot 表, 与 v1 布局不兼容
 constexpr auto kRebuildPeerDrainTimeout = std::chrono::milliseconds(200);
 constexpr auto kRebuildPeerDrainPoll = std::chrono::milliseconds(2);
 
@@ -75,6 +75,9 @@ uint32_t TopicControlPlane::begin_rebuild()
         std::this_thread::sleep_for(kRebuildPeerDrainPoll);
     }
     control_->peer_count.store(0, std::memory_order_release);
+    /* 新一代 generation 会让所有旧订阅者重新 attach, 它们的 cc_id 随之作废,
+     * 槽位一并清空, 否则旧 cc_id 会在下一轮被当成"死连接"去断新的连接。 */
+    clear_all_peer_slots();
     control_->heartbeat_ns.store(now_ns(), std::memory_order_release);
     return control_->generation.fetch_add(1, std::memory_order_acq_rel) + 1;
 }
@@ -145,6 +148,111 @@ void TopicControlPlane::remove_peer(uint32_t generation)
     {}
 }
 
+void TopicControlPlane::clear_all_peer_slots()
+{
+    if (!control_)
+    {
+        return;
+    }
+    for (uint32_t i = 0; i < kMaxPeerSlots; ++i)
+    {
+        PeerSlot& p = control_->peers[i];
+        p.cc_id.store(0, std::memory_order_relaxed);
+        p.heartbeat_ns.store(0, std::memory_order_relaxed);
+        p.pid.store(0, std::memory_order_relaxed);
+        p.generation.store(0, std::memory_order_relaxed);
+        p.in_use.store(0, std::memory_order_release);
+    }
+}
+
+int TopicControlPlane::acquire_peer_slot(uint32_t generation, uint32_t cc_id)
+{
+    if (!control_ || cc_id == 0)
+    {
+        return -1;
+    }
+    for (uint32_t i = 0; i < kMaxPeerSlots; ++i)
+    {
+        PeerSlot& p = control_->peers[i];
+        uint32_t expected = 0;
+        if (!p.in_use.compare_exchange_strong(expected, 1, std::memory_order_acq_rel,
+                                              std::memory_order_acquire))
+        {
+            continue;
+        }
+        /* 槽位已归本进程所有。cc_id 与 heartbeat_ns 在 release_peer_slot() /
+         * clear_all_peer_slots() 里都被清成 0, 而 collect_stale_peers() 会跳过
+         * 这两者为 0 的槽位, 所以从 CAS 成功到下面填完之间的窗口不会被误判死。*/
+        p.cc_id.store(cc_id, std::memory_order_relaxed);
+        p.pid.store(current_pid(), std::memory_order_relaxed);
+        p.generation.store(generation, std::memory_order_relaxed);
+        p.heartbeat_ns.store(now_ns(), std::memory_order_release);
+        return static_cast<int>(i);
+    }
+    return -1;
+}
+
+void TopicControlPlane::peer_heartbeat(int slot)
+{
+    if (!control_ || slot < 0 || static_cast<uint32_t>(slot) >= kMaxPeerSlots)
+    {
+        return;
+    }
+    control_->peers[slot].heartbeat_ns.store(now_ns(), std::memory_order_release);
+}
+
+void TopicControlPlane::release_peer_slot(int slot)
+{
+    if (!control_ || slot < 0 || static_cast<uint32_t>(slot) >= kMaxPeerSlots)
+    {
+        return;
+    }
+    PeerSlot& p = control_->peers[slot];
+    /* 先清内容再放开 in_use: 反过来的话, 槽位可能被别的订阅者抢占并填好,
+     * 随后被本次的清零覆盖掉。 */
+    p.cc_id.store(0, std::memory_order_relaxed);
+    p.heartbeat_ns.store(0, std::memory_order_relaxed);
+    p.pid.store(0, std::memory_order_relaxed);
+    p.generation.store(0, std::memory_order_relaxed);
+    p.in_use.store(0, std::memory_order_release);
+}
+
+uint32_t TopicControlPlane::collect_stale_peers(int64_t timeout_ns)
+{
+    if (!control_ || timeout_ns <= 0)
+    {
+        return 0;
+    }
+    const int64_t now = now_ns();
+    uint32_t stale = 0;
+    for (uint32_t i = 0; i < kMaxPeerSlots; ++i)
+    {
+        PeerSlot& p = control_->peers[i];
+        if (p.in_use.load(std::memory_order_acquire) == 0)
+        {
+            continue;
+        }
+        const uint32_t cc_id = p.cc_id.load(std::memory_order_acquire);
+        const int64_t hb = p.heartbeat_ns.load(std::memory_order_acquire);
+        if (cc_id == 0 || hb == 0)
+        {
+            continue;   // 刚占用还没填完, 下一轮再看
+        }
+        if (now - hb < timeout_ns)
+        {
+            continue;   // 心跳还在, 哪怕它读得慢也不动它
+        }
+        /* 判定为死连接。先摘槽位再累加 cc_id, 避免下一轮重复回收。 */
+        stale |= cc_id;
+        p.cc_id.store(0, std::memory_order_relaxed);
+        p.heartbeat_ns.store(0, std::memory_order_relaxed);
+        p.pid.store(0, std::memory_order_relaxed);
+        p.generation.store(0, std::memory_order_relaxed);
+        p.in_use.store(0, std::memory_order_release);
+    }
+    return stale;
+}
+
 void TopicControlPlane::initialize_if_needed()
 {
     if (!control_)
@@ -160,6 +268,7 @@ void TopicControlPlane::initialize_if_needed()
     control_->owner_pid.store(0, std::memory_order_relaxed);
     control_->heartbeat_ns.store(now_ns(), std::memory_order_relaxed);
     control_->peer_count.store(0, std::memory_order_relaxed);
+    clear_all_peer_slots();
     control_->magic.store(kMagic, std::memory_order_release);
 }
 

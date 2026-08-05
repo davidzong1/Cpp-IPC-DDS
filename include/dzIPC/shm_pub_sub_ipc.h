@@ -113,6 +113,9 @@ private:
     dzIPC::ThreadDispatch::ThreadOptions thread_options_;
     uint32_t msg_id_{0};  // current registration key msg_id; updated on reset_message
     bool local_registered_{false};  // guarded by topic_msg_mtx_; true after InitChannel registers
+    /* 本订阅者在控制面 PeerSlot 表中的槽位下标, -1 表示未登记。
+     * 由 sub_handshake() 线程独占访问。 */
+    int peer_slot_{-1};
 };
 }   // namespace shm
 }   // namespace dzIPC

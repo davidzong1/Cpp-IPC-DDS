@@ -667,6 +667,32 @@ namespace
       return que->conn_count();
     }
 
+    static std::uint32_t connected_id(ipc::handle_t h) noexcept
+    {
+      auto que = queue_of(h);
+      if (que == nullptr)
+      {
+        return 0;
+      }
+      return static_cast<std::uint32_t>(que->connected_id());
+    }
+
+    static void disconnect_receivers(ipc::handle_t h,
+                                     std::uint32_t cc_ids) noexcept
+    {
+      if (cc_ids == 0)
+      {
+        return;
+      }
+      auto que = queue_of(h);
+      if (que == nullptr || que->elems() == nullptr)
+      {
+        return;
+      }
+      // Caller-supplied liveness: only bits of readers known to be gone.
+      que->elems()->disconnect_receiver(static_cast<ipc::circ::cc_t>(cc_ids));
+    }
+
     static bool wait_for_recv(ipc::handle_t h, std::size_t r_count,
                               std::uint64_t tm)
     {
@@ -938,8 +964,10 @@ namespace
                       },
                       tm))
               {
-                // push() timed out — fall back to force_push() which
-                // disconnects dead/stuck readers before retrying.
+                // push() timed out — fall back to force_push(), which bumps the
+                // epoch and overwrites the oldest slot instead of waiting.
+                // Slow readers lose the lapped messages but stay connected;
+                // force_push no longer disconnects them (see prod_cons.h).
                 // This prevents a single slow reader from permanently
                 // blocking the publisher (mirrors send() behavior).
                 if (verbose)
@@ -1237,6 +1265,19 @@ namespace ipc
   std::size_t chan_impl<Flag>::recv_count(ipc::handle_t h)
   {
     return detail_impl<policy_t<Flag>>::recv_count(h);
+  }
+
+  template <typename Flag>
+  std::uint32_t chan_impl<Flag>::connected_id(ipc::handle_t h)
+  {
+    return detail_impl<policy_t<Flag>>::connected_id(h);
+  }
+
+  template <typename Flag>
+  void chan_impl<Flag>::disconnect_receivers(ipc::handle_t h,
+                                             std::uint32_t cc_ids)
+  {
+    detail_impl<policy_t<Flag>>::disconnect_receivers(h, cc_ids);
   }
 
   template <typename Flag>

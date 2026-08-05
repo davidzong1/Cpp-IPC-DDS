@@ -62,7 +62,7 @@ tmux**
 
 .vscode/**
 .github/workflows/**
-
+perf_results/**
 # msg and srv files
 msg/*
 !msg/test_messages/

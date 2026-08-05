@@ -46,6 +46,29 @@ namespace ipc
     static bool wait_for_recv(ipc::handle_t h, std::size_t r_count,
                               std::uint64_t tm);
 
+    /**
+     * \brief This handle's bit in the queue's receiver connection bitmap.
+     * \return 0 when the handle is not connected as a receiver.
+     *
+     * Pair with disconnect_receivers() to let a supervising party reap a
+     * specific dead reader.
+     */
+    static std::uint32_t connected_id(ipc::handle_t h);
+
+    /**
+     * \brief Forcibly clear specific receiver connection bits.
+     *
+     * The queue cannot tell a dead reader from a merely slow one — a reader
+     * that has not released a slot may simply be behind. Callers MUST
+     * establish liveness by other means (dzIPC drives this from the topic
+     * control plane's per-subscriber heartbeats) and pass only the bits of
+     * readers known to be gone. Disconnecting a live reader silently stops
+     * its delivery with no notification to it.
+     *
+     * \param cc_ids Bitwise-OR of the connection ids to remove; 0 is a no-op.
+     */
+    static void disconnect_receivers(ipc::handle_t h, std::uint32_t cc_ids);
+
     static bool send(ipc::handle_t h, void const *data, std::size_t size,
                      std::uint64_t tm, bool verbose);
     static buff_t recv(ipc::handle_t h, std::uint64_t tm, bool verbose);
@@ -172,6 +195,16 @@ namespace ipc
     }
 
     std::size_t recv_count() const { return detail_t::recv_count(h_); }
+
+    /// This handle's bit in the receiver connection bitmap; 0 if not a receiver.
+    std::uint32_t connected_id() const { return detail_t::connected_id(h_); }
+
+    /// Reap specific dead receivers. See chan_impl::disconnect_receivers —
+    /// liveness is the caller's responsibility.
+    void disconnect_receivers(std::uint32_t cc_ids)
+    {
+      detail_t::disconnect_receivers(h_, cc_ids);
+    }
 
     bool wait_for_recv(std::size_t r_count,
                        std::uint64_t tm = invalid_value) const

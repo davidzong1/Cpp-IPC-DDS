@@ -20,7 +20,9 @@ namespace {
 
 std::string service_control_name_for(const std::string& topic_name)
 {
-    return "dz_ipc_" + topic_name + "_ser_control";
+    /* "_ser_control2": 与 pub-sub 侧同理, TopicControl 结构体已变大,
+     * 必须换名以避免在旧的小共享内存段上越界映射。 */
+    return "dz_ipc_" + topic_name + "_ser_control2";
 }
 
 // Internal envelope: carries a fast-path request together with the client's
@@ -212,6 +214,27 @@ void shm_ser_ipc::ser_handshake()
     while (running.load(std::memory_order_acquire))
     {
         control_plane_.heartbeat();
+        /* 死连接回收。
+         *
+         * ser-cli 的发送走 try_send(), 不会掉进 force_push, 所以它从来没有
+         * "慢读者被误踢"的问题; 但它也从来没有回收死连接的机制 —— 崩溃的
+         * 客户端在响应通道 (_ser_w) 的连接位图里留下的 bit 会让服务端的
+         * try_send() 永远失败(重试 10 次后放弃), 这个方向就静默地发不出去了。
+         *
+         * 客户端在 cli_handshake() 里登记自己在响应通道上的 cc_id 并持续心跳,
+         * 这里按心跳超时判死。超时同 pub-sub 取 2s = 200 个心跳周期。 */
+        constexpr int64_t kPeerDeadTimeoutNs = 2'000'000'000LL;
+        const uint32_t stale = control_plane_.collect_stale_peers(kPeerDeadTimeoutNs);
+        if (stale != 0 && ipc_w_ptr_ && ipc_w_ptr_->valid())
+        {
+            ipc_w_ptr_->disconnect_receivers(stale);
+            if (verbose_)
+            {
+                std::cerr << "\033[33m[" << topic_name_
+                          << "_SerInfo] reaped dead client connection(s) on the response channel, cc_ids = 0x"
+                          << std::hex << stale << std::dec << "\033[0m" << std::endl;
+            }
+        }
         const bool has_client = control_plane_.peer_count() > 0;
         handshake_completed_.store(has_client, std::memory_order_release);
         if (has_client && !had_client && verbose_)
@@ -422,6 +445,8 @@ void shm_cli_ipc::cli_handshake()
                 if (peer_registered)
                 {
                     control_plane_.remove_peer(attached_generation);
+                    control_plane_.release_peer_slot(peer_slot_);
+                    peer_slot_ = -1;
                     peer_registered = false;
                 }
                 std::string r_name, w_name;
@@ -457,6 +482,22 @@ void shm_cli_ipc::cli_handshake()
                     continue;
                 }
                 peer_registered = true;
+                /* 向控制面登记本客户端在响应通道 (ipc_r_ptr_) 上的连接 bit,
+                 * 并由下面的循环持续刷新心跳。服务端据此判定死连接并回收。 */
+                {
+                    std::lock_guard<std::mutex> lock(channel_mtx_);
+                    const uint32_t cc_id = (ipc_r_ptr_ && ipc_r_ptr_->valid())
+                                               ? ipc_r_ptr_->connected_id()
+                                               : 0u;
+                    peer_slot_ = control_plane_.acquire_peer_slot(attached_generation, cc_id);
+                }
+                if (peer_slot_ < 0 && verbose_)
+                {
+                    std::cerr << "\033[33m[" << topic_name_
+                              << "_CliInfo] no free peer slot in control plane; this client "
+                                 "will not be reaped automatically if it dies\033[0m"
+                              << std::endl;
+                }
                 handshake_completed_.store(true, std::memory_order_release);
             }
         }
@@ -467,6 +508,8 @@ void shm_cli_ipc::cli_handshake()
                 if (peer_registered)
                 {
                     control_plane_.remove_peer(attached_generation);
+                    control_plane_.release_peer_slot(peer_slot_);
+                    peer_slot_ = -1;
                     peer_registered = false;
                 }
                 std::lock_guard<std::mutex> lock(channel_mtx_);
@@ -482,12 +525,17 @@ void shm_cli_ipc::cli_handshake()
                 ipc_w_ptr_.reset();
             }
         }
+        /* 心跳: 只要本客户端进程还活着, 这里就会每 10ms 刷新一次。
+         * 进程崩溃后心跳停止, 服务端超时即可安全回收其连接。 */
+        control_plane_.peer_heartbeat(peer_slot_);
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     if (peer_registered)
     {
         control_plane_.remove_peer(attached_generation);
     }
+    control_plane_.release_peer_slot(peer_slot_);
+    peer_slot_ = -1;
     if (verbose_)
     {
         std::cerr << "\033[32m[" << topic_name_
