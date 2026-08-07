@@ -592,6 +592,12 @@ struct CaseResult
     std::uint64_t frag_missing = 0;
     std::uint64_t frag_gaps_total = 0;
     std::uint64_t frag_gap_max = 0;
+    /* NACK 编码选择。两个 sent 都为 0 时无法区分"零丢包"与"位图从不触发",
+     * 所以判读时要结合 frag_missing 看。 */
+    std::uint64_t nack_explicit_sent = 0;
+    std::uint64_t nack_bitmap_sent = 0;
+    std::uint64_t nack_explicit_truncated = 0;
+    std::uint64_t nack_bitmap_truncated = 0;
     std::size_t rate_limit_bps = 0;
 
     /* 分片级丢包率。与 loss_pct() 的区别: 后者是消息级, 前者是分片级。
@@ -645,6 +651,10 @@ struct SharedCtl
     std::atomic<std::uint64_t> frag_missing;
     std::atomic<std::uint64_t> frag_gaps_total;
     std::atomic<std::uint64_t> frag_gap_max;
+    std::atomic<std::uint64_t> nack_explicit_sent;
+    std::atomic<std::uint64_t> nack_bitmap_sent;
+    std::atomic<std::uint64_t> nack_explicit_truncated;
+    std::atomic<std::uint64_t> nack_bitmap_truncated;
 
     std::uint64_t samples[kMaxSamples];
 };
@@ -695,6 +705,10 @@ SharedCtl* ctl_map(const std::string& name, bool create)
         c->frag_missing.store(0);
         c->frag_gaps_total.store(0);
         c->frag_gap_max.store(0);
+        c->nack_explicit_sent.store(0);
+        c->nack_bitmap_sent.store(0);
+        c->nack_explicit_truncated.store(0);
+        c->nack_bitmap_truncated.store(0);
         return c;
     }
     return static_cast<SharedCtl*>(p);
@@ -929,6 +943,12 @@ int run_role_subscriber(const Config& cfg)
         ctl->frag_expected.store(fs.fragments_expected, std::memory_order_relaxed);
         ctl->frag_missing.store(fs.fragments_missing, std::memory_order_relaxed);
         ctl->frag_gaps_total.store(fs.gaps_total, std::memory_order_relaxed);
+        ctl->nack_explicit_sent.store(fs.nack_explicit_sent, std::memory_order_relaxed);
+        ctl->nack_bitmap_sent.store(fs.nack_bitmap_sent, std::memory_order_relaxed);
+        ctl->nack_explicit_truncated.store(fs.nack_explicit_truncated, std::memory_order_relaxed);
+        ctl->nack_bitmap_truncated.store(fs.nack_bitmap_truncated, std::memory_order_relaxed);
+        /* gap_max 用 release 收尾, 与父进程读侧的 acquire 配对, 保证上面这些
+         * relaxed 写在父进程看到 gap_max 时都已可见。新增字段必须写在它之前。 */
         ctl->frag_gap_max.store(fs.gap_max, std::memory_order_release);
     }
 
@@ -1131,7 +1151,7 @@ CaseResult run_pubsub_case(const Config& cfg, const std::string& transport, std:
      *            用 Reliable 既测错了对象(测的是 ACK 往返而非链路单向时延), 又和
      *            test_dzipc.cpp 走的路径不一致。所以 socket 固定 publish()/BestEffort。
      * --best-effort 可强制两种传输都用 publish()。 */
-    const bool use_blocking = !cfg.best_effort && type == IPC_SHM;
+    const bool use_blocking = !cfg.best_effort ;
     auto do_publish = [&]() -> bool {
         if (use_blocking)
         {
@@ -1296,6 +1316,10 @@ CaseResult run_pubsub_case(const Config& cfg, const std::string& transport, std:
         r.frag_expected = ctl->frag_expected.load(std::memory_order_relaxed);
         r.frag_missing = ctl->frag_missing.load(std::memory_order_relaxed);
         r.frag_gaps_total = ctl->frag_gaps_total.load(std::memory_order_relaxed);
+        r.nack_explicit_sent = ctl->nack_explicit_sent.load(std::memory_order_relaxed);
+        r.nack_bitmap_sent = ctl->nack_bitmap_sent.load(std::memory_order_relaxed);
+        r.nack_explicit_truncated = ctl->nack_explicit_truncated.load(std::memory_order_relaxed);
+        r.nack_bitmap_truncated = ctl->nack_bitmap_truncated.load(std::memory_order_relaxed);
         /* 单分片消息不进入统计路径(page_cnt == 1 直接返回), 因此 expected == 0
          * 说明本用例的 payload 没有触发分片, 不是采集失败。 */
         r.frag_valid = r.frag_expected > 0;
@@ -1531,6 +1555,10 @@ CaseResult run_sercli_case(const Config& cfg, const std::string& transport, std:
         r.frag_missing = fs.fragments_missing;
         r.frag_gaps_total = fs.gaps_total;
         r.frag_gap_max = fs.gap_max;
+        r.nack_explicit_sent = fs.nack_explicit_sent;
+        r.nack_bitmap_sent = fs.nack_bitmap_sent;
+        r.nack_explicit_truncated = fs.nack_explicit_truncated;
+        r.nack_bitmap_truncated = fs.nack_bitmap_truncated;
         r.frag_valid = r.frag_expected > 0;
         dzIPC::socket::set_fragment_loss_tracking(false);
     }
@@ -1575,6 +1603,19 @@ void print_case(const CaseResult& r)
                   << "  空洞=" << r.frag_gaps_total << " 平均长度=" << std::setprecision(2) << r.mean_gap_len()
                   << " 最长=" << r.frag_gap_max
                   << "  消息[完整=" << r.frag_msgs_complete << " 丢弃=" << r.frag_msgs_incomplete << "]\n";
+
+        /* 只在真的发过 NACK 时才打印。零丢包时全 0, 打出来纯属噪音 ——
+         * 但零丢包与"位图坏了"在这一行上长得一样, 所以判读必须结合上面的缺片数。 */
+        if (r.nack_explicit_sent > 0 || r.nack_bitmap_sent > 0)
+        {
+            std::cout << "    [NACK] 显式列表=" << r.nack_explicit_sent << " 位图=" << r.nack_bitmap_sent;
+            if (r.nack_explicit_truncated > 0 || r.nack_bitmap_truncated > 0)
+            {
+                std::cout << "  截断[列表=" << r.nack_explicit_truncated << " 位图=" << r.nack_bitmap_truncated
+                          << "]";
+            }
+            std::cout << "\n";
+        }
     }
 }
 
@@ -1584,7 +1625,8 @@ const char* kCsvHeader =
     "lat_min_us,lat_mean_us,lat_p50_us,lat_p90_us,lat_p99_us,lat_p999_us,lat_max_us,jitter_stddev_us,"
     "cpu_cores,sample_count,samples_truncated,ok,note,"
     "rate_limit_bps,frag_valid,frag_expected,frag_missing,frag_loss_pct,frag_gaps,mean_gap_len,gap_max,"
-    "frag_msgs_ok,frag_msgs_dropped,gap_1,gap_2_5,gap_6_15,gap_16_31,gap_32_63,gap_64_255,gap_256plus";
+    "frag_msgs_ok,frag_msgs_dropped,gap_1,gap_2_5,gap_6_15,gap_16_31,gap_32_63,gap_64_255,gap_256plus,"
+    "nack_explicit_sent,nack_bitmap_sent,nack_explicit_truncated,nack_bitmap_truncated";
 
 void write_csv(const std::string& path, const std::vector<CaseResult>& rs)
 {
@@ -1608,6 +1650,8 @@ void write_csv(const std::string& path, const std::vector<CaseResult>& rs)
         {
             f << ',' << r.frag_gap_hist[i];
         }
+        f << ',' << r.nack_explicit_sent << ',' << r.nack_bitmap_sent << ',' << r.nack_explicit_truncated << ','
+          << r.nack_bitmap_truncated;
         f << "\n";
     }
 }
@@ -1700,6 +1744,12 @@ void write_json(const std::string& path, const KV& sysinfo, const Config& cfg, c
               << "          \"32-63\": " << r.frag_gap_hist[4] << ",\n"
               << "          \"64-255\": " << r.frag_gap_hist[5] << ",\n"
               << "          \"256+\": " << r.frag_gap_hist[6] << "\n"
+              << "        },\n"
+              << "        \"nack_encoding\": {\n"
+              << "          \"explicit_sent\": " << r.nack_explicit_sent << ",\n"
+              << "          \"bitmap_sent\": " << r.nack_bitmap_sent << ",\n"
+              << "          \"explicit_truncated\": " << r.nack_explicit_truncated << ",\n"
+              << "          \"bitmap_truncated\": " << r.nack_bitmap_truncated << "\n"
               << "        }\n"
               << "      }\n";
         }

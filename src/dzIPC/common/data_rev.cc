@@ -25,6 +25,26 @@ constexpr int SEND_BURST_BEFORE_YIELD = 64;
 constexpr uint64_t ACK_FAST_WAIT_MS = 5;
 constexpr uint8_t INTEGRITY_FLAG_CRC32C = 0x01;
 
+/* Heartbeat 相关 (端点分离 + Heartbeat) */
+constexpr int kMaxHeartbeatRepeat = 3;   // 静默轮里最多补发几次 HB
+/* HB 与最后一个分片背靠背发出, 可能被重排到最后几片之前。收到 HB 后不立刻定论,
+ * 给在途分片一点排空时间再判缺片。 */
+constexpr uint64_t kHbGraceMs = 2;
+
+/* BestEffort 下发完成通告的最小分片数。
+ *
+ * 权衡的是"每条消息多一个包"与"丢片时少空等一轮"。
+ *   收益: 丢片时接收端立刻放弃, 而不是空等 kFruitlessRoundLimit × round_wait_ms
+ *         (下限 20ms, 即最坏 40ms)。这段时间订阅线程什么都干不了, 可能连累下一条。
+ *   成本: 多一个 33 字节的包。字节开销可以忽略, 但**包数**开销是 1/page_cnt ——
+ *         3 分片的消息要多付 33% 的包, 而 UDP 吞吐在本机/局域网上常常是包率受限的。
+ *
+ * 取 16: 包数开销降到 6% 以下, 而这个尺寸(~23 KB)的消息丢了再重来代价已经不小。
+ * 低于这个门槛的 BestEffort 消息不发 HB, 回退到原有的 fruitless 启发式。
+ *
+ * Reliable 不受此限制 —— 它必须发, 因为 sequence 只能由 HB 携带。 */
+constexpr uint16_t kBestEffortHeartbeatMinPages = 16;
+
 struct chunk_meta
 {
     uint16_t page_cnt{0};
@@ -58,6 +78,10 @@ struct FragTrackState
     std::atomic<std::uint64_t> fragments_missing{0};
     std::atomic<std::uint64_t> gaps_total{0};
     std::atomic<std::uint64_t> gap_max{0};
+    std::atomic<std::uint64_t> nack_explicit_sent{0};
+    std::atomic<std::uint64_t> nack_bitmap_sent{0};
+    std::atomic<std::uint64_t> nack_explicit_truncated{0};
+    std::atomic<std::uint64_t> nack_bitmap_truncated{0};
 };
 
 FragTrackState& frag_track_state()
@@ -391,10 +415,10 @@ uint64_t ack_first_wait_ms(const ipc::socket::UDPNode* node)
     return std::max<uint64_t>(1, (rto_us + 999) / 1'000);
 }
 
-bool send_chunk_with_retry(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& chunk)
+bool send_chunk_with_retry(ipc::socket::UDPNode& node, ipc::buffer& chunk)
 {
     int retry = 0;
-    while (!node->send(chunk))
+    while (!node.send(chunk))
     {
         if (++retry >= SEND_RETRY_MAX)
         {
@@ -412,8 +436,7 @@ bool send_chunk_with_retry(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buf
     return true;
 }
 
-bool send_all_chunks(std::shared_ptr<ipc::socket::UDPNode>& node, std::vector<ipc::buffer>& chunks,
-                     std::size_t rate_limit_bps)
+bool send_all_chunks(ipc::socket::UDPNode& node, std::vector<ipc::buffer>& chunks, std::size_t rate_limit_bps)
 {
     const auto send_start = std::chrono::steady_clock::now();
     std::size_t bytes_sent = 0;
@@ -455,12 +478,12 @@ bool send_all_chunks(std::shared_ptr<ipc::socket::UDPNode>& node, std::vector<ip
 }
 
 /* Clean buffer after receiving */
-void drain_self_loopback(std::shared_ptr<ipc::socket::UDPNode>& node)
+void drain_self_loopback(ipc::socket::UDPNode& node)
 {
     constexpr int kMaxDrain = 8'192;
     for (int i = 0; i < kMaxDrain; ++i)
     {
-        ipc::buffer buf = node->receive_nowait();
+        ipc::buffer buf = node.receive_nowait();
         if (buf.empty())
         {
             return;
@@ -468,7 +491,7 @@ void drain_self_loopback(std::shared_ptr<ipc::socket::UDPNode>& node)
     }
 }
 
-void send_ack(std::shared_ptr<ipc::socket::UDPNode>& node, const chunk_meta& meta, uint32_t payload_crc32c)
+void send_ack(ipc::socket::UDPNode& node, const chunk_meta& meta, uint32_t payload_crc32c)
 {
     IpcRtpsAckMsg ack_msg;
     ack_msg.page_cnt = meta.page_cnt;
@@ -482,10 +505,31 @@ void send_ack(std::shared_ptr<ipc::socket::UDPNode>& node, const chunk_meta& met
     send_chunk_with_retry(node, ack_buf);
 }
 
-bool wait_first_data_chunk(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<IpcMsgBase>& msg_ptr,
-                           chunk_meta& meta, ipc::buffer& first_page,
-                           const std::chrono::steady_clock::time_point& begin, uint64_t tm)
+/* 发一帧 Heartbeat。必须在**数据通道**上发 —— 接收端只在数据通道上收包。 */
+void send_heartbeat(ipc::socket::UDPNode& node, const chunk_meta& meta, bool reliable, bool final_hb, uint16_t round)
 {
+    IpcRtpsHeartbeatMsg hb;
+    hb.page_cnt = meta.page_cnt;
+    hb.total_size = meta.total_size;
+    hb.data_msg_id = meta.msg_id;
+    hb.sender_id = local_node_id();
+    hb.sequence = meta.sequence;
+    /* kFlagBitmapNack 恒置: 本版本的 chunk_send_ex 一定认识 DZNB。接收端据此
+     * 决定敢不敢用位图格式 —— 对旧版发送端(不发 HB 或 HB 里没这一位)它会退回
+     * 显式列表, 那是唯一能被对方解析的编码。 */
+    hb.flags = static_cast<uint8_t>((reliable ? IpcRtpsHeartbeatMsg::kFlagReliable : 0)
+                                    | (final_hb ? IpcRtpsHeartbeatMsg::kFlagFinal : 0)
+                                    | IpcRtpsHeartbeatMsg::kFlagBitmapNack);
+    hb.round = round;
+    ipc::buffer hb_buf = hb.serialize();
+    send_chunk_with_retry(node, hb_buf);
+}
+
+bool wait_first_data_chunk(ipc::socket::UDPNode& node, std::shared_ptr<IpcMsgBase>& msg_ptr, chunk_meta& meta,
+                           ipc::buffer& first_page, const std::chrono::steady_clock::time_point& begin, uint64_t tm,
+                           IpcRtpsHeartbeatMsg& pending_hb, bool& have_pending_hb)
+{
+    IpcRtpsHeartbeatMsg hb_probe;
     while (true)
     {
         uint64_t wait_ms = tm;
@@ -499,11 +543,23 @@ bool wait_first_data_chunk(std::shared_ptr<ipc::socket::UDPNode>& node, std::sha
             wait_ms = tm - used;
         }
 
-        ipc::buffer buf = node->receive(wait_ms);
+        ipc::buffer buf = node.receive(wait_ms);
         if (buf.empty())
         {
             return false;
         }
+
+        /* Reliable 发送端会在数据之前先发一帧前导 HB。必须在 check_id 过滤之前
+         * 截住它 —— 它带着 sequence, 而 sequence 无法从数据分片的 tail 里得到。
+         * 单页消息尤其依赖这一条: 首片一到就要立刻 ACK, 没有第二次机会。 */
+        if (hb_probe.check_hb_id(buf))
+        {
+            hb_probe.deserialize(buf);
+            pending_hb = hb_probe;
+            have_pending_hb = true;
+            continue;
+        }
+
         if (!msg_ptr->check_id(buf))
         {
             continue;
@@ -526,14 +582,22 @@ bool wait_first_data_chunk(std::shared_ptr<ipc::socket::UDPNode>& node, std::sha
             continue;
         }
 
+        /* 前导 HB 与本条消息对得上, 就采纳它的 sequence。对不上说明那是上一条
+         * 消息的残留, 丢弃。 */
+        if (have_pending_hb && pending_hb.data_msg_id == tentative.msg_id && pending_hb.page_cnt == tentative.page_cnt
+            && pending_hb.total_size == tentative.total_size)
+        {
+            tentative.sequence = pending_hb.sequence;
+        }
+
         meta = tentative;
         first_page = std::move(buf);
         return true;
     }
 }
 
-void send_nack_for_missing(std::shared_ptr<ipc::socket::UDPNode>& node, const chunk_meta& meta,
-                           const std::vector<uint8_t>& received, IpcRtpsNackMsg& nack_msg)
+void send_nack_for_missing(ipc::socket::UDPNode& node, const chunk_meta& meta, const std::vector<uint8_t>& received,
+                           IpcRtpsNackMsg& nack_msg)
 {
     nack_msg.page_cnt = meta.page_cnt;
     nack_msg.total_size = meta.total_size;
@@ -549,6 +613,12 @@ void send_nack_for_missing(std::shared_ptr<ipc::socket::UDPNode>& node, const ch
             nack_msg.missing_pages.push_back(i);
             if (nack_msg.missing_pages.size() >= IpcRtpsNackMsg::kMaxMissingPages)
             {
+                /* 后面还缺的片这一轮报不出去, 要多等一个 round_wait_ms。
+                 * 计入统计: 这个数持续有量就说明该让对端支持位图了。 */
+                if (i < meta.page_cnt && frag_track_enabled().load(std::memory_order_relaxed))
+                {
+                    frag_track_state().nack_explicit_truncated.fetch_add(1, std::memory_order_relaxed);
+                }
                 break;
             }
         }
@@ -559,8 +629,153 @@ void send_nack_for_missing(std::shared_ptr<ipc::socket::UDPNode>& node, const ch
         return;
     }
 
+    if (frag_track_enabled().load(std::memory_order_relaxed))
+    {
+        frag_track_state().nack_explicit_sent.fetch_add(1, std::memory_order_relaxed);
+    }
     ipc::buffer nack_buf = nack_msg.serialize();
     send_chunk_with_retry(node, nack_buf);
+}
+
+/* 位图 NACK。窗口从第一个缺失页开始, 覆盖到最后一个缺失页(或单页容量上限)。
+ *
+ * 返回是否真的发出去了。false 表示"没有缺片", 调用方不必再走显式列表。 */
+bool send_nack_bitmap_for_missing(ipc::socket::UDPNode& node, const chunk_meta& meta,
+                                  const std::vector<uint8_t>& received, IpcRtpsNackBitmapMsg& nb_msg)
+{
+    uint16_t first_missing = 0;
+    uint16_t last_missing = 0;
+    for (uint16_t i = 1; i <= meta.page_cnt; ++i)
+    {
+        if (received[i] == 0)
+        {
+            if (first_missing == 0)
+            {
+                first_missing = i;
+            }
+            last_missing = i;
+        }
+    }
+
+    if (first_missing == 0)
+    {
+        return false;
+    }
+
+    nb_msg.page_cnt = meta.page_cnt;
+    nb_msg.total_size = meta.total_size;
+    nb_msg.data_msg_id = meta.msg_id;
+    nb_msg.receiver_id = local_node_id();
+    nb_msg.sequence = meta.sequence;
+
+    const std::size_t span = static_cast<std::size_t>(last_missing) - first_missing + 1;
+    nb_msg.reset_window(first_missing, span);
+
+    for (uint16_t i = first_missing; i <= last_missing; ++i)
+    {
+        if (received[i] == 0)
+        {
+            nb_msg.set_missing(i);   // 窗口外的页会被 set_missing 自行忽略
+        }
+    }
+
+    if (frag_track_enabled().load(std::memory_order_relaxed))
+    {
+        FragTrackState& st = frag_track_state();
+        st.nack_bitmap_sent.fetch_add(1, std::memory_order_relaxed);
+        /* reset_window 会把超出单帧容量的跨度截断, 被截掉的缺片这一轮报不出去。
+         * 与显式列表的 256 上限是同一类事, 一并计数。 */
+        if (span > IpcRtpsNackBitmapMsg::kMaxBitmapBits)
+        {
+            st.nack_bitmap_truncated.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    ipc::buffer nb_buf = nb_msg.serialize();
+    send_chunk_with_retry(node, nb_buf);
+    return true;
+}
+
+/* 在两种 NACK 编码之间选择。
+ *
+ * 判据是**线格式字节数**, 不是文档 §8.1 写的 "缺失片数 > page_cnt/8"。后者在
+ * 稀疏丢包时会误判: 713 片丢 100 片(密度 14% > 12.5%)会切到位图, 但那 100 片
+ * 若散布在全域, 窗口跨度就是 713 位 = 90 B, 而显式列表只要 200 B —— 差别不大;
+ * 真正的分水岭是 span/8 与 2*N 谁小, 直接算就是了, 不必用密度去近似。
+ *
+ * 对端不支持位图(HB 没带 kFlagBitmapNack)时无条件用显式列表。 */
+void send_nack_auto(ipc::socket::UDPNode& node, const chunk_meta& meta, const std::vector<uint8_t>& received,
+                    IpcRtpsNackMsg& nack_msg, IpcRtpsNackBitmapMsg& nb_msg, bool peer_supports_bitmap)
+{
+    if (!peer_supports_bitmap)
+    {
+        send_nack_for_missing(node, meta, received, nack_msg);
+        return;
+    }
+
+    std::size_t miss_cnt = 0;
+    uint16_t first_missing = 0;
+    uint16_t last_missing = 0;
+    for (uint16_t i = 1; i <= meta.page_cnt; ++i)
+    {
+        if (received[i] == 0)
+        {
+            ++miss_cnt;
+            if (first_missing == 0)
+            {
+                first_missing = i;
+            }
+            last_missing = i;
+        }
+    }
+
+    if (miss_cnt == 0)
+    {
+        return;
+    }
+
+    /* 两种编码各自"这一轮能报多少片"与"要花多少字节"。
+     *
+     * 判据首先是**覆盖率**, 其次才是字节数 —— 少报一片就要多等一整个
+     * round_wait_ms(713 片时 200 ms), 而多花几百字节只是一次 MTU 内的传输。
+     *
+     * 两种编码都会截断, 且截断方式不同, 所以不能只看其中一个:
+     *   显式列表: 报**任意位置**的前 256 片
+     *   位图:     报 [first, first + 11496) 这个**连续窗口**内的全部缺片
+     * 缺片密集时位图完胜(255 片连续空洞: 32 B vs 510 B); 但缺片稀疏地散布在
+     * 一条超大消息上时, 位图窗口只能覆盖消息的前一段, 反而不如显式列表 ——
+     * 例如 45000 片的消息丢了 300 片均匀散布, 位图窗口只罩得住约 77 片,
+     * 显式列表能报满 256 片。 */
+    const std::size_t span = static_cast<std::size_t>(last_missing) - first_missing + 1;
+    const std::size_t bitmap_bits = std::min(span, IpcRtpsNackBitmapMsg::kMaxBitmapBits);
+    const std::size_t bitmap_bytes = (bitmap_bits + 7) / 8;
+
+    std::size_t bitmap_cover = miss_cnt;
+    if (span > IpcRtpsNackBitmapMsg::kMaxBitmapBits)
+    {
+        /* 窗口装不下整个跨度, 得实际数一遍窗口内有多少片。 */
+        bitmap_cover = 0;
+        const std::size_t window_end = static_cast<std::size_t>(first_missing) + bitmap_bits;
+        for (std::size_t i = first_missing; i < window_end && i <= meta.page_cnt; ++i)
+        {
+            if (received[i] == 0)
+            {
+                ++bitmap_cover;
+            }
+        }
+    }
+
+    const std::size_t list_cover = std::min(miss_cnt, IpcRtpsNackMsg::kMaxMissingPages);
+    const std::size_t list_bytes = list_cover * 2;
+
+    const bool use_bitmap =
+        (bitmap_cover > list_cover) || (bitmap_cover == list_cover && bitmap_bytes < list_bytes);
+
+    if (use_bitmap && send_nack_bitmap_for_missing(node, meta, received, nb_msg))
+    {
+        return;
+    }
+    send_nack_for_missing(node, meta, received, nack_msg);
 }
 
 ipc::buffer make_owned_copy(const void* src, std::size_t n)
@@ -570,13 +785,20 @@ ipc::buffer make_owned_copy(const void* src, std::size_t n)
     return ipc::buffer(mem, n, [](void* p, std::size_t) { delete[] static_cast<uint8_t*>(p); });
 }
 
-bool recv_chunk_common(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<IpcMsgBase>& msg_ptr, uint64_t tm)
+bool recv_chunk_common(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ack_node,
+                       std::shared_ptr<IpcMsgBase>& msg_ptr, uint64_t tm)
 {
     const auto begin = std::chrono::steady_clock::now();
 
+    /* ack_node 为空 -> ACK/NACK 回到数据通道, 即端点分离之前的行为。
+     * 这一行是"缺省参数下行为完全不变"的全部实现。 */
+    ipc::socket::UDPNode& ack_out = (ack_node != nullptr) ? *ack_node : node;
+
     chunk_meta meta{};
     ipc::buffer first_page;
-    if (!wait_first_data_chunk(node, msg_ptr, meta, first_page, begin, tm))
+    IpcRtpsHeartbeatMsg pending_hb;
+    bool have_pending_hb = false;
+    if (!wait_first_data_chunk(node, msg_ptr, meta, first_page, begin, tm, pending_hb, have_pending_hb))
     {
         return false;
     }
@@ -589,7 +811,7 @@ bool recv_chunk_common(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_
         }
         const uint32_t payload_crc32c = dzIPC::common::crc32c(first_page.data(), first_page.size());
         msg_ptr->deserialize(first_page);
-        send_ack(node, meta, payload_crc32c);
+        send_ack(ack_out, meta, payload_crc32c);
         return true;
     }
 
@@ -647,19 +869,42 @@ bool recv_chunk_common(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_
     constexpr int kFruitlessRoundLimit = 2;
     int fruitless_rounds = 0;
 
+    /* ---------------- Heartbeat 状态 ----------------
+     * 收到匹配的 HB 之后, "对端是否会重传"就从猜测变成了已知事实,
+     * 上面那套 fruitless 启发式随之被精确信号取代(它仍保留, 用于对端不发 HB
+     * 的旧版本)。 */
+    IpcRtpsHeartbeatMsg hb_msg;
+    IpcRtpsNackBitmapMsg nb_msg;
+    bool hb_seen = false;             // 本轮收到了与本消息匹配的 HB
+    bool sender_reliable = false;     // HB 声明发送端会响应 NACK
+    bool hb_final = false;            // 发送端已放弃, 不会再重传
+    bool sender_bitmap_ok = false;    // HB 声明发送端认识 DZNB(位图 NACK)
+
+    /* 前导 HB 已经在 wait_first_data_chunk 里采纳过 sequence, 这里同步一下
+     * 发送端的可靠性声明, 免得第一轮还按"未知"处理。 */
+    if (have_pending_hb && pending_hb.data_msg_id == meta.msg_id && pending_hb.page_cnt == meta.page_cnt
+        && pending_hb.total_size == meta.total_size)
+    {
+        sender_reliable = (pending_hb.flags & IpcRtpsHeartbeatMsg::kFlagReliable) != 0;
+        sender_bitmap_ok = (pending_hb.flags & IpcRtpsHeartbeatMsg::kFlagBitmapNack) != 0;
+    }
+
     for (int round = 0; round < RTPS_MAX_NACK_ROUND && received_cnt < meta.page_cnt; ++round)
     {
         const std::size_t received_before_round = received_cnt;
         const auto round_begin = std::chrono::steady_clock::now();
+        /* HB 到达后把本轮窗口压缩到 kHbGraceMs; 在此之前用完整的 round_wait_ms。 */
+        uint64_t round_budget_ms = round_wait_ms;
+        hb_seen = false;
         while (received_cnt < meta.page_cnt)
         {
             const uint64_t round_used = elapsed_ms(round_begin);
-            if (round_used >= round_wait_ms)
+            if (round_used >= round_budget_ms)
             {
                 break;
             }
 
-            uint64_t wait_ms = round_wait_ms - round_used;
+            uint64_t wait_ms = round_budget_ms - round_used;
             if (effective_tm != ipc::invalid_value)
             {
                 const uint64_t used = elapsed_ms(assembly_begin);
@@ -671,11 +916,38 @@ bool recv_chunk_common(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_
                 wait_ms = std::min(wait_ms, effective_tm - used);
             }
 
-            ipc::buffer page = node->receive(wait_ms);
+            ipc::buffer page = node.receive(wait_ms);
             if (page.empty())
             {
                 break;
             }
+
+            /* HB 必须在 check_id 之前截住 —— 它的 msg_id 是 DZHB, 过不了数据
+             * 消息的类型过滤。 */
+            if (hb_msg.check_hb_id(page))
+            {
+                hb_msg.deserialize(page);
+                if (hb_msg.data_msg_id == meta.msg_id && hb_msg.page_cnt == meta.page_cnt
+                    && hb_msg.total_size == meta.total_size)
+                {
+                    /* 权威 sequence: 数据分片的 tail 里没有这个字段, 只能从 HB 拿。
+                     * 不采纳的话 ACK 会带着 0 发回去, 发送端的校验永远不匹配。 */
+                    meta.sequence = hb_msg.sequence;
+                    sender_reliable = (hb_msg.flags & IpcRtpsHeartbeatMsg::kFlagReliable) != 0;
+                    hb_final = (hb_msg.flags & IpcRtpsHeartbeatMsg::kFlagFinal) != 0;
+                    sender_bitmap_ok = (hb_msg.flags & IpcRtpsHeartbeatMsg::kFlagBitmapNack) != 0;
+                    if (!hb_seen)
+                    {
+                        hb_seen = true;
+                        /* 不立刻定论: HB 与最后几片背靠背发出, 可能被重排到它们
+                         * 前面。给在途分片 kHbGraceMs 的排空时间。 */
+                        const uint64_t used_now = elapsed_ms(round_begin);
+                        round_budget_ms = std::min(round_budget_ms, used_now + kHbGraceMs);
+                    }
+                }
+                continue;
+            }
+
             if (!msg_ptr->check_id(page))
             {
                 continue;
@@ -689,7 +961,28 @@ bool recv_chunk_common(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_
             break;
         }
 
-        /* round 0 收的是发送端的首轮突发，此时还没发过 NACK，不计入判据。
+        if (effective_tm != ipc::invalid_value && elapsed_ms(assembly_begin) >= effective_tm)
+        {
+            record_fragment_gaps(received, meta.page_cnt, false);
+            return false;
+        }
+
+        /* 收到 HB 就有了确定的分片全集, 不必再靠"连续两轮无果"去猜。 */
+        if (hb_seen)
+        {
+            if (!sender_reliable || hb_final)
+            {
+                /* BestEffort 不会重传, 已放弃的 Reliable 也不会。继续等只是空耗
+                 * 剩余轮次(713 分片时最坏 5 × 200ms = 1s)。 */
+                record_fragment_gaps(received, meta.page_cnt, false);
+                return false;
+            }
+            send_nack_auto(ack_out, meta, received, nack_msg, nb_msg, sender_bitmap_ok);
+            continue;   // 跳过 fruitless 判据, 立即进入下一轮等重传
+        }
+
+        /* 没收到 HB —— 对端可能是不发 HB 的旧版本, 退回原来的启发式。
+         * round 0 收的是发送端的首轮突发，此时还没发过 NACK，不计入判据。
          * 从 round 1 起，本轮没有任何新分片就说明对端没有响应 NACK。 */
         if (round >= 1)
         {
@@ -707,13 +1000,10 @@ bool recv_chunk_common(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_
             }
         }
 
-        if (effective_tm != ipc::invalid_value && elapsed_ms(assembly_begin) >= effective_tm)
-        {
-            record_fragment_gaps(received, meta.page_cnt, false);
-            return false;
-        }
-
-        send_nack_for_missing(node, meta, received, nack_msg);
+        /* 本轮没收到 HB, 但前导 HB 可能已经声明过对端认识位图 —— sender_bitmap_ok
+         * 是跨轮粘住的, 交给 send_nack_auto 判断即可。对端确实是旧版时它退回显式
+         * 列表, 那是唯一能被对方解析的编码。 */
+        send_nack_auto(ack_out, meta, received, nack_msg, nb_msg, sender_bitmap_ok);
     }
 
     if (received_cnt < meta.page_cnt)
@@ -726,7 +1016,7 @@ bool recv_chunk_common(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_
     const uint32_t payload_crc32c = dzIPC::common::crc32c(assembled.data(), meta.total_size);
     ipc::buffer assembled_view(assembled.data(), meta.total_size);
     msg_ptr->deserialize(assembled_view);
-    send_ack(node, meta, payload_crc32c);
+    send_ack(ack_out, meta, payload_crc32c);
     return true;
 }
 }   // namespace
@@ -737,14 +1027,28 @@ bool recv_chunk_common(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_
 bool chunk_rev_topic(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<TopicData>& rev_msg, uint64_t tm)
 {
     std::shared_ptr<IpcMsgBase> msg_ptr = rev_msg->topic();
-    return recv_chunk_common(node, msg_ptr, tm);
+    return recv_chunk_common(*node, nullptr, msg_ptr, tm);
+}
+
+bool chunk_rev_topic(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<TopicData>& rev_msg, uint64_t tm,
+                     const std::shared_ptr<ipc::socket::UDPNode>& ack_node)
+{
+    std::shared_ptr<IpcMsgBase> msg_ptr = rev_msg->topic();
+    return recv_chunk_common(*node, ack_node ? ack_node.get() : nullptr, msg_ptr, tm);
 }
 
 bool chunk_rev_server(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<ServiceData>& rev_msg, uint64_t tm,
                       bool ser_or_cli)
 {
     std::shared_ptr<IpcMsgBase> msg_ptr = ser_or_cli ? rev_msg->request() : rev_msg->response();
-    return recv_chunk_common(node, msg_ptr, tm);
+    return recv_chunk_common(*node, nullptr, msg_ptr, tm);
+}
+
+bool chunk_rev_server(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<ServiceData>& rev_msg, uint64_t tm,
+                      bool ser_or_cli, const std::shared_ptr<ipc::socket::UDPNode>& ack_node)
+{
+    std::shared_ptr<IpcMsgBase> msg_ptr = ser_or_cli ? rev_msg->request() : rev_msg->response();
+    return recv_chunk_common(*node, ack_node ? ack_node.get() : nullptr, msg_ptr, tm);
 }
 
 ipc::buffer chunk_rev_sniff(ipc::socket::UDPNode& node, uint64_t tm)
@@ -825,6 +1129,14 @@ ipc::buffer chunk_rev_sniff(ipc::socket::UDPNode& node, uint64_t tm)
 
         ipc_tail_msg tail;
         if (!parse_tail(page, tail) || !valid_chunk_meta(tail))
+        {
+            continue;
+        }
+        /* 控制帧与数据同走一条通道, 而 sniff 路径不按 msg_id 过滤(它要嗅探任意
+         * 类型的用户消息)。33 字节的 Heartbeat 恰好能通过 valid_chunk_meta 的
+         * 单页校验, 不显式排除就会被当成一条合法消息输出。
+         * ACK/NACK 目前因尺寸恰好不匹配而侥幸落选, 这里一并显式挡掉, 不再依赖巧合。*/
+        if (is_rtps_control_frame(tail.dz_ipc_msg_id))
         {
             continue;
         }
@@ -912,10 +1224,6 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
 {
     SocketSendReport report;
     report.sequence = msg_sequence_counter().fetch_add(1, std::memory_order_relaxed);
-    if (options.integrity == SocketIntegrityMode::CRC32C)
-    {
-        report.crc32c = dzIPC::common::crc32c(publish_data.data(), publish_data.size());
-    }
 
     if (publish_data.empty() || publish_data.size() < TAIL_SIZE)
     {
@@ -941,6 +1249,26 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
         write_now_page(chunks[i], static_cast<uint16_t>(i + 1));
     }
 
+    /* CRC 必须在 write_now_page **之后**算。
+     *
+     * chunks 是 publish_data 的非拥有视图(上面用 buffer(ptr, size) 构造), 所以
+     * write_now_page 是就地改写 publish_data 里每片 tail 的 now_page 字段。
+     * 而且它确实会改动字节: IpcMsgBase::adapt_memcpy_tos 是先 ++page 再
+     * add_tail_msg, 于是 serialize() 写出来的页号是 [2,3,...,N,N] —— 差一,
+     * write_now_page 的职责正是纠正成 [1,2,...,N]。
+     *
+     * 接收端 place_page 把整片(含 tail)原样拼进 assembled, CRC 的是线上真实
+     * 字节。若在纠正前算 CRC, 两端必然在每片 2 个字节上不同(N 片差 N-1 处),
+     * Reliable+CRC32C 的多页消息 100% 报 FailedIntegrity。
+     *
+     * 这个错位在端点分离之前不可见 —— ACK 根本到不了发送端, 代码在比较 CRC
+     * 之前就 FailedTimeout 返回了。单页消息也不受影响(page 从未自增, 无需纠正),
+     * 所以 test_socket_reliable_crc 一直是绿的。 */
+    if (options.integrity == SocketIntegrityMode::CRC32C)
+    {
+        report.crc32c = dzIPC::common::crc32c(publish_data.data(), publish_data.size());
+    }
+
     ipc_tail_msg first_tail;
     if (!parse_tail(chunks.front(), first_tail) || !valid_chunk_meta(first_tail))
     {
@@ -953,19 +1281,48 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
         return report;
     }
 
+    /* 端点分离: 在 ack_node 上等确认, 而不是在刚发完几百个分片的数据 socket 上。
+     * 为空则退回数据节点 —— 历史行为。 */
+    ipc::socket::UDPNode& data_out = *node;
+    ipc::socket::UDPNode& ack_in = options.ack_node ? *options.ack_node : *node;
+
     /* 入口排空：清掉上一轮 chunk_send 退出时还没来得及到达 / 处理的残留包
        （晚到的 ACK/NACK 或 self-loopback 数据片）。否则与本轮发出的包混杂后，
-       由于多轮共用同一份 meta，下面 ACK 等待循环会拿旧 ACK 当本轮 ACK 用。 */
-    drain_self_loopback(node);
+       由于多轮共用同一份 meta，下面 ACK 等待循环会拿旧 ACK 当本轮 ACK 用。
+
+       端点分离后数据通道已是 SendOnly(receive_nowait 直接返回空), 这里排空的
+       实际是 ack 通道上的迟到 ACK —— 仍然必要。 */
+    drain_self_loopback(ack_in);
+
+    const chunk_meta meta{first_tail.page_cnt, first_tail.total_size, first_tail.dz_ipc_msg_id, report.sequence};
+    const bool reliable = (options.delivery == SocketDeliveryMode::Reliable);
+
+    /* 前导 HB: 数据之前先发, 让接收端在**首片到达时**就知道 sequence。
+     *
+     * 单页消息只有这一次机会 —— recv 端收到首片立刻 ACK 并返回, 不会再有第二轮
+     * 去等 HB。多页消息虽然事后补发的 HB 也能赶上, 但前导 HB 让它第一轮就拿到
+     * 正确的 sequence, 少一次无效 ACK。 */
+    if (options.send_heartbeat && reliable)
+    {
+        send_heartbeat(data_out, meta, /*reliable=*/true, /*final_hb=*/false, /*round=*/0);
+    }
 
     /* options 未显式指定时回退到全局设置 —— pub-sub 的 publish 接口不暴露
      * SocketSendOptions, 只能靠进程级开关生效。 */
     const std::size_t rate_limit =
         (options.rate_limit_bps != 0) ? options.rate_limit_bps : global_rate_limit_bps().load(std::memory_order_relaxed);
-    if (!send_all_chunks(node, chunks, rate_limit))
+    if (!send_all_chunks(data_out, chunks, rate_limit))
     {
         report.status = SocketSendStatus::FailedLocalSend;
         return report;
+    }
+
+    /* 完成通告。Reliable 无论几页都发(sequence 必须送达); BestEffort 只在分片
+     * 数够多时才发, 见 kBestEffortHeartbeatMinPages 的权衡说明。 */
+    const bool want_completion_hb = reliable || (meta.page_cnt >= kBestEffortHeartbeatMinPages);
+    if (options.send_heartbeat && want_completion_hb)
+    {
+        send_heartbeat(data_out, meta, reliable, /*final_hb=*/!reliable, /*round=*/1);
     }
 
     /* 方案 A：BestEffort 真正 fire-and-forget。
@@ -980,15 +1337,22 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
      * 用户应该用 Reliable 而不是 BestEffort。 */
     if (options.delivery == SocketDeliveryMode::BestEffort)
     {
-        drain_self_loopback(node);
+        drain_self_loopback(ack_in);
         report.status = SocketSendStatus::SentUnconfirmed;
         return report;
     }
 
-    const chunk_meta meta{first_tail.page_cnt, first_tail.total_size, first_tail.dz_ipc_msg_id, report.sequence};
     const uint64_t nack_wait_ms = calc_nack_wait_ms(meta.page_cnt);
-    /* 方案 B': 首轮 ACK 等待由实测 RTT 决定, 而非固定 ACK_FAST_WAIT_MS */
-    uint64_t first_wait_ms = ack_first_wait_ms(node.get());
+    /* 方案 B': 首轮 ACK 等待由实测 RTT 决定, 而非固定 ACK_FAST_WAIT_MS。
+     * key 恒取数据节点 —— RTT 是链路属性, 若一处用 node、另一处用 ack_node,
+     * 估计器会被拆成两份各自样本不足的状态, 症状是偶发超时而非崩溃, 极难查。 */
+    const ipc::socket::UDPNode* const rtt_key = node.get();
+    uint64_t first_wait_ms = ack_first_wait_ms(rtt_key);
+
+    /* 接收端的 ACK 里包含了组装 page_cnt 个分片 + 对整条消息做 CRC32C 的时间,
+     * 这部分是 CPU 开销, 不是链路 RTT。端点分离之后 RTT 估计会真正收敛到
+     * loopback 的百微秒量级, 不补这一项的话大包首轮必然误判超时。 */
+    first_wait_ms += static_cast<uint64_t>(meta.page_cnt) / 64;
 
     /* 修正 1(续 2): 首轮 ACK 窗口必须覆盖限速下的传输时间。
      *
@@ -1013,10 +1377,12 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
             ? (first_wait_ms + nack_wait_ms * static_cast<uint64_t>(RTPS_MAX_NACK_ROUND))
             : options.ack_timeout_ms;
     IpcRtpsNackMsg nack_msg;
+    IpcRtpsNackBitmapMsg nb_msg;
     IpcRtpsAckMsg ack_msg;
 
     const auto ack_begin = std::chrono::steady_clock::now();
     int round = 0;
+    int hb_repeat = 0;   // 静默轮补发 HB 的次数, 上限 kMaxHeartbeatRepeat
     while (true)
     {
         bool got_nack = false;
@@ -1029,7 +1395,7 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
         {
             if (options.delivery == SocketDeliveryMode::Reliable && elapsed_ms(ack_begin) >= ack_timeout_ms)
             {
-                drain_self_loopback(node);
+                drain_self_loopback(ack_in);
                 report.status = SocketSendStatus::FailedTimeout;
                 return report;
             }
@@ -1045,14 +1411,14 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
                 const uint64_t total_used = elapsed_ms(ack_begin);
                 if (total_used >= ack_timeout_ms)
                 {
-                    drain_self_loopback(node);
+                    drain_self_loopback(ack_in);
                     report.status = SocketSendStatus::FailedTimeout;
                     return report;
                 }
                 wait_ms = std::min(wait_ms, ack_timeout_ms - total_used);
             }
 
-            ipc::buffer recv_buf = node->receive(wait_ms);
+            ipc::buffer recv_buf = ack_in.receive(wait_ms);
             if (recv_buf.empty())
             {
                 break;
@@ -1075,7 +1441,7 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
                                              .count();
                         if (rtt > 0)
                         {
-                            rtt_of(node.get()).observe(static_cast<uint64_t>(rtt));
+                            rtt_of(rtt_key).observe(static_cast<uint64_t>(rtt));
                         }
                     }
                     break;
@@ -1084,6 +1450,31 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
             }
             if (!nack_msg.check_id(recv_buf))
             {
+                /* 位图 NACK。与显式列表汇入同一个 missing_union, 下面的重传逻辑
+                 * 不必关心接收端用了哪种编码。 */
+                if (!nb_msg.check_nb_id(recv_buf))
+                {
+                    continue;
+                }
+                nb_msg.deserialize(recv_buf);
+                if (nb_msg.page_cnt != meta.page_cnt || nb_msg.total_size != meta.total_size
+                    || nb_msg.data_msg_id != meta.msg_id || nb_msg.sequence != meta.sequence)
+                {
+                    continue;
+                }
+                got_nack = true;
+                for (std::size_t bit = 0; bit < nb_msg.bit_cnt; ++bit)
+                {
+                    const std::size_t page_id = static_cast<std::size_t>(nb_msg.base_page) + bit;
+                    if (page_id > chunks.size())
+                    {
+                        break;   // 窗口尾部的填充位, 越界即可停
+                    }
+                    if (page_id > 0 && nb_msg.is_missing(static_cast<uint16_t>(page_id)))
+                    {
+                        missing_union.insert(static_cast<uint16_t>(page_id));
+                    }
+                }
                 continue;
             }
 
@@ -1108,7 +1499,7 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
         {
             /* ACK 命中后立刻 return 会把队列里剩余的 self-loopback 数据片留给下一轮，
                下一轮会把它们当作本轮 self-loopback 误处理（meta 完全相同）。 */
-            drain_self_loopback(node);
+            drain_self_loopback(ack_in);
             if (options.integrity == SocketIntegrityMode::CRC32C
                 && ((ack_msg.integrity_flags & INTEGRITY_FLAG_CRC32C) == 0 || report.ack_crc32c != report.crc32c))
             {
@@ -1125,14 +1516,47 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
             {
                 break;
             }
+            /* 这一轮既没 ACK 也没 NACK。可能是完成通告本身丢了, 也可能接收端压根
+             * 没看到最后一片、还没开始组装。补发 HB 把它推进到能做判断的状态,
+             * 比干等下一轮超时有效。 */
+            if (options.send_heartbeat && hb_repeat < kMaxHeartbeatRepeat)
+            {
+                ++hb_repeat;
+                send_heartbeat(data_out, meta, /*reliable=*/true, /*final_hb=*/false,
+                               static_cast<uint16_t>(round + 2));
+            }
             ++round;
             continue;
         }
 
+        /* 重传批次也要限速。
+         *
+         * 位图 NACK 之前, 一轮最多重传 256 片(显式列表上限), 不限速也就 377 KB
+         * 的突发。位图把上限提到 11496 位, 713 片的消息现在可以一轮全报 —— 若仍
+         * 无节制地灌回去, 就会把当初造成丢包的那个接收缓冲(§7.1 的溢出型突发)
+         * 再撑爆一次, 重传本身变成下一轮丢包的成因。
+         *
+         * 复用首轮的 rate_limit: 同一条链路, 首轮能承受的速率重传也能承受。
+         * 用相对 resend_start 的绝对时间表, 理由同 send_all_chunks —— 增量式
+         * sleep 的超调会逐片累加。 */
         std::size_t resent = 0;
+        std::size_t resent_bytes = 0;
+        const auto resend_start = std::chrono::steady_clock::now();
         for (uint16_t miss : missing_union)
         {
-            if (!send_chunk_with_retry(node, chunks[miss - 1]))
+            if (rate_limit > 0 && resent > 0)
+            {
+                const auto now = std::chrono::steady_clock::now();
+                const std::uint64_t elapsed_us =
+                    std::chrono::duration_cast<std::chrono::microseconds>(now - resend_start).count();
+                const std::uint64_t budget_us = (resent_bytes * 1'000'000ULL) / rate_limit;
+                if (budget_us > elapsed_us)
+                {
+                    std::this_thread::sleep_for(std::chrono::microseconds(budget_us - elapsed_us));
+                }
+            }
+            resent_bytes += chunks[miss - 1].size();
+            if (!send_chunk_with_retry(data_out, chunks[miss - 1]))
             {
                 report.status = SocketSendStatus::FailedLocalSend;
                 return report;
@@ -1141,6 +1565,12 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
             {
                 std::this_thread::yield();
             }
+        }
+        /* 重传批次之后补一帧 HB: 接收端据此知道这批补片已经发完, 可以立刻判断
+         * 还缺不缺, 而不必等满一个 round_wait_ms。 */
+        if (options.send_heartbeat)
+        {
+            send_heartbeat(data_out, meta, /*reliable=*/true, /*final_hb=*/false, static_cast<uint16_t>(round + 2));
         }
         ++round;
 
@@ -1152,7 +1582,13 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
 
     /* 所有 ACK round 走完仍未拿到 ACK（典型 5ms 静默退出）。本轮发出去的
        self-loopback 数据片此时还在队列里，必须清掉再返回。 */
-    drain_self_loopback(node);
+    /* 终止通告: 告诉还在组装的接收端"我放弃了, 别再等重传"。带 Final 而不带
+     * Reliable —— 接收端看到就会立即丢弃, 不再空耗自己剩余的轮次。 */
+    if (options.send_heartbeat && options.delivery == SocketDeliveryMode::Reliable)
+    {
+        send_heartbeat(data_out, meta, /*reliable=*/false, /*final_hb=*/true, static_cast<uint16_t>(round + 2));
+    }
+    drain_self_loopback(ack_in);
     report.status = (options.delivery == SocketDeliveryMode::Reliable) ? SocketSendStatus::FailedTimeout
                                                                         : SocketSendStatus::SentUnconfirmed;
     return report;
@@ -1169,28 +1605,33 @@ bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publis
 bool chunk_send_reliable(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publish_data,
                          uint64_t ack_timeout_ms)
 {
-    /* 当前没有调用方 —— dzIPC 现有的两种拓扑都不满足它的前提。
+    /* 单节点版本 —— 在发数据的同一条 socket 上等 ACK。
      *
-     * 前提: 发送端等 ACK 的那条 socket 上, 不能有自己发出的分片回绕。
+     * 这个前提在组播 + IP_MULTICAST_LOOP=1 下不成立: 自己发出的分片会全部回绕进
+     * 自己的接收队列(1 MB = 713 片), 对端的 ACK 排在它们后面, 等待窗口必然先超时。
+     * 所以本重载对多分片消息基本注定 FailedTimeout, 只适合单分片, 或有独立反向
+     * 通道的传输(如单播 TCP/UDP)。
      *
-     * 但 pub-sub 和 ser-cli 用的都是组播 socket 且 IP_MULTICAST_LOOP=1:
-     *   - pub-sub: 收发共用一条组播 socket, 自己的分片全部回绕堵在 ACK 之前;
-     *              且 1:N 下"收到某一个 ACK"无法表达全体订阅者的接收状态。
-     *   - ser-cli: 虽然请求/响应分了两条通道(port_hash_ / port_hash_+1), 但每条
-     *              通道内部仍是收发共用。客户端在 ipc_r_ptr_ 上发请求又在同一个
-     *              ipc_r_ptr_ 上等 ACK, 同样撞上 loopback 回绕。
-     *              (曾据此判断 ser-cli"双通道所以安全"并改用本函数, 实测全尺寸
-     *               失败 —— 双通道分的是方向, 不是收发。)
-     *
-     * 保留本函数是为了将来接入真正有独立反向通道的传输(如单播 TCP/UDP)。
-     * 在组播拓扑上要提高大包可靠性, 正确手段是发送端限速(见 rate_limit_bps),
-     * 避免瞬时灌满对端 SO_RCVBUF —— 实测丢包是缓冲溢出型突发, 不是随机丢包。 */
+     * 要在组播上真正用 Reliable, 走下面那个带 ack_node 的重载: 传一条独立的
+     * RecvOnly socket, ACK 从那里收, 那上面没有自己的数据回绕。
+     * 接线方式参见 socket_pub_ipc::publish_blocking()。 */
     SocketSendOptions options;
     options.delivery = SocketDeliveryMode::Reliable;
     /* 多分片消息启用 CRC32C: 分片重组后校验整体完整性。单分片时开销可忽略,
      * 多分片时能挡住"分片都到齐但内容错位"这类静默损坏。 */
     options.integrity = SocketIntegrityMode::CRC32C;
     options.ack_timeout_ms = ack_timeout_ms;
+    return chunk_send_ex(node, publish_data, options).ok();
+}
+
+bool chunk_send_reliable(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publish_data,
+                         const std::shared_ptr<ipc::socket::UDPNode>& ack_node, uint64_t ack_timeout_ms)
+{
+    SocketSendOptions options;
+    options.delivery = SocketDeliveryMode::Reliable;
+    options.integrity = SocketIntegrityMode::CRC32C;
+    options.ack_timeout_ms = ack_timeout_ms;
+    options.ack_node = ack_node;
     return chunk_send_ex(node, publish_data, options).ok();
 }
 
@@ -1220,6 +1661,10 @@ FragmentLossStats get_fragment_loss_stats()
     out.fragments_missing = st.fragments_missing.load(std::memory_order_relaxed);
     out.gaps_total = st.gaps_total.load(std::memory_order_relaxed);
     out.gap_max = st.gap_max.load(std::memory_order_relaxed);
+    out.nack_explicit_sent = st.nack_explicit_sent.load(std::memory_order_relaxed);
+    out.nack_bitmap_sent = st.nack_bitmap_sent.load(std::memory_order_relaxed);
+    out.nack_explicit_truncated = st.nack_explicit_truncated.load(std::memory_order_relaxed);
+    out.nack_bitmap_truncated = st.nack_bitmap_truncated.load(std::memory_order_relaxed);
     return out;
 }
 
@@ -1236,6 +1681,10 @@ void reset_fragment_loss_stats()
     st.fragments_missing.store(0, std::memory_order_relaxed);
     st.gaps_total.store(0, std::memory_order_relaxed);
     st.gap_max.store(0, std::memory_order_relaxed);
+    st.nack_explicit_sent.store(0, std::memory_order_relaxed);
+    st.nack_bitmap_sent.store(0, std::memory_order_relaxed);
+    st.nack_explicit_truncated.store(0, std::memory_order_relaxed);
+    st.nack_bitmap_truncated.store(0, std::memory_order_relaxed);
 }
 
 /* ---------------- 发送节流全局配置 (阶段 1) ---------------- */

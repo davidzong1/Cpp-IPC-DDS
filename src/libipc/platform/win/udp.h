@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include "libipc/buffer.h"
+#include "libipc/udp.h"
 
 namespace ipc {
 namespace detail {
@@ -16,6 +17,11 @@ class UDPNode
     uint16_t port{};
     SOCKET server_fd{INVALID_SOCKET};
     std::vector<char> temp_buffer;
+    ipc::socket::NodeRole role{ipc::socket::NodeRole::SendRecv};
+
+    /* 见 posix/udp.h 同名函数: 只有入组的 socket 才收得到组播,
+     * 只发不收的节点跳过入组以屏蔽自己的回绕。 */
+    bool joins_group() const { return role != ipc::socket::NodeRole::SendOnly; }
 
     static bool ensure_wsa()
     {
@@ -49,6 +55,7 @@ public:
         : port(rhs.port)
         , server_fd(rhs.server_fd)
         , temp_buffer(std::move(rhs.temp_buffer))
+        , role(rhs.role)
     {
         std::memcpy(name, rhs.name, sizeof(name));
         std::memcpy(ip, rhs.ip, sizeof(ip));
@@ -56,6 +63,7 @@ public:
         rhs.name[0] = '\0';
         rhs.ip[0] = '\0';
         rhs.port = 0;
+        rhs.role = ipc::socket::NodeRole::SendRecv;
     }
 
     UDPNode& operator=(UDPNode&& rhs) noexcept
@@ -68,10 +76,12 @@ public:
             port = rhs.port;
             server_fd = rhs.server_fd;
             temp_buffer = std::move(rhs.temp_buffer);
+            role = rhs.role;
             rhs.server_fd = INVALID_SOCKET;
             rhs.name[0] = '\0';
             rhs.ip[0] = '\0';
             rhs.port = 0;
+            rhs.role = ipc::socket::NodeRole::SendRecv;
         }
         return *this;
     }
@@ -83,12 +93,24 @@ public:
         close();
     }
 
+    UDPNode(const char* name, const char* ip, uint16_t port, ipc::socket::NodeRole role)
+    {
+        create(name, ip, port, role);
+    }
+
     void create(const char* name, const char* ip, uint16_t port)
+    {
+        create(name, ip, port, ipc::socket::NodeRole::SendRecv);
+    }
+
+    void create(const char* name, const char* ip, uint16_t port, ipc::socket::NodeRole role)
     {
         if (server_fd != INVALID_SOCKET)
         {
             close();
         }
+
+        this->role = role;
 
         if (name)
         {
@@ -114,6 +136,8 @@ public:
         this->server_fd = INVALID_SOCKET;
         temp_buffer.resize(1'472);   // 预分配最大UDP报文长度
     }
+
+    ipc::socket::NodeRole node_role() const noexcept { return role; }
 
     /* 检查内核是否把请求的 socket 缓冲截断了, 截断则打一次警告。
      * 与 posix/udp.h 的同名函数对应, 详见那边的注释。
@@ -169,44 +193,63 @@ public:
 
         BOOL reuse = TRUE;
         int nRecvBuf = 1'024 * 1'024;   // 1MB
-        ::setsockopt(server_fd, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&nRecvBuf), sizeof(nRecvBuf));
-        warn_if_buffer_truncated(server_fd, nRecvBuf);
-        ::setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<char*>(&reuse), sizeof(reuse));
+        if (joins_group())
+        {
+            ::setsockopt(server_fd, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&nRecvBuf), sizeof(nRecvBuf));
+            warn_if_buffer_truncated(server_fd, nRecvBuf);
+        }
+
+        /* SendOnly 既不 bind 也不入组 —— 详见 posix/udp.h connect() 的注释。 */
+        if (joins_group())
+        {
+            ::setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<char*>(&reuse), sizeof(reuse));
 #ifdef SO_REUSEPORT
-        ::setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, reinterpret_cast<char*>(&reuse), sizeof(reuse));
+            ::setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, reinterpret_cast<char*>(&reuse), sizeof(reuse));
 #endif
 
-        sockaddr_in local_addr{};
-        local_addr.sin_family = AF_INET;
-        local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        local_addr.sin_port = htons(port);
+            sockaddr_in local_addr{};
+            local_addr.sin_family = AF_INET;
+            local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+            local_addr.sin_port = htons(port);
 
-        if (::bind(server_fd, reinterpret_cast<sockaddr*>(&local_addr), sizeof(local_addr)) == SOCKET_ERROR)
-        {
-            ::closesocket(server_fd);
-            server_fd = INVALID_SOCKET;
-            return false;
+            if (::bind(server_fd, reinterpret_cast<sockaddr*>(&local_addr), sizeof(local_addr)) == SOCKET_ERROR)
+            {
+                ::closesocket(server_fd);
+                server_fd = INVALID_SOCKET;
+                return false;
+            }
+
+            ip_mreq mreq{};
+            if (::InetPtonA(AF_INET, ip, &mreq.imr_multiaddr) != 1)
+            {
+                ::closesocket(server_fd);
+                server_fd = INVALID_SOCKET;
+                return false;
+            }
+            mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+
+            if (::setsockopt(server_fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<char*>(&mreq), sizeof(mreq))
+                == SOCKET_ERROR)
+            {
+                ::closesocket(server_fd);
+                server_fd = INVALID_SOCKET;
+                return false;
+            }
         }
-
-        ip_mreq mreq{};
-        if (::InetPtonA(AF_INET, ip, &mreq.imr_multiaddr) != 1)
+        else
         {
-            ::closesocket(server_fd);
-            server_fd = INVALID_SOCKET;
-            return false;
-        }
-        mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-
-        if (::setsockopt(server_fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<char*>(&mreq), sizeof(mreq))
-            == SOCKET_ERROR)
-        {
-            ::closesocket(server_fd);
-            server_fd = INVALID_SOCKET;
-            return false;
+            in_addr probe{};
+            if (::InetPtonA(AF_INET, ip, &probe) != 1)
+            {
+                ::closesocket(server_fd);
+                server_fd = INVALID_SOCKET;
+                return false;
+            }
         }
 
         unsigned char ttl = 1;
         ::setsockopt(server_fd, IPPROTO_IP, IP_MULTICAST_TTL, reinterpret_cast<char*>(&ttl), sizeof(ttl));
+        /* 保持 1: 置 0 会让本机其他进程也收不到, 见 posix/udp.h 的说明。 */
         unsigned char loop = 1;
         ::setsockopt(server_fd, IPPROTO_IP, IP_MULTICAST_LOOP, reinterpret_cast<char*>(&loop), sizeof(loop));
         return true;
@@ -242,7 +285,8 @@ public:
 
     ipc::buffer receive_nowait()
     {
-        if (server_fd == INVALID_SOCKET)
+        /* SendOnly 没有入组, 永远收不到东西。 */
+        if (server_fd == INVALID_SOCKET || !joins_group())
             return ipc::buffer();
 
         fd_set read_fds;
@@ -278,7 +322,8 @@ public:
 
     ipc::buffer receive(uint64_t tm)
     {
-        if (server_fd == INVALID_SOCKET)
+        /* 同 receive_nowait: SendOnly 不入组, 等下去只是白白阻塞。 */
+        if (server_fd == INVALID_SOCKET || !joins_group())
             return ipc::buffer();
 
         int err_cnt = 0;
@@ -368,7 +413,7 @@ public:
         }
 
         ip_mreq mreq{};
-        if (::InetPtonA(AF_INET, ip, &mreq.imr_multiaddr) == 1)
+        if (joins_group() && ::InetPtonA(AF_INET, ip, &mreq.imr_multiaddr) == 1)
         {
             mreq.imr_interface.s_addr = htonl(INADDR_ANY);
             ::setsockopt(server_fd, IPPROTO_IP, IP_DROP_MEMBERSHIP, reinterpret_cast<char*>(&mreq), sizeof(mreq));

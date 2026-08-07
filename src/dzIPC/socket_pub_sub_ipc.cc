@@ -52,6 +52,10 @@ socket_pub_ipc::~socket_pub_ipc()
     {
         publisher_->close();
     }
+    if (ack_rx_)
+    {
+        ack_rx_->close();
+    }
     exit_flag.store(true, std::memory_order_release);
 }
 
@@ -73,8 +77,21 @@ void socket_pub_ipc::InitChannel(std::string extra_info)
 {
     try
     {
+        /* 数据通道设 SendOnly —— 不加入组播组, 于是收不到自己发出去的分片回绕。
+         *
+         * 这是 Reliable 模式能工作的前提: 之前收发共用一条入了组的 socket,
+         * 1 MB 消息的 713 个分片全部回绕进自己的接收队列, 订阅端的 ACK 排在
+         * 它们后面, 等待窗口必然先超时(实测吞吐塌到 1 msg/s 而丢包率 0.00%)。
+         *
+         * 注意不能改用 IP_MULTICAST_LOOP=0 达到同样目的 —— 那是主机级开关,
+         * 会让本机所有进程都收不到, 同机 IPC 直接失效。详见 libipc/udp.h。 */
         publisher_ = std::make_shared<ipc::socket::UDPNode>(this->topic_name_.c_str(), this->ipaddr_.c_str(),
-                                                            this->port_hash_);
+                                                            this->port_hash_, ipc::socket::NodeRole::SendOnly);
+        /* ACK 回传通道: 订阅端把 ACK/NACK 发到这个端口, 上面没有自己的数据。 */
+        ack_rx_ = std::make_shared<ipc::socket::UDPNode>(
+            this->topic_name_.c_str(), this->ipaddr_.c_str(),
+            static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetAckData),
+            ipc::socket::NodeRole::RecvOnly);
         if (verbose_)
             std::cerr << "\033[32m[" << topic_name_ << "PubInfo] Publisher initialized on IP: " << this->ipaddr_
                       << " Port: " << this->port_hash_ << " for topic: " << topic_name_ << "\033[0m" << std::endl;
@@ -83,6 +100,19 @@ void socket_pub_ipc::InitChannel(std::string extra_info)
             std::cerr << "\033[31m[" << topic_name_
                       << "PubInfo] Failed to connect publisher,reconnect affter 1 second...\033[0m" << std::endl;
             std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        /* ACK 通道连不上不算致命: BestEffort 完全不需要它, 只有 publish_blocking
+         * 会退化回"在数据通道上等 ACK"(即端点分离之前的行为)。 */
+        if (!ack_rx_->connect())
+        {
+            if (verbose_)
+            {
+                std::cerr << "\033[33m[" << topic_name_
+                          << "PubInfo] ACK channel unavailable; publish_blocking() will fall back to the "
+                             "data socket and may time out on multi-fragment payloads\033[0m"
+                          << std::endl;
+            }
+            ack_rx_.reset();
         }
         std::string topic_type_name = topic_msg_->topic()
                                           ? dzIPC::info_pool::demangle(typeid(*topic_msg_->topic()).name())
@@ -303,28 +333,26 @@ bool socket_pub_ipc::publish_best_effort(std::shared_ptr<IpcMsgBase> msg)
     {
         ipc::buffer response_data(std::move(msg->serialize()));
         SocketSendOptions options;
-        /* pub-sub 恒定 BestEffort, 不做"大包自动升级 Reliable"。
+        /* pub-sub 的默认 publish 恒定 BestEffort, 不做"大包自动升级 Reliable"。
          *
-         * 曾经尝试按 payload 尺寸自动切到 Reliable+CRC32C 以压低大包丢包率
-         * (1 MB 时实测 4.7-7.4%), 但在 pub-sub 上不成立, 已撤销。两个原因:
+         * 历史背景: 曾按 payload 尺寸自动切到 Reliable+CRC32C 以压低大包丢包率,
+         * 因为两个原因撤销。端点分离之后其中一个已经解决, 另一个仍然成立:
          *
-         * 1) ACK 收不到。pub-sub 收发共用同一条组播 socket 且 IP_MULTICAST_LOOP=1,
-         *    发布端发出的分片会全部回绕到自己的接收队列 (64 KB = 45 片,
-         *    1 MB = 713 片)。订阅端回的 ACK 排在这些 loopback 分片之后, 首轮
-         *    等待窗口 (RTT 自适应后约 1 ms) 根本轮不到它 -> 每条消息都等满
-         *    超时预算才失败。实测吞吐塌到 1 msg/s, 而丢包率仍是 0.00% ——
-         *    数据面是通的, 坏的是确认机制本身。
+         * 1) [已解决] ACK 收不到。原先收发共用同一条入组的组播 socket, 发布端
+         *    自己的分片全部回绕到自己的接收队列(1 MB = 713 片), 订阅端的 ACK
+         *    排在它们之后, 首轮窗口根本轮不到 —— 实测吞吐塌到 1 msg/s 而丢包率
+         *    仍是 0.00%。现在 publisher_ 是 SendOnly(不入组, 无回绕) 且 ACK 走
+         *    独立的 ack_rx_ 端口, 确认能正常到达, 见 publish_blocking()。
          *
-         * 2) 组播下 ACK 语义不成立。N 个订阅者时, chunk_send_ex 收到任意一个
-         *    匹配 ACK 即判定 DeliveredAcked, 无法表达"谁收到了、谁没收到"。
+         * 2) [仍然成立] 组播下 ACK 语义不完整。N 个订阅者时, chunk_send_ex 收到
+         *    任意一个匹配 ACK 即判定 DeliveredAcked, 无法表达"谁收到了、谁没
+         *    收到"。这需要 RTPS 的 Reader/Writer 配对与逐 Reader 确认状态。
          *
-         * 结论: pub-sub 的可靠性不能靠反向 ACK 实现。要提升大包到达率, 正确
-         * 方向是扩大接收端 net.core.rmem_max (实测丢包是缓冲溢出型突发, 64 MB
-         * 缓冲下 1 MB payload 可跑满 110 MB/s 且零丢包), 或发送端限速, 或由
-         * 业务侧切成小块各自独立投递。
+         * 因此默认路径仍是 BestEffort: 需要确认的调用方显式用 publish_blocking(),
+         * 并接受"至少一个订阅者确认"这一较弱的语义。
          *
-         * 同一缺陷也存在于 publish_blocking() —— 它在 socket 上走 Reliable,
-         * 在 pub-sub 的单组播通道上同样收不到 ACK。 */
+         * 提升大包到达率的首选手段依然是扩大接收端 net.core.rmem_max —— 实测
+         * 丢包是缓冲溢出型突发, 64 MB 缓冲下 1 MB payload 可跑满 110 MB/s 零丢包。 */
         options.delivery = SocketDeliveryMode::BestEffort;
         options.integrity = SocketIntegrityMode::None;
         const SocketSendReport report = chunk_send_ex(publisher_, response_data, options);
@@ -356,6 +384,13 @@ bool socket_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint
         options.delivery = SocketDeliveryMode::Reliable;
         options.integrity = SocketIntegrityMode::CRC32C;
         options.ack_timeout_ms = tm;
+        /* 端点分离让这条路径从"实际不可用"变成可用: ACK 走 ack_rx_, 不再被自己
+         * 的数据分片挤掉。ack_rx_ 为空(ACK 端口没连上)时退化为旧行为。
+         *
+         * 组播下的语义边界: N 个订阅者时, 收到任意一个匹配 ACK 即判定成功,
+         * 无法表达"谁收到了、谁没收到"。要精确到每个订阅者, 需要 RTPS 的
+         * Reader/Writer 配对与逐 Reader 的确认状态, 不在本次范围内。 */
+        options.ack_node = ack_rx_;
         const SocketSendReport report = chunk_send_ex(publisher_, response_data, options);
         if (!report.ok())
         {
@@ -449,6 +484,8 @@ socket_sub_ipc::~socket_sub_ipc()
     }
     if (subscriber_)
         subscriber_->close();
+    if (ack_tx_)
+        ack_tx_->close();
     exit_flag.store(true, std::memory_order_release);
 }
 
@@ -492,7 +529,13 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
     try
     {
         subscriber_ = std::make_shared<ipc::socket::UDPNode>(this->topic_name_.c_str(), this->ipaddr_.c_str(),
-                                                             this->port_hash_);
+                                                             this->port_hash_, ipc::socket::NodeRole::RecvOnly);
+        /* ACK 发送通道 (端点分离): 发到发布端 ack_rx_ 监听的端口。
+         * SendOnly 不入组, 所以自己发的 ACK 不会回绕进 subscriber_。 */
+        ack_tx_ = std::make_shared<ipc::socket::UDPNode>(
+            this->topic_name_.c_str(), this->ipaddr_.c_str(),
+            static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetAckData),
+            ipc::socket::NodeRole::SendOnly);
         if (verbose_)
             std::cerr << "\033[32m[" << topic_name_ << "SubInfo] Subscriber initialized on IP: " << this->ipaddr_
                       << " Port: " << this->port_hash_ << " for topic: " << topic_name_ << "\033[0m" << std::endl;
@@ -501,6 +544,18 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
             std::cerr << "\033[31m[" << topic_name_
                       << "SubInfo] Failed to connect subscriber,reconnect affter 1 second...\033[0m" << std::endl;
             std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        /* ACK 通道连不上不影响收数据, 只是无法回确认 —— BestEffort 下本就不需要。 */
+        if (!ack_tx_->connect())
+        {
+            if (verbose_)
+            {
+                std::cerr << "\033[33m[" << topic_name_
+                          << "SubInfo] ACK channel unavailable; acknowledgements will fall back to the "
+                             "data socket\033[0m"
+                          << std::endl;
+            }
+            ack_tx_.reset();
         }
         std::shared_ptr<TopicData> topic_template;
         {
@@ -528,7 +583,7 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
                             }
                             local_msg.reset(topic_msg_->clone());
                         }
-                        if (chunk_rev_topic(subscriber_, local_msg, 50))   // rev timeput 50ms
+                        if (chunk_rev_topic(subscriber_, local_msg, 50, ack_tx_))   // rev timeput 50ms
                         {
                             std::shared_ptr<IpcMsgBase> ptr_cache;
                             local_msg->swap(ptr_cache);

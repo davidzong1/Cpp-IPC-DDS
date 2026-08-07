@@ -23,7 +23,10 @@ namespace dzIPC::common
     {
         uint64_t hash_value = static_cast<uint16_t>(dzIPC::common::fnv1a64(topic_name) % 10000);
         uint64_t limited_port = UDP_DISCOVERY_BASE_PORT + domain_id * hash_value;
-        if (limited_port > 65535)
+        /* 一个 topic 实际占用 base .. base+kUdpPortOffsetMax 这一段, 所以校验
+         * 上界的是段尾而不是段首 —— 否则基址刚好落在 65535 附近时, ACK 通道会
+         * 静默回绕到低端口, 撞上别的 topic。 */
+        if (limited_port + dzIPC::common::kUdpPortOffsetMax > 65535)
         {
             throw std::runtime_error("Calculated port number exceeds the maximum allowed value of 65535. Please choose a different topic name or domain ID.");
         }

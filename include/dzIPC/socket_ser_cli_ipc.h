@@ -54,6 +54,10 @@ private:
     std::thread* handshake_thread_{nullptr};
     std::shared_ptr<ipc::socket::UDPNode> ipc_r_ptr_;
     std::shared_ptr<ipc::socket::UDPNode> ipc_w_ptr_;
+    /* 端点分离的 ACK 通道。服务端: 在请求方向回 ACK(ack_r_tx_), 在响应方向收
+     * ACK(ack_w_rx_)。数据 socket 各自只承担一个方向, 因而可以不入组/入组分开设。 */
+    std::shared_ptr<ipc::socket::UDPNode> ack_r_tx_;
+    std::shared_ptr<ipc::socket::UDPNode> ack_w_rx_;
     std::vector<char> buf_;
     std::vector<char> response_buf_;
     dzIPC::info_pool::ScopedRegistration pool_reg_;
@@ -91,6 +95,10 @@ private:
     std::string topic_name_;
     std::shared_ptr<ipc::socket::UDPNode> ipc_r_ptr_;
     std::shared_ptr<ipc::socket::UDPNode> ipc_w_ptr_;
+    /* 端点分离的 ACK 通道, 与服务端方向相反: 客户端在请求方向收 ACK(ack_r_rx_),
+     * 在响应方向回 ACK(ack_w_tx_)。 */
+    std::shared_ptr<ipc::socket::UDPNode> ack_r_rx_;
+    std::shared_ptr<ipc::socket::UDPNode> ack_w_tx_;
     std::vector<char> buf_;
     std::vector<char> response_buf_;
     std::thread* handshake_thread_{nullptr};

@@ -102,6 +102,14 @@ socket_ser_ipc::~socket_ser_ipc()
     {
         ipc_w_ptr_->close();
     }
+    if (ack_r_tx_)
+    {
+        ack_r_tx_->close();
+    }
+    if (ack_w_rx_)
+    {
+        ack_w_rx_->close();
+    }
     exit_flag.store(true, std::memory_order_release);
 }
 
@@ -112,10 +120,26 @@ void socket_ser_ipc::InitChannel(std::string extra_info)
 {
     try
     {
+        /* 服务端: 请求方向只收(RecvOnly), 响应方向只发(SendOnly)。
+         * 这两条通道各自单向, 所以能干净地分开角色 —— 响应通道不入组, 自己发出
+         * 的响应分片不会回绕进来堵住客户端的 ACK。 */
         ipc_r_ptr_ = std::make_shared<ipc::socket::UDPNode>(this->topic_name_.c_str(), this->ipaddr_.c_str(),
-                                                            this->port_hash_);
-        ipc_w_ptr_ = std::make_shared<ipc::socket::UDPNode>(this->topic_name_.c_str(), this->ipaddr_.c_str(),
-                                                            this->port_hash_ + 1);
+                                                            static_cast<uint16_t>(this->port_hash_),
+                                                            ipc::socket::NodeRole::RecvOnly);
+        ipc_w_ptr_ = std::make_shared<ipc::socket::UDPNode>(
+            this->topic_name_.c_str(), this->ipaddr_.c_str(),
+            static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetResponse),
+            ipc::socket::NodeRole::SendOnly);
+        /* 请求方向的 ACK: 服务端发出 -> 客户端收 */
+        ack_r_tx_ = std::make_shared<ipc::socket::UDPNode>(
+            this->topic_name_.c_str(), this->ipaddr_.c_str(),
+            static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetAckData),
+            ipc::socket::NodeRole::SendOnly);
+        /* 响应方向的 ACK: 客户端发出 -> 服务端收 */
+        ack_w_rx_ = std::make_shared<ipc::socket::UDPNode>(
+            this->topic_name_.c_str(), this->ipaddr_.c_str(),
+            static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetAckResponse),
+            ipc::socket::NodeRole::RecvOnly);
         if (verbose_)
         {
             std::cerr << "\033[32m[" << topic_name_ << "SerInfo] Request initialized on IP: " << this->ipaddr_
@@ -134,6 +158,16 @@ void socket_ser_ipc::InitChannel(std::string extra_info)
             std::cerr << "\033[31m[" << topic_name_
                       << "SerInfo] Failed to connect response UDP,reconnect affter 1 second...\033[0m" << std::endl;
             std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        /* ACK 通道连不上不致命: 请求/响应都走 BestEffort, 不依赖确认。
+         * 置空后 chunk_rev_server 退回"在数据通道上回 ACK"的旧行为。 */
+        if (!ack_r_tx_->connect())
+        {
+            ack_r_tx_.reset();
+        }
+        if (!ack_w_rx_->connect())
+        {
+            ack_w_rx_.reset();
         }
         std::shared_ptr<ServiceData> message_template;
         {
@@ -253,7 +287,7 @@ void socket_ser_ipc::response_thread_func()
             }
             local_msg.reset(message_->clone());
         }
-        if (!chunk_rev_server(ipc_r_ptr_, local_msg, ServerRevTime, true))
+        if (!chunk_rev_server(ipc_r_ptr_, local_msg, ServerRevTime, true, ack_r_tx_))
         {
             continue;
         }
@@ -267,8 +301,12 @@ void socket_ser_ipc::response_thread_func()
             callback(local_msg);
         }
         ipc::buffer response_data(std::move(local_msg->response()->serialize()));
-        /* 响应与请求同理, 走 BestEffort。ipc_w_ptr_ 同样是组播 socket, 在它上面
-         * 等 ACK 会撞上自己分片的 loopback 回绕。原因详见 send_request()。 */
+        /* 响应与请求同理, 走 BestEffort。64 MB 缓冲下实测 110 MB/s 零丢包, 切
+         * Reliable 要为每条消息多付一次 ACK 往返, 吞吐下降而收益不明显。
+         *
+         * 端点分离与 Heartbeat 在这条路径上的收益不是改变投递语义, 而是**丢片时
+         * 更快放弃**: 客户端收到 Final 心跳就立即丢弃残缺消息, 不再空等两轮
+         * NACK 超时(713 分片时最坏能省下近 1 秒)。 */
         if (!chunk_send(ipc_w_ptr_, response_data))
         {
             std::cerr << "\033[31m[" << topic_name_ << "SerInfo] Error sending response: Failed to send"
@@ -316,6 +354,14 @@ socket_cli_ipc::~socket_cli_ipc()
     {
         ipc_w_ptr_->close();
     }
+    if (ack_r_rx_)
+    {
+        ack_r_rx_->close();
+    }
+    if (ack_w_tx_)
+    {
+        ack_w_tx_->close();
+    }
     exit_flag.store(true, std::memory_order_release);
 }
 
@@ -327,10 +373,24 @@ void socket_cli_ipc::InitChannel(std::string extra_info)
 {
     try
     {
+        /* 客户端与服务端镜像: 请求方向只发, 响应方向只收。 */
         ipc_r_ptr_ = std::make_shared<ipc::socket::UDPNode>(this->topic_name_.c_str(), this->ipaddr_.c_str(),
-                                                            this->port_hash_);
-        ipc_w_ptr_ = std::make_shared<ipc::socket::UDPNode>(this->topic_name_.c_str(), this->ipaddr_.c_str(),
-                                                            this->port_hash_ + 1);
+                                                            static_cast<uint16_t>(this->port_hash_),
+                                                            ipc::socket::NodeRole::SendOnly);
+        ipc_w_ptr_ = std::make_shared<ipc::socket::UDPNode>(
+            this->topic_name_.c_str(), this->ipaddr_.c_str(),
+            static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetResponse),
+            ipc::socket::NodeRole::RecvOnly);
+        /* 请求方向的 ACK: 服务端发出 -> 客户端收 */
+        ack_r_rx_ = std::make_shared<ipc::socket::UDPNode>(
+            this->topic_name_.c_str(), this->ipaddr_.c_str(),
+            static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetAckData),
+            ipc::socket::NodeRole::RecvOnly);
+        /* 响应方向的 ACK: 客户端发出 -> 服务端收 */
+        ack_w_tx_ = std::make_shared<ipc::socket::UDPNode>(
+            this->topic_name_.c_str(), this->ipaddr_.c_str(),
+            static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetAckResponse),
+            ipc::socket::NodeRole::SendOnly);
         if (verbose_)
         {
             std::cerr << "\033[32m[" << topic_name_ << "CliInfo] Request initialized on IP: " << this->ipaddr_
@@ -349,6 +409,15 @@ void socket_cli_ipc::InitChannel(std::string extra_info)
             std::cerr << "\033[31m[" << topic_name_
                       << "CliInfo] Failed to connect response UDP,reconnect affter 1 second...\033[0m" << std::endl;
             std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        /* ACK 通道非关键路径, 连不上就退回旧行为。 */
+        if (!ack_r_rx_->connect())
+        {
+            ack_r_rx_.reset();
+        }
+        if (!ack_w_tx_->connect())
+        {
+            ack_w_tx_.reset();
         }
     }
     catch (const std::exception& e)
@@ -471,22 +540,24 @@ bool socket_cli_ipc::send_request(std::shared_ptr<ServiceData>& request, uint64_
         ipc::buffer request_data(std::move(request->request()->serialize()));
         /* ser-cli 两端都用 BestEffort (chunk_send), 不等 ACK。
          *
-         * 之前改成 chunk_send_reliable 是为了修 1 MB 失败, 但那是错误方向:
-         *   1. chunk_send_reliable 在 ipc_r_ptr_ 上等 ACK, 而 ipc_r_ptr_ 是组播
-         *      socket 且 IP_MULTICAST_LOOP=1 —— 自己发的分片会回绕进自己的队列,
-         *      和 pub-sub 单通道的失败模式完全相同。
-         *   2. 1 MB 的原始失败出现在 "Error receiving response", 不是 "Failed to send"
-         *      —— 发送端从没有问题, 是接收端 rmem_max=208KB 的缓冲溢出导致片丢。
+         * 曾经改成 chunk_send_reliable 试图修 1 MB 失败, 那是错误方向:
+         *   1. 当时的 ipc_r_ptr_ 收发共用且入了组, 在它上面等 ACK 会撞上自己
+         *      分片的 loopback 回绕 —— 与 pub-sub 单通道的失败模式相同。
+         *   2. 1 MB 的原始失败出现在 "Error receiving response" 而不是
+         *      "Failed to send" —— 发送端从没有问题, 是接收端 rmem_max=208KB
+         *      的缓冲溢出导致片丢。
          *
-         * 正确方向是发送端限速(--rate-limit), 让 713 个分片摊到时间上不瞬时灌满
-         * 对端缓冲。BestEffort 发送即触发限速, 不需要也不应该等 ACK。 */
+         * 现在 ipc_r_ptr_ 已是 SendOnly(不入组, 无回绕), 技术上可以走 Reliable,
+         * 但仍然维持 BestEffort: 64 MB 缓冲下已能跑 110 MB/s 零丢包, 多一次 ACK
+         * 往返只会拉低吞吐。要可靠投递的调用方可以显式用带 ack_node 的
+         * chunk_send_reliable(ipc_r_ptr_, data, ack_r_rx_)。 */
         if (!chunk_send(ipc_r_ptr_, request_data))
         {
             std::cerr << "\033[31m[" << topic_name_ << "CliInfo] Error sending request: Failed to send"
                       << "\033[0m" << std::endl;
             return false;
         }
-        if (!chunk_rev_server(ipc_w_ptr_, request, rev_tm, false))
+        if (!chunk_rev_server(ipc_w_ptr_, request, rev_tm, false, ack_w_tx_))
         {
             std::cerr << "\033[31m[" << topic_name_
                       << "CliInfo] Error receiving response: Failed to receive or parse response\033[0m" << std::endl;

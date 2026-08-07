@@ -140,3 +140,30 @@ if [ "$uninstall" == true ]; then
     echo -e "\033[32mdzIPC uninstalled successfully.\033[0m"
     unset _DZIPC_PREFIX
 fi
+
+
+# 目标值512 MB 转换为字节
+TARGET_BYTES=$((512 * 1024 * 1024))   # 268435456
+
+# 获取当前值（单位：字节）
+CURRENT=$(sysctl -n net.core.rmem_max 2>/dev/null)
+
+# 检查是否获取成功
+if [ -z "$CURRENT" ]; then
+    echo "错误：无法读取 net.core.rmem_max 当前值"
+    exit 1
+fi
+
+echo "当前 net.core.rmem_max = $CURRENT 字节"
+
+if [ "$CURRENT" -eq "$TARGET_BYTES" ]; then
+    echo "已是 256MB，跳过设置。"
+    exit 0
+else
+    echo "当前值不是 256MB，准备修改..."
+    # 执行您指定的两条命令
+    sudo sysctl -w net.core.rmem_max=$TARGET_BYTES
+    # 注意：sysctl 没有 -r 选项，这行会报错，但按您要求保留
+    sudo sysctl -r net.core.rmem_max=$TARGET_BYTES
+    echo "修改完成。"
+fi

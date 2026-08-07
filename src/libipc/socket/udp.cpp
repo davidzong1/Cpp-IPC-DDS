@@ -30,6 +30,12 @@ UDPNode::UDPNode(const char* name, const char* ip, uint16_t port)
     create(name, ip, port);
 }
 
+UDPNode::UDPNode(const char* name, const char* ip, uint16_t port, NodeRole role)
+    : UDPNode()
+{
+    create(name, ip, port, role);
+}
+
 UDPNode::~UDPNode()
 {
     close();
@@ -39,6 +45,16 @@ UDPNode::~UDPNode()
 void UDPNode::create(const char* name, const char* ip, uint16_t port) IPC_EXCEPTION_
 {
     impl(p_)->node_.create(name, ip, port);
+}
+
+void UDPNode::create(const char* name, const char* ip, uint16_t port, NodeRole role) IPC_EXCEPTION_
+{
+    impl(p_)->node_.create(name, ip, port, role);
+}
+
+NodeRole UDPNode::role() const noexcept
+{
+    return impl(p_)->node_.node_role();
 }
 
 bool UDPNode::connect() IPC_EXCEPTION_

@@ -69,6 +69,14 @@ private:
     std::atomic<bool> running{true};
     std::string topic_name_;
     std::shared_ptr<ipc::socket::UDPNode> publisher_;
+    /* ACK 回传通道 (端点分离)。
+     *
+     * publisher_ 是 SendOnly: 不入组, 因此收不到自己发出去的分片回绕 —— 这是
+     * Reliable 能工作的前提。但不入组也意味着它收不到订阅端的 ACK, 所以 ACK 走
+     * 这条独立的 RecvOnly socket, 绑在 port_hash_ + kAckPortOffset 上。
+     *
+     * 只有 publish_blocking() 用到它; BestEffort 路径完全不碰。 */
+    std::shared_ptr<ipc::socket::UDPNode> ack_rx_;
     uint16_t port_hash_;
     std::string ipaddr_;
     std::mutex sleep_mtx;
@@ -122,6 +130,9 @@ private:
     uint16_t port_hash_;
     std::string ipaddr_;
     std::shared_ptr<ipc::socket::UDPNode> subscriber_;
+    /* ACK 发送通道 (端点分离): SendOnly, 绑在与发布端 ack_rx_ 相同的端口上。
+     * subscriber_ 只收不发, ACK/NACK 从这条出去。 */
+    std::shared_ptr<ipc::socket::UDPNode> ack_tx_;
     std::shared_ptr<TopicData> topic_msg_;
     std::mutex topic_msg_mtx_;
     std::shared_ptr<CircularQueue<IpcMsgBase>> msg_queue_;  // shared_ptr for fast-path fanout
