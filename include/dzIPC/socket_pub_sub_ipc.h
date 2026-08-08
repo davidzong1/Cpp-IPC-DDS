@@ -34,6 +34,18 @@ public:
     void InitChannel(std::string extra_info = "");
     bool publish(std::shared_ptr<IpcMsgBase> msg);
     bool publish_best_effort(std::shared_ptr<IpcMsgBase> msg) override;
+    /* publish_blocking: "至少一个确认", 不是全部确认。
+     *
+     * 返回 true 当且仅当收到**任意一个**匹配本消息的 ACK —— chunk_send_ex
+     * 首个匹配即判定 DeliveredAcked (data_rev.cc 的 got_ack 分支)。N 个订阅者
+     * 时, true 只说明"至少有一个收到了", 不保证其余 N-1 个; false 说明等待
+     * 窗口内一个都没收到, 或 CRC 校验失败。
+     *
+     * 防误用: 该接口无法表达"谁收到了、谁没收到"。全体确认需要 RTPS 的
+     * Reader/Writer 配对与逐 Reader 确认状态, 本轮明确不做 (DECISIONS.md
+     * D-3)。也不要用 IpcInfoPool 的"进程活着"当"正在收数据" —— 其 liveness
+     * 是 kill(pid,0) (ipc_info_pool.cc:105-123), fork 入组慢 / socket 坏 /
+     * pid 复用任一情形都会让基于它的全体确认永久超时。 */
     bool publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm) override;
     bool publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg) override;
 

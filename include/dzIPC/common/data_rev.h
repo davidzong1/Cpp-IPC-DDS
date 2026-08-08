@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 #include "dzIPC/common/srv_data.h"
 #include "dzIPC/common/topic_data.h"
 #include "libipc/export.h"
@@ -160,6 +161,30 @@ struct FragmentLossStats
     std::uint64_t nack_explicit_truncated{0};   // 因 256 片上限被截断的次数
     std::uint64_t nack_bitmap_truncated{0};     // 因跨度超出单帧容量被截断的次数
 
+    /* ---- 跨轮 NACK 抑制 (阶段 3, sender 侧采集) ----
+     * 上面 4 个 NACK 计数都在接收端 (send_nack_*, 发 NACK 的一方), 量不到
+     * 发送端抑制的效果, 补这两个 (采集点在 chunk_send_ex 的重传批):
+     *   nack_suppressed            = 因 K=1 抑制窗口被压掉的重传页数, 抑制
+     *     生效的直接证据。压力场景 A (多订阅者错峰) 期望 > 0; 场景 B (单
+     *     订阅者) 期望 ≈ 0 (单 peer 时抑制整体关闭)。
+     *   pages_retransmitted_again  = 同一条消息内被重传 ≥2 次的页数。无抑制
+     *     基线 > 0 —— NACK 延迟/重复到达会触发重复重传; 抑制后此类场景
+     *     趋近 0, 重传本身又丢 (Case D) 时如实 > 0。 */
+    std::uint64_t nack_suppressed{0};
+    std::uint64_t pages_retransmitted_again{0};
+
+    /* ---- 闭环自适应限速 (段3 任务2b, sender 侧采集) ----
+     * rate_reductions / rate_increments 是 AIMD 减半/增倍动作计数, 比值 +
+     * rate_bps_now 的 trace 是场景 C 标定观察点 (K 与 kOverflowSpanPages);
+     * rate_floor_warns = 下限告警次数 (每节点一次, 场景 E 判据);
+     * retransmit_bytes = 重传批实际发出的字节数 (场景 C 判据 ③)。
+     * 计数全走 frag_track_enabled() 门; 自适应功能本身不受门控。 */
+    std::uint64_t rate_reductions{0};
+    std::uint64_t rate_increments{0};
+    std::uint64_t rate_floor_warns{0};
+    std::uint64_t retransmit_bytes{0};
+    std::size_t rate_bps_now{0};   // 当前生效速率快照 (采样周期读, 非自旋)
+
     /* 平均空洞长度。接近 1 说明随机丢包, 显著大于 1 说明突发。 */
     double mean_gap_len() const
     {
@@ -173,6 +198,27 @@ IPC_EXPORT bool fragment_loss_tracking_enabled();
 /* 读取累计值快照 (跨线程安全)。 */
 IPC_EXPORT FragmentLossStats get_fragment_loss_stats();
 IPC_EXPORT void reset_fragment_loss_stats();
+
+/* ---------------- 对端身份表 (阶段 2, DECISIONS.md D-1 选项 B) ----------------
+ *
+ * 发送端按 receiver_id 记录每个对端(订阅者)的确认进度 —— 段3 跨轮 NACK
+ * 抑制与 WHC 流控的前置数据。表内字段按 D-1 裁定: 只有最高确认序号 + 两个
+ * 时间戳; ack_count 是任务验收要求的可观测出口 (导出"确认数") 才加的。
+ *
+ * 用法 (多订阅者验证): 每条 Reliable 消息, chunk_send_ex 只观察**第一个**
+ * 匹配 ACK 就返回 (data_rev.cc 的 got_ack 分支, 其余 ACK 被 drain 丢弃),
+ * 因此验证 N 个订阅者要连发多条消息, 检查各条目的 ack_count 是否都在增长、
+ * 且各 highest_acked_seq 接近发送序号。注意 receiver_id 是进程级身份
+ * (local_node_id, 每进程一个), 同进程内多个订阅者会合并为同一条目。 */
+struct PeerAckInfo
+{
+    uint32_t receiver_id{0};         // 对端自报身份 (data_rev.cc local_node_id)
+    uint32_t highest_acked_seq{0};   // 该对端确认过的最高消息序号
+    uint64_t ack_count{0};           // 该对端累计确认次数
+};
+
+/* 读取指定发送节点的对端确认表快照, 按 receiver_id 升序 (跨线程安全)。 */
+IPC_EXPORT std::vector<PeerAckInfo> get_peer_ack_info(const ipc::socket::UDPNode* node);
 
 /* ---------------- 发送节流全局配置 (阶段 1) ----------------
  *
