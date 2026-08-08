@@ -45,26 +45,40 @@ class CMakeBuildExt(build_ext):
             "--build",
             str(cmake_build_dir),
             "--target",
-            "dzipc",
+            "_dzipc_core",
             "-j",
         ]
         subprocess.check_call(build_cmd)
 
         ext_suffix = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
-        built_module = cmake_build_dir / "python" / f"dzipc{ext_suffix}"
+        built_module = cmake_build_dir / "python" / f"_dzipc_core{ext_suffix}"
         if not built_module.exists():
             raise FileNotFoundError(f"未找到已构建模块: {built_module}")
 
-        output_path = Path(self.get_ext_fullpath(ext.name))
+        # 安装到 dzpc 包目录
+        output_path = Path(self.get_ext_fullpath("dzipc._dzipc_core"))
         output_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(built_module, output_path)
+
+        # 同时安装 Python 包文件
+        pkg_src = python_dir / "dzipc"
+        pkg_dst = output_path.parent
+        if pkg_src.is_dir():
+            for item in pkg_src.iterdir():
+                if item.is_file() and item.suffix == ".py":
+                    shutil.copy2(item, pkg_dst / item.name)
+                elif item.is_dir() and item.name in {"gen_msgs", "gen_srv"}:
+                    gen_dst = pkg_dst / item.name
+                    if gen_dst.exists():
+                        shutil.rmtree(gen_dst)
+                    shutil.copytree(item, gen_dst)
 
 
 setup(
     name="dzipc",
-    version="0.1.0",
-    description="Python bindings for cpp-ipc (dzIPC)",
-    ext_modules=[Extension("dzipc", sources=[])],
+    version="0.2.0",
+    description="Python bindings for cpp-ipc (dzIPC) with dynamic message support",
+    ext_modules=[Extension("dzipc._dzipc_core", sources=[])],
     cmdclass={"build_ext": CMakeBuildExt},
     zip_safe=False,
 )

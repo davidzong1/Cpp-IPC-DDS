@@ -142,6 +142,11 @@ public:
         return head_.force_push(que, std::forward<F>(f), block_);
     }
 
+    template <typename Q, typename F>
+    bool push_sniffer(Q* que, F&& f) {
+        return head_.push_sniffer(que, std::forward<F>(f), block_);
+    }
+
     template <typename Q, typename F, typename R>
     bool pop(Q* que, cursor_t* cur, F&& f, R&& out) {
         if (cur == nullptr) return false;

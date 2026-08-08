@@ -10,6 +10,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include "dzIPC/common/name_operator.h"
 
 namespace dzIPC {
 struct shm_sniffer_options
@@ -43,51 +44,22 @@ shm_sniffer::~shm_sniffer()
 void shm_sniffer::create_sniffer(const std::string& topic_name, int domain_id, bool ser_or_topic, uint32_t msg_id)
 {
     stop_.store(false, std::memory_order_release);
+    topic_name_ = topic_name;
+    domain_id_ = domain_id;
     this->ser_or_topic_ = ser_or_topic;
     this->msg_id_ = msg_id;
-    // The shm publishers/servers do NOT open a route/server with the raw topic
-    // name — they mangle it the same way the regular sub/cli does. The sniffer
-    // must apply the exact same scheme to attach to the right SHM region.
-    //   topic mode  : "dz_ipc_<topic>_topic"            -> ipc::route
-    //   service mode: "dz_ipc_<topic>_ser_r" + "_ser_w" -> ipc::server
-    shm_sniffer_options opt;
-    opt.pref = "";
-    if (ser_or_topic_)
+    std::string control_name =
+        ser_or_topic_ ? "dz_ipc_" + sanitize_topic_name(topic_name) + "_ser_control"
+                      : "dz_ipc_" + sanitize_topic_name(topic_name) + "_topic_control";
+    if (!control_plane_.open(control_name))
     {
-        opt.topo = ipc::sniffer::topology::server;
-        opt.name = "dz_ipc_" + topic_name + "_ser_r";
-    }
-    else
-    {
-        opt.topo = ipc::sniffer::topology::route;
-        opt.name = "dz_ipc_" + topic_name + "_topic";
-    }
-    req_ = std::make_unique<ipc::sniffer>();
-    bool ok = opt.pref.empty() ? req_->open(opt.name.c_str(), opt.topo)
-                               : req_->open(ipc::prefix{opt.pref.c_str()}, opt.name.c_str(), opt.topo);
-    if (!ok)
-    {
-        std::fprintf(stderr, "error: failed to open channel '%s' (prefix='%s', topology=%s)\n", opt.name.c_str(),
-                     opt.pref.c_str(),
-                     opt.topo == ipc::sniffer::topology::server  ? "server"
-                     : opt.topo == ipc::sniffer::topology::route ? "route"
-                                                                 : "channel");
-
+        std::fprintf(stderr, "error: failed to open control plane '%s'\n", control_name.c_str());
         std::exit(1);
     }
-    if (this->ser_or_topic_)
+    generation_ = control_plane_.generation();
+    if (!open_channels(topic_name, domain_id, ser_or_topic))
     {
-        std::string res_name = "dz_ipc_" + topic_name + "_ser_w";
-        res_ = std::make_unique<ipc::sniffer>();
-        bool ok = opt.pref.empty()
-                      ? res_->open(res_name.c_str(), ipc::sniffer::topology::server)
-                      : res_->open(ipc::prefix{opt.pref.c_str()}, res_name.c_str(), ipc::sniffer::topology::server);
-        if (!ok)
-        {
-            std::fprintf(stderr, "error: failed to open channel '%s' (prefix='%s', topology=%s)\n", res_name.c_str(),
-                         opt.pref.c_str(), "server");
-            std::exit(1);
-        }
+        std::exit(1);
     }
     ready.store(true, std::memory_order_release);
     recv_thread_ = std::thread(
@@ -95,6 +67,7 @@ void shm_sniffer::create_sniffer(const std::string& topic_name, int domain_id, b
         {
             while (!stop_.load(std::memory_order_acquire))
             {
+                reopen_if_generation_changed();
                 sniffer_info got = recv_inner(50);
                 // Only refresh the cache when we actually received something, so a
                 // timeout in this iteration doesn't clobber a payload that the
@@ -108,6 +81,80 @@ void shm_sniffer::create_sniffer(const std::string& topic_name, int domain_id, b
                 std::this_thread::yield();
             }
         });
+}
+
+bool shm_sniffer::open_channels(const std::string& topic_name, int, bool ser_or_topic)
+{
+    // The shm publishers/servers do NOT open a route/server with the raw topic
+    // name — they mangle it the same way the regular sub/cli does. The sniffer
+    // must apply the exact same scheme to attach to the right SHM region.
+    //   topic mode  : "dz_ipc_<topic>_topic"            -> ipc::route
+    //   service mode: "dz_ipc_<topic>_ser_r" + "_ser_w" -> ipc::server
+    shm_sniffer_options opt;
+    opt.pref = "";
+    std::string sanitized = sanitize_topic_name(topic_name);
+    if (ser_or_topic_)
+    {
+        opt.topo = ipc::sniffer::topology::server;
+        opt.name = "dz_ipc_" + sanitized + "_ser_r";
+    }
+    else
+    {
+        opt.topo = ipc::sniffer::topology::route;
+        opt.name = "dz_ipc_" + sanitized + "_topic";
+    }
+    req_ = std::make_unique<ipc::sniffer>();
+    bool ok = opt.pref.empty() ? req_->open(opt.name.c_str(), opt.topo)
+                               : req_->open(ipc::prefix{opt.pref.c_str()}, opt.name.c_str(), opt.topo);
+    if (!ok)
+    {
+        std::fprintf(stderr, "error: failed to open channel '%s' (prefix='%s', topology=%s)\n", opt.name.c_str(),
+                     opt.pref.c_str(),
+                     opt.topo == ipc::sniffer::topology::server  ? "server"
+                     : opt.topo == ipc::sniffer::topology::route ? "route"
+                                                                 : "channel");
+
+        return false;
+    }
+    if (ser_or_topic)
+    {
+        std::string res_name = "dz_ipc_" + sanitized + "_ser_w";
+        res_ = std::make_unique<ipc::sniffer>();
+        bool ok = opt.pref.empty()
+                      ? res_->open(res_name.c_str(), ipc::sniffer::topology::server)
+                      : res_->open(ipc::prefix{opt.pref.c_str()}, res_name.c_str(), ipc::sniffer::topology::server);
+        if (!ok)
+        {
+            std::fprintf(stderr, "error: failed to open channel '%s' (prefix='%s', topology=%s)\n", res_name.c_str(),
+                         opt.pref.c_str(), "server");
+            return false;
+        }
+    }
+    else
+    {
+        res_.reset();
+    }
+    return true;
+}
+
+void shm_sniffer::reopen_if_generation_changed()
+{
+    using dzIPC::control_plane_shm::TopicState;
+    if (!control_plane_.valid() || control_plane_.state() != TopicState::Ready)
+    {
+        return;
+    }
+    const std::uint32_t current_generation = control_plane_.generation();
+    if (current_generation == 0 || current_generation == generation_)
+    {
+        return;
+    }
+    if (open_channels(topic_name_, domain_id_, ser_or_topic_))
+    {
+        generation_ = current_generation;
+        std::lock_guard<std::mutex> lock(msg_mutex);
+        msg_cache.reset();
+    }
 }
 
 sniffer_info shm_sniffer::try_recv() noexcept

@@ -44,6 +44,10 @@ inline auto& acc_of(void* mem, std::size_t size) {
 namespace ipc {
 namespace shm {
 
+ipc::string object_name(char const *name) {
+    return (name != nullptr && name[0] == '/') ? ipc::string{name} : ipc::string{"/"} + name;
+}
+
 id_t acquire(char const * name, std::size_t size, unsigned mode) {
     if (!is_valid_string(name)) {
         ipc::error("fail acquire: name is empty\n");
@@ -51,7 +55,7 @@ id_t acquire(char const * name, std::size_t size, unsigned mode) {
     }
     // For portable use, a shared memory object should be identified by name of the form /somename.
     // see: https://man7.org/linux/man-pages/man3/shm_open.3.html
-    ipc::string op_name = ipc::string{"/"} + name;
+    ipc::string op_name = object_name(name);
     // Open the object for read-write access.
     int flag = O_RDWR;
     switch (mode) {
@@ -167,7 +171,7 @@ std::int32_t release(id_t id) noexcept {
     std::int32_t ret = -1;
     auto ii = static_cast<id_info_t*>(id);
     if (ii->mem_ == nullptr || ii->size_ == 0) {
-        ipc::error("fail release: invalid id (mem = %p, size = %zd), name = %s\n", 
+        ipc::error("fail release: invalid id (mem = %p, size = %zd), name = %s\n",
                     ii->mem_, ii->size_, ii->name_.c_str());
     }
     else if ((ret = acc_of(ii->mem_, ii->size_).fetch_sub(1, std::memory_order_acq_rel)) <= 1) {
@@ -179,6 +183,24 @@ std::int32_t release(id_t id) noexcept {
     else ::munmap(ii->mem_, ii->size_);
     mem::free(ii);
     return ret;
+}
+
+std::int32_t release_no_unlink(id_t id) noexcept {
+    if (id == nullptr) {
+        ipc::error("fail release_no_unlink: invalid id (null)\n");
+        return -1;
+    }
+    auto ii = static_cast<id_info_t*>(id);
+    if (ii->mem_ == nullptr || ii->size_ == 0) {
+        ipc::error("fail release_no_unlink: invalid id (mem = %p, size = %zd), name = %s\n",
+                    ii->mem_, ii->size_, ii->name_.c_str());
+    }
+    else {
+        acc_of(ii->mem_, ii->size_).fetch_sub(1, std::memory_order_acq_rel);
+        ::munmap(ii->mem_, ii->size_);
+    }
+    mem::free(ii);
+    return 0;
 }
 
 void remove(id_t id) noexcept {
@@ -199,7 +221,8 @@ void remove(char const * name) noexcept {
         ipc::error("fail remove: name is empty\n");
         return;
     }
-    ::shm_unlink(name);
+    const ipc::string op_name = object_name(name);
+    ::shm_unlink(op_name.c_str());
 }
 
 } // namespace shm

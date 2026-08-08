@@ -36,27 +36,35 @@ if (PYBIND11_CMAKE_DIR_RESULT EQUAL 0 AND EXISTS "${PYBIND11_CMAKE_DIR}")
 endif()
 
 find_package(pybind11 CONFIG REQUIRED)
+if (Python3_VERSION VERSION_GREATER_EQUAL "3.11" AND pybind11_VERSION VERSION_LESS "2.10")
+    message(FATAL_ERROR
+        "Python ${Python3_VERSION} requires pybind11 >= 2.10 for this binding; "
+        "found pybind11 ${pybind11_VERSION}. Install pybind11 in the selected "
+        "Python environment or pass -Dpybind11_DIR=<path>.")
+endif()
+message(STATUS "Building _dzipc_core with Python ${Python3_VERSION} and pybind11 ${pybind11_VERSION}")
+
 # Unicode Support
 add_definitions(-DUNICODE -D_UNICODE)
 
-pybind11_add_module(dzipc MODULE src/interface.cc)
-add_dependencies(dzipc generate_ipc_messages)
+pybind11_add_module(_dzipc_core MODULE src/interface.cc)
+add_dependencies(_dzipc_core generate_ipc_messages)
 
-target_link_libraries(dzipc PRIVATE ipc)
-target_include_directories(dzipc PRIVATE ${LIBIPC_PROJECT_DIR}/include)
+target_link_libraries(_dzipc_core PRIVATE ipc)
+target_include_directories(_dzipc_core PRIVATE ${LIBIPC_PROJECT_DIR}/include)
 
-target_compile_features(dzipc PRIVATE cxx_std_17)
+target_compile_features(_dzipc_core PRIVATE cxx_std_17)
 if (MSVC)
-    target_compile_options(dzipc PRIVATE /utf-8)
+    target_compile_options(_dzipc_core PRIVATE /utf-8)
 endif()
-set_target_properties(dzipc PROPERTIES
+set_target_properties(_dzipc_core PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/python
 )
 
 if (NOT ROSBUILD)
-    install(TARGETS dzipc
-        LIBRARY DESTINATION lib/python
-        RUNTIME DESTINATION lib/python
-        ARCHIVE DESTINATION lib/python
+    install(TARGETS _dzipc_core
+        LIBRARY DESTINATION lib/python/dzipc
+        RUNTIME DESTINATION lib/python/dzipc
+        ARCHIVE DESTINATION lib/python/dzipc
     )
 endif()

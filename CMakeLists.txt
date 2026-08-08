@@ -4,6 +4,11 @@ project(cpp-ipc)
 # 标准安装目录(Linux: bin/lib/include; Windows: bin/lib/include 相对 CMAKE_INSTALL_PREFIX)
 include(GNUInstallDirs)
 
+# 默认安装到项目本地 local 目录（可通过 -DCMAKE_INSTALL_PREFIX=... 覆盖为系统路径）
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX "${CMAKE_SOURCE_DIR}/local" CACHE PATH "Install path prefix, default to local dir" FORCE)
+endif()
+
 # 生成消息头文件
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 function(generate_ipc_messages)
@@ -113,6 +118,7 @@ endif()
 
 add_subdirectory(exec/dzipc_list)
 add_subdirectory(exec/dzipc_topic_cat)
+add_subdirectory(exec/dzipc_pub)
 
 if (LIBIPC_BUILD_TESTS)
     set(GOOGLETEST_VERSION 1.10.0)
@@ -145,6 +151,22 @@ if(NOT ROSBUILD)
     install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
     install(TARGETS dzipc_topic_cat dzipc_list
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+    # Python 包文件（GenericMessage 封装层，无需编译）
+    install(FILES python/dzipc/__init__.py
+        DESTINATION lib/python/dzipc
+    )
+    install(DIRECTORY python/dzipc/gen_msgs/
+        DESTINATION lib/python/dzipc/gen_msgs
+        FILES_MATCHING PATTERN "*.py" PATTERN "*.pyi"
+    )
+    install(DIRECTORY python/dzipc/gen_srv/
+        DESTINATION lib/python/dzipc/gen_srv
+        FILES_MATCHING PATTERN "*.py" PATTERN "*.pyi"
+    )
+    install(FILES python/dzipc.pyi
+        DESTINATION lib/python/dzipc
+        OPTIONAL
     )
     install(EXPORT cpp-ipc-targets
         FILE cpp-ipc-targets.cmake

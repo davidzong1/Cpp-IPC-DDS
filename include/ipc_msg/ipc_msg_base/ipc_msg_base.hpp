@@ -24,9 +24,11 @@ class IpcMsgBase : public std::enable_shared_from_this<IpcMsgBase>
 
 public:
     IpcMsgBase() = default;
-    ~IpcMsgBase() = default;
+    virtual ~IpcMsgBase() = default;
 
     void set_msg_id(const uint32_t id) { dz_ipc_msg_id = id; }
+
+    uint32_t msg_id() const noexcept { return dz_ipc_msg_id; }
 
     bool check_id(const ipc::buffer& data, uint32_t expected_id) const
     {

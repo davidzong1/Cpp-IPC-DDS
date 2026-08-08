@@ -196,6 +196,19 @@ public:
         });
     }
 
+    template <typename T, typename F, typename... P>
+    bool push_sniffer(F&& prep, P&&... params) {
+        if (elems_ == nullptr) return false;
+        if constexpr (!relat_trait<policy_t>::is_broadcast || relat_trait<policy_t>::is_multi_producer) {
+            return this->push<T>(std::forward<F>(prep), std::forward<P>(params)...);
+        }
+        else {
+            return elems_->push_sniffer(this, [&](void* p) {
+                if (prep(p)) ::new (p) T(std::forward<P>(params)...);
+            });
+        }
+    }
+
     template <typename T, typename F>
     bool pop(T& item, F&& out) {
         if (elems_ == nullptr) {
@@ -226,6 +239,11 @@ public:
     template <typename... P>
     bool force_push(P&&... params) {
         return base_t::template force_push<T>(std::forward<P>(params)...);
+    }
+
+    template <typename... P>
+    bool push_sniffer(P&&... params) {
+        return base_t::template push_sniffer<T>(std::forward<P>(params)...);
     }
 
     bool pop(T& item) {

@@ -93,6 +93,11 @@ std::int32_t handle::release() {
     return shm::release(detach());
 }
 
+std::int32_t handle::release_no_unlink() {
+    if (impl(p_)->id_ == nullptr) return -1;
+    return shm::release_no_unlink(detach());
+}
+
 void handle::clear() noexcept {
     if (impl(p_)->id_ == nullptr) return;
     shm::remove(detach());

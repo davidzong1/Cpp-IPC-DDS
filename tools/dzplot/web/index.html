@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>dzplot — Time-Series Visualization</title>
+  <link rel="stylesheet" href="/styles.css?v=1" />
+</head>
+<body>
+<div class="app-shell">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">P</div>
+      <div>
+        <h1>dzplot</h1>
+        <p id="connectionText">Disconnected</p>
+      </div>
+    </div>
+
+    <!-- FPS Control -->
+    <section class="control-panel">
+      <div class="section-head"><h2>Render FPS</h2></div>
+      <div class="fps-control">
+        <input id="fpsSlider" type="range" min="1" max="120" value="60" />
+        <span class="fps-value"><strong id="fpsValue">60</strong> fps</span>
+      </div>
+      <div class="fps-meta">
+        <span>Target: <strong id="targetFps">60</strong></span>
+        <span>Actual: <strong id="actualFps">0</strong></span>
+      </div>
+    </section>
+
+    <!-- Source Control -->
+    <section class="control-panel">
+      <div class="section-head"><h2>Source</h2></div>
+      <div class="source-tabs">
+        <button id="tabBag" class="tab active">📁 Bag</button>
+        <button id="tabLive" class="tab">🔴 Live</button>
+      </div>
+      <!-- Bag mode -->
+      <div id="bagPanel" class="source-panel">
+        <label>Bag File
+          <input id="bagPath" type="text" placeholder="/path/to/events.bag" />
+        </label>
+        <div class="row">
+          <label>Speed
+            <input id="bagSpeed" type="number" value="1.0" min="0.01" max="100" step="0.1" />
+          </label>
+          <label class="checkbox-label">
+            <input id="bagLoop" type="checkbox" /> Loop
+          </label>
+        </div>
+        <button id="loadBagBtn" class="primary-action">Load & Play</button>
+      </div>
+      <!-- Live mode -->
+      <div id="livePanel" class="source-panel" hidden>
+        <label>Topic
+          <input id="liveTopic" type="text" placeholder="/test/topic" />
+        </label>
+        <label>Msg Type
+          <input id="liveMsgType" type="text" placeholder="StdRawMessage" value="StdRawMessage" />
+        </label>
+        <div class="row">
+          <label>Transport
+            <select id="liveTransport">
+              <option value="shm">shm</option>
+              <option value="socket">socket</option>
+            </select>
+          </label>
+          <label>Domain
+            <input id="liveDomain" type="number" value="0" min="0" />
+          </label>
+        </div>
+        <button id="startSniffBtn" class="primary-action">Start Sniffing</button>
+      </div>
+    </section>
+
+    <!-- Playback Controls -->
+    <section class="control-panel">
+      <div class="section-head"><h2>Playback</h2></div>
+      <div class="playback-row">
+        <button id="btnStop" title="Stop">⏹</button>
+        <button id="btnPause" title="Pause">⏸</button>
+        <button id="btnPlay" title="Play">▶</button>
+      </div>
+      <div id="playbackInfo" class="playback-info">Idle</div>
+    </section>
+
+    <!-- Topics & Fields -->
+    <section class="topic-panel">
+      <div class="section-head">
+        <h2>Topics</h2>
+        <span id="topicCount">0</span>
+      </div>
+      <div id="topicList" class="topic-list"></div>
+    </section>
+
+    <!-- Status -->
+    <section class="status-panel collapsed">
+      <div class="section-head">
+        <h2>Queue Status</h2>
+        <button class="collapse-toggle" type="button">+</button>
+      </div>
+      <div class="status-body">
+        <div class="status-row"><span>Queue</span><strong id="qSize">0</strong></div>
+        <div class="status-row"><span>Capacity</span><strong id="qCap">4096</strong></div>
+        <div class="status-row"><span>Watermark</span><strong id="qWatermark">0%</strong></div>
+        <div class="status-row"><span>Dropped</span><strong id="qDropped">0</strong></div>
+        <div class="status-row"><span>Backpressure</span><strong id="qBP">off</strong></div>
+        <div class="status-row"><span>Subsample</span><strong id="qSub">1x</strong></div>
+        <div class="status-row"><span>Samples Rx</span><strong id="qTotalRx">0</strong></div>
+      </div>
+    </section>
+  </aside>
+
+  <!-- Main chart area -->
+  <main class="chart-area">
+    <div id="chartContainer" class="chart-container">
+      <div id="chartPlaceholder" class="chart-placeholder">
+        <div class="placeholder-icon">📈</div>
+        <h2>No charts active</h2>
+        <p>Load a .bag file or start sniffing, then select topics and fields to plot.</p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script type="module" src="/app.js?v=1"></script>
+</body>
+</html>

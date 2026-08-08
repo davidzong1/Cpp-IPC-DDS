@@ -143,6 +143,15 @@ struct typed_reader final : reader_iface {
     ipc::shm::handle h_;
     elems_t*         elems_ = nullptr;
 
+    ~typed_reader() {
+        // Release the SHM handle without unlinking the name.
+        // The sniffer is a passive observer — it must never delete the
+        // publisher's SHM segment when it closes or reopens.  On POSIX,
+        // release_no_unlink() only munmap/free/ref-decrement, skipping
+        // shm_unlink entirely.
+        h_.release_no_unlink();
+    }
+
     bool open(char const* shm_name) {
         if (!h_.acquire(shm_name, sizeof(elems_t))) return false;
         elems_ = static_cast<elems_t*>(h_.get());
@@ -189,6 +198,11 @@ public:
     // Lazy-loaded per-chunk-size storage handles for large messages.
     ipc::map<std::size_t, ipc::shm::handle> chunk_handles_;
 
+    // Fragment state must live across try_recv_one() calls. recv() may be
+    // woken after any fragment, while the rest of the message is still being
+    // published.
+    ipc::map<msg_id_t, cache_entry> frags_;
+
     // Optional waiter for blocking recv(); opened lazily.
     ipc::detail::waiter rd_waiter_;
 
@@ -231,18 +245,25 @@ public:
             return false;
         }
 
-        // Open the rd_waiter for efficient blocking recv. Failure is
-        // non-fatal — we just fall back to short-sleep polling.
-        rd_waiter_.open(
-            ipc::make_prefix(prefix_, {"RD_CONN__", name_}).c_str());
+        // Open the rd_waiter lazily — the first call to recv() will open it.
+        // This ensures that try_recv()-only users (e.g. dzplot polling loop)
+        // never open the waiter SHM at all, avoiding its close() path
+        // entirely.
 
         primed_ = false;
         cur_ = 0;
         dropped_ = 0;
+        frags_.clear();
         return true;
     }
 
     void close() noexcept {
+        frags_.clear();
+        // Release chunk handles without shm_unlink — the sniffer must never
+        // delete the publisher's SHM segments.
+        for (auto& kv : chunk_handles_) {
+            kv.second.release_no_unlink();
+        }
         chunk_handles_.clear();
         rd_waiter_.close();
         reader_.reset();
@@ -295,18 +316,18 @@ public:
             return {};
         }
 
-        // Lap detection: if the writer has wrapped past us, drop the lost
-        // slots and resume from the oldest still-valid slot.
-        constexpr std::uint32_t ring = 256;
+        // Lap detection: if the writer has wrapped past us, drop all pending
+        // slots. The current fragment format has no start marker, so resuming
+        // from the oldest visible slot could assemble a suffix as a full
+        // message after the first fragment has been overwritten.
+        constexpr std::uint32_t ring =
+            static_cast<std::uint32_t>(ipc::sniffer_ring_slots);
         std::uint32_t lag = wt - cur_; // intentional unsigned wrap
         if (lag > ring) {
-            dropped_ += (lag - ring);
-            cur_ = wt - ring;
+            dropped_ += lag;
+            cur_ = wt;
+            frags_.clear();
         }
-
-        // Fragment cache (per-message). Local to one try_recv_one() call —
-        // a sniffer that loses a fragment cannot reassemble that message.
-        ipc::map<msg_id_t, cache_entry> frags;
 
         while (cur_ != reader_->write_index()) {
             sniff_msg_t   msg{};
@@ -319,6 +340,7 @@ public:
             // bytes may be torn. Treat as drop and advance.
             if ((after_wt - this_idx) > ring) {
                 dropped_++;
+                frags_.clear();
                 continue;
             }
 
@@ -346,7 +368,8 @@ public:
             }
 
             // ---- Inline / fragmented message.
-            if (msg_size <= ipc::data_length) {
+            auto it = frags_.find(msg.id_);
+            if (msg_size <= ipc::data_length && it == frags_.end()) {
                 // Single-fragment message — copy and return.
                 auto* mem = static_cast<ipc::byte_t*>(ipc::mem::alloc(msg_size));
                 if (mem == nullptr) continue;
@@ -361,13 +384,12 @@ public:
 
             // Multi-fragment: msg_size is the *remaining* bytes including
             // this fragment. Reassemble keyed by msg.id_.
-            auto it = frags.find(msg.id_);
-            if (it == frags.end()) {
+            if (it == frags_.end()) {
                 cache_entry e;
                 e.buf.resize(msg_size);
                 std::memcpy(e.buf.data(), &msg.data_, ipc::data_length);
                 e.fill = ipc::data_length;
-                frags.emplace(msg.id_, std::move(e));
+                frags_.emplace(msg.id_, std::move(e));
             }
             else {
                 auto& ce = it->second;
@@ -383,7 +405,7 @@ public:
                     auto* mem = static_cast<ipc::byte_t*>(
                         ipc::mem::alloc(ce.buf.size()));
                     if (mem == nullptr) {
-                        frags.erase(it);
+                        frags_.erase(it);
                         return {};
                     }
                     std::memcpy(mem, ce.buf.data(), ce.buf.size());
@@ -393,7 +415,7 @@ public:
                         out_meta->msg_id  = msg.id_;
                         out_meta->dropped = dropped_;
                     }
-                    frags.erase(it);
+                    frags_.erase(it);
                     return buff_t{mem, sz, ipc::mem::free};
                 }
             }
@@ -464,6 +486,7 @@ std::uint64_t sniffer::dropped() const noexcept {
 void sniffer::skip_to_latest() noexcept {
     if (p_ == nullptr) return;
     p_->primed_ = false;
+    p_->frags_.clear();
 }
 
 buff_t sniffer::try_recv(meta* out_meta) noexcept {
@@ -476,6 +499,14 @@ buff_t sniffer::recv(std::uint64_t timeout_ms, meta* out_meta) noexcept {
 
     auto first = p_->try_recv_one(out_meta);
     if (!first.empty()) return first;
+
+    // Lazy-open the waiter on first blocking call.
+    // try_recv()-only users (e.g. dzplot polling) never reach here.
+    if (!p_->rd_waiter_.valid()) {
+        p_->rd_waiter_.open(
+            ipc::make_prefix(p_->prefix_, {"RD_CONN__", p_->name_}).c_str());
+        // Failure is non-fatal — we fall back to short-sleep polling below.
+    }
 
     auto t0 = std::chrono::steady_clock::now();
     auto deadline_reached = [&]() {

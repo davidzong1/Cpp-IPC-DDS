@@ -1,0 +1,779 @@
+:root {
+  color-scheme: dark;
+  /* 【右下角参考坐标轴蒙版】CSS 变量，与 JS 端 referenceAxisConfig 中的值保持同步 */
+  --reference-axis-size: 150px;   /* 蒙版容器宽高 */
+  --reference-axis-inset: 12px;   /* 距离 scene-panel 右下角的边距 */
+  --bg: #0f1216;
+  --sidebar: #171b22;
+  --panel: #1e242d;
+  --panel-2: #252c36;
+  --border: #333c49;
+  --text: #edf2f8;
+  --muted: #9aa7b7;
+  --accent: #38bdf8;
+  --accent-strong: #0ea5e9;
+  --red: #ef4444;
+  --green: #22c55e;
+  --blue: #3b82f6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #242b35;
+  color: var(--text);
+  cursor: pointer;
+  min-height: 34px;
+  padding: 0 12px;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+input,
+select {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #11161d;
+  color: var(--text);
+  padding: 0 10px;
+}
+
+input:focus,
+select:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+select:disabled {
+  color: var(--muted);
+  cursor: default;
+  opacity: 1;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  width: 100vw;
+  height: 100vh;
+}
+
+.sidebar {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
+  border-right: 1px solid var(--border);
+  background: var(--sidebar);
+  padding: 10px;
+}
+
+.brand {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.brand-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #071018;
+  font-size: 20px;
+  font-weight: 800;
+}
+
+.brand h1 {
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.brand p,
+.viewport-toolbar p,
+span {
+  color: var(--muted);
+}
+
+.sidebar-actions {
+  display: grid;
+}
+
+.primary-action {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+  color: #06131b;
+  font-weight: 700;
+}
+
+.display-list-panel,
+.config-panel {
+  min-height: 0;
+  max-height: 100%;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.config-panel {
+  flex: 0 0 auto;
+}
+
+/* ---- collapse ---- */
+
+/* 折叠时隐藏面板内容 */
+.config-panel.collapsed .config-actions,
+.status-panel.collapsed .event-log {
+  display: none;
+}
+
+/* 折叠时禁止滚动条 */
+.config-panel.collapsed,
+.status-panel.collapsed {
+  overflow: hidden;
+}
+
+.status-panel {
+  flex: 0 1 210px;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+/* status 折叠后紧贴内容高度 */
+.status-panel.collapsed {
+  flex: 0 0 auto;
+}
+
+/* 折叠切换按钮，展开显示 −，折叠显示 + */
+.collapse-toggle {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.collapse-toggle:hover {
+  color: var(--text);
+  background: #2a3340;
+}
+
+/* 折叠后隐藏 section-head 底部边框 */
+.collapsed .section-head {
+  border-bottom: none;
+}
+
+/* ---- 侧边栏宽度拖拽手柄 ---- */
+
+/* 灰色圆角拖拽条，位于侧边栏右边缘 */
+.sidebar-resize-handle {
+  position: absolute;
+  right: -6px;         /* 半露在侧边栏外侧 */
+  top: 40%;
+  bottom: 40%;
+  width: 12px;
+  cursor: col-resize;  /* 左右拖拽光标 */
+  z-index: 5;
+  background: #a3aab7; /* 深灰底色 */
+  border-radius: 3px;  /* 圆条胶囊形 */
+  transition: background 0.15s;
+}
+
+/* 三条竖线防滑纹理，暗示可拖拽 */
+.sidebar-resize-handle::before {
+  content: "";
+  position: absolute;
+  inset: 4px 2px;     /* 上下各留 4px，左右各留 2px */
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0px,
+    transparent 1px,   /* 线间距 */
+    #3d3f42 1px,       /* 竖线颜色 */
+    #3d3f42 2px,       /* 竖线宽 1px */
+    transparent 2px,
+    transparent 3px    /* 每条线周期 3px */
+  );
+  opacity: 0.6;
+}
+
+/* hover / 拖拽中高亮为蓝色 */
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle.dragging {
+  background: var(--accent);
+}
+
+.sidebar-resize-handle:hover::before,
+.sidebar-resize-handle.dragging::before {
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0px,
+    transparent 1px,
+    #08283a 1px,       /* 深色竖线，与蓝色底形成对比 */
+    #08283a 2px,
+    transparent 2px,
+    transparent 3px
+  );
+  opacity: 0.9;
+}
+
+.display-list-panel {
+  flex: 1 1 auto;
+}
+
+.status-panel {
+  flex: 0 1 210px;
+}
+
+.section-head {
+  display: flex;
+  height: 28px;             /* 标题栏高度：增大以容纳上下 padding，让标题文字与面板边缘有呼吸空间 */
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  padding: 0 10px;          /* 左右内边距：5px → 10px，标题文字与左右边缘拉开距离 */
+}
+
+.section-head h2,
+.viewport-toolbar h2,
+.modal h2 {
+  font-size: 16px;
+  height: 20px;
+  line-height: 1.2;
+}
+
+.display-list,
+.event-log {
+  height: calc(100% - 28px); /* 匹配 section-head 高度，确保内容区不被标题栏遮挡 */
+  overflow: auto;
+}
+
+/* display 面板条目：覆盖全局 button 的 min-height，使高度由内容决定 */
+.display-item {
+  width: 100%;
+  min-height: 16px;            /* 覆盖全局 button min-height: 34px，由内容撑高 */
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+
+.display-item.active {
+  background: #203442;
+}
+
+.display-item:hover,
+.display-item:focus-visible {
+  background: #182630;
+  outline: none;
+}
+
+.display-item.active:hover,
+.display-item.active:focus-visible {
+  background: #203442;
+}
+
+/* 条目标题：缩小间距、字号与行高 */
+.display-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;                 /* 由 6px 缩小 */
+  color: var(--text);
+  font-weight: 700;
+  font-size: 11px;          /* 新增字号约束 */
+  line-height: 1;           /* 压紧行高，消除默认行高多出的空白 */
+}
+
+/* 条目元信息：消除上边距，紧贴标题 */
+.display-meta {
+  margin-top: 0;            /* 由 2px 缩小至 0，紧贴标题 */
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;          /* 由 12px 缩小 */
+  line-height: 1;           /* 压紧行高 */
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 条目操作栏：消除上边距，紧贴 meta */
+.display-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 3px;                 /* 由 6px 缩小 */
+  margin-top: 0;            /* 由 4px 缩小至 0，紧贴 meta */
+}
+
+/* 操作栏按钮：缩小高度与内边距 */
+.display-actions button {
+  min-height: 16px;         /* 由 26px 大幅缩小 */
+  padding: 0 4px;           /* 由 0 8px 缩小 */
+  font-size: 10px;          /* 由 12px 缩小 */
+  line-height: 1;           /* 压紧行高 */
+}
+
+/* 可视化切换开关：缩小字体、间距与高度 */
+.visualize-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;                 /* 由 6px 缩小 */
+  min-height: 16px;         /* 由 26px 大幅缩小 */
+  color: var(--muted);
+  font-size: 10px;          /* 由 12px 缩小 */
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+}
+
+/* 切换开关复选框：缩小尺寸，覆盖全局 input 的 min-height */
+.visualize-toggle input {
+  width: 14px;              /* 由 14px 缩小 */
+  height: 14px;             /* 由 14px 缩小 */
+  min-height: 16px;            /* 覆盖全局 input min-height: 36px */
+  padding: 1px;               /* 覆盖全局 input padding: 0 10px */
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.config-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px 4px;
+  padding: 4px 6px;
+}
+
+#configPathInput {
+  grid-column: 1 / -1;
+  min-width: 0;
+  min-height: 24px;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.config-actions button {
+  min-height: 24px;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+/* status 面板内每条事件，紧凑排列 */
+.event-row {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  column-gap: 3px;   /* 时间列与内容列之间的水平间距 */
+  row-gap: 0;        /* 两行之间的垂直间距 */
+  border-bottom: 1px solid var(--border);
+  padding: 3px 10px;
+  font-size: 10px;
+  line-height: 1.0;
+}
+
+.event-row strong {
+  color: var(--text);
+}
+
+/* 顶部工具栏区域，包含标题、操作提示、指标卡片 */
+.viewport-shell {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: 52px minmax(0, 1fr);
+}
+
+.viewport-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+  background: #12161c;
+  padding: 0 14px;
+}
+
+/* 3D View 大标题 */
+.viewport-toolbar h2 {
+  font-size: 15px;
+}
+
+/* 操作提示文字 */
+.viewport-toolbar p {
+  font-size: 11px;
+}
+
+/* 三列指标卡片区：Zoom / Grid / Displays */
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(72px, 1fr));
+  gap: 8px;
+}
+
+.metrics div {
+  min-width: 72px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 5px 8px;
+}
+
+.metrics span {
+  display: block;
+  margin-bottom: 1px;
+  font-size: 10px;
+}
+
+.metrics strong {
+  font-size: 13px;
+}
+
+.scene-panel {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+#sceneCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+}
+
+#sceneCanvas.panning {
+  cursor: move;
+}
+
+#sceneCanvas.orbiting {
+  cursor: grabbing;
+}
+
+.scene-fps {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: inline-grid;
+  min-width: 68px;
+  grid-template-columns: auto auto;
+  gap: 8px;
+  align-items: baseline;
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  border-radius: 6px;
+  background: rgba(15, 18, 22, 0.72);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  padding: 5px 8px;
+}
+
+.scene-fps span {
+  color: #cbd5e1;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.scene-fps strong {
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* 右下角坐标轴容器：仅占位，无蒙版背景，3D 箭头由 JS renderAxisGizmo 渲染 */
+.scene-overlay {
+  position: absolute;
+  right: var(--reference-axis-inset);
+  bottom: var(--reference-axis-inset);
+  width: var(--reference-axis-size);
+  height: var(--reference-axis-size);
+  pointer-events: none;
+}
+
+.scene-overlay div {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.scene-overlay div:nth-child(1) strong {
+  color: var(--red);
+}
+
+.scene-overlay div:nth-child(2) strong {
+  color: var(--green);
+}
+
+.scene-overlay div:nth-child(3) strong {
+  color: var(--blue);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.54);
+  padding: 20px;
+  z-index: 10;
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.modal {
+  width: min(480px, 100%);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+}
+
+.modal-head,
+.modal-actions {
+  display: flex;
+  height: 54px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+}
+
+.modal-actions {
+  justify-content: flex-end;
+  border-top: 1px solid var(--border);
+  border-bottom: 0;
+}
+
+.modal-body {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.modal-body label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.modal-body label[hidden] {
+  display: none;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.icon-button {
+  min-width: 34px;
+  padding: 0;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: 310px minmax(0, 1fr);
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .status-panel {
+    display: none;
+  }
+
+  .viewport-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+    height: auto;
+    padding: 12px;
+  }
+
+  .metrics {
+    width: 100%;
+  }
+
+  .image-overlay {
+    max-width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+  }
+}
+
+/* ---- image overlay ---- */
+
+.image-overlay {
+  position: absolute;
+  top: 96px;
+  right: 28px;
+  width: 420px;
+  min-width: 160px;
+  height: 380px;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+  z-index: 5;
+  will-change: transform, left, top, width, height;
+}
+
+.image-overlay[hidden] {
+  display: none;
+}
+
+.image-overlay-header {
+  display: flex;
+  height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  padding: 0 8px 0 14px;
+  cursor: grab;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.image-overlay-header:active {
+  cursor: grabbing;
+}
+
+.image-overlay.dragging {
+  user-select: none;
+}
+
+.image-overlay.dragging .image-overlay-body {
+  pointer-events: none;
+}
+
+.image-overlay-header span {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-overlay-header .icon-button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+  border-radius: 5px;
+  flex-shrink: 0;
+}
+
+.image-overlay-body {
+  width: var(--image-content-width, 100%);
+  height: var(--image-content-height, auto);
+  flex: 0 0 var(--image-content-height, auto);
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.image-overlay-body img,
+.image-overlay-body canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 100%;
+  min-height: 100%;
+  object-fit: contain;
+}
+
+.image-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  background: linear-gradient(
+    135deg,
+    transparent 50%,
+    var(--muted) 50%,
+    transparent 54%,
+    var(--muted) 54%,
+    transparent 58%,
+    var(--muted) 58%,
+    transparent 62%,
+    var(--muted) 62%
+  );
+  opacity: 0.55;
+  z-index: 2;
+}
+
+.image-resize-handle:hover {
+  opacity: 1;
+}

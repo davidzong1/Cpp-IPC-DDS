@@ -1,0 +1,9 @@
+StdHeader header
+int32 type
+int32 action
+StdPose pose
+StdVector3d scale
+StdColor color
+StdVector3d[] points
+string text
+string mesh_resource

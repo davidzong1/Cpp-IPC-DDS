@@ -1,7 +1,10 @@
 #pragma once
 #include <cstdint>
+#include <cstring>
+#include <stdexcept>
 #include <sstream>
 #include <string>
+#include <vector>
 #include "ipc_msg/ipc_msg_base/ipc_msg_base.hpp"
 
 namespace dzIPC {
@@ -34,6 +37,8 @@ enum MsgType : uint8_t {
     MSG_FLOAT32_ARRAY = 22,
     MSG_FLOAT64_ARRAY = 23,
     MSG_STRING_ARRAY = 24,
+    MSG_NESTED = 25,
+    MSG_NESTED_ARRAY = 26,
 };
 
 template<typename T>
@@ -94,6 +99,52 @@ inline std::string read_string_from_buffer(const uint8_t* buffer, uint32_t& offs
         }
     }
     return str;
+}
+
+inline ipc::buffer read_raw_buffer_from_buffer(const uint8_t* buffer, uint32_t& offset, const int32_t data_size)
+{
+    ipc::buffer nested_buffer(new uint8_t[data_size], data_size,
+                              [](void* p, std::size_t) { delete[] static_cast<uint8_t*>(p); });
+    if (data_size <= 0)
+    {
+        return nested_buffer;
+    }
+
+    uint8_t* value_ptr = static_cast<uint8_t*>(nested_buffer.data());
+    uint32_t passed_tails = offset / (IPC_MSG_MAX_SIZE + TAIL_MSG_SIZE);
+    uint32_t pure_data_offset = offset - passed_tails * TAIL_MSG_SIZE;
+    uint32_t cut_cnt = ((pure_data_offset + data_size) / IPC_MSG_MAX_SIZE) - (pure_data_offset / IPC_MSG_MAX_SIZE);
+    uint32_t has_copy_size = 0;
+    for (uint32_t i = 0; i < cut_cnt; ++i)
+    {
+        uint32_t copy_size = std::min(IPC_MSG_MAX_SIZE - (pure_data_offset % IPC_MSG_MAX_SIZE),
+                                      static_cast<uint32_t>(data_size) - has_copy_size);
+        std::memcpy(value_ptr + has_copy_size, buffer + offset, copy_size);
+
+        offset += copy_size + TAIL_MSG_SIZE;
+        pure_data_offset += copy_size;
+        has_copy_size += copy_size;
+    }
+
+    long remaining_size = data_size - has_copy_size;
+    if (remaining_size > 0)
+    {
+        std::memcpy(value_ptr + has_copy_size, buffer + offset, remaining_size);
+        offset += remaining_size;
+    }
+    return nested_buffer;
+}
+
+inline std::string indent_lines(const std::string& input, const std::string& indent)
+{
+    std::stringstream source(input);
+    std::stringstream result;
+    std::string line;
+    while (std::getline(source, line))
+    {
+        result << indent << line << "\n";
+    }
+    return result.str();
 }
 
 template<typename T>
@@ -458,6 +509,28 @@ inline std::string msg_to_string(ipc::buffer& raw_data)
                     }
                 }
                 ss << " ]\n";
+            }
+            break;
+        case MsgType::MSG_NESTED:
+            {
+                int32_t nested_size = read_value_from_buffer<int32_t>(buffer, offset);
+                ipc::buffer nested_buffer = read_raw_buffer_from_buffer(buffer, offset, nested_size);
+                ss << name << ":\n";
+                ss << indent_lines(msg_to_string(nested_buffer), "  ");
+            }
+            break;
+        case MsgType::MSG_NESTED_ARRAY:
+            {
+                int32_t count = read_value_from_buffer<int32_t>(buffer, offset);
+                ss << name << ": [\n";
+                for (int32_t i = 0; i < count; ++i)
+                {
+                    int32_t nested_size = read_value_from_buffer<int32_t>(buffer, offset);
+                    ipc::buffer nested_buffer = read_raw_buffer_from_buffer(buffer, offset, nested_size);
+                    ss << "  -\n";
+                    ss << indent_lines(msg_to_string(nested_buffer), "    ");
+                }
+                ss << "]\n";
             }
             break;
         default:

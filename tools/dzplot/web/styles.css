@@ -1,0 +1,247 @@
+/* dzplot — Time-series visualization styles */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d23;
+  --surface2: #242830;
+  --border: #2e323a;
+  --text: #c9cdd4;
+  --text-dim: #6b7280;
+  --primary: #4f8cff;
+  --primary-dim: #3a5fb8;
+  --green: #4caf50;
+  --orange: #ff9800;
+  --red: #f44336;
+  --yellow: #ffc107;
+  --sidebar-w: 300px;
+}
+
+html, body { height: 100%; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+
+.app-shell { display: flex; height: 100vh; overflow: hidden; }
+
+/* Sidebar */
+.sidebar {
+  width: var(--sidebar-w); min-width: 260px; background: var(--surface);
+  border-right: 1px solid var(--border); display: flex; flex-direction: column;
+  overflow-y: auto; flex-shrink: 0;
+}
+
+.brand {
+  display: flex; align-items: center; gap: 10px; padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.brand-mark {
+  width: 32px; height: 32px; background: var(--primary); color: #fff;
+  border-radius: 6px; display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 18px; flex-shrink: 0;
+}
+.brand h1 { font-size: 15px; font-weight: 600; }
+.brand p { font-size: 11px; color: var(--text-dim); }
+
+/* Control panels */
+.control-panel {
+  padding: 10px 16px; border-bottom: 1px solid var(--border);
+}
+.section-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.section-head h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-dim); letter-spacing: 0.05em; }
+
+/* FPS */
+.fps-control { display: flex; flex-direction: column; gap: 4px; }
+.fps-control input[type=range] {
+  width: 100%; accent-color: var(--primary); height: 6px;
+}
+.fps-value { font-size: 13px; color: var(--text-dim); }
+.fps-value strong { color: var(--text); font-size: 16px; }
+.fps-meta { display: flex; gap: 12px; font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+.fps-meta strong { color: var(--text); }
+
+/* Source tabs */
+.source-tabs { display: flex; gap: 0; margin-bottom: 8px; }
+.tab {
+  flex: 1; padding: 6px 8px; border: 1px solid var(--border); background: var(--surface2);
+  color: var(--text-dim); cursor: pointer; font-size: 12px; text-align: center;
+}
+.tab:first-child { border-radius: 4px 0 0 4px; }
+.tab:last-child { border-radius: 0 4px 4px 0; }
+.tab.active { background: var(--primary-dim); color: #fff; border-color: var(--primary); }
+
+.source-panel { display: flex; flex-direction: column; gap: 6px; }
+.source-panel label { font-size: 11px; color: var(--text-dim); display: flex; flex-direction: column; gap: 2px; }
+.source-panel input, .source-panel select {
+  padding: 6px 8px; background: var(--surface2); border: 1px solid var(--border);
+  color: var(--text); border-radius: 4px; font-size: 13px;
+}
+.source-panel input:focus, .source-panel select:focus { outline: none; border-color: var(--primary); }
+.row { display: flex; gap: 8px; }
+.row > * { flex: 1; }
+.checkbox-label { flex-direction: row !important; align-items: center; gap: 4px !important; font-size: 12px !important; }
+
+.primary-action {
+  padding: 8px 14px; background: var(--primary); color: #fff; border: none;
+  border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500;
+  transition: background 0.15s;
+}
+.primary-action:hover { background: var(--primary-dim); }
+.primary-action.small { padding: 4px 8px; font-size: 11px; }
+
+/* Playback */
+.playback-row { display: flex; gap: 4px; }
+.playback-row button {
+  width: 36px; height: 36px; font-size: 18px; background: var(--surface2);
+  border: 1px solid var(--border); color: var(--text); border-radius: 6px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.playback-row button:hover { background: var(--border); }
+.playback-info { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+
+/* Topics */
+.topic-panel { flex: 1; overflow-y: auto; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+.topic-list { display: flex; flex-direction: column; gap: 6px; }
+.topic-item {
+  padding: 8px; background: var(--surface2); border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.topic-item.active { border-color: var(--primary); }
+.topic-item-head { display: flex; align-items: center; justify-content: space-between; }
+.topic-name { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topic-source {
+  font-size: 10px; padding: 1px 6px; border-radius: 3px; color: #fff; flex-shrink: 0;
+}
+.topic-source.bag { background: #5c6bc0; }
+.topic-source.live { background: #ef5350; }
+.topic-item-meta { font-size: 10px; color: var(--text-dim); display: flex; gap: 8px; margin-top: 2px; }
+
+.field-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.field-tag {
+  font-size: 10px; background: rgba(79,140,255,0.15); color: var(--primary);
+  padding: 1px 6px; border-radius: 3px; display: flex; align-items: center; gap: 3px;
+}
+.field-remove-btn {
+  background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 12px; padding: 0;
+}
+.field-input-row { display: flex; gap: 4px; margin-top: 4px; }
+.field-input {
+  flex: 1; padding: 4px 6px; background: var(--bg); border: 1px solid var(--border);
+  color: var(--text); border-radius: 3px; font-size: 11px;
+}
+.quick-fields { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
+.quick-field-btn {
+  font-size: 10px; padding: 2px 6px; background: var(--surface2); border: 1px solid var(--border);
+  color: var(--text-dim); border-radius: 3px; cursor: pointer;
+}
+.quick-field-btn:hover { border-color: var(--primary); color: var(--primary); }
+
+/* Status */
+.status-panel { padding: 10px 16px; border-bottom: 1px solid var(--border); }
+.status-panel.collapsed .status-body { display: none; }
+.status-body { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.status-row { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); }
+.status-row strong { color: var(--text); }
+.collapse-toggle { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 14px; }
+
+/* Main chart area */
+.chart-area {
+  flex: 1; display: flex; flex-direction: column; overflow: hidden;
+}
+.chart-container {
+  flex: 1; display: flex; flex-wrap: wrap; align-content: flex-start;
+  gap: 12px; padding: 16px; overflow-y: auto;
+}
+.chart-placeholder {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 12px; color: var(--text-dim); min-height: 300px;
+}
+.placeholder-icon { font-size: 48px; }
+.chart-placeholder h2 { font-size: 18px; color: var(--text); }
+.chart-placeholder p { font-size: 13px; text-align: center; max-width: 320px; }
+
+/* Chart card */
+.chart-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  overflow: hidden; flex: 1 1 400px; min-width: 340px; max-width: 100%;
+}
+.chart-card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+}
+.chart-title { font-size: 12px; font-weight: 500; }
+.chart-close {
+  background: none; border: none; color: var(--text-dim); cursor: pointer;
+  font-size: 16px; padding: 0 4px;
+}
+.chart-close:hover { color: var(--red); }
+.chart-canvas { display: block; width: 100%; }
+
+/* Icon button */
+.icon-button { background: none; border: none; cursor: pointer; color: var(--text-dim); }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* Ensure [hidden] beats any display rule (e.g. .source-panel's flex).
+   Browsers apply [hidden] { display: none } in the UA stylesheet, but
+   author rules like .source-panel { display: flex } override it. */
+[hidden] { display: none !important; }
+
+/* ------------------------------------------------------------------
+   Responsive: stack vertically below 700 px
+   ------------------------------------------------------------------ */
+@media (max-width: 700px) {
+  .app-shell {
+    flex-direction: column;
+    height: auto;
+    min-height: 100vh;
+    overflow: auto;
+  }
+
+  .sidebar {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    height: auto;
+    flex-shrink: 0;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    overflow-y: visible;
+  }
+
+  .chart-area {
+    width: 100%;
+    min-height: 60vh;
+    flex: none;
+  }
+
+  .chart-container {
+    min-height: 50vh;
+  }
+
+  .chart-placeholder {
+    min-height: 200px;
+  }
+
+  .chart-placeholder p {
+    max-width: 90vw;
+  }
+
+  .chart-card {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .topic-name {
+    white-space: normal;
+    word-break: break-all;
+  }
+
+  .row {
+    flex-wrap: wrap;
+  }
+}

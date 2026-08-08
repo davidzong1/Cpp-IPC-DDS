@@ -1,0 +1,11 @@
+{
+  "domain": 0,
+  "transport": "shm",
+  "queue": 10,
+  "poll": 0.03,
+  "extra": "",
+  "topics": [],
+  "robot_displays": [],
+  "robot_state_displays": [],
+  "robot_models": []
+}

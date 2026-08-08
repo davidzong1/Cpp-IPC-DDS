@@ -8,11 +8,8 @@
 *.so
 *.dll
 *.dylib
-
 **/__pycache__/**
-include/msg/**
-!include/msg/ipc_msg_base/
-!include/msg/ipc_msg_base/**
+
 # Qt-es
 object_script.*.Release
 object_script.*.Debug
@@ -47,9 +44,6 @@ target_wrapper.*
 # QtCreator CMake
 CMakeLists.txt.user*
 
-# My output files
-build/**
-
 # vs
 .vs
 # .vscode
@@ -59,3 +53,39 @@ build/**
 *.venv/**
 build_py/**
 build_win/**
+
+local/**
+build/**
+
+# agnent
+tmux**
+
+.vscode/**
+.github/workflows/**
+perf_results/**
+# msg and srv files
+msg/*
+!msg/test_messages/
+!msg/test_msg2/
+!msg/test_nested/
+!msg/ros_std_msgs/
+!msg/std_msgs/
+srv/*
+!srv/request_response_test/
+!srv/std_srv/
+python/dzipc/gen_msgs/**
+python/dzipc/gen_srv/**
+include/ipc_msg/**
+include/ipc_srv/**
+!include/ipc_msg/ipc_msg_base/
+!include/ipc_msg/ipc_msg_base/**
+python/dzipc.pyi
+msg/external_paths.json
+srv/external_paths.json
+
+.codex/**
+.claude/**
+.pytest_cache/**
+.agents/**
+
+brainstorm/**
