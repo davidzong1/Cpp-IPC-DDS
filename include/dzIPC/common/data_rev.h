@@ -173,17 +173,33 @@ struct FragmentLossStats
     std::uint64_t nack_suppressed{0};
     std::uint64_t pages_retransmitted_again{0};
 
-    /* ---- 闭环自适应限速 (段3 任务2b, sender 侧采集) ----
-     * rate_reductions / rate_increments 是 AIMD 减半/增倍动作计数, 比值 +
-     * rate_bps_now 的 trace 是场景 C 标定观察点 (K 与 kOverflowSpanPages);
+    /* ---- 闭环自适应限速 (段3 任务2b 起, 段4 方案E DCTCP) ----
+     * rate_reductions / rate_increments 是速率变化动作计数 (只在速率实际变化
+     * 时 ++, 任务0 修复), 比值 + rate_bps_now 的 trace 是场景 C 标定观察点;
      * rate_floor_warns = 下限告警次数 (每节点一次, 场景 E 判据);
-     * retransmit_bytes = 重传批实际发出的字节数 (场景 C 判据 ③)。
+     * retransmit_bytes = 重传批实际发出的字节数 (场景 C 判据 ③);
+     * observed_bps_now = 最近 DZA2 的接收端观测速率 (段4 方案E, 仅诊断不参与
+     * 控制, D-7 红线)。
      * 计数全走 frag_track_enabled() 门; 自适应功能本身不受门控。 */
     std::uint64_t rate_reductions{0};
     std::uint64_t rate_increments{0};
     std::uint64_t rate_floor_warns{0};
     std::uint64_t retransmit_bytes{0};
-    std::size_t rate_bps_now{0};   // 当前生效速率快照 (采样周期读, 非自旋)
+    std::size_t rate_bps_now{0};     // 当前生效速率快照 (采样周期读, 非自旋)
+    std::size_t observed_bps_now{0}; // 最近 DZA2 的接收观测速率 (仅诊断)
+
+    /* ---- 段5 任务2h (方案3 前置): runs 判别信号 (发送端位图 NACK 派生, 仅诊断) ----
+     * runs_now/lost_now = 最近一条消息的 runs 首捕获快照 (方案3 判别信号, 采集/
+     * 诊断字段, 不进任何 bps= 赋值 —— 与 observed_bps 同一把尺子, D-7 精神)。
+     * 语义 (T.3 + T.1, 裁定 T):
+     *   - T.3 首捕获: 每消息每对端只取第一条位图 NACK 的 pattern (重传后 pattern
+     *     逐轮缩小, 混入不同轮会失真); 与 lost_pages 首 NACK 前捕获同口径。
+     *   - T.1 跨对端聚合: 取最拥塞 (runs/lost 最小) 对端, 只上报该对端原始量。
+     *   - runs = 连续缺失段数 (真拥塞≈1, 真随机≈lost); lost = 同一 pattern 缺页数。
+     *     两量分别上报, 比值 runs/lost 留给判读侧算 (P.3: 分离度标定要看分布)。
+     *   - 该消息无位图 NACK pattern 时 (干净 / 只来 DZA2 / 只来显式 NACK) → (0,0)。 */
+    std::size_t runs_now{0};
+    std::size_t lost_now{0};
 
     /* 平均空洞长度。接近 1 说明随机丢包, 显著大于 1 说明突发。 */
     double mean_gap_len() const

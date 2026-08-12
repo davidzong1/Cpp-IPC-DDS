@@ -46,22 +46,51 @@ constexpr uint64_t kHbGraceMs = 2;
  * Reliable 不受此限制 —— 它必须发, 因为 sequence 只能由 HB 携带。 */
 constexpr uint16_t kBestEffortHeartbeatMinPages = 16;
 
-/* ---------------- 闭环自适应限速 (段3 任务2b) 常量 ----------------
+/* ---------------- 闭环自适应限速 (段3 任务2b 起, 段4 方案E) 常量 ----------------
  *
- * v1 初值, 全部标注「待 tester 标定」(reviewer 方案 §7 参数表):
- *   kOverflowSpanPages    溢出型缺片判据: 单帧 NACK 缺片跨度 ≥ 4。随机丢包
- *                         跨度 1-2, ≥4 即缓冲溢出特征; page_cnt < 5 的消息
- *                         物理上不可能触发 → 小消息零假阳性。
- *   kCleanMessagesPerIncrement  连续 K 条干净消息后 ×1.5 增倍 (AIMD 增窗)。
- *                         K=1 会全速↔半速高频震荡; K=3 ≈ 3 条消息恢复。
+ * v1 初值, 全部标注「待 tester 标定」(reviewer 方案 §7 参数表)。段4 方案E 移除
+ * 了二值跨度判据 kOverflowSpanPages (被连续丢包分数 F 取代) 与 ×1.5 增倍
+ * (被加性升 +Δ 取代), 本块同步更新:
+ *   kCleanMessagesPerIncrement  连续 K 条干净 (F==0 且页数够大) 消息后加性升
+ *                         +Δ (Δ = initial/16)。K=3 ≈ 3 条消息恢复。
  *   kRateFloorDivisor     静态下限 = initial/32 (5 次减半 = 部署意图的 1/32,
  *                         相对值, 与部署速度解耦)。
  *   kLeaseTimeoutMultiple  liveness 租期 = 3 × 本条消息 ack_timeout: 1× 消息
- *                         预算 + 1× last_ack_ts 最坏滞后 + 1× 抖动余量。 */
-constexpr uint16_t kOverflowSpanPages = 4;
+ *                         预算 + 1× last_ack_ts 最坏滞后 + 1× 抖动余量。
+ *   kMinPagesForRateSignal 段4 方案E: F==0 计入 clean 的最小页数。单页/小消息
+ *                         没压到接收缓冲, F=0 是弱证据 ("链路有余量"不可信) ——
+ *                         全小消息负载下若小消息的 F=0 也计 clean, 速率会靠弱
+ *                         证据一路爬到 initial, 然后一条大消息就溢出。不对称
+ *                         规则 (leader 裁定): 拥塞证据永远采信 (F>0 小消息也
+ *                         降速), 余量证据要求消息够大; 小消息 F==0 既不计
+ *                         clean 也不清零 clean_count (中性, 跳过)。 */
 constexpr uint32_t kCleanMessagesPerIncrement = 3;
 constexpr uint32_t kRateFloorDivisor = 32;
 constexpr uint32_t kLeaseTimeoutMultiple = 3;
+constexpr uint16_t kMinPagesForRateSignal = 8;
+/* ---- 段5 R1 新增 (推荐档 T=1 / Δ=initial/320) ---- */
+constexpr uint32_t kRateRecoverAlpha = 1;           // α 门阈值 (alpha_scaled 单位 = α×256; 1 ⇒ α≤0.39%)
+constexpr uint32_t kRateRecoverAlphaSentinel = 256; // 回滚哨兵: =256 退回旧 3-clean 门 (可取值远小于 256, 不冲突)
+constexpr uint32_t kRateRecoverStepDivisor = 320;   // 升步长 = initial / 320 (替代 initial/16)
+/* ---- 段5 任务2h (方案3 前置): runs 判别信号采集 (纯诊断, 不进 bps= 赋值) ----
+ * 回滚开关沿方案2/变更集 v2 哨兵惯用法: 判据只留一处 (kRatePlan3RunsOn <
+ * kRatePlan3Sentinel), 关闭 = kRatePlan3RunsOn 改 4096 → kRunsCaptureEnabled
+ * 折叠 false, 采集全旁路, 运行行为与落笔前逐字相同 (只加眼睛不动手脚)。
+ * 判别器本体 (阈值 + 判别落点) 见段5 任务2j, 于下方与 drop 分支落笔。 */
+constexpr uint32_t kRatePlan3RunsOn   = 1;     // 采集开关 (1=开; ≥哨兵=关)
+constexpr uint32_t kRatePlan3Sentinel = 4096;  // 回滚哨兵
+const bool kRunsCaptureEnabled = (kRatePlan3RunsOn < kRatePlan3Sentinel);  // 判据只此一处
+
+/* ---- 段5 任务2j (P-3 判别器本体): runs/lost 判拥塞 vs 随机阈值 (O.3 放行) ----
+ * tester 实测标定 (seg5_task3g_runs_calibration): 标准(真拥塞) p90=0.158 <
+ * 1% 注入(真随机) p10=1.000, 阈值 = 间隙中点 (0.158+1.000)/2 = 0.579。三态单调
+ * (饿死 0.002 < 标准 0.07 < 1% 1.0)。runs/lost > 0.579 判真随机, ≤0.579 判真拥塞。
+ * 定点 ×1000 交叉相乘避免除法 (同 T.1 惯用法): ratio>0.579 ⇔ runs×1000 > 579×lost。
+ * 单阈值 (O.3): 两常量取同值, ⛔ 不得自设迟滞 band (自设 = 自行改判据)。 */
+constexpr uint32_t kRatePlan3RunsCongest = 579;  // 0.579×1000 (判拥塞侧; 缺数据保守按拥塞)
+constexpr uint32_t kRatePlan3RunsRandom  = 579;  // 0.579×1000 (判随机侧; 与 Congest 同值)
+static_assert(kRatePlan3RunsCongest == kRatePlan3RunsRandom,
+              "P-3 单阈值 (O.3): 两常量必须同值, 禁止迟滞 band");
 
 struct chunk_meta
 {
@@ -115,6 +144,10 @@ struct FragTrackState
     std::atomic<std::uint64_t> rate_floor_warns{0};
     std::atomic<std::uint64_t> retransmit_bytes{0};
     std::atomic<std::size_t> rate_bps_now{0};   // 当前生效速率快照, 供 rate trace 采样
+    std::atomic<std::size_t> observed_bps_now{0};   // 最近 DZA2 的接收观测速率 (方案E, 仅诊断)
+    /* 段5 任务2h: runs 判别信号快照 (方案3 前置, 仅诊断不进 bps= 赋值)。 */
+    std::atomic<std::size_t> runs_now{0};   // 最近消息 runs 首捕获 (T.3+T.1)
+    std::atomic<std::size_t> lost_now{0};   // 同一 pattern 缺页数
 };
 
 FragTrackState& frag_track_state()
@@ -556,22 +589,28 @@ uint64_t ack_first_wait_ms(const ipc::socket::UDPNode* node)
     return std::max<uint64_t>(1, (rto_us + 999) / 1'000);
 }
 
-/* ---------------- 闭环自适应限速 (段3 任务2b, reviewer 方案 §2-§4) ----------------
+/* ---------------- 闭环自适应限速 (段3 任务2b 起, 段4 方案E 重构为 DCTCP) ----
  *
- * WHC 重定标: rate_limit_bps 从常量变 per-node 自适应 (AIMD)。同步单消息模型
- * 下在飞可靠消息恒 ≤1, 控制周期 = 消息生命周期。状态是**发送链路属性**
- * (per-node), 与对端无关 → 不进 PeerState (D-1 纪律, 表仍 3 字段 + ack_count)。
+ * WHC 重定标: rate_limit_bps 从常量变 per-node 自适应。同步单消息模型下在飞
+ * 可靠消息恒 ≤1, 控制周期 = 消息生命周期。状态是**发送链路属性** (per-node),
+ * 与对端无关 → 不进 PeerState (D-1 纪律, 表仍 3 字段 + ack_count)。
  *
- * 降速信号 := 任一 NACK 帧 (显式或位图), 满足:
- *   ① 四字段匹配当前消息 (循环内已保证);
- *   ② 单帧缺片跨度 hi - lo ≥ kOverflowSpanPages (=4)  // 溢出型: 分散大跨度缺失
- *   ③ 发送者 peer_is_live(receiver_id, 租期)            // 僵尸/新加入者不驱动降速
- * 随机丢包是 1-2 片相邻缺失 (跨度 1), 缓冲溢出是分散大跨度缺失 —— 跨度 ≥ 4 是
- * 溢出特征; 且 page_cnt < 5 的消息物理上不可能触发 → 小消息零假阳性。
+ * 段3 (MIMD 盲探测, 已由段4 方案E 替换): 二值降速信号 (跨度 ≥ 4 的 NACK) →
+ * 减半, 连续 K 条 clean → ×1.5。只有 {floor, initial} 两个边界点, 开区间内
+ * 无不动点, 真实容量落在 (floor, initial) 时极限环振荡是结构必然 —— 这是 E
+ * 的立项理由。文档里曾写 "AIMD" 是错的 (两边都乘性, 是 MIMD)。
  *
- * 采样截断 (at-least-one 的残余): 迟到 NACK (晚于首匹配 ACK 的 return) 会被下
- * 一条消息的入口 drain 丢弃, 信号漏采 —— 只漏报不误报, 接受此残余 (拍板1 的
- * 「不额外等待」), drain_record_acks 扩展后在返回前收干, 截断窗口大幅收窄。 */
+ * 段4 方案E (DCTCP 式比例控制, 替代 MIMD): 接收端每条消息回送 lost_pages /
+ * page_cnt = 丢包分数 F (DZA2, 与 ACK 同行; NACK 派生 F 仅作混合部署应急),
+ * 多对端取最差。控制律:
+ *   α ← (1−g)·α + g·F            EWMA, g=1/16, 定点 ×256
+ *   F > 0   → bps × (1−α/2), 钳到 floor        (比例降, 降幅随拥塞连续变化)
+ *   F == 0 连续 K 条 (且页数足够) → bps + Δ     (加性升, 升幅恒为 initial/16)
+ * 降幅 ∝ α ∝ F, 升幅恒为 Δ ⇒ 速率稳定在"比例降幅恰好抵消加性升幅"那一点,
+ * 开区间内有真实平衡点, 极限环消失。
+ *
+ * 采样截断残余: 迟到 NACK (晚于首匹配 ACK 的 return) 会被下一条消息的入口
+ * drain 丢弃 —— 只漏报不误报; DZA2 随 ACK 同行, 不依赖 NACK 是否赶上。 */
 
 struct RateLimitState
 {
@@ -579,8 +618,16 @@ struct RateLimitState
     std::size_t initial_bps{0};      // 播种值 (配置), 增长上限
     std::size_t bps{0};              // 当前生效速率; 0 = 未启用
     std::size_t static_floor_bps{0}; // initial / kRateFloorDivisor
-    std::uint32_t clean_count{0};    // 连续干净消息数
+    std::uint32_t clean_count{0};    // 连续干净消息数 (够大的消息 F==0)
     bool floor_warned{false};        // 下限告警每节点只打一次 (复刻 udp.h 哲学)
+    /* ---- 段4 方案E 新增 ---- */
+    std::uint32_t alpha_scaled{0};    // α×256, DCTCP EWMA (干净启动, 首次丢包后爬升)
+    std::size_t additive_step_bps{0}; // Δ = initial/16, 播种时算一次 (加性升步长)
+    std::size_t observed_bps_last{0}; // 诊断快照 (最近 DZA2 值), 不参与控制 (D-7)
+    std::size_t runs_last{0};         // 诊断快照 (最近消息 runs 首捕获), 不参与控制
+    std::size_t lost_last{0};         // 诊断快照 (同一 pattern 缺页数), 不参与控制
+    /* ---- 段5 R1 新增: 活 α 的高位累积器 ---- */
+    std::uint32_t alpha_accum{0};     // α×4096, EWMA 在 ×16 高位累积, 消除 /16 整数截断死区
 };
 
 /* 复刻 rtt_of / peers_of 的查找范式: static mutex + unordered_map,
@@ -627,14 +674,28 @@ std::size_t effective_rate_bps(ipc::socket::UDPNode* node, std::size_t options_b
         st.static_floor_bps = global / kRateFloorDivisor;
         st.clean_count = 0;
         st.floor_warned = false;
+        /* 段4 方案E 播种: α 干净启动; Δ = initial/16 (相对播种值, 与绝对速率
+         * 解耦); 诊断快照清零。 */
+        st.alpha_scaled = 0;
+        st.alpha_accum = 0;   // 段5 R1: ×4096 累积器同步清零
+        st.additive_step_bps = std::max<std::size_t>(1, global / 16);
+        st.observed_bps_last = 0;
+        st.runs_last = 0;
+        st.lost_last = 0;
     }
     return st.bps;
 }
 
-/* 单帧 NACK 缺片跨度判据: hi - lo ≥ kOverflowSpanPages 即溢出型信号。 */
-bool nack_span_is_overflow(uint16_t lo, uint16_t hi)
+/* 丢包分数 F 的定点表示 (×256, ∈ [0,256])。count 夹取到 page_cnt 防分母错配
+ * (畸形帧的越界缺页号已被调用方过滤, 这里再钳一道)。 */
+uint32_t scaled_loss_fraction(uint32_t count, uint16_t page_cnt)
 {
-    return static_cast<int>(hi) - lo >= static_cast<int>(kOverflowSpanPages);
+    if (page_cnt == 0)
+    {
+        return 0;
+    }
+    const uint64_t cnt = std::min<uint64_t>(count, page_cnt);
+    return static_cast<uint32_t>(std::min<uint64_t>(256, (cnt * 256) / page_cnt));
 }
 
 /* 物理下限 (reviewer 方案 §3.2, 必须):
@@ -675,21 +736,28 @@ bool peer_is_live(const ipc::socket::UDPNode* node, uint32_t receiver_id, uint64
     return age_ms >= 0 && static_cast<uint64_t>(age_ms) < lease_ms;
 }
 
-/* 转移函数 (每条消息结束时调用一次, reviewer 方案 §2.3):
+/* 转移函数 (每条消息结束时调用一次, 段4 方案E DCTCP 式比例控制, 替换段3
+ * MIMD):
  *
- * 溢出信号 → 减半, 每次钳到 max(static_floor, window_floor(page_cnt)) ——
- *   逐消息知道 page_cnt, 动态钳制 (不是播种时定死)。到下限仍在溢出 → 告警
- *   触发条件 ①。clean_count 清零。
- * 干净 (拿到 ACK 且无溢出信号) → 连续 K 条后 ×1.5, 上限 initial。
- *   带良性重传 (跨度 < 4) 的消息仍算 clean —— 随机丢包的重传不是拥塞。
- *   FailedTimeout / FailedIntegrity 不算 clean (也不触发降速; 超时无信号是
- *   死 peer, 不该为此降速)。
+ * f_max_scaled = 本条消息收集到的最大丢包分数 F×256 (多对端取最差, D-8:
+ *   DZA2 的 lost_pages 权威, NACK 派生 F 只作混合部署应急 —— 取 max 后只应用
+ *   一次, 天然防双源重复计数)。
+ * F > 0 → 比例降: bps × (1−α/2), 钳到 floor —— 降幅 ∝ α ∝ F, 连续变化。
+ *   到下限仍拥塞 → 告警 ① (短语逐字保留自段3)。clean_count 清零。
+ * F == 0 → 连续 K 条**够大的**消息 (page_cnt ≥ kMinPagesForRateSignal, 裁定②:
+ *   小消息 F=0 是弱证据, 中性跳过不清零) 后加性升 +Δ, 上限 initial —— 升幅
+ *   恒为 Δ 不过冲, 这是 E 消除极限环的关键。
  * at_floor_timeout (超时返回点传 true): 速率已在下限仍 FailedTimeout → 告警
- *   触发条件 ② —— 覆盖「接收端静默放弃所以没有 NACK」的盲区 (正是
- *   window_floor 描述的静默丢弃型失效)。两条告警共用固定短语 `rate limit
- *   floor`, 每节点一次 (floor_warned), 不刷屏。 */
-void adapt_rate(ipc::socket::UDPNode* node, uint16_t page_cnt, bool overflow_signal, bool clean,
-                bool at_floor_timeout = false)
+ *   ② —— 覆盖「接收端静默放弃所以没有 NACK」的盲区 (window_floor 描述的静默
+ *   丢弃型失效)。两条告警共用固定短语 `rate limit floor`, 每节点一次
+ *   (floor_warned), 不刷屏。超时不算 clean 不降速 (段3 :685-689 裁定逐字)。
+ * 完整性失败: 调用方已拦截, 不进入本函数。
+ * 计数器 (rate_reductions/rate_increments) 只在速率实际变化时 ++ (段4 任务0
+ * 纪律: 钳到 floor / initial 的 no-op 不计数); 计数受 frag_track 门控, 功能
+ * 不受门控。 */
+void adapt_rate_dctcp(ipc::socket::UDPNode* node, uint16_t page_cnt, uint32_t f_max_scaled, bool clean,
+                      bool at_floor_timeout = false, std::size_t observed_bps = 0,
+                      std::size_t runs_first = 0, std::size_t lost_first = 0)
 {
     RateLimitState& st = rate_state_of(node);
     std::lock_guard<std::mutex> lock(st.mtx);
@@ -700,11 +768,31 @@ void adapt_rate(ipc::socket::UDPNode* node, uint16_t page_cnt, bool overflow_sig
     const std::size_t floor_bps = std::max(st.static_floor_bps, static_cast<std::size_t>(window_floor_bps(page_cnt)));
     const bool at_floor = st.bps <= floor_bps;
     const bool track = frag_track_enabled().load(std::memory_order_relaxed);
-    if (overflow_signal)
+    const uint32_t f_scaled = std::min<uint32_t>(f_max_scaled, 256);
+    /* EWMA 每条消息都更新: F=0 时 α 按 (1−g) 衰减, 无拥塞余震。 */
+    /* 段5 R1 修死区 (§4.3): α EWMA 改 ×4096 高位累积器, 消除 /16 整数截断死区。
+     * 显式 cast 必须保留: 无 cast 时 f_scaled*16 若被提升为 unsigned 会改变负数语义 (§8.3)。 */
+    st.alpha_accum += (static_cast<int32_t>(f_scaled) * 16 - static_cast<int32_t>(st.alpha_accum)) / 16;
+    st.alpha_scaled = static_cast<uint32_t>(st.alpha_accum >> 4);
+    if (f_scaled > 0)
     {
-        st.bps = std::max(floor_bps, st.bps / 2);
+        const std::size_t old_bps = st.bps;
+        /* 降幅 = bps × α/2, 向上取整; α 至少按 1 (≈0.4%) 计 —— F>0 而 α=0
+         * (首次丢包) 或除法截断为 0 时, 降幅恒 0 会让拥塞信号静默 (出错点③)。 */
+        /* 段5 任务2j (P-3 判别器本体, O.3 放行): runs/lost 判拥塞 vs 随机。
+         * 阈值 0.579 (tester 实测标定: 标准 p90=0.158 < 1% p10=1.000 间隙中点)。
+         * 判随机 (runs/lost>0.579) → α_eff 压到结构下限 1: 降速减弱但不清零,
+         * 最小降仍 = (bps×1+511)/512 ≥ bps/512 (裁定1(c), ⛔ 不许清零)。
+         * 判拥塞 / 缺数据 (无首捕获 pattern 或 lost=0 分母退化) → 维持 R1 全量降
+         * (裁定1(b) 保守按拥塞, 不 fail-open 成随机)。判别量只进 α_eff 增益,
+         * ⛔ 不进 bps= 赋值 (裁定1(a)); runs 从位图 NACK 派生 (liveness 仅 NACK 派生)。 */
+        const bool runs_random = kRunsCaptureEnabled && runs_first > 0 && lost_first > 0
+                                 && runs_first * 1000 > static_cast<std::size_t>(kRatePlan3RunsRandom) * lost_first;
+        const uint32_t alpha_eff = runs_random ? 1u : std::max<uint32_t>(st.alpha_scaled, 1);
+        const std::size_t drop = (st.bps * alpha_eff + 511) / 512;
+        st.bps = std::max(floor_bps, st.bps - drop);
         st.clean_count = 0;
-        if (st.bps == floor_bps && !st.floor_warned)   // 到下限仍在溢出 → 告警 ①
+        if (st.bps == floor_bps && !st.floor_warned)   // 到下限仍拥塞 → 告警 ①
         {
             st.floor_warned = true;
             if (track)
@@ -716,16 +804,44 @@ void adapt_rate(ipc::socket::UDPNode* node, uint16_t page_cnt, bool overflow_sig
                          "net.core.rmem_max and subscriber health\033[0m\n",
                          static_cast<const void*>(node), st.bps);
         }
-        if (track)
+        if (track && st.bps != old_bps)   // 已在下限时钳制是 no-op: 速率未变, 不计数
         {
             frag_track_state().rate_reductions.fetch_add(1, std::memory_order_relaxed);
         }
+        /* 段5 任务2k (P.1 回升门, 本轮唯一新增授权): 判随机时允许回升 tick 触发 ——
+         * 打开 P-3 第二头 (S.3 病征 inc=0 零回升)。判别器只改「是否发生」(布尔门):
+         * runs_random=true → 在削弱降速 (α_eff=1, 2j) 之后追加一次回升 tick。
+         * ⛔ 幅度逐字不动: inc_step 表达式与下方 rise 分支同式 (Δ=initial/320 或
+         * 回滚态 additive_step_bps, 上限 initial), 判别量不写进 bps 函数项 (W 硬禁令
+         * 针对 rise=Δ·g(判别量) 形式)。缺数据 / 真拥塞 (runs_random=false) → 门关闭,
+         * 维持 R1 全量降 (judge_p3ii 第6条「真拥塞降速不弱于 R1」自动保持)。 */
+        if (runs_random)
+        {
+            const std::size_t old_bps_rise = st.bps;
+            const std::size_t inc_step = (kRateRecoverAlpha >= kRateRecoverAlphaSentinel)
+                                             ? st.additive_step_bps
+                                             : std::max<std::size_t>(1, st.initial_bps / kRateRecoverStepDivisor);
+            st.bps = std::min(st.initial_bps, st.bps + inc_step);   // 加性升 +Δ, 上限 initial
+            st.clean_count = 0;
+            if (track && st.bps != old_bps_rise)   // 已在天花板 initial 时 min() 是 no-op: 速率未变, 不计数
+            {
+                frag_track_state().rate_increments.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
     }
-    else if (clean && ++st.clean_count >= kCleanMessagesPerIncrement)
+    else if (clean && page_cnt >= kMinPagesForRateSignal
+             && (kRateRecoverAlpha >= kRateRecoverAlphaSentinel
+                     ? (++st.clean_count >= kCleanMessagesPerIncrement)   // 回滚态: 旧 K 连续门
+                     : (st.alpha_accum >> 4 <= kRateRecoverAlpha)))       // 新态: α 门 (α_scaled≤T 才放行)
     {
-        st.bps = std::min(st.initial_bps, st.bps + st.bps / 2);   // ×1.5, 上限 initial
+        const std::size_t old_bps = st.bps;
+        /* 段5 R1 Δ 收缩 (§4.5): 回滚态用 additive_step_bps(=initial/16), 新态用 initial/320。 */
+        const std::size_t inc_step = (kRateRecoverAlpha >= kRateRecoverAlphaSentinel)
+                                         ? st.additive_step_bps
+                                         : std::max<std::size_t>(1, st.initial_bps / kRateRecoverStepDivisor);
+        st.bps = std::min(st.initial_bps, st.bps + inc_step);   // 加性升 +Δ, 上限 initial
         st.clean_count = 0;
-        if (track)
+        if (track && st.bps != old_bps)   // 已在天花板 initial 时 min() 是 no-op: 速率未变, 不计数
         {
             frag_track_state().rate_increments.fetch_add(1, std::memory_order_relaxed);
         }
@@ -743,9 +859,15 @@ void adapt_rate(ipc::socket::UDPNode* node, uint16_t page_cnt, bool overflow_sig
                      "net.core.rmem_max and subscriber health\033[0m\n",
                      static_cast<const void*>(node), st.bps);
     }
+    st.observed_bps_last = observed_bps;   // 诊断快照, 不参与控制 (D-7)
+    st.runs_last = runs_first;             // 诊断快照 (T.3 首捕获 + T.1 最拥塞), 不参与控制
+    st.lost_last = lost_first;
     if (track)
     {
         frag_track_state().rate_bps_now.store(st.bps, std::memory_order_relaxed);
+        frag_track_state().observed_bps_now.store(st.observed_bps_last, std::memory_order_relaxed);
+        frag_track_state().runs_now.store(st.runs_last, std::memory_order_relaxed);
+        frag_track_state().lost_now.store(st.lost_last, std::memory_order_relaxed);
     }
 }
 
@@ -825,6 +947,71 @@ void drain_self_loopback(ipc::socket::UDPNode& node)
     }
 }
 
+/* ---- 段5 任务2h: runs 判别信号 (方案3 前置, 纯诊断, 不进 bps= 赋值) ----
+ * runs = 位图 NACK 里连续缺失段的段数 (真拥塞≈1, 真随机≈lost)。RunsFirst 是
+ * 每消息每对端的 T.3 首捕获记录 (见 drain_record_acks / chunk_send_ex)。 */
+struct RunsFirst
+{
+    bool captured{false};
+    std::size_t runs{0};
+    std::size_t lost{0};
+};
+
+/* 与 F 采集同一边界 (page_id==0 || >page_cnt 即停) 数连续缺失段数。lost 沿用
+ * 调用方已算好的 miss_cnt (同源, 不重算 —— runs 与 lost 必须出自同一 pattern)。 */
+std::size_t count_bitmap_runs(const IpcRtpsNackBitmapMsg& nb, std::size_t page_cnt)
+{
+    std::size_t runs = 0;
+    bool prev_missing = false;
+    for (std::size_t bit = 0; bit < nb.bit_cnt; ++bit)
+    {
+        const std::size_t page_id = static_cast<std::size_t>(nb.base_page) + bit;
+        if (page_id == 0 || page_id > page_cnt)
+        {
+            break;
+        }
+        const bool missing = nb.is_missing(static_cast<uint16_t>(page_id));
+        if (missing && !prev_missing)
+        {
+            ++runs;   // 0→1 跳变 = 新 run 起点
+        }
+        prev_missing = missing;
+    }
+    return runs;
+}
+
+/* T.1 跨对端聚合: 取最拥塞 (runs/lost 最小, 交叉相乘避免除法) 对端, 只输出该
+ * 对端原始 runs/lost —— 比值留给判读侧算 (P.3: 分离度标定要看分布)。无首捕获
+ * pattern → (0,0)。 */
+void aggregate_runs_first(const std::unordered_map<uint32_t, RunsFirst>& m, std::size_t& runs_out,
+                          std::size_t& lost_out)
+{
+    runs_out = 0;
+    lost_out = 0;
+    std::size_t best_runs = 0;
+    std::size_t best_lost = 0;
+    bool any = false;
+    for (const auto& kv : m)
+    {
+        const RunsFirst& rf = kv.second;
+        if (!rf.captured || rf.lost == 0)
+        {
+            continue;
+        }
+        if (!any || rf.runs * best_lost < best_runs * rf.lost)
+        {
+            any = true;
+            best_runs = rf.runs;
+            best_lost = rf.lost;
+        }
+    }
+    if (any)
+    {
+        runs_out = best_runs;
+        lost_out = best_lost;
+    }
+}
+
 /* 段3 任务2: ACK 命中后非阻塞收干记账 (裁定 段3_裁定_抑制触发窗口与drain.md §二,
  * 拍板1 的落法)。首匹配 ACK 已满足返回条件 (at-least-one 语义不变), 这里只把
  * 内核缓冲里已到达的其他对端 ACK 一并记入身份表再丢弃 —— 不额外等待, 只是
@@ -841,23 +1028,31 @@ void drain_self_loopback(ipc::socket::UDPNode& node)
  * seen: 本消息已记账对端集合 (含循环内首匹配的 receiver_id), 保证每消息
  * 每对端至多计 1 次 —— ack_count 语义 = 确认该消息的对端数。
  *
- * 段3 任务2b 扩展 (reviewer 方案 §8 改 5): 非 ACK 帧里顺带采集降速信号 ——
- * 位图/显式 NACK, 四字段匹配, 记单帧缺片跨度 lo/hi, 若跨度 ≥ kOverflowSpanPages
- * 且发送者 live → 置 *overflow_signal (供返回前 adapt_rate 用)。**用局部 nack
- * 实例 (nack_msg/nb_msg), 不写身份表** (record_peer_nack 不调, last_nack_ts
- * 不更新 —— 与循环内的记录语义分离)。lease_ms == 0 或 overflow_signal 为
- * nullptr 时退化为纯记账 (保持旧行为)。 */
+ * 段3 任务2b → 段4 方案E 扩展 (reviewer 方案 §8 改 5 + 设计 §7.2): 非 ACK 帧里
+ * 顺带采集丢包分数 F —— 位图/显式 NACK 计数**通过范围检查**的缺页数 / page_cnt,
+ * 发送者 live → 并入 *f_max_scaled (取 max; 僵尸/新加入者不驱动降速, D-3)。
+ * **DZA2 分支**: 与 DZAK 同记账 (record_peer_ack, 无 liveness 过滤 —— DZA2
+ * 本身即"本消息已 ACK"的证明, 僵尸从构造上发不出), 并入 F 与 observed_bps
+ * (仅诊断)。**用局部 nack 实例 (nack_msg/nb_msg/ack2_msg), 不写身份表**
+ * (record_peer_nack 不调, last_nack_ts 不更新 —— 与循环内的记录语义分离)。
+ * lease_ms == 0 或 f_max_scaled 为 nullptr 时退化为纯记账 (保持旧行为)。
+ * F 是"取 max 聚合"而非短路布尔 —— 每条非 ACK 帧都要解析完。
+ * 段5 任务2h: runs_first_map != nullptr 时, 顺带对每对端第一条位图 NACK 做 T.3
+ * 首捕获 (迟到 NACK 也采 —— 对端首条 NACK 可能晚于 got_ack 才入 drain 窗口)。 */
 void drain_record_acks(ipc::socket::UDPNode& node, const chunk_meta& meta,
                        const ipc::socket::UDPNode* rtt_key,
                        std::unordered_set<uint32_t>& seen,
-                       uint64_t lease_ms = 0, bool* overflow_signal = nullptr)
+                       uint64_t lease_ms = 0, uint32_t* f_max_scaled = nullptr,
+                       uint32_t* observed_bps_out = nullptr,
+                       std::unordered_map<uint32_t, RunsFirst>* runs_first_map = nullptr)
 {
     constexpr int kMaxAckDrain = 1'024;
     IpcRtpsAckMsg ack_msg;   // 局部实例, 不碰调用方 ack_msg
-    /* 信号采集的局部 NACK 实例 —— 与循环内 (chunk_send_ex 的 nack_msg/nb_msg)
+    /* 信号采集的局部实例 —— 与循环内 (chunk_send_ex 的 nack_msg/nb_msg/ack_msg)
      * 语义分离: 这里只读不写身份表。 */
     IpcRtpsNackMsg nack_msg;
     IpcRtpsNackBitmapMsg nb_msg;
+    IpcRtpsAck2Msg ack2_msg;
     for (int i = 0; i < kMaxAckDrain; ++i)
     {
         ipc::buffer buf = node.receive_nowait();
@@ -865,11 +1060,34 @@ void drain_record_acks(ipc::socket::UDPNode& node, const chunk_meta& meta,
         {
             return;
         }
+        if (ack2_msg.check_ak2_id(buf))
+        {
+            /* DZA2 (段4 方案E): 与 DZAK 同记账 + 采 F。四字段匹配后无需
+             * liveness 过滤 (DZA2 自证活, 设计 §6.2)。 */
+            ack2_msg.deserialize(buf);
+            if (ack2_msg.page_cnt == meta.page_cnt && ack2_msg.total_size == meta.total_size
+                && ack2_msg.data_msg_id == meta.msg_id && ack2_msg.sequence == meta.sequence)
+            {
+                if (seen.insert(ack2_msg.receiver_id).second)
+                {
+                    record_peer_ack(rtt_key, ack2_msg.receiver_id, meta.sequence);
+                }
+                if (f_max_scaled != nullptr)
+                {
+                    *f_max_scaled = std::max(*f_max_scaled, scaled_loss_fraction(ack2_msg.lost_pages, meta.page_cnt));
+                }
+                if (observed_bps_out != nullptr)
+                {
+                    *observed_bps_out = ack2_msg.observed_bps;
+                }
+            }
+            continue;
+        }
         if (!ack_msg.check_ak_id(buf))
         {
             /* 非 ACK 帧 (数据片/HB/显式 NACK/位图 NACK): 照旧丢弃, 但先做
-             * 降速信号采集 (任务2b)。已采到信号后短路, 不再解析后续帧。 */
-            if (lease_ms > 0 && overflow_signal != nullptr && !*overflow_signal)
+             * F 采集 (NACK 派生 F 只作混合部署应急, 主从关系见设计 §6.2)。 */
+            if (lease_ms > 0 && f_max_scaled != nullptr)
             {
                 if (!nack_msg.check_nk_id(buf))
                 {
@@ -881,8 +1099,7 @@ void drain_record_acks(ipc::socket::UDPNode& node, const chunk_meta& meta,
                     if (nb_msg.page_cnt == meta.page_cnt && nb_msg.total_size == meta.total_size
                         && nb_msg.data_msg_id == meta.msg_id && nb_msg.sequence == meta.sequence)
                     {
-                        uint16_t lo = 0, hi = 0;
-                        bool have = false;
+                        std::size_t miss_cnt = 0;
                         for (std::size_t bit = 0; bit < nb_msg.bit_cnt; ++bit)
                         {
                             const std::size_t page_id = static_cast<std::size_t>(nb_msg.base_page) + bit;
@@ -892,21 +1109,22 @@ void drain_record_acks(ipc::socket::UDPNode& node, const chunk_meta& meta,
                             }
                             if (nb_msg.is_missing(static_cast<uint16_t>(page_id)))
                             {
-                                if (!have)
-                                {
-                                    lo = hi = static_cast<uint16_t>(page_id);
-                                    have = true;
-                                }
-                                else
-                                {
-                                    hi = static_cast<uint16_t>(page_id);
-                                }
+                                ++miss_cnt;
                             }
                         }
-                        if (have && nack_span_is_overflow(lo, hi)
-                            && peer_is_live(rtt_key, nb_msg.receiver_id, lease_ms))
+                        if (miss_cnt > 0 && peer_is_live(rtt_key, nb_msg.receiver_id, lease_ms))
                         {
-                            *overflow_signal = true;
+                            *f_max_scaled =
+                                std::max(*f_max_scaled, scaled_loss_fraction(static_cast<uint32_t>(miss_cnt),
+                                                                              meta.page_cnt));
+                            /* 段5 任务2h: T.3 首捕获 (每对端只采第一条位图 NACK)。 */
+                            if (runs_first_map != nullptr && kRunsCaptureEnabled
+                                && runs_first_map->find(nb_msg.receiver_id) == runs_first_map->end())
+                            {
+                                runs_first_map->emplace(nb_msg.receiver_id,
+                                                        RunsFirst{true, count_bitmap_runs(nb_msg, meta.page_cnt),
+                                                                  miss_cnt});
+                            }
                         }
                     }
                     continue;
@@ -915,29 +1133,20 @@ void drain_record_acks(ipc::socket::UDPNode& node, const chunk_meta& meta,
                 if (nack_msg.page_cnt == meta.page_cnt && nack_msg.total_size == meta.total_size
                     && nack_msg.data_msg_id == meta.msg_id && nack_msg.sequence == meta.sequence)
                 {
-                    uint16_t lo = 0, hi = 0;
-                    bool have = false;
+                    std::size_t miss_cnt = 0;
                     for (uint16_t page_id : nack_msg.missing_pages)
                     {
                         if (page_id == 0 || page_id > meta.page_cnt)
                         {
                             continue;
                         }
-                        if (!have)
-                        {
-                            lo = hi = page_id;
-                            have = true;
-                        }
-                        else
-                        {
-                            lo = std::min(lo, page_id);
-                            hi = std::max(hi, page_id);
-                        }
+                        ++miss_cnt;
                     }
-                    if (have && nack_span_is_overflow(lo, hi)
-                        && peer_is_live(rtt_key, nack_msg.receiver_id, lease_ms))
+                    if (miss_cnt > 0 && peer_is_live(rtt_key, nack_msg.receiver_id, lease_ms))
                     {
-                        *overflow_signal = true;
+                        *f_max_scaled =
+                            std::max(*f_max_scaled, scaled_loss_fraction(static_cast<uint32_t>(miss_cnt),
+                                                                          meta.page_cnt));
                     }
                 }
             }
@@ -957,8 +1166,29 @@ void drain_record_acks(ipc::socket::UDPNode& node, const chunk_meta& meta,
     }
 }
 
-void send_ack(ipc::socket::UDPNode& node, const chunk_meta& meta, uint32_t payload_crc32c)
+/* 段4 方案E 扩展: use_dza2=true 时发 DZA2 (DZAK 超集 + lost_pages/observed_bps),
+ * 否则与段3 逐字节一致。**发送端只有在 HB 通告过 kFlagRateFeedback 时才会收到
+ * DZA2** —— 旧版发送端会整帧丢弃 DZA2, 该消息永远等不到 ACK (成功路径致命),
+ * 所以 use_dza2 必须由协商位 sender_feedback_ok 驱动, 绝不无条件发。 */
+void send_ack(ipc::socket::UDPNode& node, const chunk_meta& meta, uint32_t payload_crc32c, bool use_dza2 = false,
+              uint16_t lost_pages = 0, uint32_t observed_bps = 0)
 {
+    if (use_dza2)
+    {
+        IpcRtpsAck2Msg ack2_msg;
+        ack2_msg.page_cnt = meta.page_cnt;
+        ack2_msg.total_size = meta.total_size;
+        ack2_msg.data_msg_id = meta.msg_id;
+        ack2_msg.receiver_id = local_node_id();
+        ack2_msg.sequence = meta.sequence;
+        ack2_msg.integrity_flags = INTEGRITY_FLAG_CRC32C;
+        ack2_msg.payload_crc32c = payload_crc32c;
+        ack2_msg.lost_pages = lost_pages;
+        ack2_msg.observed_bps = observed_bps;
+        ipc::buffer ack2_buf = ack2_msg.serialize();
+        send_chunk_with_retry(node, ack2_buf);
+        return;
+    }
     IpcRtpsAckMsg ack_msg;
     ack_msg.page_cnt = meta.page_cnt;
     ack_msg.total_size = meta.total_size;
@@ -982,10 +1212,15 @@ void send_heartbeat(ipc::socket::UDPNode& node, const chunk_meta& meta, bool rel
     hb.sequence = meta.sequence;
     /* kFlagBitmapNack 恒置: 本版本的 chunk_send_ex 一定认识 DZNB。接收端据此
      * 决定敢不敢用位图格式 —— 对旧版发送端(不发 HB 或 HB 里没这一位)它会退回
-     * 显式列表, 那是唯一能被对方解析的编码。 */
+     * 显式列表, 那是唯一能被对方解析的编码。
+     * kFlagRateFeedback 恒置 (段4 方案E): 本版本的 chunk_send_ex 一定认识 DZA2
+     * (解析 DZAK 与 DZA2 两条路径都在)。接收端只有看到这一位才发 DZA2 —— 旧版
+     * 发送端若收到 DZA2 会整帧丢弃 (成功路径致命, 见 udp_rtps_ack_msg.hpp 的
+     * DZA2 注释)。旧端解析只做 & 掩码, 多余位安全忽略, 置位无损。 */
     hb.flags = static_cast<uint8_t>((reliable ? IpcRtpsHeartbeatMsg::kFlagReliable : 0)
                                     | (final_hb ? IpcRtpsHeartbeatMsg::kFlagFinal : 0)
-                                    | IpcRtpsHeartbeatMsg::kFlagBitmapNack);
+                                    | IpcRtpsHeartbeatMsg::kFlagBitmapNack
+                                    | IpcRtpsHeartbeatMsg::kFlagRateFeedback);
     hb.round = round;
     ipc::buffer hb_buf = hb.serialize();
     send_chunk_with_retry(node, hb_buf);
@@ -1275,9 +1510,21 @@ bool recv_chunk_common(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ack_nod
         {
             return false;
         }
+        /* 单页路径无组装轮, 协商位只能来自前导 HB (与多页路径 :1351 处判定
+         * 语义一致)。**单页也发 DZA2** (leader 裁定②): 不发的话全小消息负载
+         * 永远产生不了 clean 样本, 降速后加性升永不触发 —— 但 F=0 来自单页
+         * 消息不构成"链路有余量"的证据 (1 页没压到缓冲), 发送端以
+         * kMinPagesForRateSignal 门控 clean 计数。observed_bps 无组装窗, 显式
+         * 置 0 —— 否则接近 0 的 elapsed 除出垃圾值。 */
+        bool fb_ok = false;
+        if (have_pending_hb && pending_hb.data_msg_id == meta.msg_id && pending_hb.page_cnt == meta.page_cnt
+            && pending_hb.total_size == meta.total_size)
+        {
+            fb_ok = (pending_hb.flags & IpcRtpsHeartbeatMsg::kFlagRateFeedback) != 0;
+        }
         const uint32_t payload_crc32c = dzIPC::common::crc32c(first_page.data(), first_page.size());
         msg_ptr->deserialize(first_page);
-        send_ack(ack_out, meta, payload_crc32c);
+        send_ack(ack_out, meta, payload_crc32c, fb_ok, /*lost_pages=*/0, /*observed_bps=*/0);
         return true;
     }
 
@@ -1345,6 +1592,14 @@ bool recv_chunk_common(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ack_nod
     bool sender_reliable = false;     // HB 声明发送端会响应 NACK
     bool hb_final = false;            // 发送端已放弃, 不会再重传
     bool sender_bitmap_ok = false;    // HB 声明发送端认识 DZNB(位图 NACK)
+    bool sender_feedback_ok = false;  // HB 声明发送端认识 DZA2(段4 方案E, 显式拥塞反馈)
+
+    /* 段4 方案E 测量: lost_pages = 本条消息首次发 NACK 时的缺片数 = 去重重传
+     * 需求 (received[] 逐页幂等去重), 精确无截断, 是权威 F 的分子。首次捕获后
+     * 不再改 —— 消息收全后才算的 received_cnt 恒为 page_cnt, 那会让 F 恒 0,
+     * 复刻段3 "信号系统性偏低" 的缺陷。消息无缺片 ⇒ 永不调 send_nack_auto ⇒
+     * 保持 0 ⇒ F=0 ✓。 */
+    uint16_t lost_pages = 0;
 
     /* 前导 HB 已经在 wait_first_data_chunk 里采纳过 sequence, 这里同步一下
      * 发送端的可靠性声明, 免得第一轮还按"未知"处理。 */
@@ -1353,6 +1608,7 @@ bool recv_chunk_common(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ack_nod
     {
         sender_reliable = (pending_hb.flags & IpcRtpsHeartbeatMsg::kFlagReliable) != 0;
         sender_bitmap_ok = (pending_hb.flags & IpcRtpsHeartbeatMsg::kFlagBitmapNack) != 0;
+        sender_feedback_ok = (pending_hb.flags & IpcRtpsHeartbeatMsg::kFlagRateFeedback) != 0;
     }
 
     for (int round = 0; round < RTPS_MAX_NACK_ROUND && received_cnt < meta.page_cnt; ++round)
@@ -1402,6 +1658,7 @@ bool recv_chunk_common(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ack_nod
                     sender_reliable = (hb_msg.flags & IpcRtpsHeartbeatMsg::kFlagReliable) != 0;
                     hb_final = (hb_msg.flags & IpcRtpsHeartbeatMsg::kFlagFinal) != 0;
                     sender_bitmap_ok = (hb_msg.flags & IpcRtpsHeartbeatMsg::kFlagBitmapNack) != 0;
+                    sender_feedback_ok = (hb_msg.flags & IpcRtpsHeartbeatMsg::kFlagRateFeedback) != 0;
                     if (!hb_seen)
                     {
                         hb_seen = true;
@@ -1443,6 +1700,11 @@ bool recv_chunk_common(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ack_nod
                 record_fragment_gaps(received, meta.page_cnt, false);
                 return false;
             }
+            if (lost_pages == 0)
+            {
+                /* 首次发 NACK 前捕获缺片数 (见上方声明处注释)。 */
+                lost_pages = static_cast<uint16_t>(meta.page_cnt - received_cnt);
+            }
             send_nack_auto(ack_out, meta, received, nack_msg, nb_msg, sender_bitmap_ok);
             continue;   // 跳过 fruitless 判据, 立即进入下一轮等重传
         }
@@ -1469,6 +1731,10 @@ bool recv_chunk_common(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ack_nod
         /* 本轮没收到 HB, 但前导 HB 可能已经声明过对端认识位图 —— sender_bitmap_ok
          * 是跨轮粘住的, 交给 send_nack_auto 判断即可。对端确实是旧版时它退回显式
          * 列表, 那是唯一能被对方解析的编码。 */
+        if (lost_pages == 0)
+        {
+            lost_pages = static_cast<uint16_t>(meta.page_cnt - received_cnt);
+        }
         send_nack_auto(ack_out, meta, received, nack_msg, nb_msg, sender_bitmap_ok);
     }
 
@@ -1482,7 +1748,12 @@ bool recv_chunk_common(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ack_nod
     const uint32_t payload_crc32c = dzIPC::common::crc32c(assembled.data(), meta.total_size);
     ipc::buffer assembled_view(assembled.data(), meta.total_size);
     msg_ptr->deserialize(assembled_view);
-    send_ack(ack_out, meta, payload_crc32c);
+    /* 段4 方案E: observed_bps = 已组装字节 / 组装期 (assembly_begin 起, 含 NACK
+     * 重传轮), 仅诊断不参与控制 (D-7 红线 —— 发送端是瓶颈时它恒等于发送速率,
+     * 拿它设速率会永远不上涨)。elapsed < 1ms 时置 0 防除出垃圾值。 */
+    const uint64_t asm_ms = elapsed_ms(assembly_begin);
+    const uint32_t observed_bps = (asm_ms >= 1) ? static_cast<uint32_t>(meta.total_size * 1000 / asm_ms) : 0;
+    send_ack(ack_out, meta, payload_crc32c, sender_feedback_ok, lost_pages, observed_bps);
     return true;
 }
 }   // namespace
@@ -1848,16 +2119,24 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
             ? (first_wait_ms + nack_wait_ms * static_cast<uint64_t>(RTPS_MAX_NACK_ROUND))
             : options.ack_timeout_ms;
     /* 段3 任务2b: liveness 租期 = 3 × 本条消息的 effective ack_timeout (用户
-     * 显式 override 就用 override, 否则推导值); overflow_signal = 本条消息
-     * 是否观测到来自 live peer 的溢出型 NACK (跨度 ≥ kOverflowSpanPages)。 */
+     * 显式 override 就用 override, 否则推导值)。段4 方案E: f_max_scaled = 本条
+     * 消息收集到的最大丢包分数 F×256 (DZA2 权威 + NACK 派生应急, 多对端取最差,
+     * 取 max 后消息结束时只应用一次 —— 双源不会重复计数); observed_bps_last =
+     * 最近 DZA2 的接收速率 (仅诊断, D-7 不参与控制)。 */
     const uint64_t lease_ms = kLeaseTimeoutMultiple * ack_timeout_ms;
-    bool overflow_signal = false;
+    uint32_t f_max_scaled = 0;
+    uint32_t observed_bps_last = 0;
     IpcRtpsNackMsg nack_msg;
     IpcRtpsNackBitmapMsg nb_msg;
     IpcRtpsAckMsg ack_msg;
+    IpcRtpsAck2Msg ack2_msg;
     /* 本消息已记账 (含循环内首匹配) 的对端 receiver_id 集合 ——
      * drain_record_acks 据此去重, 每消息每对端至多计 1 次。 */
     std::unordered_set<uint32_t> acked_receivers;
+    /* ---- 段5 任务2h: runs 判别信号 (纯诊断, 不进 bps=) ----
+     * T.3 首捕获去重: 每消息每对端只取第一条位图 NACK (主循环 + drain 共享此表);
+     * T.1 最拥塞聚合在消息结束时做 (aggregate_runs_first, 只上报原始 runs/lost)。 */
+    std::unordered_map<uint32_t, RunsFirst> runs_first_map;
 
     const auto ack_begin = std::chrono::steady_clock::now();
     int round = 0;
@@ -1898,6 +2177,9 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
     {
         bool got_nack = false;
         bool got_ack = false;
+        /* 本收集窗口内命中四字段匹配的 ACK 帧 (DZAK 或 DZA2) —— 经基类引用
+         * 统一访问公共前缀, 完整性检查读它 (段4 方案E)。 */
+        const IpcRtpsAckMsg* matched_ack = nullptr;
         /* 本收集窗口内是否见过未知 peer 的 NACK —— 有则本轮整体跳过抑制、
          * 立即补发 (见上方抑制注释: 新订阅者中途加入的旁路)。每轮重置:
          * 旁路只作用于出现该 NACK 的那一轮。 */
@@ -1910,10 +2192,13 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
         {
             if (options.delivery == SocketDeliveryMode::Reliable && elapsed_ms(ack_begin) >= ack_timeout_ms)
             {
-                /* 段3 任务2b: 超时返回前转移一次 (clean=false; at_floor_timeout=true
+                /* 段4 方案E: 超时返回前转移一次 (clean=false; at_floor_timeout=true
                  * → 若速率已在下限, 告警条件②覆盖「接收端静默放弃所以没有 NACK」
-                 * 的盲区)。 */
-                adapt_rate(node.get(), meta.page_cnt, overflow_signal, /*clean=*/false, /*at_floor_timeout=*/true);
+                 * 的盲区; 超时前收到的 NACK 仍按 F 降速)。 */
+                std::size_t runs_f = 0, lost_f = 0;   // 段5 任务2h: T.1 最拥塞聚合 (诊断)
+                aggregate_runs_first(runs_first_map, runs_f, lost_f);
+                adapt_rate_dctcp(node.get(), meta.page_cnt, f_max_scaled, /*clean=*/false, /*at_floor_timeout=*/true,
+                                 /*observed_bps=*/0, runs_f, lost_f);
                 drain_self_loopback(ack_in);
                 report.status = SocketSendStatus::FailedTimeout;
                 return report;
@@ -1930,8 +2215,11 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
                 const uint64_t total_used = elapsed_ms(ack_begin);
                 if (total_used >= ack_timeout_ms)
                 {
-                    /* 段3 任务2b: 同第一处超时返回。 */
-                    adapt_rate(node.get(), meta.page_cnt, overflow_signal, /*clean=*/false, /*at_floor_timeout=*/true);
+                    /* 段4 方案E: 同第一处超时返回。 */
+                    std::size_t runs_f = 0, lost_f = 0;   // 段5 任务2h: T.1 最拥塞聚合 (诊断)
+                    aggregate_runs_first(runs_first_map, runs_f, lost_f);
+                    adapt_rate_dctcp(node.get(), meta.page_cnt, f_max_scaled, /*clean=*/false, /*at_floor_timeout=*/true,
+                                     /*observed_bps=*/0, runs_f, lost_f);
                     drain_self_loopback(ack_in);
                     report.status = SocketSendStatus::FailedTimeout;
                     return report;
@@ -1951,6 +2239,7 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
                     && ack_msg.data_msg_id == meta.msg_id && ack_msg.sequence == meta.sequence)
                 {
                     got_ack = true;
+                    matched_ack = &ack_msg;
                     report.ack_crc32c = ack_msg.payload_crc32c;
                     /* 阶段 2: 记录确认对端。receiver_id 由接收端自报
                      * (local_node_id), ACK 已按四字段匹配, 身份可信。 */
@@ -1971,6 +2260,41 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
                             rtt_of(rtt_key).observe(static_cast<uint64_t>(rtt));
                         }
                     }
+                    break;
+                }
+                continue;
+            }
+            /* DZA2 (段4 方案E 显式拥塞反馈 ACK): 紧跟 check_ak_id 之后、NACK
+             * 检查之前 (出错点① —— 漏并这里, 反馈永不到达, DCTCP 主信号丢失)。
+             * 与 DZAK 走同一段四字段匹配/记账/RTT (超集: 前 7 字段偏移一致),
+             * 只多采 F 与 observed_bps。无需 liveness 过滤: DZA2 本身即"本条
+             * 消息已 ACK"的证明 (record_peer_ack 更新 last_ack_ts), 僵尸从不
+             * ACK 所以发不出 DZA2, 从构造上不可能拉低全组 (设计 §6.2)。 */
+            if (ack2_msg.check_ak2_id(recv_buf))
+            {
+                ack2_msg.deserialize(recv_buf);
+                if (ack2_msg.page_cnt == meta.page_cnt && ack2_msg.total_size == meta.total_size
+                    && ack2_msg.data_msg_id == meta.msg_id && ack2_msg.sequence == meta.sequence)
+                {
+                    got_ack = true;
+                    matched_ack = &ack2_msg;
+                    report.ack_crc32c = ack2_msg.payload_crc32c;
+                    record_peer_ack(rtt_key, ack2_msg.receiver_id, meta.sequence);
+                    acked_receivers.insert(ack2_msg.receiver_id);
+                    if (round == 0)
+                    {
+                        const auto rtt = std::chrono::duration_cast<std::chrono::microseconds>(
+                                             std::chrono::steady_clock::now() - ack_begin)
+                                             .count();
+                        if (rtt > 0)
+                        {
+                            rtt_of(rtt_key).observe(static_cast<uint64_t>(rtt));
+                        }
+                    }
+                    /* DZA2 是权威 F (lost_pages = 接收端逐页去重计数, 不随 NACK
+                     * 截断低报); observed_bps 仅诊断 (D-7)。 */
+                    f_max_scaled = std::max(f_max_scaled, scaled_loss_fraction(ack2_msg.lost_pages, meta.page_cnt));
+                    observed_bps_last = ack2_msg.observed_bps;
                     break;
                 }
                 continue;
@@ -1998,11 +2322,12 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
                     nack_from_unknown_peer = true;
                 }
                 record_peer_nack(rtt_key, nb_msg.receiver_id);
-                /* 段3 任务2b 降速信号: 单帧缺片跨度 ≥ kOverflowSpanPages 且发送
-                 * 者 live → 溢出型 NACK。遍历时顺带记 lo/hi (全缺位图的
-                 * 跨度=整窗, 必然命中; 随机丢包跨度 1-2, 不命中)。 */
-                uint16_t nack_lo = 0, nack_hi = 0;
-                bool nack_have = false;
+                /* 段4 方案E 丢包分数 F: 数出**通过范围检查**的置位页数 (与
+                 * missing_union 同一过滤, 防畸形帧越界页号污染 F) / page_cnt,
+                 * 发送者 live → 并入 f_max_scaled (取最差对端, D-8)。NACK 派生
+                 * F 是应急 (位图 ≤11496 位截断时低报, 预期降级) —— DZA2 权威
+                 * F 会覆盖它 (去重计数单调、不截断)。 */
+                std::size_t nack_miss_cnt = 0;
                 for (std::size_t bit = 0; bit < nb_msg.bit_cnt; ++bit)
                 {
                     const std::size_t page_id = static_cast<std::size_t>(nb_msg.base_page) + bit;
@@ -2013,21 +2338,22 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
                     if (page_id > 0 && nb_msg.is_missing(static_cast<uint16_t>(page_id)))
                     {
                         missing_union.insert(static_cast<uint16_t>(page_id));
-                        if (!nack_have)
-                        {
-                            nack_lo = nack_hi = static_cast<uint16_t>(page_id);
-                            nack_have = true;
-                        }
-                        else
-                        {
-                            nack_hi = static_cast<uint16_t>(page_id);
-                        }
+                        ++nack_miss_cnt;
                     }
                 }
-                if (nack_have && nack_span_is_overflow(nack_lo, nack_hi)
-                    && peer_is_live(rtt_key, nb_msg.receiver_id, lease_ms))
+                if (nack_miss_cnt > 0 && peer_is_live(rtt_key, nb_msg.receiver_id, lease_ms))
                 {
-                    overflow_signal = true;
+                    f_max_scaled = std::max(
+                        f_max_scaled, scaled_loss_fraction(static_cast<uint32_t>(nack_miss_cnt), meta.page_cnt));
+                    /* 段5 任务2h: T.3 首捕获 —— 主循环第一条位图 NACK 即采 (runs 与
+                     * lost 同 pattern、同一边界, lost 沿用 nack_miss_cnt)。 */
+                    if (kRunsCaptureEnabled
+                        && runs_first_map.find(nb_msg.receiver_id) == runs_first_map.end())
+                    {
+                        runs_first_map.emplace(nb_msg.receiver_id,
+                                               RunsFirst{true, count_bitmap_runs(nb_msg, chunks.size()),
+                                                         nack_miss_cnt});
+                    }
                 }
                 continue;
             }
@@ -2047,30 +2373,21 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
                 nack_from_unknown_peer = true;
             }
             record_peer_nack(rtt_key, nack_msg.receiver_id);
-            /* 段3 任务2b 降速信号: 同位置图 NACK 分支 (min/max over missing)。 */
-            uint16_t nack_lo = 0, nack_hi = 0;
-            bool nack_have = false;
+            /* 段4 方案E 丢包分数 F: 同位置图 NACK 分支 (计数通过范围检查的
+             * 缺页, live 才并入; 显式列表 ≤256 截断时低报, 应急信号)。 */
+            std::size_t nack_miss_cnt = 0;
             for (uint16_t page_id : nack_msg.missing_pages)
             {
                 if (page_id > 0 && page_id <= chunks.size())
                 {
                     missing_union.insert(page_id);
-                    if (!nack_have)
-                    {
-                        nack_lo = nack_hi = page_id;
-                        nack_have = true;
-                    }
-                    else
-                    {
-                        nack_lo = std::min(nack_lo, page_id);
-                        nack_hi = std::max(nack_hi, page_id);
-                    }
+                    ++nack_miss_cnt;
                 }
             }
-            if (nack_have && nack_span_is_overflow(nack_lo, nack_hi)
-                && peer_is_live(rtt_key, nack_msg.receiver_id, lease_ms))
+            if (nack_miss_cnt > 0 && peer_is_live(rtt_key, nack_msg.receiver_id, lease_ms))
             {
-                overflow_signal = true;
+                f_max_scaled = std::max(f_max_scaled,
+                                        scaled_loss_fraction(static_cast<uint32_t>(nack_miss_cnt), meta.page_cnt));
             }
         }
 
@@ -2080,18 +2397,25 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
                下一轮会把它们当作本轮 self-loopback 误处理（meta 完全相同）。
                这里顺带把内核缓冲里已到达的其他对端 ACK 记入身份表 (段3 任务2,
                drain_record_acks): 不额外等待, 只是不再丢弃; 清队列职责不变。
-               任务2b: 同时把迟到 NACK 的溢出信号采进 overflow_signal。 */
-            drain_record_acks(ack_in, meta, rtt_key, acked_receivers, lease_ms, &overflow_signal);
+               段4 方案E: 同时把迟到 NACK/DZA2 的 F 采进 f_max_scaled (最差对端
+               的反馈晚于 return 到达 → 本条欠反应, 下一条消息必然补采 —— 一条
+               消息的滞后, 不是盲区, D-8)。 */
+            drain_record_acks(ack_in, meta, rtt_key, acked_receivers, lease_ms, &f_max_scaled, &observed_bps_last,
+                              &runs_first_map);
             if (options.integrity == SocketIntegrityMode::CRC32C
-                && ((ack_msg.integrity_flags & INTEGRITY_FLAG_CRC32C) == 0 || report.ack_crc32c != report.crc32c))
+                && ((matched_ack->integrity_flags & INTEGRITY_FLAG_CRC32C) == 0 || report.ack_crc32c != report.crc32c))
             {
                 /* 完整性失败: 不 adapt, 直接返回 (reviewer 方案 §8 改 5)。 */
                 report.status = SocketSendStatus::FailedIntegrity;
                 return report;
             }
-            /* 段3 任务2b: 消息结束, 转移一次。clean = 拿到 ACK 且无溢出信号
-             * (带良性重传 < 4 页的消息仍算 clean; 完整性失败已在上方拦截)。 */
-            adapt_rate(node.get(), meta.page_cnt, overflow_signal, /*clean=*/!overflow_signal);
+            /* 段4 方案E: 消息结束, 转移一次。clean = 拿到 ACK 且 F==0 —— F 来自
+             * DZA2 权威 (与 ACK 同行) 或 NACK 派生应急; 完整性失败已在上方拦截。
+             * 带丢包的消息按 F 比例降 (含 1-2 页小丢失: 连续信号, 降幅小)。 */
+            std::size_t runs_f = 0, lost_f = 0;   // 段5 任务2h: T.1 最拥塞聚合 (诊断)
+            aggregate_runs_first(runs_first_map, runs_f, lost_f);
+            adapt_rate_dctcp(node.get(), meta.page_cnt, f_max_scaled, /*clean=*/f_max_scaled == 0,
+                             /*at_floor_timeout=*/false, observed_bps_last, runs_f, lost_f);
             report.status = SocketSendStatus::DeliveredAcked;
             return report;
         }
@@ -2207,11 +2531,14 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
     {
         send_heartbeat(data_out, meta, /*reliable=*/false, /*final_hb=*/true, static_cast<uint16_t>(round + 2));
     }
-    /* 段3 任务2b: 终局超时前转移一次 (仅 Reliable 的 FailedTimeout 算失败;
+    /* 段4 方案E: 终局超时前转移一次 (仅 Reliable 的 FailedTimeout 算失败;
      * BestEffort 的 SentUnconfirmed 不是失败, 不 adapt)。 */
     if (options.delivery == SocketDeliveryMode::Reliable)
     {
-        adapt_rate(node.get(), meta.page_cnt, overflow_signal, /*clean=*/false, /*at_floor_timeout=*/true);
+        std::size_t runs_f = 0, lost_f = 0;   // 段5 任务2h: T.1 最拥塞聚合 (诊断)
+        aggregate_runs_first(runs_first_map, runs_f, lost_f);
+        adapt_rate_dctcp(node.get(), meta.page_cnt, f_max_scaled, /*clean=*/false, /*at_floor_timeout=*/true,
+                         /*observed_bps=*/0, runs_f, lost_f);
     }
     drain_self_loopback(ack_in);
     report.status = (options.delivery == SocketDeliveryMode::Reliable) ? SocketSendStatus::FailedTimeout
@@ -2297,6 +2624,9 @@ FragmentLossStats get_fragment_loss_stats()
     out.rate_floor_warns = st.rate_floor_warns.load(std::memory_order_relaxed);
     out.retransmit_bytes = st.retransmit_bytes.load(std::memory_order_relaxed);
     out.rate_bps_now = st.rate_bps_now.load(std::memory_order_relaxed);
+    out.observed_bps_now = st.observed_bps_now.load(std::memory_order_relaxed);
+    out.runs_now = st.runs_now.load(std::memory_order_relaxed);
+    out.lost_now = st.lost_now.load(std::memory_order_relaxed);
     return out;
 }
 
@@ -2324,6 +2654,9 @@ void reset_fragment_loss_stats()
     st.rate_floor_warns.store(0, std::memory_order_relaxed);
     st.retransmit_bytes.store(0, std::memory_order_relaxed);
     st.rate_bps_now.store(0, std::memory_order_relaxed);
+    st.observed_bps_now.store(0, std::memory_order_relaxed);
+    st.runs_now.store(0, std::memory_order_relaxed);
+    st.lost_now.store(0, std::memory_order_relaxed);
 }
 
 /* ---------------- 发送节流全局配置 (阶段 1) ---------------- */

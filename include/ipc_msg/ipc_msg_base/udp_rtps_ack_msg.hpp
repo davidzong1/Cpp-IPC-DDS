@@ -368,6 +368,111 @@ public:
     IpcRtpsAckMsg* clone() const override { return new IpcRtpsAckMsg(*this); }
 };
 
+/* ACK 的显式拥塞反馈变体 (段4 方案E) —— 在 DZAK 的 7 个字段之后追加:
+ *   lost_pages   (u16)  本条消息接收端实际缺的页数 (去重重传需求, 权威 F 分子)
+ *   observed_bps (u32)  接收速率 (B/s), 仅诊断, 不参与控制 (D-7 红线)
+ *
+ * ---- 为什么用独立 msg_id 而不是在 DZAK 里加字段 ----
+ * 与 DZNB 同因 (:110-115): 旧版解析器 adapt_memcpy_tods 不做边界检查, 在既有
+ * 报文里加字段会让旧版读出垃圾长度并越界读。独立 msg_id 让旧版 check_id 直接
+ * 失配、安全忽略整帧。配合 D-5 协商 (接收端只有看到 HB 的 kFlagRateFeedback
+ * 位才发本格式), 旧发送端根本收不到 DZA2 —— 两层保险。
+ *
+ * ---- 为什么是"严格超集"且字段顺序逐字节不动 ----
+ * 发送端的四字段匹配 (page_cnt/total_size/data_msg_id/sequence) 与 payload_crc32c
+ * 完整性校验是已结项回归面, 前 7 字段偏移与 DZAK 完全一致 ⇒ 对两类帧走同一段
+ * 匹配/校验逻辑 (经基类引用访问公共前缀), 逐字不变, 只多读两个字段。
+ * 重排字段顺序的设计已被否决。
+ *
+ * ---- 单页约束 ----
+ * 控制帧一旦分片, 每个 datagram 都会过 check_id 然后 deserialize 出半截垃圾,
+ * 所以载荷必须恒为单页 (kMaxWireBytes 注释 :130-133)。41 B 远在限内, 显式断言。 */
+class IpcRtpsAck2Msg : public IpcRtpsAckMsg
+{
+public:
+    static constexpr uint32_t kRtpsAck2MsgId = 0x44'5A'41'32;   // "DZA2"
+    /* 2+4+4+4+4+1+4 (DZAK 7 字段) + 2 (lost_pages) + 4 (observed_bps) + 12 (tail) */
+    static constexpr std::size_t kWireSize = 2 + 4 + 4 + 4 + 4 + 1 + 4 + 2 + 4 + 12;
+
+    static_assert(kWireSize <= IpcRtpsNackBitmapMsg::kMaxWireBytes, "DZA2 must stay a single datagram");
+
+    uint16_t lost_pages{0};     // 本条消息缺片数 (夹取 ≤ page_cnt)
+    uint32_t observed_bps{0};   // 接收速率 (B/s), 仅诊断
+
+    IpcRtpsAck2Msg() { set_msg_id(kRtpsAck2MsgId); }
+
+    ~IpcRtpsAck2Msg() = default;
+
+    bool check_ak2_id(const ipc::buffer& data) const { return check_id(data, kRtpsAck2MsgId); }
+
+    ipc::buffer serialize() override
+    {
+        const uint32_t total_size_ = sizeof(page_cnt) + sizeof(total_size) + sizeof(data_msg_id) + sizeof(receiver_id)
+                                     + sizeof(sequence) + sizeof(integrity_flags) + sizeof(payload_crc32c)
+                                     + sizeof(lost_pages) + sizeof(observed_bps);
+
+        ipc::buffer data = serialize_data_cut(total_size_);
+        uint32_t offset = 0;
+        uint16_t page = 1;
+
+        adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&page_cnt), page, offset,
+                         sizeof(page_cnt));
+        adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&total_size), page,
+                         offset, sizeof(total_size));
+        adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&data_msg_id), page,
+                         offset, sizeof(data_msg_id));
+        adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&receiver_id), page,
+                         offset, sizeof(receiver_id));
+        adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&sequence), page, offset,
+                         sizeof(sequence));
+        adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&integrity_flags), page,
+                         offset, sizeof(integrity_flags));
+        adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&payload_crc32c), page,
+                         offset, sizeof(payload_crc32c));
+        adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&lost_pages), page,
+                         offset, sizeof(lost_pages));
+        adapt_memcpy_tos(static_cast<uint8_t*>(data.data()), reinterpret_cast<const uint8_t*>(&observed_bps), page,
+                         offset, sizeof(observed_bps));
+
+        add_tail_msg(static_cast<uint8_t*>(data.data()) + offset, page);
+        return data;
+    }
+
+    void deserialize(const ipc::buffer& buffer) override
+    {
+        /* 新帧无旧格式: 固定尺寸, 长度不对就是不认识的东西, 整帧拒绝 (照 DZHB
+         * 模板 :448-451, 而非 DZAK 的兼容尺寸试探)。字段默认值全 0 ⇒ 短帧/畸形
+         * 帧经四字段匹配必然不命中, 安全丢弃。 */
+        if (buffer.size() != kWireSize)
+        {
+            return;
+        }
+
+        uint32_t offset = 0;
+        deserialize_data_cut(uint32_t(buffer.size()));
+        adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&page_cnt), static_cast<const uint8_t*>(buffer.data()), offset,
+                          sizeof(page_cnt));
+        adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&total_size), static_cast<const uint8_t*>(buffer.data()), offset,
+                          sizeof(total_size));
+        adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&data_msg_id), static_cast<const uint8_t*>(buffer.data()), offset,
+                          sizeof(data_msg_id));
+        adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&receiver_id), static_cast<const uint8_t*>(buffer.data()), offset,
+                          sizeof(receiver_id));
+        adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&sequence), static_cast<const uint8_t*>(buffer.data()), offset,
+                          sizeof(sequence));
+        adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&integrity_flags), static_cast<const uint8_t*>(buffer.data()),
+                          offset, sizeof(integrity_flags));
+        adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&payload_crc32c), static_cast<const uint8_t*>(buffer.data()),
+                          offset, sizeof(payload_crc32c));
+        adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&lost_pages), static_cast<const uint8_t*>(buffer.data()), offset,
+                          sizeof(lost_pages));
+        adapt_memcpy_tods(reinterpret_cast<uint8_t*>(&observed_bps), static_cast<const uint8_t*>(buffer.data()), offset,
+                          sizeof(observed_bps));
+    }
+
+    IpcRtpsAck2Msg* clone() const override { return new IpcRtpsAck2Msg(*this); }
+};
+
 /* Heartbeat —— 发送端发完分片后在**数据通道**上的主动通告。
  *
  * 两个作用, 第二个是硬需求而非优化:
@@ -396,6 +501,11 @@ public:
     /* 发送端认识 DZNB(位图 NACK)。接收端只有看到这一位才可以发位图格式 ——
      * 旧版发送端的 check_id 会直接丢弃 DZNB, 那一轮就等于没发 NACK。 */
     static constexpr uint8_t kFlagBitmapNack = 0x04;
+    /* 发送端认识 DZA2(显式拥塞反馈 ACK, 段4 方案E)。接收端只有看到这一位才
+     * 可以发 DZA2, 否则老实发 DZAK —— 旧版发送端若收到 DZA2 会整帧丢弃, 该
+     * 消息永远等不到 ACK, 每次 publish 都 FailedTimeout (成功路径, 比 DZNB
+     * 的失败路径危险一个量级)。旧端解析只做 & 掩码无严格相等, 置位安全。 */
+    static constexpr uint8_t kFlagRateFeedback = 0x08;
 
     static constexpr std::size_t kWireSize = 2 + 4 + 4 + 4 + 4 + 1 + 2 + 12;
 
@@ -480,5 +590,6 @@ public:
 inline bool is_rtps_control_frame(uint32_t msg_id)
 {
     return msg_id == IpcRtpsHeartbeatMsg::kRtpsHeartbeatMsgId || msg_id == IpcRtpsAckMsg::kRtpsAckMsgId
-           || msg_id == IpcRtpsNackMsg::kRtpsNackMsgId || msg_id == IpcRtpsNackBitmapMsg::kRtpsNackBitmapMsgId;
+           || msg_id == IpcRtpsAck2Msg::kRtpsAck2MsgId || msg_id == IpcRtpsNackMsg::kRtpsNackMsgId
+           || msg_id == IpcRtpsNackBitmapMsg::kRtpsNackBitmapMsgId;
 }
