@@ -1193,7 +1193,10 @@ P-4 只立档**。
 
 **代码态锚点（段8）**: 本段零代码、零占机；`data_rev.cc`=a5d15b95 / `data_rev.h`=e3adf7ef /
 lib=**17050d67**（与段6 结项逐字一致，seg7_closure_index.md §4）。判定工具统一（Y2 挂账：
-floor×1.20 vs analyze_cell×1.02）未解，P-1 判据引用仍须标代码态。本段未 commit。
+floor×1.20 vs analyze_cell×1.02）**已清**（段5 裁定 M.1：×1.02 正确 = `analyze_cell.sh:89`
+实现是事实；×1.20 为判据文档误写、无任何工具含此值，判据文档已对齐 ×1.02；段9 tester
+复核确认 P-1 全工具链仅 analyze_cell 一处实现、judge_p1 委托之、档I/II 映射按 M.6）。P-1
+判据引用仍须标代码态。本段未 commit。
 
 ### 8.3 建议
 

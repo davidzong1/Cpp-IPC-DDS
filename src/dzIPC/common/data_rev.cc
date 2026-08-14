@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -612,6 +613,24 @@ uint64_t ack_first_wait_ms(const ipc::socket::UDPNode* node)
  * 采样截断残余: 迟到 NACK (晚于首匹配 ACK 的 return) 会被下一条消息的入口
  * drain 丢弃 —— 只漏报不误报; DZA2 随 ACK 同行, 不依赖 NACK 是否赶上。 */
 
+/* ---- 段8/段9 E2 ④ 传输时滞实验: F 延迟线 (env 门控, D=0 惰性) ----
+ * 只动反馈时滞 τ (F 信号→α EWMA 的跨轮相位滞后) 一个量。操作化:
+ * f_scaled 入控制律前按 D 轮延迟 (环形缓冲); 方案 B (tester 3a 确认):
+ * :777 降速触发同用延迟值 → 对端丢包被检测→α 反映 整体后移 D 轮。
+ * D = env DZIPC_TAU_DELAY_ROUNDS, 默认 0。⛔ D=0 时绕过环形缓冲, 编译后
+ * 行为与未补丁代码逐字节一致 (tester 惰性等价性门前置)。⛔ 控制律参数
+ * 一律不动, 仅延迟 F 输入; 生产默认关闭。 */
+constexpr uint32_t kMaxTauDelayRounds = 32;   // 延迟档 0/4/8/16 的上限裕量
+uint32_t tau_delay_rounds()
+{
+    const char* s = std::getenv("DZIPC_TAU_DELAY_ROUNDS");
+    if (s == nullptr)
+    {
+        return 0u;
+    }
+    return std::min<uint32_t>(static_cast<uint32_t>(std::strtoul(s, nullptr, 10)), kMaxTauDelayRounds);
+}
+
 struct RateLimitState
 {
     std::mutex mtx;                  // 保护本状态 (同 rtt_of 锁粒度结论)
@@ -628,6 +647,9 @@ struct RateLimitState
     std::size_t lost_last{0};         // 诊断快照 (同一 pattern 缺页数), 不参与控制
     /* ---- 段5 R1 新增: 活 α 的高位累积器 ---- */
     std::uint32_t alpha_accum{0};     // α×4096, EWMA 在 ×16 高位累积, 消除 /16 整数截断死区
+    /* ---- 段8 E2 (F 延迟线, env 门控, 仅 D>0 使用; D=0 惰性绕过) ---- */
+    std::uint32_t tau_delay_buf[kMaxTauDelayRounds]{};  // F 延迟环形缓冲
+    std::uint32_t tau_delay_head{0};                    // 写头
 };
 
 /* 复刻 rtt_of / peers_of 的查找范式: static mutex + unordered_map,
@@ -769,12 +791,29 @@ void adapt_rate_dctcp(ipc::socket::UDPNode* node, uint16_t page_cnt, uint32_t f_
     const bool at_floor = st.bps <= floor_bps;
     const bool track = frag_track_enabled().load(std::memory_order_relaxed);
     const uint32_t f_scaled = std::min<uint32_t>(f_max_scaled, 256);
+    /* E2 ④ (段8/段9, env 门控): F 延迟线。f_scaled 入控制律前按 D 轮延迟
+     * (环形缓冲), D = env DZIPC_TAU_DELAY_ROUNDS, 默认 0。D=0 时绕过缓冲,
+     * f_ewma = f_scaled, 与未补丁代码逐字节同构 (惰性)。方案 B: :777 触发
+     * 同用延迟值, 使「检测→α 反映」整体后移 D 轮 (τ 响应滞后)。 */
+    const uint32_t d = tau_delay_rounds();
+    uint32_t f_ewma;
+    if (d == 0)
+    {
+        f_ewma = f_scaled;   // 惰性: 不触碰环形缓冲, 编译后行为与未补丁一致
+    }
+    else
+    {
+        const uint32_t slot = (st.tau_delay_head + kMaxTauDelayRounds - d) % kMaxTauDelayRounds;
+        f_ewma = st.tau_delay_buf[slot];
+        st.tau_delay_buf[st.tau_delay_head] = f_scaled;
+        st.tau_delay_head = (st.tau_delay_head + 1) % kMaxTauDelayRounds;
+    }
     /* EWMA 每条消息都更新: F=0 时 α 按 (1−g) 衰减, 无拥塞余震。 */
     /* 段5 R1 修死区 (§4.3): α EWMA 改 ×4096 高位累积器, 消除 /16 整数截断死区。
      * 显式 cast 必须保留: 无 cast 时 f_scaled*16 若被提升为 unsigned 会改变负数语义 (§8.3)。 */
-    st.alpha_accum += (static_cast<int32_t>(f_scaled) * 16 - static_cast<int32_t>(st.alpha_accum)) / 16;
+    st.alpha_accum += (static_cast<int32_t>(f_ewma) * 16 - static_cast<int32_t>(st.alpha_accum)) / 16;
     st.alpha_scaled = static_cast<uint32_t>(st.alpha_accum >> 4);
-    if (f_scaled > 0)
+    if (f_ewma > 0)
     {
         const std::size_t old_bps = st.bps;
         /* 降幅 = bps × α/2, 向上取整; α 至少按 1 (≈0.4%) 计 —— F>0 而 α=0
