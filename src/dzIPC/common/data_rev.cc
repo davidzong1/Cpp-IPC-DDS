@@ -785,7 +785,8 @@ void adapt_rate_dctcp(ipc::socket::UDPNode* node, uint16_t page_cnt, uint32_t f_
          * 最小降仍 = (bps×1+511)/512 ≥ bps/512 (裁定1(c), ⛔ 不许清零)。
          * 判拥塞 / 缺数据 (无首捕获 pattern 或 lost=0 分母退化) → 维持 R1 全量降
          * (裁定1(b) 保守按拥塞, 不 fail-open 成随机)。判别量只进 α_eff 增益,
-         * ⛔ 不进 bps= 赋值 (裁定1(a)); runs 从位图 NACK 派生 (liveness 仅 NACK 派生)。 */
+         * ⛔ 不进 bps= 赋值 (裁定1(a)); runs 从 NACK 派生 (位图或显式, 段6 任务1a;
+         * liveness 仅 NACK 派生)。 */
         const bool runs_random = kRunsCaptureEnabled && runs_first > 0 && lost_first > 0
                                  && runs_first * 1000 > static_cast<std::size_t>(kRatePlan3RunsRandom) * lost_first;
         const uint32_t alpha_eff = runs_random ? 1u : std::max<uint32_t>(st.alpha_scaled, 1);
@@ -948,8 +949,9 @@ void drain_self_loopback(ipc::socket::UDPNode& node)
 }
 
 /* ---- 段5 任务2h: runs 判别信号 (方案3 前置, 纯诊断, 不进 bps= 赋值) ----
- * runs = 位图 NACK 里连续缺失段的段数 (真拥塞≈1, 真随机≈lost)。RunsFirst 是
- * 每消息每对端的 T.3 首捕获记录 (见 drain_record_acks / chunk_send_ex)。 */
+ * runs = NACK 里连续缺失段的段数 (真拥塞≈1, 真随机≈lost), 位图或显式编码都采
+ * (段6 任务1a 扩展: 显式 NACK missing_pages 同导出)。RunsFirst 是每消息每对端的
+ * T.3 首捕获记录 (见 drain_record_acks / chunk_send_ex)。 */
 struct RunsFirst
 {
     bool captured{false};
@@ -976,6 +978,32 @@ std::size_t count_bitmap_runs(const IpcRtpsNackBitmapMsg& nb, std::size_t page_c
             ++runs;   // 0→1 跳变 = 新 run 起点
         }
         prev_missing = missing;
+    }
+    return runs;
+}
+
+/* 显式 NACK 的 runs: missing_pages 由 send_nack_for_missing 按页号升序、去重
+ * push (每页至多一次), 连续缺失段数 = 相邻两页页号相差 1 的分组数。越界页与
+ * miss_cnt 同过滤 (页号 ∈ [1, page_cnt], 越界丢弃不参与分段)。lost 沿用调用
+ * 方已算好的 miss_cnt —— runs 与 lost 必须出自同一 pattern (同 count_bitmap_runs
+ * 同源纪律; ⛔ 采集/诊断, 不进 bps= 赋值)。 */
+std::size_t count_explicit_runs(const std::vector<uint16_t>& pages, std::size_t page_cnt)
+{
+    std::size_t runs = 0;
+    bool have_prev = false;
+    uint16_t prev = 0;   // 0 恒越界 (页号从 1 起), 可作"无上一有效页"哨兵
+    for (uint16_t page : pages)
+    {
+        if (page == 0 || static_cast<std::size_t>(page) > page_cnt)
+        {
+            continue;
+        }
+        if (!have_prev || page != static_cast<uint16_t>(prev + 1))
+        {
+            ++runs;   // 新 run 起点
+        }
+        have_prev = true;
+        prev = page;
     }
     return runs;
 }
@@ -1037,8 +1065,9 @@ void aggregate_runs_first(const std::unordered_map<uint32_t, RunsFirst>& m, std:
  * (record_peer_nack 不调, last_nack_ts 不更新 —— 与循环内的记录语义分离)。
  * lease_ms == 0 或 f_max_scaled 为 nullptr 时退化为纯记账 (保持旧行为)。
  * F 是"取 max 聚合"而非短路布尔 —— 每条非 ACK 帧都要解析完。
- * 段5 任务2h: runs_first_map != nullptr 时, 顺带对每对端第一条位图 NACK 做 T.3
- * 首捕获 (迟到 NACK 也采 —— 对端首条 NACK 可能晚于 got_ack 才入 drain 窗口)。 */
+ * 段5 任务2h (段6 任务1a 扩展): runs_first_map != nullptr 时, 顺带对每对端第一条
+ * NACK (位图或显式, 先到先采) 做 T.3 首捕获 (迟到 NACK 也采 —— 对端首条 NACK
+ * 可能晚于 got_ack 才入 drain 窗口)。 */
 void drain_record_acks(ipc::socket::UDPNode& node, const chunk_meta& meta,
                        const ipc::socket::UDPNode* rtt_key,
                        std::unordered_set<uint32_t>& seen,
@@ -1117,7 +1146,8 @@ void drain_record_acks(ipc::socket::UDPNode& node, const chunk_meta& meta,
                             *f_max_scaled =
                                 std::max(*f_max_scaled, scaled_loss_fraction(static_cast<uint32_t>(miss_cnt),
                                                                               meta.page_cnt));
-                            /* 段5 任务2h: T.3 首捕获 (每对端只采第一条位图 NACK)。 */
+                            /* 段5 任务2h (段6 任务1a): T.3 首捕获 —— 该对端尚未被
+                             * 任一编码 (位图/显式) 捕获时才采。 */
                             if (runs_first_map != nullptr && kRunsCaptureEnabled
                                 && runs_first_map->find(nb_msg.receiver_id) == runs_first_map->end())
                             {
@@ -1147,6 +1177,18 @@ void drain_record_acks(ipc::socket::UDPNode& node, const chunk_meta& meta,
                         *f_max_scaled =
                             std::max(*f_max_scaled, scaled_loss_fraction(static_cast<uint32_t>(miss_cnt),
                                                                           meta.page_cnt));
+                        /* 段6 任务1a: drain 迟到显式 NACK 同做 T.3 首捕获 —— 与位图
+                         * drain 分支共享 runs_first_map (每对端先到先采), 迟到也采
+                         * (对端首条 NACK 可能晚于 got_ack 才入 drain 窗口)。lost 沿用
+                         * miss_cnt (同 pattern、同一边界); 采集/诊断, ⛔ 不进 bps=。 */
+                        if (runs_first_map != nullptr && kRunsCaptureEnabled
+                            && runs_first_map->find(nack_msg.receiver_id) == runs_first_map->end())
+                        {
+                            runs_first_map->emplace(nack_msg.receiver_id,
+                                                    RunsFirst{true, count_explicit_runs(nack_msg.missing_pages,
+                                                                                         meta.page_cnt),
+                                                              miss_cnt});
+                        }
                     }
                 }
             }
@@ -2134,8 +2176,10 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
      * drain_record_acks 据此去重, 每消息每对端至多计 1 次。 */
     std::unordered_set<uint32_t> acked_receivers;
     /* ---- 段5 任务2h: runs 判别信号 (纯诊断, 不进 bps=) ----
-     * T.3 首捕获去重: 每消息每对端只取第一条位图 NACK (主循环 + drain 共享此表);
-     * T.1 最拥塞聚合在消息结束时做 (aggregate_runs_first, 只上报原始 runs/lost)。 */
+     * T.3 首捕获去重: 每消息每对端只取第一条 NACK (位图或显式, 先到先采; 段6
+     * 任务1a 把显式编码并入采集源, 消除 q=0.078 位图-only 窄化), 主循环 + drain
+     * 共享此表; T.1 最拥塞聚合在消息结束时做 (aggregate_runs_first, 只上报原始
+     * runs/lost)。 */
     std::unordered_map<uint32_t, RunsFirst> runs_first_map;
 
     const auto ack_begin = std::chrono::steady_clock::now();
@@ -2345,7 +2389,8 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
                 {
                     f_max_scaled = std::max(
                         f_max_scaled, scaled_loss_fraction(static_cast<uint32_t>(nack_miss_cnt), meta.page_cnt));
-                    /* 段5 任务2h: T.3 首捕获 —— 主循环第一条位图 NACK 即采 (runs 与
+                    /* 段5 任务2h (段6 任务1a): T.3 首捕获 —— 主循环位图 NACK, 该对端
+                     * 尚未被任一编码捕获时即采 (runs 与
                      * lost 同 pattern、同一边界, lost 沿用 nack_miss_cnt)。 */
                     if (kRunsCaptureEnabled
                         && runs_first_map.find(nb_msg.receiver_id) == runs_first_map.end())
@@ -2388,6 +2433,18 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
             {
                 f_max_scaled = std::max(f_max_scaled,
                                         scaled_loss_fraction(static_cast<uint32_t>(nack_miss_cnt), meta.page_cnt));
+                /* 段6 任务1a: 显式 NACK 同做 T.3 首捕获 —— 与位图分支共享
+                 * runs_first_map (每对端先到先采), 消除"对端编码选显式时
+                 * runs/lost 恒 (0,0)"的采集窄化 (q=0.078 归因, 段5 任务2l)。
+                 * runs 从 missing_pages 升序列表数连续段, lost 沿用 nack_miss_cnt
+                 * (同 pattern、同一边界); 采集/诊断, ⛔ 不进 bps= 赋值。 */
+                if (kRunsCaptureEnabled
+                    && runs_first_map.find(nack_msg.receiver_id) == runs_first_map.end())
+                {
+                    runs_first_map.emplace(nack_msg.receiver_id,
+                                           RunsFirst{true, count_explicit_runs(nack_msg.missing_pages, chunks.size()),
+                                                     nack_miss_cnt});
+                }
             }
         }
 

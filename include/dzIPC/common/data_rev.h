@@ -188,16 +188,18 @@ struct FragmentLossStats
     std::size_t rate_bps_now{0};     // 当前生效速率快照 (采样周期读, 非自旋)
     std::size_t observed_bps_now{0}; // 最近 DZA2 的接收观测速率 (仅诊断)
 
-    /* ---- 段5 任务2h (方案3 前置): runs 判别信号 (发送端位图 NACK 派生, 仅诊断) ----
+    /* ---- 段5 任务2h (方案3 前置): runs 判别信号 (发送端 NACK 派生, 位图或显式, 仅诊断) ----
      * runs_now/lost_now = 最近一条消息的 runs 首捕获快照 (方案3 判别信号, 采集/
      * 诊断字段, 不进任何 bps= 赋值 —— 与 observed_bps 同一把尺子, D-7 精神)。
      * 语义 (T.3 + T.1, 裁定 T):
-     *   - T.3 首捕获: 每消息每对端只取第一条位图 NACK 的 pattern (重传后 pattern
-     *     逐轮缩小, 混入不同轮会失真); 与 lost_pages 首 NACK 前捕获同口径。
+     *   - T.3 首捕获: 每消息每对端只取第一条 NACK (位图或显式, 先到先采) 的 pattern
+     *     (重传后 pattern 逐轮缩小, 混入不同轮会失真); 段6 任务1a 起显式 NACK
+     *     missing_pages 也导出 runs/lost (runs = 升序缺页列表的连续段数, lost = 缺页数),
+     *     与 lost_pages 首 NACK 前捕获同口径。
      *   - T.1 跨对端聚合: 取最拥塞 (runs/lost 最小) 对端, 只上报该对端原始量。
      *   - runs = 连续缺失段数 (真拥塞≈1, 真随机≈lost); lost = 同一 pattern 缺页数。
      *     两量分别上报, 比值 runs/lost 留给判读侧算 (P.3: 分离度标定要看分布)。
-     *   - 该消息无位图 NACK pattern 时 (干净 / 只来 DZA2 / 只来显式 NACK) → (0,0)。 */
+     *   - 该消息无任何 NACK pattern 时 (干净 / 只来 DZA2) → (0,0)。 */
     std::size_t runs_now{0};
     std::size_t lost_now{0};
 
