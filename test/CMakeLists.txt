@@ -23,6 +23,9 @@ file(GLOB SRC_FILES
 # Exclude benchmark from auto-test list (has its own main, not a gtest)
 list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/ipc_benchmark.cpp")
 list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/dzipc_perf_benchmark.cpp")
+list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/dzflat_benchmark.cpp")
+list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/dzflat_tx_benchmark.cpp")
+list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/dzflat_py_publisher.cpp")
 file(GLOB HEAD_FILES ${LIBIPC_PROJECT_DIR}/test/*.h)
 
 # 查找 pthread 库
@@ -134,3 +137,49 @@ if(UNIX AND NOT APPLE)
 endif()
 set_target_properties(dzipc_perf_benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 message(STATUS "Created benchmark executable: dzipc_perf_benchmark")
+# ================================================================
+# DZFlat 离线基准 (docs/dzflat_shm.md Step 1 验收门)
+# 自带 main(), 不是 gtest; 覆写 global operator new 以统计堆分配次数。
+# ================================================================
+add_executable(dzflat_benchmark ${LIBIPC_PROJECT_DIR}/test/dzflat_benchmark.cpp)
+target_compile_options(dzflat_benchmark PRIVATE
+    $<$<CONFIG:Release>:-O2>
+    $<$<CONFIG:RelWithDebInfo>:-O2>
+    $<$<CONFIG:MinSizeRel>:-O2>
+)
+target_compile_definitions(dzflat_benchmark PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+target_link_libraries(dzflat_benchmark ipc Threads::Threads)
+set_target_properties(dzflat_benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+message(STATUS "Created benchmark executable: dzflat_benchmark")
+
+# ================================================================
+# DZFlat 传输层基准 (docs/dzflat_shm.md Step 2 验收门)
+# 走真实 SHM 链路, 自带 main(), 不是 gtest。
+# ================================================================
+add_executable(dzflat_tx_benchmark ${LIBIPC_PROJECT_DIR}/test/dzflat_tx_benchmark.cpp)
+target_compile_options(dzflat_tx_benchmark PRIVATE
+    $<$<CONFIG:Release>:-O2>
+    $<$<CONFIG:RelWithDebInfo>:-O2>
+    $<$<CONFIG:MinSizeRel>:-O2>
+)
+target_compile_definitions(dzflat_tx_benchmark PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+target_link_libraries(dzflat_tx_benchmark ipc Threads::Threads)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(dzflat_tx_benchmark rt)
+endif()
+set_target_properties(dzflat_tx_benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+message(STATUS "Created benchmark executable: dzflat_tx_benchmark")
+
+# ================================================================
+# DZFlat 的 Python 侧验收用发布端 (docs/dzflat_shm.md Step 4)
+# Python 发不出 DZFlat(GenericMessage 无 schema 写不出定长布局), 所以由这个小程序
+# 充当发布端, 供 test/test_dzflat_python.py 订阅比对。自带 main(), 不是 gtest。
+# ================================================================
+add_executable(dzflat_py_publisher ${LIBIPC_PROJECT_DIR}/test/dzflat_py_publisher.cpp)
+target_compile_options(dzflat_py_publisher PRIVATE $<$<CONFIG:Release>:-O2>)
+target_link_libraries(dzflat_py_publisher ipc Threads::Threads)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(dzflat_py_publisher rt)
+endif()
+set_target_properties(dzflat_py_publisher PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+message(STATUS "Created helper executable: dzflat_py_publisher")

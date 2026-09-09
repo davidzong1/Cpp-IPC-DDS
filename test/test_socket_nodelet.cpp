@@ -155,7 +155,7 @@ bool wait_until(Pred pred, int timeout_ms)
 
 void drain_subscriber(socket::socket_sub_ipc& sub, std::shared_ptr<TopicData>& topic)
 {
-    while (sub.try_get(topic))
+    while (sub.try_get_clone(topic))
     {
     }
 }
@@ -165,7 +165,7 @@ bool bounded_never_received(socket::socket_sub_ipc& sub, std::shared_ptr<TopicDa
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline)
     {
-        if (sub.try_get(topic))
+        if (sub.try_get_clone(topic))
         {
             return false;
         }
@@ -196,7 +196,7 @@ TEST(SocketNodelet, NormalUdpPathUsed)
     msg->marker = "udp";
     pair.pub->publish(msg);
 
-    ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 2000))
+    ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 2000))
         << "subscriber did not receive message";
 
     // Even if fast path engages (K=3), the first 3 publishes go through UDP.
@@ -228,7 +228,7 @@ TEST(SocketNodelet, SameProcessFastPathMetrics)
         m->value = i;
         m->marker = "warmup";
         pair.pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 2000))
+        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 2000))
             << "sub did not receive warmup " << i;
     }
 
@@ -239,7 +239,7 @@ TEST(SocketNodelet, SameProcessFastPathMetrics)
     msg->value = 42;
     msg->marker = "fast_path";
     pair.pub->publish(msg);
-    ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 500))
+    ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 500))
         << "subscriber did not receive fast-path message";
 
     {
@@ -280,7 +280,7 @@ TEST(SocketNodelet, SnapshotImmutabilityAfterPublish)
         m->value = -1;
         m->marker = "warmup";
         pair.pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 2000))
+        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 2000))
             << "sub did not receive warmup " << i;
     }
 
@@ -291,7 +291,7 @@ TEST(SocketNodelet, SnapshotImmutabilityAfterPublish)
     msg->value = 999;
     msg->marker = "AFTER_MUTATION";
 
-    ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 500));
 
     auto rcvd = pair.sub_topic->topic()->msgcast<CountingMsg>();
     EXPECT_EQ(rcvd->value, 100) << "mutation after publish must not affect delivered snapshot";
@@ -327,9 +327,9 @@ TEST(SocketNodelet, TwoSubscribersSameSnapshot)
         m->value = -1;
         m->marker = "warmup";
         pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return sub1->try_get(sub1_topic); }, 2000))
+        ASSERT_TRUE(wait_until([&]() { return sub1->try_get_clone(sub1_topic); }, 2000))
             << "sub1 did not receive warmup " << i;
-        ASSERT_TRUE(wait_until([&]() { return sub2->try_get(sub2_topic); }, 2000))
+        ASSERT_TRUE(wait_until([&]() { return sub2->try_get_clone(sub2_topic); }, 2000))
             << "sub2 did not receive warmup " << i;
     }
 
@@ -338,8 +338,8 @@ TEST(SocketNodelet, TwoSubscribersSameSnapshot)
     msg->marker = "twin";
     pub->publish(msg);
 
-    ASSERT_TRUE(wait_until([&]() { return sub1->try_get(sub1_topic); }, 500));
-    ASSERT_TRUE(wait_until([&]() { return sub2->try_get(sub2_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return sub1->try_get_clone(sub1_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return sub2->try_get_clone(sub2_topic); }, 500));
 
     auto rcvd1 = sub1_topic->topic()->msgcast<CountingMsg>();
     auto rcvd2 = sub2_topic->topic()->msgcast<CountingMsg>();
@@ -419,7 +419,7 @@ TEST(SocketNodelet, TopicIsolation)
             m->value = -1;
             m->marker = "warmup";
             p->pub->publish(m);
-            ASSERT_TRUE(wait_until([&]() { return p->sub->try_get(p->sub_topic); }, 2000))
+            ASSERT_TRUE(wait_until([&]() { return p->sub->try_get_clone(p->sub_topic); }, 2000))
                 << "warmup receive failed";
         }
     }
@@ -439,7 +439,7 @@ TEST(SocketNodelet, TopicIsolation)
     msg_a->marker = "only_a";
     pair_a.pub->publish(msg_a);
 
-    bool a_got = wait_until([&]() { return pair_a.sub->try_get(pair_a.sub_topic); }, 500);
+    bool a_got = wait_until([&]() { return pair_a.sub->try_get_clone(pair_a.sub_topic); }, 500);
     ASSERT_TRUE(a_got) << "topic_a subscriber should receive";
     {
         auto rcvd = pair_a.sub_topic->topic()->msgcast<CountingMsg>();
@@ -483,7 +483,7 @@ TEST(SocketNodelet, MsgIdIsolation)
         m->value = -1;
         m->marker = "warmup";
         pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return sub_a->try_get(sub_a_topic); }, 2000))
+        ASSERT_TRUE(wait_until([&]() { return sub_a->try_get_clone(sub_a_topic); }, 2000))
             << "sub_a did not receive warmup " << i;
     }
     drain_subscriber(*sub_b, sub_b_topic);
@@ -494,7 +494,7 @@ TEST(SocketNodelet, MsgIdIsolation)
     msg->marker = "msgid_142";
     pub->publish(msg);
 
-    bool a_got = wait_until([&]() { return sub_a->try_get(sub_a_topic); }, 500);
+    bool a_got = wait_until([&]() { return sub_a->try_get_clone(sub_a_topic); }, 500);
     ASSERT_TRUE(a_got) << "sub with matching msg_id should receive";
     {
         auto rcvd = sub_a_topic->topic()->msgcast<CountingMsg>();
@@ -530,7 +530,7 @@ TEST(SocketNodelet, PublishAfterSubDestroyNoCrash)
             m->value = -1;
             m->marker = "warmup";
             pub->publish(m);
-            ASSERT_TRUE(wait_until([&]() { return sub->try_get(sub_topic); }, 2000))
+            ASSERT_TRUE(wait_until([&]() { return sub->try_get_clone(sub_topic); }, 2000))
                 << "sub did not receive warmup " << i;
         }
     }
@@ -573,7 +573,7 @@ TEST(SocketNodelet, TopologyCountChangeResetsK)
         m->value = i;
         m->marker = "K_build";
         pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return sub1->try_get(sub1_topic); }, 2000))
+        ASSERT_TRUE(wait_until([&]() { return sub1->try_get_clone(sub1_topic); }, 2000))
             << "sub1 did not receive warmup " << i;
     }
 
@@ -592,8 +592,8 @@ TEST(SocketNodelet, TopologyCountChangeResetsK)
         pub->publish(m);
     }
     // Both subs should receive via UDP.
-    ASSERT_TRUE(wait_until([&]() { return sub1->try_get(sub1_topic); }, 2000));
-    ASSERT_TRUE(wait_until([&]() { return sub2->try_get(sub2_topic); }, 2000));
+    ASSERT_TRUE(wait_until([&]() { return sub1->try_get_clone(sub1_topic); }, 2000));
+    ASSERT_TRUE(wait_until([&]() { return sub2->try_get_clone(sub2_topic); }, 2000));
     EXPECT_GE(stats->serialize.load(), 1)
         << "1st publish after topology change MUST invoke serialize (K was reset)";
 
@@ -604,8 +604,8 @@ TEST(SocketNodelet, TopologyCountChangeResetsK)
         m->value = i;
         m->marker = "post_join";
         pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return sub1->try_get(sub1_topic); }, 2000));
-        ASSERT_TRUE(wait_until([&]() { return sub2->try_get(sub2_topic); }, 2000));
+        ASSERT_TRUE(wait_until([&]() { return sub1->try_get_clone(sub1_topic); }, 2000));
+        ASSERT_TRUE(wait_until([&]() { return sub2->try_get_clone(sub2_topic); }, 2000));
     }
 
     stats->reset();
@@ -615,8 +615,8 @@ TEST(SocketNodelet, TopologyCountChangeResetsK)
         m->marker = "fast_path";
         pub->publish(m);
     }
-    ASSERT_TRUE(wait_until([&]() { return sub1->try_get(sub1_topic); }, 500));
-    ASSERT_TRUE(wait_until([&]() { return sub2->try_get(sub2_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return sub1->try_get_clone(sub1_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return sub2->try_get_clone(sub2_topic); }, 500));
 
     // After K=3 re-established, fast path should engage (if IpcInfoPool available).
     // At minimum, message content must be correct.
@@ -669,7 +669,7 @@ TEST(SocketNodelet, FakeRemoteSubForcesUdpFallback)
         m->value = i;
         m->marker = "warmup";
         pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return sub->try_get(sub_topic); }, 2000))
+        ASSERT_TRUE(wait_until([&]() { return sub->try_get_clone(sub_topic); }, 2000))
             << "sub did not receive warmup " << i;
     }
     // Warmup always goes through UDP (serialize).
@@ -709,7 +709,7 @@ TEST(SocketNodelet, FakeRemoteSubForcesUdpFallback)
         m->marker = "remote_present";
         pub->publish(m);
 
-        ASSERT_TRUE(wait_until([&]() { return sub->try_get(sub_topic); }, 2000))
+        ASSERT_TRUE(wait_until([&]() { return sub->try_get_clone(sub_topic); }, 2000))
             << "sub did not receive message " << i << " (UDP delivery must still work)";
 
         {

@@ -536,16 +536,20 @@ TEST(DzipcLogRotation, QueueDepthTriggersRotation)
 
     ASSERT_TRUE(logger::StartDzipcLog(path, 256, 10));
 
-    // 64 KB payload so writer can't instantly drain — queue arms
-    std::vector<uint8_t> big(64 * 1024, 0xEF);
+    /* 目标是把队列压过 max_queue(10) 从而 arm 住轮转。
+     *
+     * 原来的写法用 64 KB 负载 + 每轮 sleep(50ms), 结果是掷硬币(实测 12 次跑失败 6 次):
+     *   - RecordPublish 会把负载 memcpy 进事件, 所以 64 KB 负载让**生产者**每次 push 的
+     *     成本与写线程每次 pop+落盘的成本相当, 谁快谁慢全看调度;
+     *   - 每轮之间的 sleep 又给了写线程把队列排空的机会, 下一轮从 0 开始重新爬。
+     *
+     * 改成小负载 + 不间断紧循环: 写线程每个事件有固定开销(序列化、索引项、ofstream 调用),
+     * 而生产者只是一次小 memcpy + 入队, 于是生产者稳定跑赢, 队列必然爬过 10。
+     * 超过 eff_max 的推送会被丢弃(这正常), arm 只需要队列**触到** 10 一次。 */
+    std::vector<uint8_t> small(64, 0xEF);
 
-    // Flood faster than writer can drain (12 > 10 base, < 15 augmented)
-    for (int round = 0; round < 4; ++round)
-    {
-        for (int i = 0; i < 12; ++i)
-            logger::RecordPublish("/t4", "T4", 0, i, logger::TransportKind::kShm, big.data(), big.size());
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
+    for (int i = 0; i < 400; ++i)
+        logger::RecordPublish("/t4", "T4", 0, i, logger::TransportKind::kShm, small.data(), small.size());
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
     logger::StopDzipcLog();
 

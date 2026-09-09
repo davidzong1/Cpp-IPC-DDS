@@ -473,7 +473,7 @@ TEST_F(DzipcPubTest, EndToEndShmPublishSubscribe)
     deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (!received && std::chrono::steady_clock::now() < deadline)
     {
-        if (subscriber->try_get(sub_data))
+        if (subscriber->try_get_clone(sub_data))
         {
             received = true;
             break;

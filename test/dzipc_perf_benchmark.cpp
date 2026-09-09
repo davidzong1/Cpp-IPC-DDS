@@ -888,7 +888,7 @@ int run_role_subscriber(const Config& cfg)
     {
         while (ctl->phase.load(std::memory_order_acquire) != 2)
         {
-            if (!sub->try_get(rcv))
+            if (!sub->try_get_clone(rcv))
             {
                 continue;
             }

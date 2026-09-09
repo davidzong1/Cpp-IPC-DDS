@@ -196,7 +196,7 @@ void subscribe_thread_function()
     bool exit_flag = false;
     while (!exit_flag)
     {
-        if (subscriber->try_get(topic_msg_))
+        if (subscriber->try_get_clone(topic_msg_))
         {
             auto rev_msg = topic_msg_->topic()->msgcast<dzIPC::Msg::TestMsg>();
             socket_subscriber_count.fetch_add(1);
@@ -450,7 +450,7 @@ void shm_subscribe_thread_function()
     bool exit_flag = false;
     while (!exit_flag)
     {
-        if (subscriber->try_get(topic_msg_))
+        if (subscriber->try_get_clone(topic_msg_))
         {
             auto rev_msg = topic_msg_->topic()->msgcast<dzIPC::Msg::TestMsg>();
             shm_subscriber_count.fetch_add(1);

@@ -228,7 +228,7 @@ void warmup_shm_fp(shm::shm_pub_ipc& pub, shm::shm_sub_ipc& sub,
         m->value = i;
         m->marker = "warmup";
         pub.publish(m);
-        ASSERT_TRUE(wait_until([&]() { return sub.try_get(sub_topic); }, 500))
+        ASSERT_TRUE(wait_until([&]() { return sub.try_get_clone(sub_topic); }, 500))
             << "warmup receive failed at i=" << i;
     }
 }
@@ -264,7 +264,7 @@ TEST_F(NodeletSwitchFixture, ShmDefaultOffSerializeEvidence)
             m->value = i;
             m->marker = "raw";
             pub->publish(m);
-            ASSERT_TRUE(wait_until([&]() { return sub->try_get(sub_topic); }, 500))
+            ASSERT_TRUE(wait_until([&]() { return sub->try_get_clone(sub_topic); }, 500))
                 << "raw pub: sub did not receive message " << i;
 
             EXPECT_GE(stats->serialize.load(), 1)
@@ -296,7 +296,7 @@ TEST_F(NodeletSwitchFixture, ShmDefaultOffSerializeEvidence)
             pub->publish(m);
 
             std::shared_ptr<TopicData> recv = TopicDataPtrMake<CountingMsg>();
-            ASSERT_TRUE(wait_until([&]() { return sub->try_get(recv); }, 500))
+            ASSERT_TRUE(wait_until([&]() { return sub->try_get_clone(recv); }, 500))
                 << "factory sub did not receive message " << i;
 
             EXPECT_GE(stats->serialize.load(), 1)
@@ -335,7 +335,7 @@ TEST_F(NodeletSwitchFixture, ShmEnableFastPathEvidence)
         m->marker = "fast_path";
         pub->publish(m);
     }
-    ASSERT_TRUE(wait_until([&]() { return sub->try_get(sub_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return sub->try_get_clone(sub_topic); }, 500));
 
     EXPECT_EQ(stats->serialize.load(), 0) << "fast path MUST NOT invoke serialize";
     EXPECT_EQ(stats->clone.load(), 1) << "fast path clones once";
@@ -409,7 +409,7 @@ TEST_F(NodeletSwitchFixture, ShmToggleOffDisablesFastPath)
         m->marker = "before_toggle";
         pub->publish(m);
     }
-    ASSERT_TRUE(wait_until([&]() { return sub->try_get(sub_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return sub->try_get_clone(sub_topic); }, 500));
     EXPECT_EQ(stats->serialize.load(), 0) << "fast path should be active before toggle off";
 
     EnableNodelet(false);
@@ -421,7 +421,7 @@ TEST_F(NodeletSwitchFixture, ShmToggleOffDisablesFastPath)
         m->marker = "after_toggle_off";
         pub->publish(m);
     }
-    ASSERT_TRUE(wait_until([&]() { return sub->try_get(sub_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return sub->try_get_clone(sub_topic); }, 500));
     EXPECT_GE(stats->serialize.load(), 1)
         << "after EnableNodelet(false), publish MUST invoke serialize";
 
@@ -543,7 +543,7 @@ TEST_F(NodeletSwitchFixture, UdpNodeletEvidence)
                 m->value = -1;
                 m->marker = "sync";
                 pub->publish(m);
-                synced = wait_until([&]() { return sub->try_get(sub_topic); }, 300);
+                synced = wait_until([&]() { return sub->try_get_clone(sub_topic); }, 300);
             }
             ASSERT_TRUE(synced) << "UDP pub/sub sync timed out (default off)";
         }
@@ -556,7 +556,7 @@ TEST_F(NodeletSwitchFixture, UdpNodeletEvidence)
             m->value = i;
             m->marker = "udp_off";
             pub->publish(m);
-            ASSERT_TRUE(wait_until([&]() { return sub->try_get(sub_topic); }, 1000))
+            ASSERT_TRUE(wait_until([&]() { return sub->try_get_clone(sub_topic); }, 1000))
                 << "UDP sub did not receive message " << i << " (default off)";
 
             EXPECT_GE(stats->serialize.load(), 1)
@@ -588,7 +588,7 @@ TEST_F(NodeletSwitchFixture, UdpNodeletEvidence)
                 m->value = -1;
                 m->marker = "sync";
                 pub->publish(m);
-                synced = wait_until([&]() { return sub->try_get(sub_topic); }, 300);
+                synced = wait_until([&]() { return sub->try_get_clone(sub_topic); }, 300);
             }
             ASSERT_TRUE(synced) << "UDP pub/sub sync timed out (enabled)";
         }
@@ -600,7 +600,7 @@ TEST_F(NodeletSwitchFixture, UdpNodeletEvidence)
             m->value = -1;
             m->marker = "warmup";
             pub->publish(m);
-            ASSERT_TRUE(wait_until([&]() { return sub->try_get(sub_topic); }, 1000))
+            ASSERT_TRUE(wait_until([&]() { return sub->try_get_clone(sub_topic); }, 1000))
                 << "UDP warmup receive failed at i=" << i;
         }
 
@@ -612,7 +612,7 @@ TEST_F(NodeletSwitchFixture, UdpNodeletEvidence)
             m->marker = "udp_fast";
             pub->publish(m);
         }
-        ASSERT_TRUE(wait_until([&]() { return sub->try_get(sub_topic); }, 1000));
+        ASSERT_TRUE(wait_until([&]() { return sub->try_get_clone(sub_topic); }, 1000));
 
         EXPECT_EQ(stats->serialize.load(), 0)
             << "UDP fast path: serialize MUST be 0";

@@ -178,7 +178,7 @@ void subscribe_thread_function()
     bool exit_flag = false;
     while (!exit_flag)
     {
-        if (subscriber.try_get(topic_msg_))
+        if (subscriber.try_get_clone(topic_msg_))
         {
             auto received_msg = topic_msg_->topic()->msgcast<dzIPC::Msg::TestMsg>();
             subscriber_count.fetch_add(1);
@@ -261,7 +261,7 @@ TEST(DzIpcShm, SubscriberRecoversAfterPublisherRestart)
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
         while (std::chrono::steady_clock::now() < deadline)
         {
-            if (subscriber.try_get(topic_msg))
+            if (subscriber.try_get_clone(topic_msg))
             {
                 auto received = topic_msg->topic()->msgcast<dzIPC::Msg::TestMsg>();
                 for (const auto& item : received->data3)
