@@ -9,7 +9,7 @@
 
 namespace ipc {
 
-using storage_id_t = std::int32_t;
+/* storage_id_t 现由 libipc/def.h 提供(公共 loan API 需要指名它)。 */
 
 template <std::size_t DataSize, std::size_t AlignSize>
 struct id_type;

@@ -251,6 +251,21 @@ namespace
     }
   };
 
+  /* chunk 负载区的 8 字节对齐契约。
+   *
+   * chunk->data() = 共享段基址 + sizeof(chunk_info_t) + chunk_size * id + 16。
+   * 段基址来自 mmap(页对齐), chunk_size 是 large_msg_align(1024) 的整数倍, 头部
+   * 偏移 16 亦为 8 的倍数 —— 因此只要 sizeof(chunk_info_t) 是 8 的倍数, 负载区
+   * 就一定 8 字节对齐。
+   *
+   * 这个前提原本只是"恰好成立"(id_pool 的 alignof 为 1, spin_lock 为 4), 没有任何
+   * 东西保证它。DZFlat 会在负载区里原地读写 double/uint64(见 docs/dzflat_shm.md
+   * §3.6), x86 容忍非对齐访问而 ARM 不一定, 故在此钉死: 一旦 chunk_info_t 的成员
+   * 变化导致对齐塌掉, 这里编译期就会失败, 而不是在 ARM 上运行期出错。
+   */
+  static_assert(sizeof(chunk_info_t) % 8 == 0,
+                "chunk payload must stay 8-byte aligned: see docs/dzflat_shm.md 3.6");
+
   auto &chunk_storages()
   {
     class chunk_handle_t
@@ -334,10 +349,39 @@ namespace
     return it->second->get_info(inf, chunk_size);
   }
 
+  /* 借样(loan)的容量档位。
+   *
+   * 为什么不能按精确长度借: 共享段是按 chunk_size 分段命名的
+   * (CHUNK_INFO__<chunk_size>, 见 chunk_storage_info), 而 calc_chunk_size 只按
+   * large_msg_align(1024) 取整。变长负载(压缩图 / 点云)每 1KB 就会开一个新段,
+   * 映射对象数无界增长 —— 借样把 chunk 的持有期拉长后, 同时活着的段会更多。
+   *
+   * 档位设计: 小消息按 1KB 台阶(≤64KB 共 64 档, 与既有 send 路径同粒度, 不引入
+   * 新段), 大消息按 2 的幂(段数对数增长, 最多再加十几档)。代价是大消息最坏浪费
+   * 接近一半容量 —— 但 chunk 是 tmpfs 上的稀疏映射, 只有真正写到的页才占物理内存,
+   * 而我们只写 total_size 那一段。
+   */
+  IPC_CONSTEXPR_ std::size_t loan_size_class(std::size_t size) noexcept
+  {
+    if (size <= 64 * 1024)
+    {
+      return ((size + ipc::large_msg_align - 1) / ipc::large_msg_align) *
+             ipc::large_msg_align;
+    }
+    std::size_t c = 128 * 1024;
+    while (c < size)
+    {
+      std::size_t nxt = c << 1;
+      if (nxt < c)
+        return size; // 溢出: 退回精确值, 后续 acquire 会失败
+      c = nxt;
+    }
+    return c;
+  }
+
   std::pair<ipc::storage_id_t, void *> acquire_storage(conn_info_head *inf,
                                                        std::size_t size,
-                                                       ipc::circ::cc_t conns)
-  {
+                                                       ipc::circ::cc_t conns)  {
     std::size_t chunk_size = calc_chunk_size(size);
     auto info = chunk_storage_info(inf, chunk_size);
     if (info == nullptr)
@@ -446,11 +490,101 @@ namespace
     info->lock_.unlock();
   }
 
-  template <typename MsgT>
-  bool clear_message(conn_info_head *inf, void *p)
+  /* 覆写槽位时对被丢弃消息的 chunk 做条件归还。
+   *
+   * rem_cc = force_push 覆写前仍未 pop 该槽位的接收方位图(见 prod_cons.h 的
+   * broadcast force_push), 也就是"永远看不到被覆写这条消息"的那一批。
+   *
+   *   清掉 rem_cc 的位后 == 0 → 没有任何接收方还握着这块 → 立即归还 id;
+   *                      != 0 → 仍有接收方 pop 过而尚未释放其 buff_t →
+   *                              **不归还**, 交由最后一个持有者的 buff_t 析构
+   *                              (recycle_storage)归还。
+   *
+   * 为什么必须清 rem_cc 的位: chunk 的 conns 位图在发送时被初始化为当时的接收方
+   * 集合, 只有"pop 到该消息并释放 buff_t"才会清位。被覆写的消息那些接收方永远
+   * 读不到, 其位若不在此清掉, 位图永不归零 → chunk 永久泄漏(32 槽/尺寸类, 见
+   * id_pool::max_count)。旧实现正是为此才无条件 release_storage。
+   *
+   * 为什么不能无条件 release: 无条件归还会把"正被接收方持有的 chunk id"直接放回
+   * 池子, 下一帧 acquire 到同一 id 就会覆写持有者正在读的内存, 且持有者析构时会
+   * 造成同一 id 二次入池(两条消息拿到同一块)。今天接收方拿到 buff_t 后立刻拷出
+   * 就丢, 窗口是微秒级; 一旦让接收方长期持有 chunk(DZFlat 的 Sample), 该窗口会
+   * 被拉成秒级并必现。
+   *
+   * 残余窗口(本函数未关闭): pop() 先把槽位数据拷出、之后才清自己的 rc 位, 所以
+   * 一个"已读到 storage id 但尚未清位"的接收方仍会被算进 rem_cc。这与 prod_cons.h
+   * force_push 注释里已登记的"覆写与 pop 无互斥 → 数据撕裂"同源, 需在 pop() 侧
+   * 增加覆写检测才能根除。
+   */
+  void discard_storage(ipc::storage_id_t id, conn_info_head *inf,
+                       std::size_t size, ipc::circ::cc_t rem_cc)
+  {
+    if (id < 0)
+    {
+      ipc::error("[discard_storage] id is invalid: id = %ld, size = %zd\n",
+                 (long)id, size);
+      return;
+    }
+    /* rem_cc == 0 ⇒ 该消息**所有**本该收到它的读方都已经 pop 过, 于是这块 chunk 的
+     * 生命周期完全归它们的 buff_t 所有 —— 写方在此无权归还。
+     *
+     * 不加这道闸的后果是双重入池: 最后一个持有者的 recycle_storage 已经把 id 放回池子,
+     * 写方再放一次, id_pool::release 的头插就把空闲链表接成自环
+     * (next_[id] = cursor_ 而 cursor_ 已是 id), 此后每次 acquire 都返回同一个 id ——
+     * 所有大消息共用一块 chunk, 内容互相踩踏。实测表现为吞吐用例直接挂死。
+     *
+     * 这也让 unicast 策略天然安全: 它的 rem_cc 恒为 0(其 push 只取读方已放行的格子),
+     * 于是这里恒早返回。 */
+    if (rem_cc == 0)
+      return;
+
+    std::size_t chunk_size = calc_chunk_size(size);
+    auto info = chunk_storage_info(inf, chunk_size);
+    if (info == nullptr)
+      return;
+
+    auto chunk = info->at(chunk_size, id);
+    if (chunk == nullptr)
+      return;
+
+    auto &conns = chunk->conns();
+    for (unsigned k = 0;;)
+    {
+      auto cur_conns = conns.load(std::memory_order_acquire);
+      auto nxt_conns = static_cast<ipc::circ::cc_t>(cur_conns & ~rem_cc);
+      if (conns.compare_exchange_weak(cur_conns, nxt_conns,
+                                      std::memory_order_release))
+      {
+        if (nxt_conns != 0)
+        {
+          return; // 仍有持有者, 由其 buff_t 析构归还
+        }
+        break;
+      }
+      ipc::yield(k);
+    }
+    info->lock_.lock();
+    info->pool_.release(id);
+    info->lock_.unlock();
+  }
+
+  template <typename MsgT, typename Flag>
+  bool clear_message(conn_info_head *inf, void *p, ipc::circ::cc_t rem_cc)
   {
     auto msg = static_cast<MsgT *>(p);
-    if (msg->storage_)
+    /* rem_cc 是判定的**唯一依据**: 它非空才说明"有读方本该收到这条消息却永远不会来取",
+     * 也只有那时写方才有权归还其 chunk。
+     *
+     * rem_cc == 0 时必须什么都不做 —— 该消息所有该收的读方都已 pop 过, chunk 的生命
+     * 周期完全归它们的 buff_t。此时若再归还一次, 就是双重入池: id_pool::release 的头插
+     * 会把空闲链表接成自环(next_[id] = cursor_ 而 cursor_ 已是 id), 此后每次 acquire
+     * 都返回同一个 id, 所有大消息共用一块 chunk 互相踩踏。实测表现为吞吐用例直接挂死。
+     *
+     * 这条也让 unicast 天然安全: 它的 push 只取读方已放行的格子(rem_cc 恒 0), 而它的
+     * force_push 从不调用本回调, 于是恒早返回。
+     *
+     * 详见 docs/dzflat_known_issues.md 第 4 条。 */
+    if (msg->storage_ && (rem_cc != 0))
     {
       std::int32_t r_size =
           static_cast<std::int32_t>(ipc::data_length) + msg->remain_;
@@ -459,8 +593,16 @@ namespace
         ipc::error("[clear_message] invalid msg size: %d\n", (int)r_size);
         return true;
       }
-      release_storage(*reinterpret_cast<ipc::storage_id_t *>(&msg->data_), inf,
-                      static_cast<std::size_t>(r_size));
+      auto id = *reinterpret_cast<ipc::storage_id_t *>(&msg->data_);
+      auto sz = static_cast<std::size_t>(r_size);
+      if constexpr (ipc::relat_trait<Flag>::is_broadcast)
+      {
+        discard_storage(id, inf, sz, rem_cc);
+      }
+      else
+      {
+        release_storage(id, inf, sz);
+      }
     }
     return true;
   }
@@ -812,20 +954,27 @@ namespace
                       info->wt_waiter_,
                       [&]
                       {
-                        return !que->push([](void *)
-                                          { return true; },
-                                          info->cc_id_, msg_id, remain, data,
-                                          size);
+                        /* push 也会覆写被套圈的格子(见 prod_cons.h 里
+                         * <single,multi,broadcast>::push 的注释), 所以它和 force_push
+                         * 一样必须归还被丢弃消息的 chunk。旧实现这里是空回调, 于是每次
+                         * 这种覆写都漏一块。 */
+                        return !que->push(
+                            [info](void *p, ipc::circ::cc_t rem_cc)
+                            {
+                              return clear_message<typename queue_t::value_t,
+                                                   flag_t>(info, p, rem_cc);
+                            },
+                            info->cc_id_, msg_id, remain, data, size);
                       },
                       tm))
               {
                 ipc::log("force_push: msg_id = %zd, remain = %d, size = %zd\n",
                          msg_id, remain, size);
                 if (!que->force_push(
-                        [info](void *p)
+                        [info](void *p, ipc::circ::cc_t rem_cc)
                         {
-                          return clear_message<typename queue_t::value_t>(info,
-                                                                          p);
+                          return clear_message<typename queue_t::value_t,
+                                               flag_t>(info, p, rem_cc);
                         },
                         info->cc_id_, msg_id, remain, data, size))
                 {
@@ -943,8 +1092,10 @@ namespace
             {
               if (sniffer_only)
               {
+                /* sniffer 环从不承载 chunk(no_member_send 在 sniffer_only 下不走
+                 * acquire_storage), 所以这里无需归还; 但回调签名要与 push 统一。 */
                 if (!que->push_sniffer(
-                        [](void *)
+                        [](void *, ipc::circ::cc_t)
                         { return true; },
                         info->cc_id_, msg_id, remain, data, size))
                 {
@@ -957,10 +1108,17 @@ namespace
                       info->wt_waiter_,
                       [&]
                       {
-                        return !que->push([](void *)
-                                          { return true; },
-                                          info->cc_id_, msg_id, remain, data,
-                                          size);
+                        /* push 也会覆写被套圈的格子(见 prod_cons.h 里
+                         * <single,multi,broadcast>::push 的注释), 所以它和 force_push
+                         * 一样必须归还被丢弃消息的 chunk。旧实现这里是空回调, 于是每次
+                         * 这种覆写都漏一块。 */
+                        return !que->push(
+                            [info](void *p, ipc::circ::cc_t rem_cc)
+                            {
+                              return clear_message<typename queue_t::value_t,
+                                                   flag_t>(info, p, rem_cc);
+                            },
+                            info->cc_id_, msg_id, remain, data, size);
                       },
                       tm))
               {
@@ -975,9 +1133,10 @@ namespace
                            "remain = %d, size = %zd\n",
                            msg_id, remain, size);
                 if (!que->force_push(
-                        [info](void *p)
+                        [info](void *p, ipc::circ::cc_t rem_cc)
                         {
-                          return clear_message<typename queue_t::value_t>(info, p);
+                          return clear_message<typename queue_t::value_t,
+                                               flag_t>(info, p, rem_cc);
                         },
                         info->cc_id_, msg_id, remain, data, size))
                 {
@@ -1004,10 +1163,17 @@ namespace
                       info->wt_waiter_,
                       [&]
                       {
-                        return !que->push([](void *)
-                                          { return true; },
-                                          info->cc_id_, msg_id, remain, data,
-                                          size);
+                        /* push 也会覆写被套圈的格子(见 prod_cons.h 里
+                         * <single,multi,broadcast>::push 的注释), 所以它和 force_push
+                         * 一样必须归还被丢弃消息的 chunk。旧实现这里是空回调, 于是每次
+                         * 这种覆写都漏一块。 */
+                        return !que->push(
+                            [info](void *p, ipc::circ::cc_t rem_cc)
+                            {
+                              return clear_message<typename queue_t::value_t,
+                                                   flag_t>(info, p, rem_cc);
+                            },
+                            info->cc_id_, msg_id, remain, data, size);
                       },
                       tm))
               {
@@ -1173,6 +1339,136 @@ namespace
       return recv(h, 0, verbose);
     }
 
+    /* ---------------------------------------------------------------- 借样 */
+
+    static ipc::loan_t loan(ipc::handle_t h, std::size_t size, bool verbose)
+    {
+      auto que = queue_of(h);
+      if (que == nullptr || que->elems() == nullptr)
+      {
+        if (verbose)
+          ipc::error("fail: loan, invalid queue\n");
+        return {};
+      }
+      if (!que->ready_sending())
+      {
+        if (verbose)
+          ipc::error("fail: loan, que->ready_sending() == false\n");
+        return {};
+      }
+      /* 无接收方时不存在 chunk 语义: send() 在这种情况下也不走 chunk(改用 sniffer
+       * 环或分片), 强行借了没人回收。让调用方回退。 */
+      ipc::circ::cc_t conns =
+          que->elems()->connections(std::memory_order_relaxed);
+      if (conns == 0)
+      {
+        if (verbose)
+          ipc::error("fail: loan, there is no receiver on this connection.\n");
+        return {};
+      }
+      /* 接收侧靠 msg.storage_ 判定大消息, 而 storage_ 只在 size > large_msg_limit
+       * 的分支被设置。借样必须落在那条路径上。 */
+      if (size <= ipc::large_msg_limit)
+      {
+        size = ipc::large_msg_limit + 1;
+      }
+      const std::size_t cap = loan_size_class(size);
+      conn_info_t *inf = info_of(h);
+      auto dat = acquire_storage(inf, cap, conns);
+      if (dat.second == nullptr)
+      {
+        /* chunk 池耗尽(每档位 32 块)。不是错误, 是背压信号 —— 调用方回退整包路径。 */
+        return {};
+      }
+      ipc::loan_t lo;
+      lo.id = dat.first;
+      lo.data = dat.second;
+      lo.size = cap;
+      return lo;
+    }
+
+    static bool publish_loan(ipc::handle_t h, ipc::loan_t const &lo,
+                             std::uint64_t tm, bool verbose)
+    {
+      if (!lo.valid())
+        return false;
+      auto que = queue_of(h);
+      conn_info_t *inf = info_of(h);
+      if (que == nullptr || inf == nullptr || que->elems() == nullptr)
+      {
+        if (verbose)
+          ipc::error("fail: publish_loan, invalid queue\n");
+        discard_loan(h, lo);
+        return false;
+      }
+      auto acc = inf->acc();
+      if (acc == nullptr)
+      {
+        if (verbose)
+          ipc::error("fail: publish_loan, info_of(h)->acc() == nullptr\n");
+        discard_loan(h, lo);
+        return false;
+      }
+      auto msg_id = acc->fetch_add(1, std::memory_order_relaxed);
+      /* 与 send() 的大消息分支同构: 槽位里写的是 chunk id(整数), 不是数据。
+       * 传 size = 0 让 msg_t 置 storage_ = true 并拷贝 id;
+       * remain 编码的是**借到的容量**, 因为接收侧要用它反推 chunk_size 才能定位
+       * 共享段(见 recv 的 find_storage(buf_id, inf, msg_size))。真实负载长度由负载
+       * 自身的头部承载, 不走这里。 */
+      const std::int32_t remain = static_cast<std::int32_t>(lo.size) -
+                                  static_cast<std::int32_t>(ipc::data_length);
+      auto id = lo.id;
+      bool pushed = wait_for(
+          inf->wt_waiter_,
+          [&]
+          {
+            /* 同上: push 覆写被套圈的格子时也要归还被丢弃消息的 chunk。 */
+            return !que->push(
+                [inf](void *p, ipc::circ::cc_t rem_cc)
+                {
+                  return clear_message<typename queue_t::value_t, flag_t>(inf, p,
+                                                                          rem_cc);
+                },
+                inf->cc_id_, msg_id, remain, &id, 0);
+          },
+          tm);
+      if (!pushed)
+      {
+        if (verbose)
+          ipc::log("publish_loan force_push: msg_id = %zd, cap = %zd\n", msg_id,
+                   lo.size);
+        pushed = que->force_push(
+            [inf](void *p, ipc::circ::cc_t rem_cc)
+            {
+              return clear_message<typename queue_t::value_t, flag_t>(inf, p,
+                                                                      rem_cc);
+            },
+            inf->cc_id_, msg_id, remain, &id, 0);
+      }
+      if (!pushed)
+      {
+        /* 没能进队列 = 没有任何接收方会回收它, 必须自己还回去。 */
+        if (verbose)
+          ipc::error("fail: publish_loan, push failed; chunk returned\n");
+        discard_loan(h, lo);
+        return false;
+      }
+      notify_readers(inf);
+      return true;
+    }
+
+    static void discard_loan(ipc::handle_t h, ipc::loan_t const &lo)
+    {
+      if (!lo.valid())
+        return;
+      conn_info_t *inf = info_of(h);
+      if (inf == nullptr)
+        return;
+      /* 尚未投递 ⇒ 没有任何接收方持有它 ⇒ 无条件归还是安全的(与被覆写消息的
+       * discard_storage 不同, 那里必须先按 conns 位图判断)。 */
+      release_storage(lo.id, inf, lo.size);
+    }
+
   }; // detail_impl<Policy>
 
   template <typename Flag>
@@ -1319,6 +1615,26 @@ namespace ipc
   buff_t chan_impl<Flag>::try_recv(ipc::handle_t h, bool verbose)
   {
     return detail_impl<policy_t<Flag>>::try_recv(h, verbose);
+  }
+
+  template <typename Flag>
+  ipc::loan_t chan_impl<Flag>::loan(ipc::handle_t h, std::size_t size,
+                                    bool verbose)
+  {
+    return detail_impl<policy_t<Flag>>::loan(h, size, verbose);
+  }
+
+  template <typename Flag>
+  bool chan_impl<Flag>::publish_loan(ipc::handle_t h, ipc::loan_t const &lo,
+                                     std::uint64_t tm, bool verbose)
+  {
+    return detail_impl<policy_t<Flag>>::publish_loan(h, lo, tm, verbose);
+  }
+
+  template <typename Flag>
+  void chan_impl<Flag>::discard_loan(ipc::handle_t h, ipc::loan_t const &lo)
+  {
+    detail_impl<policy_t<Flag>>::discard_loan(h, lo);
   }
 
   template struct chan_impl<

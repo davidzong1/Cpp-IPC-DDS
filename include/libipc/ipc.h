@@ -20,6 +20,31 @@ namespace ipc
     receiver
   };
 
+  /**
+   * \brief 一块已借出的共享 chunk。
+   *
+   * 常规 send() 是「调用方缓冲 → memcpy 进 chunk」; loan() 把 chunk 直接交给调用方,
+   * 让它就地把负载写进共享内存, 省掉那一次 memcpy。配合 DZFlat 平坦布局使用时,
+   * 「序列化」与「送进共享内存」合并成一次写入(见 docs/dzflat_shm.md)。
+   *
+   * \note size 是**借到的容量**, 不是负载长度。容量按尺寸档位向上取整(见
+   *       loan_size_class), 因为共享段是按 chunk_size 分段命名的, 逐字节取整会让
+   *       每个长度都开一个新段。接收侧据此还原 chunk 位置, 所以投递时travel 的
+   *       正是这个容量值 —— 真实负载长度由负载自身的头部承载。
+   *
+   * \note 生命周期: loan() 成功后, 要么 publish_loan()(所有权转移给队列, 由最后一个
+   *       接收方的 buff_t 析构归还), 要么 discard_loan()(立刻归还)。两者都不调用即为
+   *       泄漏 —— 每个尺寸档位只有 32 块。
+   */
+  struct loan_t
+  {
+    ipc::storage_id_t id = -1;
+    void *data = nullptr;
+    std::size_t size = 0;   ///< 借到的容量(>= 请求值)
+
+    bool valid() const noexcept { return (id >= 0) && (data != nullptr); }
+  };
+
   template <typename Flag>
   struct IPC_EXPORT chan_impl
   {
@@ -77,6 +102,23 @@ namespace ipc
     static bool try_send(ipc::handle_t h, void const *data, std::size_t size,
                          std::uint64_t tm, bool verbose);
     static buff_t try_recv(ipc::handle_t h, bool verbose);
+
+    /**
+     * \brief 借一块共享 chunk 供调用方就地写入。
+     * \return 无效 loan_t 表示失败(无接收方 / chunk 池耗尽 / size 过小)。
+     *
+     * 失败时**必须**回退到 send/try_send —— 借样不是必成的, 池子只有 32 块/档位。
+     * 成功后必须以 publish_loan 或 discard_loan 之一结束, 否则泄漏。
+     */
+    static ipc::loan_t loan(ipc::handle_t h, std::size_t size, bool verbose);
+
+    /// \brief 把已借出的 chunk 作为一条消息投递(单条, 不拆包)。
+    /// 失败时 chunk 已被本函数归还, 调用方不得再 discard_loan。
+    static bool publish_loan(ipc::handle_t h, ipc::loan_t const &lo,
+                             std::uint64_t tm, bool verbose);
+
+    /// \brief 放弃一块未投递的 chunk, 立刻归还池子。幂等于无效 loan。
+    static void discard_loan(ipc::handle_t h, ipc::loan_t const &lo);
   };
 
   template <typename Flag>
@@ -264,6 +306,29 @@ namespace ipc
     }
 
     buff_t try_recv() { return detail_t::try_recv(h_, verbose_); }
+
+    /**
+     * \brief 借一块共享 chunk 就地写入, 省掉 send() 的那次 memcpy。
+     *
+     * 典型用法(失败必须能回退, 池子只有 32 块/档位):
+     * \code
+     *   auto lo = ch.loan(need);
+     *   if (lo.valid()) {
+     *     if (!write_payload_into(lo.data, lo.size)) { ch.discard_loan(lo); ... }
+     *     else if (!ch.publish_loan(lo)) { ... }   // 失败时 chunk 已由内部归还
+     *   } else {
+     *     ch.try_send(buf, n);                     // 回退整包路径
+     *   }
+     * \endcode
+     */
+    loan_t loan(std::size_t size) { return detail_t::loan(h_, size, verbose_); }
+
+    bool publish_loan(loan_t const &lo, std::uint64_t tm = default_timeout)
+    {
+      return detail_t::publish_loan(h_, lo, tm, verbose_);
+    }
+
+    void discard_loan(loan_t const &lo) { detail_t::discard_loan(h_, lo); }
   };
 
   template <relat Rp, relat Rc, trans Ts>

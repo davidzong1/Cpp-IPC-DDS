@@ -12,6 +12,11 @@ namespace ipc {
 
 using byte_t = std::uint8_t;
 
+/// \brief Index of a chunk inside a CHUNK_INFO shared segment; -1 is invalid.
+/// Declared here (rather than only in the internal id_pool.h) so the public
+/// loan API in ipc.h can name it.
+using storage_id_t = std::int32_t;
+
 template <std::size_t N>
 struct uint;
 
