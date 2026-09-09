@@ -4,6 +4,8 @@
 #include "dzIPC/type.h"
 #include "libipc/export.h"
 
+namespace dzIPC { class Sample; }
+
 namespace dzIPC {
 namespace pimpl {
 class IPC_EXPORT publisher_ipc_impl
@@ -36,8 +38,13 @@ public:
     ~subscriber_ipc_impl();
     void InitChannel(std::string extra_info = "");
     void reset_message(const std::shared_ptr<TopicData>& msg);
-    void get(std::shared_ptr<TopicData>& msg);
-    bool try_get(std::shared_ptr<TopicData>& msg);
+    /* 视图路径(零拷贝, DZFlat 段; 无 owning 对象可记日志)。 */
+    void get(Sample& out);
+    bool try_get(Sample& out);
+
+    /* 物化路径(TLV + 快速路径对象; 记订阅事件日志)。 */
+    void get_clone(std::shared_ptr<TopicData>& msg);
+    bool try_get_clone(std::shared_ptr<TopicData>& msg);
     bool exit_flag() const;
 
 private:

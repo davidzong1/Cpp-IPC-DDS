@@ -18,19 +18,19 @@ std::function<void(std::shared_ptr<ServiceData>&)> wrap_server_callback(
     {
         const auto transport = (ipc_type == IPCType::Shm) ? logger::TransportKind::kShm
                                                            : logger::TransportKind::kSocket;
-        if (logger::IsDzipcLogRunning() && data && data->request())
+        if (logger::IsDzipcLogRunning() && data)
         {
             try {
-                auto& req = data->request();
-                std::shared_ptr<IpcMsgBase> snapshot(req->clone());
+                /* owned_copy: DZFlat 视图槽也能物化成 owning 供序列化记录。 */
+                auto snapshot = data->request_owned_copy();
                 if (!snapshot) throw std::bad_alloc();
                 ipc::buffer buf = snapshot->serialize();
                 logger::LogEvent ev{};
                 ev.timestamp_ns = logger::NowNs();
                 ev.topic = topic;
-                ev.type_name = info_pool::demangle(typeid(*req).name());
+                ev.type_name = info_pool::demangle(typeid(*snapshot).name());
                 ev.domain_id = static_cast<uint32_t>(domain_id);
-                ev.msg_id = req->msg_id();
+                ev.msg_id = snapshot->msg_id();
                 ev.transport = transport;
                 ev.role = logger::RoleKind::kServer;
                 ev.event_kind = logger::EventKind::kRequest;
@@ -47,16 +47,16 @@ std::function<void(std::shared_ptr<ServiceData>&)> wrap_server_callback(
 
         if (callback) callback(data);
 
-        if (logger::IsDzipcLogRunning() && data && data->response())
+        if (logger::IsDzipcLogRunning() && data)
         {
             try {
-                auto& resp = data->response();
-                std::shared_ptr<IpcMsgBase> snapshot(resp->clone());
+                auto snapshot = data->response_owned_copy();
                 if (!snapshot) throw std::bad_alloc();
                 ipc::buffer buf = snapshot->serialize();
-                logger::RecordResponse(topic, info_pool::demangle(typeid(*resp).name()),
-                                       static_cast<uint32_t>(domain_id), resp->msg_id(), transport,
-                                       static_cast<const uint8_t*>(buf.data()), buf.size());
+                logger::RecordResponse(topic, info_pool::demangle(typeid(*snapshot).name()),
+                                       static_cast<uint32_t>(domain_id), snapshot->msg_id(),
+                                       transport, static_cast<const uint8_t*>(buf.data()),
+                                       buf.size());
             } catch (...) {
                 // Logging must not alter the response path.
             }
@@ -194,34 +194,32 @@ bool pimpl::client_ipc_impl::send_request(std::shared_ptr<ServiceData>& request,
         try {
             auto transport = (impl(p_)->ipc_type == IPCType::Shm) ? dzIPC::logger::TransportKind::kShm
                                                                   : dzIPC::logger::TransportKind::kSocket;
-            auto& req_msg = request->request();
-            std::shared_ptr<IpcMsgBase> snapshot(req_msg->clone());
+            auto snapshot = request->request_owned_copy();
             if (!snapshot) throw std::bad_alloc();
             ipc::buffer buf = snapshot->serialize();
             dzIPC::logger::RecordRequest(impl(p_)->topic_name,
-                                         dzIPC::info_pool::demangle(typeid(*req_msg).name()),
+                                         dzIPC::info_pool::demangle(typeid(*snapshot).name()),
                                          static_cast<uint32_t>(impl(p_)->domain_id),
-                                         req_msg->msg_id(), transport,
+                                         snapshot->msg_id(), transport,
                                          static_cast<const uint8_t*>(buf.data()), buf.size());
         } catch (...) {
             // Logging is diagnostic and must never change request behavior.
         }
     }
     const bool ok = impl(p_)->ipc->send_request(request, rev_tm);
-    if (ok && dzIPC::logger::IsDzipcLogRunning() && request && request->response()) {
+    if (ok && dzIPC::logger::IsDzipcLogRunning() && request) {
         try {
             auto transport = (impl(p_)->ipc_type == IPCType::Shm) ? dzIPC::logger::TransportKind::kShm
                                                                   : dzIPC::logger::TransportKind::kSocket;
-            auto& resp = request->response();
-            std::shared_ptr<IpcMsgBase> snapshot(resp->clone());
+            auto snapshot = request->response_owned_copy();
             if (!snapshot) throw std::bad_alloc();
             ipc::buffer buf = snapshot->serialize();
             dzIPC::logger::LogEvent ev{};
             ev.timestamp_ns = dzIPC::logger::NowNs();
             ev.topic = impl(p_)->topic_name;
-            ev.type_name = dzIPC::info_pool::demangle(typeid(*resp).name());
+            ev.type_name = dzIPC::info_pool::demangle(typeid(*snapshot).name());
             ev.domain_id = static_cast<uint32_t>(impl(p_)->domain_id);
-            ev.msg_id = resp->msg_id();
+            ev.msg_id = snapshot->msg_id();
             ev.transport = transport;
             ev.role = dzIPC::logger::RoleKind::kClient;
             ev.event_kind = dzIPC::logger::EventKind::kResponse;

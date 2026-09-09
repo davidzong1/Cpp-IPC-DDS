@@ -15,6 +15,16 @@ namespace dzIPC {
 constexpr IPCType IPC_SHM = IPCType::Shm;         // 共享内存通信模式
 constexpr IPCType IPC_SOCKET = IPCType::Socket;   // UDP通信模式
 
+#define ENABLENODELET EnableNodelet(true); // 启用进程内快速路径
+#define DISABLENODELET EnableNodelet(false); // 禁用进程内快速路径
+/* 全大写不是风格偏好, 是必须的: 宏名一旦与函数 EnableDzFlat 同名, 对象式宏会把
+ * 调用点 dzIPC::EnableDzFlat(false) 展开成 dzIPC::EnableDzFlat(true);(false); ——
+ * 两条合法语句, 编译器不报错, 而实参被**静默反转**。而 EnableDzFlat(false) 恰好是
+ * 灰度升级的第一步(docs/dzflat_shm.md §3.5), 反转的后果是把 DZFlat 段推给未升级的
+ * 订阅方, 表现为静默丢消息。 */
+#define ENABLEDZFLAT EnableDzFlat(true); // 启用DZFlat平坦布局(shm专用)
+#define DISABLEDZFLAT EnableDzFlat(false); // 禁用DZFlat平坦布局
+
 using msgPtr = std::shared_ptr<IpcMsgBase>;   // 基类消息智能指针类型定义，用于接收数据
 
 /***********************************************************************************/
@@ -81,15 +91,4 @@ IPC_EXPORT void RequestShutdown();
 // 查询是否已经请求退出
 IPC_EXPORT bool IsShutdownRequested();
 
-/***********************************************************************************/
-/***********************************************************************************/
-/**********************************进程级开关***************************************/
-/***********************************************************************************/
-/***********************************************************************************/
-// Nodelet (进程内快速路径) 开关。默认 false。
-// 开启后 SHM pub/sub、IPC_SOCKET (UDP) pub/sub 与 SHM ser/cli
-// 各自在满足条件时尝试跳过序列化直接传递 shared_ptr；
-// 条件不满足时自动回退正常通信路径，并按实例/原因输出一次性 warning。
-// 线程安全，可在任意时刻调用。
-// 声明自 dzIPC/common/nodelet_config.h，实现在 nodelet_config.cc。
-}   // namespace dzIPC
+}

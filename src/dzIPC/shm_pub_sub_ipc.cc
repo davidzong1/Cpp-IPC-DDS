@@ -7,6 +7,7 @@
 #include "dzIPC/common/local_pub_sub_registry.h"
 #include "dzIPC/common/name_operator.h"
 #include "dzIPC/common/nodelet_config.h"
+#include "dzIPC/common/wire_accept.h"
 
 namespace dzIPC {
 namespace shm {
@@ -277,6 +278,12 @@ bool shm_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_
 {
     try
     {
+        if (try_publish_dzflat(msg, tm))
+        {
+            dzIPC::detail::NoteDzFlatPublish(true);
+            return true;
+        }
+        dzIPC::detail::NoteDzFlatPublish(false);
         ipc::buffer response_data(std::move(msg->serialize()));
         if (publisher_->recv_count() == 0)
         {
@@ -295,10 +302,61 @@ bool shm_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
+/* DZFlat 借样发布: 借一块共享 chunk, 把消息**直接按平坦布局写进共享内存**, 省掉
+ * 「serialize() 整包 new + TLV 页尾分段拷贝 + send() 再 memcpy 进 chunk」这一整串。
+ *
+ * 返回 false 表示"本次不走 DZFlat", 调用方须回退既有整包路径。回退不是异常, 是常态:
+ *   - 开关未开 / 消息类型不支持(手写类型、GenericMessage);
+ *   - 该通道当前没有接收方(chunk 无人回收, loan 会拒绝);
+ *   - chunk 池耗尽(每尺寸档位 32 块) —— 这是背压, 回退整包路径仍能送达。
+ *
+ * 生命周期: loan 成功后每条出口都必须以 publish_loan 或 discard_loan 结束。
+ * publish_loan 失败时 chunk 已由其内部归还, 这里不得重复 discard。
+ */
+bool shm_pub_ipc::try_publish_dzflat(const std::shared_ptr<IpcMsgBase>& msg, std::uint64_t tm)
+{
+    if (!dzIPC::IsDzFlatEnabled() || !msg || !msg->dzflat_supported())
+    {
+        return false;
+    }
+    if (!publisher_ || publisher_->recv_count() == 0)
+    {
+        return false;
+    }
+    const std::uint32_t need = msg->dzflat_size();
+    if (need == 0)
+    {
+        return false;
+    }
+    auto lo = publisher_->loan(need);
+    if (!lo.valid())
+    {
+        return false;   // 池耗尽 / 无接收方 —— 回退整包
+    }
+    if (!msg->dzflat_write(lo.data, static_cast<std::uint32_t>(lo.size)))
+    {
+        publisher_->discard_loan(lo);
+        return false;
+    }
+    return publisher_->publish_loan(lo, tm);
+}
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
 bool shm_pub_ipc::publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg)
 {
     try
     {
+        /* 有接收方时优先借样(tm=0: 与 no_member_try_send 的 best-effort 语义一致)。
+         * 无接收方时必须走 no_member_try_send —— 那条路径会把负载送进 sniffer 环,
+         * 而 sniffer 侧解析的是 TLV, 所以不能用 DZFlat。 */
+        if (try_publish_dzflat(msg, 0))
+        {
+            dzIPC::detail::NoteDzFlatPublish(true);
+            return true;
+        }
+        dzIPC::detail::NoteDzFlatPublish(false);
         ipc::buffer response_data(std::move(msg->serialize()));
         return publisher_->no_member_try_send(response_data.data(), response_data.size(), 0);
     }
@@ -326,6 +384,7 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
     topic_msg_.reset(msg->clone());
     msg_id_ = topic_msg_->topic()->msg_id();
     msg_queue_ = std::make_shared<CircularQueue<IpcMsgBase>>(queue_size);
+    view_queue_ = std::make_shared<CircularQueue<Sample>>(queue_size);
 }
 
 /******************************************************************************************************/
@@ -554,6 +613,75 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
                     {
                         continue;
                     }
+                    /* 双 wire 分流 + 拒收计数 (docs/dzflat_shm.md §3.8 / wire_accept.h)
+                     *
+                     * 段首 4 字节: DZFlat 是 magic 'DZFL', TLV 是首字段名的长度(小整数),
+                     * 结构上不可能碰撞, 故可无条件判别。分两条投递队列:
+                     *
+                     *   view 队列(借样 Sample)  ←  DZFlat 段 + 话题类型支持 DZFlat(typed/
+                     *       由 get()/try_get() 服务, 零拷贝         generator 生成, schema_hash≠0)
+                     *   clone 队列(物化对象)    ←  TLV 段, 以及发给 schema-less 话题
+                     *       由 get_clone()/try_get_clone() 服务   (GenericMessage / 手写类型)
+                     *       的 DZFlat 段 —— GenericMessage 无 C++ schema, 只能把段字节
+                     *       拷进 dzflat_seg_ 留待 Python 解码, 见 generic_message.hpp。
+                     *
+                     * 严格分流: TLV 消息永远不会被 get()/try_get() 物化; 混合 wire(灰度期)
+                     * 需要调用方两条都 drain。 */
+                    std::uint32_t exp_id = 0, exp_hash = 0;
+                    bool viewable = false;
+                    {
+                        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+                        if (!topic_msg_)
+                        {
+                            continue;
+                        }
+                        exp_id = msg_id_;   /* 注册键 = 话题模板的 msg_id */
+                        exp_hash = topic_msg_->topic()->dzflat_schema_hash();
+                        viewable = (exp_hash != 0);   /* 仅 generator 生成的 typed 话题 */
+                    }
+
+                    const bool is_dzflat =
+                        dzflat::looks_like_dzflat(raw_data.data(), raw_data.size());
+                    if (is_dzflat)
+                    {
+                        if (viewable)
+                        {
+                            std::uint32_t seg_id = 0;
+                            if (!IpcMsgBase::dzflat_peek_msg_id(raw_data.data(), raw_data.size(),
+                                                                seg_id)
+                                || seg_id != exp_id)
+                            {
+                                detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatIdSkipped);
+                                continue;
+                            }
+                            dzflat::SegHeader h{};
+                            std::memcpy(&h, raw_data.data(), sizeof(h));
+                            if (h.schema_hash != exp_hash)
+                            {
+                                detail::NoteDzFlatRx(
+                                    detail::DzFlatRxEvent::kDzFlatSchemaDrop);
+                                continue;
+                            }
+                            detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatAccepted);
+                            /* 借样: raw_data(buff_t) 让 chunk 的 conns 引用保持非零,
+                             * 原样移进 Sample —— chunk 在用户读完字段前不会归还池。 */
+                            view_queue_->push(std::make_shared<Sample>(
+                                std::move(raw_data), seg_id, exp_hash));
+                            continue;
+                        }
+                        /* schema-less 话题(GenericMessage): 合法 DZFlat 段同样落到下方
+                         * 物化路径, 由 GenericMessage::dzflat_read 把段字节拷进
+                         * dzflat_seg_, 留待持有 schema 的一侧(Python)解码。 */
+                    }
+                    else if (dzflat::has_dzflat_magic(raw_data.data(), raw_data.size()))
+                    {
+                        /* magic 在但 looks_like_dzflat 不过 ⇒ 段头自相矛盾 / layout_ver
+                         * 不认识 ⇒ 损坏段, 不是"不是 DZFlat"。 */
+                        detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatHeaderBad);
+                        continue;
+                    }
+
+                    /* TLV(或 schema-less 的 DZFlat)→ 物化, 与 ser/cli 共用 AcceptWire。 */
                     std::shared_ptr<TopicData> local_msg;
                     {
                         std::lock_guard<std::mutex> lock(topic_msg_mtx_);
@@ -563,11 +691,11 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
                         }
                         local_msg.reset(topic_msg_->clone());
                     }
-                    if (!local_msg->check_msg_id(raw_data))
+                    if (!AcceptWire(raw_data, local_msg->msg_id(), *local_msg->topic()))
+                    {
                         continue;
-                    local_msg->topic()->deserialize(raw_data);
-                    std::shared_ptr<IpcMsgBase> ptr_cache;
-                    local_msg->swap(ptr_cache);
+                    }
+                    std::shared_ptr<IpcMsgBase> ptr_cache;                    local_msg->swap(ptr_cache);
                     msg_queue_->push(std::move(ptr_cache));
                 }
                 else
@@ -594,7 +722,33 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
-void shm_sub_ipc::get(std::shared_ptr<TopicData>& msg)
+/* ---- 视图路径: 只服务借样的 DZFlat 段(见 subscribe 循环的分流) ---- */
+void shm_sub_ipc::get(Sample& out)
+{
+    std::shared_ptr<Sample> s;
+    view_queue_->pop(s);   /* 阻塞直到有 Sample; TLV-only 话题请用 get_clone, 见基类注释 */
+    if (s)
+    {
+        out = std::move(*s);
+    }
+}
+
+bool shm_sub_ipc::try_get(Sample& out)
+{
+    std::shared_ptr<Sample> s;
+    if (!view_queue_->try_pop(s))
+    {
+        return false;
+    }
+    if (!s)
+    {
+        return false;
+    }
+    out = std::move(*s);
+    return true;
+}
+
+void shm_sub_ipc::get_clone(std::shared_ptr<TopicData>& msg)
 {
     std::shared_ptr<IpcMsgBase> ipc_msg;
     msg_queue_->pop(ipc_msg);
@@ -604,7 +758,7 @@ void shm_sub_ipc::get(std::shared_ptr<TopicData>& msg)
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
-bool shm_sub_ipc::try_get(std::shared_ptr<TopicData>& msg)
+bool shm_sub_ipc::try_get_clone(std::shared_ptr<TopicData>& msg)
 {
     std::shared_ptr<IpcMsgBase> ipc_msg;
     if (msg_queue_->try_pop(ipc_msg))

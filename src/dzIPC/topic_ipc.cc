@@ -193,18 +193,29 @@ void pimpl::subscriber_ipc_impl::reset_message(const std::shared_ptr<TopicData>&
     impl(p_)->ipc->reset_message(msg);
 }
 
-void pimpl::subscriber_ipc_impl::get(std::shared_ptr<TopicData>& msg)
+/* 视图路径: 零拷贝借样, 无 owning 对象, 不记订阅事件日志。 */
+void pimpl::subscriber_ipc_impl::get(Sample& out)
 {
-    impl(p_)->ipc->get(msg);
+    impl(p_)->ipc->get(out);
+}
+
+bool pimpl::subscriber_ipc_impl::try_get(Sample& out)
+{
+    return impl(p_)->ipc->try_get(out);
+}
+
+void pimpl::subscriber_ipc_impl::get_clone(std::shared_ptr<TopicData>& msg)
+{
+    impl(p_)->ipc->get_clone(msg);
     if (msg && msg->topic()) {
         log_subscribe_event(impl(p_)->topic_name, impl(p_)->domain_id,
                             impl(p_)->ipc_type, msg->topic());
     }
 }
 
-bool pimpl::subscriber_ipc_impl::try_get(std::shared_ptr<TopicData>& msg)
+bool pimpl::subscriber_ipc_impl::try_get_clone(std::shared_ptr<TopicData>& msg)
 {
-    const bool ok = impl(p_)->ipc->try_get(msg);
+    const bool ok = impl(p_)->ipc->try_get_clone(msg);
     if (ok && msg && msg->topic()) {
         log_subscribe_event(impl(p_)->topic_name, impl(p_)->domain_id,
                             impl(p_)->ipc_type, msg->topic());

@@ -10,9 +10,107 @@
 #include "dzIPC/common/local_pub_sub_registry.h"
 #include "dzIPC/common/name_operator.h"
 #include "dzIPC/common/nodelet_config.h"
+#include "dzIPC/common/wire_accept.h"
 
 namespace dzIPC {
 namespace shm {
+
+namespace {
+
+/* DZFlat 借样发送 (docs/dzflat_shm.md Step 2, srv 接入见 known_issues 第 6 条)。
+ *
+ * 返回 false 表示"本次不走 DZFlat", 调用方须回退既有整包序列化。回退是常态:
+ * 开关未开 / 类型不支持 / 对端未连 / chunk 池耗尽都会走到那里。
+ *
+ * ser/cli 用的是 ipc::server(single-single-unicast), 与 pub/sub 的 route 不同:
+ * 其 recv 侧 recycle 无条件归还(sub_rc 恒 true), chunk 的 conns 不承载持有信息 ——
+ * 对借样没有影响, 因为一条消息只有一个接收方, 它的 buff_t 析构即归还。 */
+bool try_send_dzflat(const std::shared_ptr<ipc::server>& ch, const std::shared_ptr<IpcMsgBase>& msg)
+{
+    /* 每次调用都记一笔: 回退是静默的, 没有计数就分不清"收益生效了"和"一直在回退"
+     * (pub/sub 侧同理, 见 nodelet_config.h 的说明)。 */
+    struct Note
+    {
+        bool used = false;
+        ~Note() { dzIPC::detail::NoteDzFlatPublish(used); }
+    } note;
+
+    if (!dzIPC::IsDzFlatEnabled() || !ch || !msg || !msg->dzflat_supported())
+    {
+        return false;
+    }
+    if (ch->recv_count() == 0)
+    {
+        return false;   // 无接收方: chunk 借不到也无人回收
+    }
+    const std::uint32_t need = msg->dzflat_size();
+    if (need == 0)
+    {
+        return false;
+    }
+    auto lo = ch->loan(need);
+    if (!lo.valid())
+    {
+        return false;   // 池耗尽 —— 背压, 不是错误
+    }
+    if (!msg->dzflat_write(lo.data, static_cast<std::uint32_t>(lo.size)))
+    {
+        ch->discard_loan(lo);
+        return false;
+    }
+    note.used = ch->publish_loan(lo, 0);
+    return note.used;
+}
+
+/* 双 wire 接收: 判别 + 校验 + 拒收计数, 与 pub/sub 共用一份实现
+ * (见 dzIPC/common/wire_accept.h)。返回 false 表示这条应当丢弃。
+ *
+ * ser/cli 的期待 msg_id 就取 target 自己的 —— 与 pub/sub 不同, 这里的目标对象不会被
+ * swap() 移走, 它始终持有本请求/响应类型的 msg_id。 */
+bool accept_wire(const ipc::buffer& raw, const std::shared_ptr<IpcMsgBase>& target)
+{
+    return dzIPC::AcceptWire(raw, target->msg_id(), *target);
+}
+
+/* 分流一个收到的段, 让 DZFlat request/response 走零拷贝借样(仿 pub/sub 视图路径)。
+ *
+ *   1  = 借样成功: typed DZFlat 且 id/schema 全对上 —— 段已 move 进 sample_out;
+ *   0  = 应走物化 accept_wire: TLV / schema-less(GenericMessage)话题 / 手写类型;
+ *  -1  = 识别为 typed DZFlat 但校验失败(id 或 schema 不符) —— 已计数, 调用方丢弃。
+ *
+ * 计数只在 1 / -1 路径记一次; 0 路径留给 accept_wire 自己记, 避免重复。 */
+int classify_received(ipc::buffer& raw, const std::shared_ptr<IpcMsgBase>& tpl,
+                      std::uint32_t tpl_msg_id, std::shared_ptr<dzIPC::Sample>& sample_out)
+{
+    using E = dzIPC::detail::DzFlatRxEvent;
+    if (!dzflat::looks_like_dzflat(raw.data(), raw.size()))
+    {
+        return 0;
+    }
+    if (!tpl || !tpl->dzflat_supported())
+    {
+        return 0;   // schema-less / 手写类型: 物化(GenericMessage 拷段字节)
+    }
+    std::uint32_t seg_id = 0;
+    if (!IpcMsgBase::dzflat_peek_msg_id(raw.data(), raw.size(), seg_id) || seg_id != tpl_msg_id)
+    {
+        dzIPC::detail::NoteDzFlatRx(E::kDzFlatIdSkipped);
+        return -1;
+    }
+    dzflat::SegHeader h{};
+    std::memcpy(&h, raw.data(), sizeof(h));
+    if (h.schema_hash != tpl->dzflat_schema_hash())
+    {
+        dzIPC::detail::NoteDzFlatRx(E::kDzFlatSchemaDrop);
+        return -1;
+    }
+    dzIPC::detail::NoteDzFlatRx(E::kDzFlatAccepted);
+    sample_out =
+        std::make_shared<dzIPC::Sample>(std::move(raw), seg_id, h.schema_hash);
+    return 1;
+}
+
+}   // namespace
 using namespace ipc;
 using dzIPC::control_plane_shm::TopicState;
 
@@ -319,17 +417,32 @@ void shm_ser_ipc::response_thread_func()
             }
             local_msg.reset(message_->clone());
         }
-        if (!local_msg->check_msg_id(raw_data))
+        /* 双 wire 分流: DZFlat + typed request → 借样成只读视图(回调用 request_view<T>()
+         * 读, 零拷贝); TLV / schema-less → 物化进 owning request()。 */
+        auto tpl = local_msg->request();
+        std::shared_ptr<dzIPC::Sample> sample;
+        const int wr = classify_received(raw_data, tpl, tpl ? tpl->msg_id() : 0, sample);
+        if (wr == 1)
         {
-            if (verbose_)
-            {
-                std::cerr << "\033[33m[Warning] Received message with invalid ID on topic: " << topic_name_ << "\033[0m"
-                          << std::endl;
-            }
-            continue;
+            /* 借样成功: request() 保持模板克隆(不填收到的数据), 数据在借样段里。 */
+            local_msg->request_sample() = std::move(sample);
         }
-        /* 反序列转换为msg数据 */
-        local_msg->request()->deserialize(raw_data);
+        else if (wr == 0)
+        {
+            if (!accept_wire(raw_data, local_msg->request()))
+            {
+                if (verbose_)
+                {
+                    std::cerr << "\033[33m[Warning] Received message with invalid ID on topic: " << topic_name_
+                              << "\033[0m" << std::endl;
+                }
+                continue;
+            }
+        }
+        else
+        {
+            continue;   // typed DZFlat 但 id/schema 不符 → 丢弃
+        }
         std::function<void(std::shared_ptr<ServiceData>&)> callback;
         {
             std::lock_guard<std::mutex> lock(callback_mtx_);
@@ -338,6 +451,10 @@ void shm_ser_ipc::response_thread_func()
         if (callback)
         {
             callback(local_msg);
+        }
+        if (try_send_dzflat(ipc_w_ptr_, local_msg->response()))
+        {
+            continue;   // 已借样送出
         }
         ipc::buffer response_data(std::move(local_msg->response()->serialize()));
         int retry_count = 0;
@@ -664,16 +781,20 @@ bool shm_cli_ipc::send_request(std::shared_ptr<ServiceData>& request, uint64_t r
     {
         return false;
     }
-    ipc::buffer request_data(std::move(request->request()->serialize()));
-    int retry_count = 0;
-    while (!ipc_w_ptr_->try_send(request_data.data(), request_data.size()))
+    if (!try_send_dzflat(ipc_w_ptr_, request->request()))
     {
-        retry_count++;
-        if (retry_count > 10)
+        ipc::buffer request_data(std::move(request->request()->serialize()));
+        int retry_count = 0;
+        while (!ipc_w_ptr_->try_send(request_data.data(), request_data.size()))
         {
-            return false;
-        }
-    };
+            retry_count++;
+            if (retry_count > 10)
+            {
+                return false;
+            }
+        };
+    }
+    request->response_sample().reset();   // 清掉上一次响应(若有), 本次重新收
     do
     {
         ipc::buffer raw_response = ipc_r_ptr_->recv(rev_tm);
@@ -681,11 +802,21 @@ bool shm_cli_ipc::send_request(std::shared_ptr<ServiceData>& request, uint64_t r
         {
             return false;
         }
-        if (message_template->check_msg_id(raw_response))   // 收到响应且ID正确,否则重新接收
+        auto resp_tpl = request->response();
+        std::shared_ptr<dzIPC::Sample> sample;
+        const int rr =
+            classify_received(raw_response, resp_tpl, resp_tpl ? resp_tpl->msg_id() : 0, sample);
+        if (rr == 1)
         {
-            request->response()->deserialize(raw_response);
+            /* DZFlat 响应借样: response() 保持模板克隆, 借样段随 ServiceData 活到调用方读完。 */
+            request->response_sample() = std::move(sample);
             break;
         }
+        if (rr == 0 && accept_wire(raw_response, request->response()))
+        {
+            break;   // TLV / schema-less 响应已物化
+        }
+        /* rr == -1(typed DZFlat 不符)或 accept_wire 拒 → 重新接收 */
     } while (true);
     return true;
 }

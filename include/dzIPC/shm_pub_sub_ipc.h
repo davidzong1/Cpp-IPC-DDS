@@ -8,8 +8,11 @@
 #include <vector>
 #include "dzIPC/common/control_plane.h"
 #include "dzIPC/common/circularqueue.h"
+#include "dzIPC/common/loaned_message.h"
+#include "dzIPC/common/nodelet_config.h"
 #include "dzIPC/common/local_pub_sub_registry.h"
 #include "dzIPC/common/thread_dispatch.h"
+#include "dzIPC/common/sample_message.h"
 #include "dzIPC/common/topic_data.h"
 #include "dzIPC/ipc_info_pool.h"
 #include "dzIPC/pub_sub_base.h"
@@ -37,6 +40,56 @@ public:
 
     bool has_subscribed() const { return subscribed_; }
 
+    /* ------------------------------------------------------------------ B 级借样
+     *
+     * loan<Flat>(varlen_budget) 借一块共享 chunk 并返回一个就地构造器: 大负载直接写
+     * 进共享内存, 发布端零拷贝(docs/dzflat_shm.md §4.2)。
+     *
+     * **必须检查返回值**: 无接收方 / chunk 池耗尽(32 块/尺寸档位)/ 开关未开时返回无效
+     * 对象, 调用方须回退到普通 publish()。这是背压而非错误。
+     *
+     * varlen_budget = 变长区(string / 数组 / 嵌套元素块)最多需要的字节数上界。超出后
+     * alloc_* 返回空 span 且 publish_loaned 会失败并归还 chunk, 不会写出坏段。
+     *
+     * 用法见 loaned_message.h 顶部注释。
+     */
+    template<typename Flat>
+    LoanedMessage<Flat> loan(std::uint32_t varlen_budget)
+    {
+        if (!dzIPC::IsDzFlatEnabled() || !publisher_)
+        {
+            return {};
+        }
+        auto lo = publisher_->loan(Flat::loan_size(varlen_budget));
+        if (!lo.valid())
+        {
+            return {};
+        }
+        return LoanedMessage<Flat>{publisher_, lo, dzflat_msg_id()};
+    }
+
+    /// 投递一个就地构造完成的借样消息。失败时 chunk 由内部归还。
+    template<typename Flag>
+    bool publish_loaned(LoanedMessage<Flag>&& lo, std::uint64_t tm = 0)
+    {
+        if (!lo.valid() || !publisher_)
+        {
+            return false;
+        }
+        if (!lo.finalize())
+        {
+            /* 超出变长预算 —— lo 析构会归还 chunk。 */
+            dzIPC::detail::NoteDzFlatPublish(false);
+            return false;
+        }
+        const auto handle = lo.loan();
+        /* publish_loan 接管所有权(成功与否都不再由 lo 归还): 失败时它自己 discard。 */
+        lo.release();
+        const bool ok = publisher_->publish_loan(handle, tm);
+        dzIPC::detail::NoteDzFlatPublish(ok);
+        return ok;
+    }
+
     /* 禁用拷贝 */
     shm_pub_ipc(const shm_pub_ipc&) = delete;
     shm_pub_ipc& operator=(const shm_pub_ipc&) = delete;
@@ -44,6 +97,16 @@ public:
 private:
     void pub_handshake();
     // void sub_listener();
+
+    /* B 级借样封口时写进段头的 msg_id。取自本发布者的话题模板 —— 与 A 级走
+     * msg->dz_ipc_msg_id 等价, 但 B 级没有 owning 消息对象可问。 */
+    std::uint32_t dzflat_msg_id() const
+    {
+        return (topic_msg_ && topic_msg_->topic()) ? topic_msg_->topic()->msg_id() : 0;
+    }
+
+    /* DZFlat 借样发布; 返回 false 表示本次须回退整包序列化(见 .cc 中的说明)。 */
+    bool try_publish_dzflat(const std::shared_ptr<IpcMsgBase>& msg, std::uint64_t tm);
 
 private:
     size_t domain_id_{0};
@@ -82,8 +145,13 @@ public:
     ~shm_sub_ipc();
     void InitChannel(std::string extra_info = "");
     void reset_message(const std::shared_ptr<TopicData>& msg);
-    void get(std::shared_ptr<TopicData>& msg);
-    bool try_get(std::shared_ptr<TopicData>& msg);
+    /* ---- 视图路径(零拷贝, 只服务 DZFlat 段) ---- */
+    void get(Sample& out);
+    bool try_get(Sample& out);
+
+    /* ---- 物化路径(TLV + 快速路径克隆对象 + schema-less 话题) ---- */
+    void get_clone(std::shared_ptr<TopicData>& msg);
+    bool try_get_clone(std::shared_ptr<TopicData>& msg);
     /* 禁用拷贝 */
     shm_sub_ipc(const shm_sub_ipc&) = delete;
     shm_sub_ipc& operator=(const shm_sub_ipc&) = delete;
@@ -103,7 +171,8 @@ private:
     std::mutex channel_mtx_;
     std::shared_ptr<TopicData> topic_msg_;
     std::mutex topic_msg_mtx_;
-    std::shared_ptr<CircularQueue<IpcMsgBase>> msg_queue_;  // shared_ptr for fast-path fanout
+    std::shared_ptr<CircularQueue<IpcMsgBase>> msg_queue_;  // 物化队列; shared_ptr for fast-path fanout
+    std::shared_ptr<CircularQueue<Sample>> view_queue_;  // 视图队列: 借样的 DZFlat 段
     std::thread* subscribe_thread_{nullptr};
     std::thread* sub_handshake_thread_{nullptr};
     //

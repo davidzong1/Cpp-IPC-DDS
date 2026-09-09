@@ -1,3 +1,4 @@
+#include "dzIPC/common/sample_message.h"
 #include "dzIPC/socket_pub_sub_ipc.h"
 #include <iostream>
 #include <memory>
@@ -620,7 +621,19 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
-void socket_sub_ipc::get(std::shared_ptr<TopicData>& msg)
+/* 视图路径: socket 无 DZFlat 段, 恒不可用。 */
+void socket_sub_ipc::get(Sample& out)
+{
+    (void)out;
+}
+
+bool socket_sub_ipc::try_get(Sample& out)
+{
+    (void)out;
+    return false;
+}
+
+void socket_sub_ipc::get_clone(std::shared_ptr<TopicData>& msg)
 {
     std::shared_ptr<IpcMsgBase> ipc_msg;
     msg_queue_->pop(ipc_msg);
@@ -630,7 +643,7 @@ void socket_sub_ipc::get(std::shared_ptr<TopicData>& msg)
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
-bool socket_sub_ipc::try_get(std::shared_ptr<TopicData>& msg)
+bool socket_sub_ipc::try_get_clone(std::shared_ptr<TopicData>& msg)
 {
     std::shared_ptr<IpcMsgBase> ipc_msg;
     if (msg_queue_->try_pop(ipc_msg))

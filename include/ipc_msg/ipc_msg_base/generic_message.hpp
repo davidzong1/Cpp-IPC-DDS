@@ -49,7 +49,12 @@ public:
     // ---- 字段管理 ----
 
     /// 清空所有字段
-    void clear() { fields_.clear(); }
+    void clear()
+    {
+        fields_.clear();
+        dzflat_seg_.clear();
+        dzflat_seg_hash_ = 0;
+    }
 
     /// 返回字段数量
     size_t field_count() const { return fields_.size(); }
@@ -123,6 +128,49 @@ public:
     // ---- IpcMsgBase 接口 ----
     ipc::buffer serialize() override;
     void deserialize(const ipc::buffer& buffer) override;
+
+    /* ------------------------------------------------------- DZFlat 段直通
+     *
+     * GenericMessage 是**自描述 TLV** 的通用走查器 —— 它靠 wire 里的字段名工作。
+     * DZFlat 是定长布局, wire 里没有字段名, 所以本类型在 C++ 侧**无法**把它解析成
+     * fields_: 缺 schema。而 schema 只存在于 generator 产出的物件里, 且没有任何 TU
+     * 会编译那些生成头文件(Python 进程尤其如此), 所以 C++ 侧拿不到。
+     *
+     * 因此这里只做直通: 原样留存段字节 + schema 指纹, 由**持有 schema 的一侧**去解码。
+     * 落地形态是 Python: generator 另外发射一份 Python schema
+     * (python/dzipc/gen_msgs/_dzflat_schema.py), 由 python/dzipc/dzflat.py 解码。
+     * 这样 Python 侧还顺带拿到了 TLV 路径给不了的东西 —— 大数组可以用 memoryview
+     * 零拷贝读, 而不是 get_uint8_array() 那样返回一个百万元素的 Python list。
+     *
+     * 不这样做的后果不是"退化", 而是**静默丢消息**: 订阅循环在 dzflat_read 返回 false
+     * 时会 continue(见 shm_pub_sub_ipc.cc 的双 wire 分派)。
+     *
+     * 注意: 持有段的 GenericMessage 是只读直通体, fields_ 为空 —— 两者互斥。
+     * 它不能被 serialize() 回 TLV(同样缺 schema), 只能整段转发。
+     */
+    bool dzflat_read(const void* seg, size_t size) override
+    {
+        if (!dzflat::looks_like_dzflat(seg, size))
+        {
+            return false;
+        }
+        dzflat::SegHeader h{};
+        std::memcpy(&h, seg, sizeof(h));
+        const auto* p = static_cast<const uint8_t*>(seg);
+        dzflat_seg_.assign(p, p + h.total_size);
+        dzflat_seg_hash_ = h.schema_hash;
+        fields_.clear();   /* 与 TLV 字段互斥 */
+        return true;
+    }
+
+    /// 是否持有一个 DZFlat 段(而非 TLV 字段)。
+    bool has_dzflat() const noexcept { return !dzflat_seg_.empty(); }
+
+    /// 所持段的 schema 指纹; 未持有时为 0。用于在 Python 侧查 schema 注册表。
+    uint32_t dzflat_seg_schema_hash() const noexcept { return dzflat_seg_hash_; }
+
+    /// 所持段的原始字节。生命周期与本对象绑定。
+    const std::vector<uint8_t>& dzflat_seg() const noexcept { return dzflat_seg_; }
     GenericMessage* clone() const override { return new GenericMessage(*this); }
 
 private:
@@ -133,6 +181,9 @@ private:
     };
 
     std::vector<FieldEntry> fields_;
+    /* DZFlat 直通载荷。非空即表示本对象持有一个 DZFlat 段, 此时 fields_ 为空。 */
+    std::vector<uint8_t> dzflat_seg_;
+    uint32_t dzflat_seg_hash_ = 0;
 
     // 按名称查找字段（返回索引），未找到返回 -1
     int find_field(const std::string& name) const;

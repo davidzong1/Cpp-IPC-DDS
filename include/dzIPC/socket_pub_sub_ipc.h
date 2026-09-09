@@ -14,6 +14,8 @@
 #include "dzIPC/common/nodelet_config.h"
 #include "dzIPC/common/thread_dispatch.h"
 #include "dzIPC/common/topic_data.h"
+
+namespace dzIPC { class Sample; }
 #include "dzIPC/ipc_info_pool.h"
 #include "dzIPC/pub_sub_base.h"
 #include "libipc/udp.h"
@@ -126,8 +128,13 @@ public:
     ~socket_sub_ipc();
     void InitChannel(std::string extra_info = "");
     void reset_message(const std::shared_ptr<TopicData>& msg);
-    void get(std::shared_ptr<TopicData>& msg);
-    bool try_get(std::shared_ptr<TopicData>& msg);
+    /* 视图路径: socket 无 DZFlat 段, 恒 false。一律用 get_clone/try_get_clone。 */
+    void get(Sample& out);
+    bool try_get(Sample& out);
+
+    /* 物化路径。socket 的接收只走这条。 */
+    void get_clone(std::shared_ptr<TopicData>& msg);
+    bool try_get_clone(std::shared_ptr<TopicData>& msg);
     /* 禁用拷贝 */
     socket_sub_ipc(const socket_sub_ipc&) = delete;
     socket_sub_ipc& operator=(const socket_sub_ipc&) = delete;
