@@ -9,7 +9,7 @@
 *.dll
 *.dylib
 **/__pycache__/**
-
+.freebuff/**
 # Qt-es
 object_script.*.Release
 object_script.*.Debug
@@ -89,3 +89,5 @@ srv/external_paths.json
 .agents/**
 
 brainstorm/**
+
+reasonix.toml
