@@ -242,7 +242,7 @@ class DzipcSubscriber(threading.Thread):
                     )
                     return
                 try:
-                    ok, out = sub.try_get(topic_data)
+                    ok, out = sub.try_get_clone(topic_data)
                     if ok:
                         got_data = True
                         self._process_sample(
@@ -288,7 +288,7 @@ class DzipcSubscriber(threading.Thread):
             try:
                 while not self.stop_event.is_set():
                     try:
-                        ok, out = sub.try_get(topic_data)
+                        ok, out = sub.try_get_clone(topic_data)
                         if not ok:
                             if (
                                 idle_reconnect_timeout > 0

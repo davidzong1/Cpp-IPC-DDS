@@ -39,7 +39,10 @@ def run_pub(args: argparse.Namespace) -> None:
             msg.data3.append("exit")
         msg.data4 = (i % 2 == 0)
 
-        ok = pub.publish(msg)
+        # publish 收的是 C++ 侧消息对象, 不是 Python 封装类 —— 必须显式 to_generic()。
+        # (注意与 make_topic_data 的不对称: 那个会自动转换, 这个不会。直接传封装对象
+        #  会得到一条 pybind 的 "Invoked with: ..." 类型错误。)
+        ok = pub.publish(msg.to_generic())
         print(f"[PUB] seq={i}, ok={ok}, data3={msg.data3}")
         time.sleep(args.period)
 
@@ -61,27 +64,34 @@ def run_sub(args: argparse.Namespace) -> None:
     print("[SUB] 订阅已启动，Ctrl+C 退出")
     try:
         while True:
-            ok, out = sub.try_get(topic_data)
+            ok, out = sub.try_get_clone(topic_data)
             if not ok:
                 time.sleep(args.poll)
                 continue
 
-            # 绑定层里 topic() 返回 IpcMsgBase；若 RTTI 下转失败，就退回模板对象读取
+            # topic() 返回的是 **C++ 侧对象**，字段不是 Python 属性 —— 必须用生成的
+            # 封装类把它转成 Python 对象再读。
+            #
+            # 原先这里是 `if not hasattr(msg_obj, "data3"): msg_obj = msg_template`
+            # 加一串 getattr(..., 默认值)：hasattr 永远为假，于是**每次都退回读模板对象**
+            # (空值)，而 getattr 的默认值又把这个错误吞掉 —— 打印出来的一直是空列表,
+            # 收不到 exit 也永远不退出。见 docs/dzflat_known_issues.md 第 2 条。
+            #
+            # from_generic 两种 wire 都认(TLV 与 DZFlat)。
             msg_obj = out.topic() if out is not None else topic_data.topic()
-            if not hasattr(msg_obj, "data3"):
-                msg_obj = msg_template
+            msg = ipc.TestMsg.from_generic(msg_obj)
 
             print(
                 "[SUB] recv:",
                 {
-                    "data1": list(getattr(msg_obj, "data1", [])),
-                    "data2": list(getattr(msg_obj, "data2", [])),
-                    "data3": list(getattr(msg_obj, "data3", [])),
-                    "data4": bool(getattr(msg_obj, "data4", False)),
+                    "data1": list(msg.data1),
+                    "data2": list(msg.data2),
+                    "data3": list(msg.data3),
+                    "data4": bool(msg.data4),
                 },
             )
 
-            if "exit" in list(getattr(msg_obj, "data3", [])):
+            if "exit" in list(msg.data3):
                 print("[SUB] 收到 exit，退出")
                 return
     except KeyboardInterrupt:

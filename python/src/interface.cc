@@ -1,4 +1,5 @@
 #include "dzIPC/common/control_plane.h"
+#include "dzIPC/common/nodelet_config.h"
 #include "dzIPC/dzipc.h"
 #include "ipc_msg/ipc_msg_base/ipc_msg_base.hpp"
 #include "ipc_msg/ipc_msg_base/generic_message.hpp"
@@ -85,6 +86,33 @@ PYBIND11_MODULE(_dzipc_core, m)
         m, "GenericMessage")
         .def(py::init<>())
         .def("clear", &dzIPC::GenericMessage::clear)
+        /* ---- DZFlat 段直通 (docs/dzflat_shm.md §9.6) ----
+         * C++ 侧没有 schema 无法解析定长布局, 所以把段原样交给 Python, 由
+         * python/dzipc/dzflat.py 按生成的 schema 解码。 */
+        .def("has_dzflat", &dzIPC::GenericMessage::has_dzflat,
+             "是否持有一个 DZFlat 段(而非 TLV 字段)")
+        .def("dzflat_schema_hash_rx", &dzIPC::GenericMessage::dzflat_seg_schema_hash,
+             "所持 DZFlat 段的 schema 指纹; 用于查 dzipc.dzflat 的 schema 注册表")
+        .def(
+            "dzflat_memoryview",
+            [](dzIPC::GenericMessage& self)
+            {
+                /* 零拷贝视图: 生命周期与本 GenericMessage 绑定。Python 侧的解码器在
+                 * 消息存活期间读它; 需要留存就自己 copy。这与 C++ 侧 View 的契约一致。 */
+                const auto& v = self.dzflat_seg();
+                return py::memoryview::from_memory(
+                    const_cast<std::uint8_t*>(v.data()), static_cast<py::ssize_t>(v.size()),
+                    /*readonly=*/true);
+            },
+            "所持 DZFlat 段的只读零拷贝视图(生命周期随本对象)")
+        .def(
+            "dzflat_bytes",
+            [](dzIPC::GenericMessage& self)
+            {
+                const auto& v = self.dzflat_seg();
+                return py::bytes(reinterpret_cast<const char*>(v.data()), v.size());
+            },
+            "所持 DZFlat 段的字节副本(需要跨消息留存时用它)")
         .def("field_count", &dzIPC::GenericMessage::field_count)
         .def("field_name", &dzIPC::GenericMessage::field_name)
         .def("field_type", &dzIPC::GenericMessage::field_type)
@@ -300,13 +328,17 @@ PYBIND11_MODULE(_dzipc_core, m)
         .def("InitChannel", &dzIPC::pimpl::subscriber_ipc_impl::InitChannel, py::arg("extra_info") = "",
              py::call_guard<py::gil_scoped_release>())
         .def("reset_message", &dzIPC::pimpl::subscriber_ipc_impl::reset_message)
+        /* C++ 侧 get/try_get 已翻转为零拷贝 Sample 视图(见 pub_sub_base.h)。
+         * Python 的 GenericMessage 载体是 schema-less 直通体, 无 C++ 类型可 bind 成
+         * XxxView; Python 的零拷贝视图(borrowed bytes + memoryview)是后续独立改动。
+         * 因此这里把 get/try_get 指到 clone 路径, 保留 Python 今日的行为。 */
         .def(
             "get",
             [](dzIPC::pimpl::subscriber_ipc_impl& self, std::shared_ptr<dzIPC::TopicData> msg)
             {
                 {
                     py::gil_scoped_release release;
-                    self.get(msg);
+                    self.get_clone(msg);
                 }
                 return msg;
             },
@@ -318,7 +350,30 @@ PYBIND11_MODULE(_dzipc_core, m)
                 bool ok;
                 {
                     py::gil_scoped_release release;
-                    ok = self.try_get(msg);
+                    ok = self.try_get_clone(msg);
+                }
+                return py::make_tuple(ok, msg);
+            },
+            py::arg("msg"))
+        .def(
+            "get_clone",
+            [](dzIPC::pimpl::subscriber_ipc_impl& self, std::shared_ptr<dzIPC::TopicData> msg)
+            {
+                {
+                    py::gil_scoped_release release;
+                    self.get_clone(msg);
+                }
+                return msg;
+            },
+            py::arg("msg"))
+        .def(
+            "try_get_clone",
+            [](dzIPC::pimpl::subscriber_ipc_impl& self, std::shared_ptr<dzIPC::TopicData> msg)
+            {
+                bool ok;
+                {
+                    py::gil_scoped_release release;
+                    ok = self.try_get_clone(msg);
                 }
                 return py::make_tuple(ok, msg);
             },
@@ -361,6 +416,43 @@ PYBIND11_MODULE(_dzipc_core, m)
           py::arg("verbose") = false, py::arg("enable_thread_qos") = false,
           py::arg("cpu_id") = -1, py::arg("thread_priority") = 0,
           py::call_guard<py::gil_scoped_release>());
+
+    // ---- DZFlat: 开关与观测量 (docs/dzflat_shm.md) ----
+    //
+    // Python 进程需要这些, 理由和 C++ 一样但更迫切: Python 侧的载体是 GenericMessage,
+    // 它是**直通体**(无 schema, 见 generic_message.hpp), 于是对任何格式合法的段都返回
+    // 成功 —— C++ 层的 dzflat_schema_drop 在 Python 进程里永远是 0。版本错配到了 Python
+    // 才被发现(按指纹查不到 schema), 所以两侧的计数要一起看才完整:
+    //   C++ 侧 rx_counters()          —— 判别、msg_id、TLV 越界
+    //   Python 侧 dzipc.dzflat.rx_stats() —— 指纹查不到 schema
+    py::class_<dzIPC::DzFlatRxStats>(m, "DzFlatRxStats")
+        .def_readonly("dzflat_accepted", &dzIPC::DzFlatRxStats::dzflat_accepted)
+        .def_readonly("dzflat_id_skipped", &dzIPC::DzFlatRxStats::dzflat_id_skipped)
+        .def_readonly("dzflat_header_bad", &dzIPC::DzFlatRxStats::dzflat_header_bad)
+        .def_readonly("dzflat_schema_drop", &dzIPC::DzFlatRxStats::dzflat_schema_drop)
+        .def_readonly("tlv_accepted", &dzIPC::DzFlatRxStats::tlv_accepted)
+        .def_readonly("tlv_id_skipped", &dzIPC::DzFlatRxStats::tlv_id_skipped)
+        .def_readonly("tlv_corrupt_drop", &dzIPC::DzFlatRxStats::tlv_corrupt_drop)
+        .def_property_readonly("defects", &dzIPC::DzFlatRxStats::defects,
+                               "真实缺陷合计(不含正常的 msg_id 过滤); 非 0 就该去查")
+        .def("__repr__", [](const dzIPC::DzFlatRxStats& s) {
+            return "<DzFlatRxStats dzflat=" + std::to_string(s.dzflat_accepted)
+                   + "/skip" + std::to_string(s.dzflat_id_skipped)
+                   + "/hdr_bad" + std::to_string(s.dzflat_header_bad)
+                   + "/schema_drop" + std::to_string(s.dzflat_schema_drop)
+                   + " tlv=" + std::to_string(s.tlv_accepted)
+                   + "/skip" + std::to_string(s.tlv_id_skipped)
+                   + "/corrupt" + std::to_string(s.tlv_corrupt_drop) + ">";
+        });
+
+    m.def("EnableDzFlat", &dzIPC::EnableDzFlat, py::arg("enabled"),
+          "开启/关闭 DZFlat 发布(进程级, 默认关)。只影响发布侧; 接收侧永远同时认两种 wire");
+    m.def("IsDzFlatEnabled", &dzIPC::IsDzFlatEnabled);
+    m.def("DzFlatPublishCount", &dzIPC::DzFlatPublishCount, "走 DZFlat 发出的条数");
+    m.def("DzFlatFallbackCount", &dzIPC::DzFlatFallbackCount, "尝试后回落整包序列化的条数");
+    m.def("ResetDzFlatCounters", &dzIPC::ResetDzFlatCounters);
+    m.def("DzFlatRxCounters", &dzIPC::DzFlatRxCounters, "接收侧计数(含各类拒收)");
+    m.def("ResetDzFlatRxCounters", &dzIPC::ResetDzFlatRxCounters);
 
     m.def("StartShutdownMonitor", &dzIPC::StartShutdownMonitor);
     m.def("RequestShutdown", &dzIPC::RequestShutdown);

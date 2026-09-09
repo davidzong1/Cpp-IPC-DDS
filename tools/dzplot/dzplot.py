@@ -938,7 +938,7 @@ class LiveSniffSource:
                     result = sub.try_recv()
                     ok = result is not None
                 else:
-                    ok, out = sub.try_get(topic_data)
+                    ok, out = sub.try_get_clone(topic_data)
 
                 # Notify per-topic rate controller
                 queue_depth = self.queue.size

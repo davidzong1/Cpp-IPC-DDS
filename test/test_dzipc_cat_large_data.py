@@ -66,7 +66,7 @@ if __name__ == "__main__":
     # 改用非阻塞 try_get() + time.sleep()（time.sleep 会释放 GIL，让发布线程得以运行）。
     while True:
         topic_data = ipc.make_topic_data(ipc.TestMsg())
-        ok, topic_data = sub.try_get(topic_data)
+        ok, topic_data = sub.try_get_clone(topic_data)
         poll_count += 1
         if not ok:
             # 没收到就让出 GIL，给发布线程跑的机会
