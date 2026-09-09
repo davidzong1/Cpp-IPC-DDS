@@ -14,6 +14,13 @@ from msg_generator import FieldInfo, MessageGenerator, NestedTypeInfo
 
 
 class ServiceGenerator(MessageGenerator):
+    # srv 的请求/应答类型同样发射 DZFlat 段(Root/Flat/View/Builder + 四个虚函数)。
+    #
+    # 关键约束: 虚函数的**声明**由 generate_clone_function 发在类内, 而**定义**在
+    # generate_dzflat_block 里发在类外 —— 两者必须成对。所以本类的 generate_class
+    # 在闭合 "};" 之后立刻追加 DZFlat 段(见下), 且必须仍在 namespace dzIPC::Srv 之内。
+    # 少了任何一半都会得到"已声明未定义的虚函数" → 链接期 undefined vtable。
+    emit_dzflat = True
     """服务生成器"""
 
     def __init__(self, nested_types: Optional[Dict[str, NestedTypeInfo]] = None):
@@ -72,6 +79,7 @@ class ServiceGenerator(MessageGenerator):
 #include <cstddef>
 #include <stdexcept>
 #include "ipc_msg/ipc_msg_base/ipc_msg_base.hpp"
+#include "ipc_msg/ipc_msg_base/dzflat.h"
 {nested_include_lines}
 namespace dzIPC::Srv {{
 """
@@ -95,6 +103,9 @@ namespace dzIPC::Srv {{
                 self.generate_deserialize_function(),
                 self.generate_clone_function(class_name),
                 "};",
+                "",
+                # 类外定义 + Root/Flat/View/Builder。self.fields 此刻正是本类的字段表。
+                self.generate_dzflat_section(class_name),
                 "",
             ]
             return self._normalize_indent("\n".join(parts))

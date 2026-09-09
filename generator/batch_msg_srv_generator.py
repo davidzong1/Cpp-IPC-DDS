@@ -152,6 +152,8 @@ class SubscriberIPC:
     def reset_message(self, msg: TopicData) -> None: ...
     def get(self, msg: TopicData) -> TopicData: ...
     def try_get(self, msg: TopicData) -> Tuple[bool, TopicData]: ...
+    def get_clone(self, msg: TopicData) -> TopicData: ...
+    def try_get_clone(self, msg: TopicData) -> Tuple[bool, TopicData]: ...
 
 # AUTO_GENERATED_MSG_SRV_STUBS_BEGIN
 {stubs}# AUTO_GENERATED_MSG_SRV_STUBS_END
@@ -433,6 +435,7 @@ from __future__ import annotations
 
 from typing import List
 from dzipc._dzipc_core import GenericMessage
+from dzipc import dzflat as _dzflat
 {extra_imports}
 
 
@@ -457,9 +460,25 @@ class {class_name}:
 
     @classmethod
     def from_generic(cls, g) -> "{class_name}":
-        """从 GenericMessage 反序列化"""
+        """从 GenericMessage 反序列化, 自动识别 TLV 与 DZFlat 两种 wire。
+
+        DZFlat 段里没有字段名, GenericMessage 解不了它(缺 schema), 只是把段原样留存;
+        真正的解码在 dzipc.dzflat 里按生成的 schema 完成。不先试这一路的话, 下面的
+        g.get_*() 会因为 fields_ 为空而抛 "Field not found" —— 见
+        docs/dzflat_known_issues.md §9.6。
+        """
+        _d = _dzflat.decode_generic(g, zero_copy=False)
+        if _d is not None:
+            return cls._from_dzflat_dict(_d)
         obj = cls(g)
 {from_generic_calls}
+        return obj
+
+    @classmethod
+    def _from_dzflat_dict(cls, d) -> "{class_name}":
+        """由 dzipc.dzflat 解出的 dict 构造本类型(含嵌套)。"""
+        obj = cls()
+{from_dzflat_calls}
         return obj
 
     def __repr__(self):
@@ -492,9 +511,25 @@ class {class_name}:
 
     @classmethod
     def from_generic(cls, g) -> "{class_name}":
-        """从 GenericMessage 反序列化"""
+        """从 GenericMessage 反序列化, 自动识别 TLV 与 DZFlat 两种 wire。
+
+        DZFlat 段里没有字段名, GenericMessage 解不了它(缺 schema), 只是把段原样留存;
+        真正的解码在 dzipc.dzflat 里按生成的 schema 完成。不先试这一路的话, 下面的
+        g.get_*() 会因为 fields_ 为空而抛 "Field not found" —— 见
+        docs/dzflat_known_issues.md §9.6。
+        """
+        _d = _dzflat.decode_generic(g, zero_copy=False)
+        if _d is not None:
+            return cls._from_dzflat_dict(_d)
         obj = cls(g)
 {from_generic_calls}
+        return obj
+
+    @classmethod
+    def _from_dzflat_dict(cls, d) -> "{class_name}":
+        """由 dzipc.dzflat 解出的 dict 构造本类型(含嵌套)。"""
+        obj = cls()
+{from_dzflat_calls}
         return obj
 
     def __repr__(self):
@@ -602,6 +637,23 @@ def _generate_wrapper(template: str, class_name: str, fields: List[Tuple[str, st
             from_gen_lines.append(f'obj.{fname} = g.{getter}("{fname}")')
     from_generic_calls = "\n".join(from_gen_lines)
 
+    # from_dzflat_calls —— DZFlat 段解码后是纯 dict, 键名与字段名一一对应。
+    # 嵌套要递归构造对应的封装类, 因为使用者拿到的应该是 StdHeader 而不是 dict。
+    from_flat_lines = []
+    for fname, py_type, ftype, is_array, base_type in fields:
+        if _is_nested_base(base_type) and is_array:
+            nested_class = _nested_class_name(py_type, is_array)
+            from_flat_lines.append(
+                f'obj.{fname} = [{nested_class}._from_dzflat_dict(e) for e in d["{fname}"]]')
+        elif _is_nested_base(base_type):
+            from_flat_lines.append(f'obj.{fname} = {py_type}._from_dzflat_dict(d["{fname}"])')
+        elif is_array:
+            # 变长标量数组在零拷贝模式下是 memoryview, 统一转成 list 与 TLV 路径一致
+            from_flat_lines.append(f'obj.{fname} = list(d["{fname}"])')
+        else:
+            from_flat_lines.append(f'obj.{fname} = d["{fname}"]')
+    from_dzflat_calls = "\n".join(from_flat_lines)
+
     # repr
     repr_lines = []
     for fname, _, _, _, _ in fields:
@@ -615,6 +667,7 @@ def _generate_wrapper(template: str, class_name: str, fields: List[Tuple[str, st
         default_inits=textwrap.indent(default_inits, "            "),
         to_generic_calls=textwrap.indent(to_generic_calls, "        "),
         from_generic_calls=textwrap.indent(from_generic_calls, "        "),
+        from_dzflat_calls=textwrap.indent(from_dzflat_calls, "        "),
         repr_parts=textwrap.indent(repr_parts, "        "),
     )
 
@@ -625,6 +678,11 @@ def generate_msg_registry_init(msg_files: List[str], msg_root: str) -> str:
         '"""自动生成的 msg 类型注册表 — 每次修改 .msg 后由 batch_msg_srv_generator.py 更新"""',
         "from __future__ import annotations",
         "from typing import List",
+        "",
+        "# DZFlat schema 注册表: import 即把全部类型的 schema 登记进 dzipc.dzflat,",
+        "# 于是通用工具(topic_echo)可以只凭段头的 schema_hash 反查出字段表。",
+        "# 不导入的后果是 SCHEMA_BY_HASH 为空, DZFlat 消息在 Python 侧全部解不出来。",
+        "from . import _dzflat_schema as _dzflat_schema  # noqa: F401",
         "",
         "# 导入所有 msg 封装类",
     ]
@@ -975,6 +1033,127 @@ def generate_python_stub_bindings(msg_input_dir: str, srv_input_dir: str,
         f.write(content)
 
 
+PYTHON_DZFLAT_SCHEMA = os.path.join(PYTHON_MSG_WRAPPER_DIR, "_dzflat_schema.py")
+CPP_ALL_HEADERS_TEST = "./test/test_generated_headers.cpp"
+
+
+def generate_python_dzflat_schema() -> None:
+    """写出 Python 侧的 DZFlat schema。
+
+    必须在 C++ 头文件生成之后调用 —— 那一步才会填 dzflat_generator 的 LAYOUT_CACHE /
+    HASH_CACHE / PY_SCHEMA_ENTRIES。
+
+    为什么 Python 需要这份东西: DZFlat 是定长布局, wire 里没有字段名, 而 C++ 侧的
+    GenericMessage 又拿不到 schema(没有 TU 编译生成头文件)。所以 schema 必须以**数据**
+    形式送到 Python。详见 python/dzipc/dzflat.py 的模块注释与 docs/dzflat_shm.md §9.6。
+    """
+    from dzflat_generator import PY_SCHEMA_ENTRIES
+
+    header = [
+        "# -*- coding: utf-8 -*-",
+        '"""DZFlat schema —— 自动生成, 勿手改。',
+        "",
+        "由 generator/batch_msg_srv_generator.py 从 msg/*.msg 产出。每个条目的字段偏移与",
+        "schema_hash 与 C++ 侧是**同一组数**: 偏移会以字面量写进生成头文件的",
+        "static_assert, hash 由 dzflat_generator.compute_schema_hash 复刻 dzflat.h 的",
+        "constexpr 算出。因此 C++ 编译期就替本文件校验了布局模型。",
+        '"""',
+        "",
+        "from dzipc.dzflat import Field, Schema, register as _reg",
+        "",
+        "",
+    ]
+    body = "\n\n".join(PY_SCHEMA_ENTRIES)
+    os.makedirs(PYTHON_MSG_WRAPPER_DIR, exist_ok=True)
+    with open(PYTHON_DZFLAT_SCHEMA, "w", encoding="utf-8") as f:
+        f.write("\n".join(header) + body + "\n")
+
+
+def generate_cpp_all_headers_test() -> None:
+    """写出"编译全部生成头文件"的测试 TU。
+
+    起因: 生成的头文件**没有任何 TU 会编译**, 只有测试用到的那几个类型才被实例化, 于是
+    generator 对某个字段形态的缺陷可以长期潜伏。DZFlat 落地时就撞上一个 —— std_matrix_3d
+    的 StdVector3d[3](定长嵌套数组)对应 std::array<>, 而生成的 copy_to 调了 resize(),
+    根本编译不过; 因为没人编译它, 前三个 Step 全绿。详见 docs/dzflat_shm.md §9.6。
+    """
+    hdrs = sorted(
+        h for h in glob.glob(os.path.join(default_output_path, "**/*.hpp"), recursive=True)
+        if "/ipc_msg_base/" not in h.replace("\\", "/")
+    )
+    srvs = sorted(glob.glob(os.path.join(default_srv_path, "**/*.hpp"), recursive=True))
+
+    def inc(path: str) -> str:
+        rel = os.path.relpath(path, "./include").replace("\\", "/")
+        return f'#include "{rel}"'
+
+    lines = [
+        "/* 编译全部生成头文件 —— 让 generator 的缺陷无处潜伏。自动生成, 勿手改。",
+        " *",
+        " * 生成的消息头没有任何产品 TU 会编译, 只有测试用到的那几个类型才被实例化。于是",
+        " * generator 对某个字段形态的 bug 可以长期潜伏: DZFlat 落地时就撞上一个 ——",
+        " * std_matrix_3d 的 StdVector3d[3](定长嵌套数组)对应 std::array<>, 而生成的",
+        " * copy_to 调了 resize(), 编译不过; 因为没人编译它, 前三个 Step 全绿。",
+        " *",
+        " * 本文件把所有生成头文件拉进来编译一遍, 于是每个类型的这些东西都被覆盖:",
+        " *   - Root 布局 static_assert(generator 的字面量偏移 vs 真实 ABI, 也即 Python",
+        " *     侧 DZFlat 解码器所用偏移的正确性);",
+        " *   - 每个字段形态的 View / Builder / copy_to 能否编译;",
+        " *   - kSchemaHash / kRootTight 能否在编译期求值。",
+        " *",
+        " * 见 docs/dzflat_shm.md §9.6。",
+        " */",
+        "#include <cstdint>",
+        "#include <vector>",
+        "",
+    ]
+    lines += [inc(h) for h in hdrs]
+    lines += [inc(h) for h in srvs]
+    lines += [
+        "",
+        '#include "gtest/gtest.h"',
+        "",
+        "/* 编译本身就是断言。下面再抽查两条关键不变式, 让用例有可观测输出。 */",
+        "TEST(GeneratedHeaders, SchemaHashesAreNonZeroAndStructureSensitive)",
+        "{",
+        "    EXPECT_NE(dzIPC::Msg::StdImageFlat::kSchemaHash, 0u);",
+        "    EXPECT_NE(dzIPC::Msg::StdPointCloudFlat::kSchemaHash, 0u);",
+        "    EXPECT_NE(dzIPC::Msg::StdMatrix3dFlat::kSchemaHash, 0u);",
+        "    EXPECT_NE(dzIPC::Msg::StdImageFlat::kSchemaHash,",
+        "              dzIPC::Msg::StdPointCloudFlat::kSchemaHash);",
+        "    EXPECT_NE(dzIPC::Msg::StdMatrix3dFlat::kSchemaHash,",
+        "              dzIPC::Msg::StdVector3dFlat::kSchemaHash);",
+        "}",
+        "",
+        "/* 定长嵌套数组(std::array<Msg,N>) —— 正是上面那个潜伏 bug 的形态。 */",
+        "TEST(GeneratedHeaders, FixedNestedArrayRoundTrips)",
+        "{",
+        "    dzIPC::Msg::StdMatrix3d m;",
+        "    for (std::size_t i = 0; i < m.rot.size(); ++i)",
+        "        m.rot[i].data = {double(i), double(i) + 0.5, double(i) + 0.25};",
+        "",
+        "    const std::uint32_t cap = dzIPC::Msg::StdMatrix3dFlat::size(m);",
+        "    std::vector<std::uint8_t> seg(cap);",
+        "    ASSERT_TRUE(dzIPC::Msg::StdMatrix3dFlat::write(m, seg.data(), cap));",
+        "    const auto* h = reinterpret_cast<const dzflat::SegHeader*>(seg.data());",
+        "",
+        "    auto v = dzIPC::Msg::StdMatrix3dView::bind(seg.data(), h->total_size);",
+        "    ASSERT_TRUE(v.valid());",
+        "    ASSERT_EQ(v.rot_count(), m.rot.size());",
+        "",
+        "    dzIPC::Msg::StdMatrix3d back;",
+        "    v.copy_to(back);",
+        "    for (std::size_t i = 0; i < m.rot.size(); ++i)",
+        "    {",
+        "        EXPECT_EQ(back.rot[i].data, m.rot[i].data) << \"rot[\" << i << \"]\";",
+        "    }",
+        "}",
+        "",
+    ]
+    with open(CPP_ALL_HEADERS_TEST, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
 def get_msg_directories(input_dir: str) -> List[str]:
     msg_directories = set()
     for root, dirs, files in os.walk(input_dir):
@@ -1023,6 +1202,20 @@ def main():
         generate_python_wrappers(msg_input_dir, srv_input_dir)
     except Exception as e:
         print(f"生成 Python 封装失败: {e}")
+        sys.exit(1)
+
+    # 2.5 生成 Python 侧 DZFlat schema + "编译全量生成头"的测试清单
+    #
+    #  顺序有两个硬约束:
+    #    - 必须在第 1 步(C++ 头生成)之后: 那一步才填好 dzflat_generator 的
+    #      LAYOUT_CACHE / HASH_CACHE / PY_SCHEMA_ENTRIES;
+    #    - 必须在第 2 步之后: generate_python_wrappers 会先清空 gen_msgs/*.py
+    #      (_prepare_python_wrapper_dir), 放在它之前写的 schema 会被删掉。
+    try:
+        generate_python_dzflat_schema()
+        generate_cpp_all_headers_test()
+    except Exception as e:
+        print(f"生成 DZFlat schema 失败: {e}")
         sys.exit(1)
 
     # 3. 生成 Python .pyi 类型存根
