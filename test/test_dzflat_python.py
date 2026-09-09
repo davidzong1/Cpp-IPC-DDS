@@ -150,6 +150,8 @@ def test_image_dzflat(pub_bin):
     msg = got[-1]
     if not check(msg.has_dzflat(), "GenericMessage 持有 DZFlat 段"):
         return
+    check(msg.dzflat_is_borrowed(), "段是借样(未拷贝) —— Python 零拷贝已生效")
+
     schema = dzflat.schema_of(msg)
     if not check(schema is not None and schema.name == "StdImage",
                  "按 schema_hash 反查到 StdImage 的 schema"):

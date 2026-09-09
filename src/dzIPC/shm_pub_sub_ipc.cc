@@ -669,9 +669,42 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
                                 std::move(raw_data), seg_id, exp_hash));
                             continue;
                         }
-                        /* schema-less 话题(GenericMessage): 合法 DZFlat 段同样落到下方
-                         * 物化路径, 由 GenericMessage::dzflat_read 把段字节拷进
-                         * dzflat_seg_, 留待持有 schema 的一侧(Python)解码。 */
+                        /* schema-less 话题: 话题若是 GenericMessage, 把段**借**给它(不拷
+                         * 字节), Python 按段头 schema_hash 查表解码 —— 这是 Python 侧零拷贝
+                         * 的落点。msg_id 需对上; schema 无从在 C++ 校验(GenericMessage 无
+                         * schema)。话题不是 GenericMessage(手写类型)收到 DZFlat = 类型不匹配,
+                         * 丢弃。 */
+                        std::uint32_t seg_id = 0, seg_hash = 0;
+                        {
+                            dzflat::SegHeader h{};
+                            std::memcpy(&h, raw_data.data(), sizeof(h));
+                            seg_hash = h.schema_hash;
+                        }
+                        if (!IpcMsgBase::dzflat_peek_msg_id(raw_data.data(), raw_data.size(),
+                                                            seg_id)
+                            || seg_id != exp_id)
+                        {
+                            detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatIdSkipped);
+                            continue;
+                        }
+                        detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatAccepted);
+                        std::shared_ptr<TopicData> local_msg;
+                        {
+                            std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+                            if (!topic_msg_)
+                            {
+                                continue;
+                            }
+                            local_msg.reset(topic_msg_->clone());
+                        }
+                        if (local_msg->topic()->dzflat_adopt(std::move(raw_data), seg_hash))
+                        {
+                            std::shared_ptr<IpcMsgBase> ptr_cache;
+                            local_msg->swap(ptr_cache);
+                            msg_queue_->push(std::move(ptr_cache));
+                            continue;
+                        }
+                        continue;   /* 非 GenericMessage 的 schema-less 话题: 类型不匹配, 丢弃 */
                     }
                     else if (dzflat::has_dzflat_magic(raw_data.data(), raw_data.size()))
                     {

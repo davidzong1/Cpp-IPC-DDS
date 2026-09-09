@@ -1,6 +1,7 @@
 #pragma once
 #include "ipc_msg/ipc_msg_base/ipc_msg_base.hpp"
 #include <cstdint>
+#include <memory>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -159,18 +160,54 @@ public:
         const auto* p = static_cast<const uint8_t*>(seg);
         dzflat_seg_.assign(p, p + h.total_size);
         dzflat_seg_hash_ = h.schema_hash;
+        dzflat_borrow_.reset();   /* 物化拷贝优先; 若有旧借样则放掉 */
         fields_.clear();   /* 与 TLV 字段互斥 */
         return true;
     }
 
+    /* 借样: 不拷段字节, 直接把一个活 chunk 的 DZFlat 段收下(Python 解码走这条, 见
+     * shm_pub_sub_ipc.cc 订阅分流)。schema_hash 由调用方按段头给出 —— GenericMessage
+     * 无 C++ schema, 无从校验, 留给持有 schema 的一侧(Python)按指纹查表。 */
+    bool dzflat_adopt(ipc::buffer buf, std::uint32_t schema_hash) override
+    {
+        if (!dzflat::looks_like_dzflat(buf.data(), buf.size()))
+        {
+            return false;
+        }
+        dzflat::SegHeader h{};
+        std::memcpy(&h, buf.data(), sizeof(h));
+        dzflat_borrow_ = std::make_shared<ipc::buffer>(std::move(buf));
+        dzflat_len_ = h.total_size;   /* 段内有效长度(chunk 容量通常更大) */
+        dzflat_seg_hash_ = schema_hash;
+        dzflat_seg_.clear();
+        fields_.clear();
+        return true;
+    }
+
     /// 是否持有一个 DZFlat 段(而非 TLV 字段)。
-    bool has_dzflat() const noexcept { return !dzflat_seg_.empty(); }
+    bool has_dzflat() const noexcept { return !dzflat_seg_.empty() || (dzflat_borrow_ != nullptr); }
+
+    /// 所持段是否为"借样"(未拷贝, 指向共享 chunk)。Python 侧据此确认零拷贝已生效。
+    bool dzflat_is_borrowed() const noexcept { return dzflat_borrow_ != nullptr; }
 
     /// 所持段的 schema 指纹; 未持有时为 0。用于在 Python 侧查 schema 注册表。
     uint32_t dzflat_seg_schema_hash() const noexcept { return dzflat_seg_hash_; }
 
-    /// 所持段的原始字节。生命周期与本对象绑定。
+    /// 所持段的原始字节(拷贝模式)。借样模式下为空 —— 用 dzflat_data()/dzflat_size()。
     const std::vector<uint8_t>& dzflat_seg() const noexcept { return dzflat_seg_; }
+
+    /// 段基址(借样与拷贝两种模式统一; 借样指向共享 chunk)。
+    const uint8_t* dzflat_data() const noexcept
+    {
+        return dzflat_borrow_ ? static_cast<const uint8_t*>(dzflat_borrow_->data())
+                              : (dzflat_seg_.empty() ? nullptr : dzflat_seg_.data());
+    }
+
+    /// 段内有效字节数(= SegHeader.total_size, 借样时可能小于 chunk 容量)。
+    std::size_t dzflat_len() const noexcept
+    {
+        return dzflat_borrow_ ? dzflat_len_ : dzflat_seg_.size();
+    }
     GenericMessage* clone() const override { return new GenericMessage(*this); }
 
 private:
@@ -181,8 +218,13 @@ private:
     };
 
     std::vector<FieldEntry> fields_;
-    /* DZFlat 直通载荷。非空即表示本对象持有一个 DZFlat 段, 此时 fields_ 为空。 */
+    /* DZFlat 直通载荷, 两种承载方式:
+     *   - dzflat_seg_:   字节拷贝(legacy: AcceptWire / 任意段指针的 dzflat_read);
+     *   - dzflat_borrow_: 借来的活 chunk(ipc::buffer 共享持有, 不拷贝段字节)。
+     * 两者互斥, 非空即表示持有一个 DZFlat 段, 此时 fields_ 为空。 */
     std::vector<uint8_t> dzflat_seg_;
+    std::shared_ptr<ipc::buffer> dzflat_borrow_;
+    std::uint32_t dzflat_len_ = 0;   /* 借样段的 SegHeader.total_size */
     uint32_t dzflat_seg_hash_ = 0;
 
     // 按名称查找字段（返回索引），未找到返回 -1

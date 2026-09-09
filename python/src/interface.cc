@@ -91,6 +91,8 @@ PYBIND11_MODULE(_dzipc_core, m)
          * python/dzipc/dzflat.py 按生成的 schema 解码。 */
         .def("has_dzflat", &dzIPC::GenericMessage::has_dzflat,
              "是否持有一个 DZFlat 段(而非 TLV 字段)")
+        .def("dzflat_is_borrowed", &dzIPC::GenericMessage::dzflat_is_borrowed,
+             "段是否为借样(指向共享 chunk, 未拷贝字节)")
         .def("dzflat_schema_hash_rx", &dzIPC::GenericMessage::dzflat_seg_schema_hash,
              "所持 DZFlat 段的 schema 指纹; 用于查 dzipc.dzflat 的 schema 注册表")
         .def(
@@ -99,9 +101,10 @@ PYBIND11_MODULE(_dzipc_core, m)
             {
                 /* 零拷贝视图: 生命周期与本 GenericMessage 绑定。Python 侧的解码器在
                  * 消息存活期间读它; 需要留存就自己 copy。这与 C++ 侧 View 的契约一致。 */
-                const auto& v = self.dzflat_seg();
+                const auto* base = self.dzflat_data();
                 return py::memoryview::from_memory(
-                    const_cast<std::uint8_t*>(v.data()), static_cast<py::ssize_t>(v.size()),
+                    const_cast<std::uint8_t*>(base),
+                    static_cast<py::ssize_t>(self.dzflat_len()),
                     /*readonly=*/true);
             },
             "所持 DZFlat 段的只读零拷贝视图(生命周期随本对象)")
@@ -109,8 +112,9 @@ PYBIND11_MODULE(_dzipc_core, m)
             "dzflat_bytes",
             [](dzIPC::GenericMessage& self)
             {
-                const auto& v = self.dzflat_seg();
-                return py::bytes(reinterpret_cast<const char*>(v.data()), v.size());
+                const auto* base = self.dzflat_data();
+                return py::bytes(reinterpret_cast<const char*>(base),
+                                 static_cast<py::ssize_t>(self.dzflat_len()));
             },
             "所持 DZFlat 段的字节副本(需要跨消息留存时用它)")
         .def("field_count", &dzIPC::GenericMessage::field_count)

@@ -91,6 +91,11 @@ public:
     /// 从 DZFlat 段读回本消息(拷回 owning struct)。段不可信, 校验失败返回 false。
     virtual bool dzflat_read(const void* seg, size_t size) { return false; }
 
+    /// 借样: 把一个活 chunk 的 DZFlat 段直接收下, **不拷字节**。仅 schema-less 载体
+    /// (GenericMessage)覆写为真;owning/手写类型默认不支持返回 false —— 调用方应丢弃,
+    /// 因为该类型收到 DZFlat 段本身意味着类型不匹配。
+    virtual bool dzflat_adopt(ipc::buffer /*buf*/, uint32_t /*schema_hash*/) { return false; }
+
     /// DZFlat 段头里的 msg_id 是否与本消息类型一致(对应 TLV 的 check_id)。
     bool check_dzflat_id(const ipc::buffer& data) const
     {
