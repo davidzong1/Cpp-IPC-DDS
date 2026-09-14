@@ -1,3 +1,4 @@
+#include "dzIPC/common/name_operator.h"
 #include "dzIPC/shm_pub_sub_ipc.h"
 #include "dzIPC/shm_ser_cli_ipc.h"
 #include "dzIPC/common/thread_dispatch.h"
@@ -173,7 +174,11 @@ void publish_thread_function()
 void subscribe_thread_function()
 {
     std::shared_ptr<TopicData> topic_msg_ = std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::Msg::TestMsg>());
-    dzIPC::shm::shm_sub_ipc subscriber(topic_msg_, "TestMsg2", 10, 1, true);
+    /* 参数序是 (msg, topic, domain_id, queue_size, verbose) —— 这里原本写成
+     * (…, 10, 1, …) 即 domain=10/queue=1, 与发布方的 domain=1 不一致。此前 SHM 段名不含
+     * domain_id(docs/shm_defect_fixes.md 第 1 条), 两者才碰巧连上; domain 隔离修好之后
+     * 它们正确地互不可见, 订阅线程就永远等不到消息而挂死。对齐为 domain=1, queue=10。 */
+    dzIPC::shm::shm_sub_ipc subscriber(topic_msg_, "TestMsg2", 1, 10, true);
     subscriber.InitChannel();
     bool exit_flag = false;
     while (!exit_flag)
@@ -357,7 +362,7 @@ TEST(DzIpcShm, PublishForSnifferWithoutSubscriber)
     publisher.InitChannel();
 
     ipc::sniffer sniffer;
-    ASSERT_TRUE(sniffer.open("dz_ipc_SnifferOnly_topic", ipc::sniffer::topology::route));
+    ASSERT_TRUE(sniffer.open(shm_topic_segment_name("SnifferOnly", 1).c_str(), ipc::sniffer::topology::route));
     EXPECT_EQ(sniffer.receiver_connections(), 0u);
     EXPECT_TRUE(sniffer.try_recv().empty());
 
@@ -400,7 +405,7 @@ TEST(DzIpcShm, PublishLargeForSnifferWithoutSubscriber)
     publisher.InitChannel();
 
     ipc::sniffer sniffer;
-    ASSERT_TRUE(sniffer.open("dz_ipc_SnifferLarge_topic", ipc::sniffer::topology::route));
+    ASSERT_TRUE(sniffer.open(shm_topic_segment_name("SnifferLarge", 1).c_str(), ipc::sniffer::topology::route));
     EXPECT_TRUE(sniffer.try_recv().empty());
 
     std::string large_text(ipc::data_length * 8, 'x');
@@ -468,7 +473,7 @@ TEST(DzIpcShm, SnifferReopenAfterPublisherRestart)
     pub1->InitChannel();
 
     auto sniffer1 = std::make_unique<ipc::sniffer>();
-    ASSERT_TRUE(sniffer1->open("dz_ipc_SnifferReopenV2_topic", ipc::sniffer::topology::route));
+    ASSERT_TRUE(sniffer1->open(shm_topic_segment_name("SnifferReopenV2", 1).c_str(), ipc::sniffer::topology::route));
     EXPECT_TRUE(sniffer1->try_recv().empty());
 
     ASSERT_TRUE(pub1->publish_for_sniffer(msg1));
@@ -494,7 +499,7 @@ TEST(DzIpcShm, SnifferReopenAfterPublisherRestart)
 
     // --- Phase 5: open new sniffer2 on pub2's SHM, verify it receives data ---
     auto sniffer2 = std::make_unique<ipc::sniffer>();
-    ASSERT_TRUE(sniffer2->open("dz_ipc_SnifferReopenV2_topic", ipc::sniffer::topology::route))
+    ASSERT_TRUE(sniffer2->open(shm_topic_segment_name("SnifferReopenV2", 1).c_str(), ipc::sniffer::topology::route))
         << "sniffer2 failed to open — old sniffer may have unlinked pub2's SHM";
     EXPECT_TRUE(sniffer2->try_recv().empty());
 

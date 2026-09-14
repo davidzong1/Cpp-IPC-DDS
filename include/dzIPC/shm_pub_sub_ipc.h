@@ -148,6 +148,8 @@ public:
     /* ---- 视图路径(零拷贝, 只服务 DZFlat 段) ---- */
     void get(Sample& out);
     bool try_get(Sample& out);
+    /// 带超时(毫秒)的视图 get; 超时返回 false。用于 TLV-only 话题上避免永久阻塞。
+    bool get(Sample& out, std::uint64_t tm_ms);
 
     /* ---- 物化路径(TLV + 快速路径克隆对象 + schema-less 话题) ---- */
     void get_clone(std::shared_ptr<TopicData>& msg);

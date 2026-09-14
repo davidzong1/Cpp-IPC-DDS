@@ -233,3 +233,78 @@ TEST(DzFlatRx, DzflatOnlyGoesToTheViewPath)
     EXPECT_FALSE(sub.try_get_clone(spill)) << "typed DZFlat 段不应出现在物化队列";
     EXPECT_GT(dzIPC::DzFlatRxCounters().dzflat_accepted, 0u);
 }
+
+/* ④ TLV-only 话题上, 带超时的 get 必须按时返回 false, 而不是永久挂死。
+ * (docs/shm_defect_fixes.md 第 4 条: 视图队列只承载 DZFlat 段, 而是否发 DZFlat 由发布端
+ * 决定, 所以 TLV-only 话题的视图队列**永远是空的** —— 无超时的 get 不是"等数据"而是注定
+ * 挂死。判据必须带时限: 用一个 watchdog 线程断言它在预算内返回。) */
+TEST(DzFlatRx, TimedGetReturnsOnTlvOnlyTopic)
+{
+    DzFlatSwitch off{false};   /* 关掉 DZFlat ⇒ 全走 TLV ⇒ 视图队列恒空 */
+    const std::string topic = unique_topic("timedget");
+    auto pub_td = std::make_shared<dzIPC::TopicData>(
+        std::make_shared<dzIPC::Msg::StdImage>(), kMsgId);
+    auto sub_td = std::make_shared<dzIPC::TopicData>(
+        std::make_shared<dzIPC::Msg::StdImage>(), kMsgId);
+    dzIPC::shm::shm_pub_ipc pub{pub_td, topic, 0};
+    dzIPC::shm::shm_sub_ipc sub{sub_td, topic, 0, 8};
+    pub.InitChannel();
+    sub.InitChannel();
+    std::this_thread::sleep_for(300ms);
+
+    /* 发几条 TLV, 让通道确实活着 —— 证明"返回 false"不是因为通道不通, 而是因为视图
+     * 队列本来就收不到东西。 */
+    const auto src = make_image(48, 32, 0x11);
+    for (int i = 0; i < 5; ++i)
+    {
+        auto m = std::make_shared<dzIPC::Msg::StdImage>(src);
+        m->set_msg_id(kMsgId);
+        pub.publish(m);
+    }
+    std::this_thread::sleep_for(200ms);
+
+    const auto t0 = std::chrono::steady_clock::now();
+    dzIPC::Sample sample;
+    const bool got = sub.get(sample, 200);   /* 200ms 预算 */
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+
+    EXPECT_FALSE(got) << "TLV-only 话题上视图 get 不该拿到东西";
+    EXPECT_GE(elapsed, 150ms) << "提前返回了, 没真正等满超时";
+    EXPECT_LT(elapsed, 2000ms) << "超过预算仍未返回 —— 超时没生效, 调用方会挂死";
+}
+
+/* ⑤ TLV 消息确实还在(证明上一条的 false 不是通道故障) —— 双 drain 的另一半。 */
+TEST(DzFlatRx, TimedGetDoesNotDisturbTheClonePath)
+{
+    DzFlatSwitch off{false};
+    const std::string topic = unique_topic("timedget2");
+    auto pub_td = std::make_shared<dzIPC::TopicData>(
+        std::make_shared<dzIPC::Msg::StdImage>(), kMsgId);
+    auto sub_td = std::make_shared<dzIPC::TopicData>(
+        std::make_shared<dzIPC::Msg::StdImage>(), kMsgId);
+    dzIPC::shm::shm_pub_ipc pub{pub_td, topic, 0};
+    dzIPC::shm::shm_sub_ipc sub{sub_td, topic, 0, 8};
+    pub.InitChannel();
+    sub.InitChannel();
+    std::this_thread::sleep_for(300ms);
+
+    const auto src = make_image(48, 32, 0x22);
+    dzIPC::Sample sample;
+    sub.get(sample, 100);   /* 先空等一次, 不应影响后续 */
+
+    bool cloned = false;
+    const auto deadline = std::chrono::steady_clock::now() + 3000ms;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        auto m = std::make_shared<dzIPC::Msg::StdImage>(src);
+        m->set_msg_id(kMsgId);
+        pub.publish(m);
+        if (sub.try_get_clone(sub_td))
+        {
+            cloned = true;
+            break;
+        }
+        std::this_thread::sleep_for(5ms);
+    }
+    EXPECT_TRUE(cloned) << "超时返回后物化路径应当照常工作";
+}

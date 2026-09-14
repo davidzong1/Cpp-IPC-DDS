@@ -21,3 +21,16 @@ std::string sanitize_topic_name(const std::string& topic_name)
     }
     return name;
 }
+
+std::string shm_topic_segment_name(const std::string& topic_name, size_t domain_id)
+{
+    return "dz_ipc_d" + std::to_string(domain_id) + "_" + sanitize_topic_name(topic_name)
+           + "_topic";
+}
+
+std::string shm_service_prefix(const std::string& topic_name, size_t domain_id)
+{
+    /* 注意: 服务侧历史上没有对 topic 名做 sanitize(传的已是处理过的名字), 这里保持原样,
+     * 只补 domain 前缀 —— 改清洗规则会动到段名, 属于另一件事。 */
+    return "dz_ipc_d" + std::to_string(domain_id) + "_" + topic_name;
+}

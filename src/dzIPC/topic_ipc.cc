@@ -204,6 +204,11 @@ bool pimpl::subscriber_ipc_impl::try_get(Sample& out)
     return impl(p_)->ipc->try_get(out);
 }
 
+bool pimpl::subscriber_ipc_impl::get(Sample& out, std::uint64_t tm_ms)
+{
+    return impl(p_)->ipc->get(out, tm_ms);
+}
+
 void pimpl::subscriber_ipc_impl::get_clone(std::shared_ptr<TopicData>& msg)
 {
     impl(p_)->ipc->get_clone(msg);

@@ -16,6 +16,11 @@ using dzIPC::control_plane_shm::TopicState;
 
 namespace {
 
+/* 单 topic 的接收方上限 = libipc 连接位图的位宽(circ::cc_t = uint32_t)。
+ * 与 control_plane.h 的 kMaxPeerSlots(64) 不同 —— 那是控制面登记表的容量, 比这里大一倍;
+ * 两者的差额正是 docs/shm_defect_fixes.md 第 2 条那个黑洞的容量。 */
+constexpr std::size_t kMaxShmReceiversPerTopic = 32;
+
 std::string control_name_for(const std::string& data_name)
 {
     /* "_control2": TopicControl 增加 PeerSlot 表后结构体变大, 沿用旧名会让
@@ -24,9 +29,13 @@ std::string control_name_for(const std::string& data_name)
     return data_name + "_control2";
 }
 
-std::string shm_name_for_topic(const std::string& topic_name)
+/* 段名规则收在 dzIPC/common/name_operator.h —— 传输层、sniffer、工具都从那一处取,
+ * 免得规则一改要同时改五处且漏掉的那处是静默失效(见该头文件的说明)。
+ * 段名含 domain_id: 不含就等于 SHM 上没有 domain 隔离(docs/shm_defect_fixes.md 第 1 条),
+ * 代价是与旧版本进程不互通 —— 这是有意的, 旧进程段名不带 domain, 能互通就说明没生效。 */
+std::string shm_name_for_topic(const std::string& topic_name, size_t domain_id)
 {
-    return "dz_ipc_" + sanitize_topic_name(topic_name) + "_topic";
+    return shm_topic_segment_name(topic_name, domain_id);
 }
 
 void wait_for_peer_drain(dzIPC::control_plane_shm::TopicControlPlane& control_plane)
@@ -46,7 +55,7 @@ void wait_for_peer_drain(dzIPC::control_plane_shm::TopicControlPlane& control_pl
 shm_pub_ipc::shm_pub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
                          bool verbose, bool enable_thread_qos, int cpu_id, int thread_priority)
     : pub_ipc_base(msg, topic_name, domain_id, verbose)
-    , topic_name_(shm_name_for_topic(topic_name))
+    , topic_name_(shm_name_for_topic(topic_name, domain_id))
     , raw_topic_name_(topic_name)
     , domain_id_(domain_id)
     , verbose_(verbose)
@@ -375,7 +384,7 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
                          const size_t queue_size, bool verbose, bool enable_thread_qos, int cpu_id,
                          int thread_priority)
     : sub_ipc_base(msg, topic_name, domain_id, queue_size, verbose)
-    , topic_name_(shm_name_for_topic(topic_name))
+    , topic_name_(shm_name_for_topic(topic_name, domain_id))
     , raw_topic_name_(topic_name)
     , domain_id_(domain_id)
     , verbose_(verbose)
@@ -517,13 +526,51 @@ void shm_sub_ipc::sub_handshake()
                 /* 向控制面登记本订阅者的 libipc 连接 bit, 并由下面的循环持续
                  * 刷新心跳。发布端据此判定死连接 —— 取代了 force_push 里那套
                  * "没读完就算无效读者"的误伤逻辑。 */
+                uint32_t cc_id = 0u;
                 {
                     std::lock_guard<std::mutex> lock(channel_mtx_);
-                    const uint32_t cc_id = (subscriber_ && subscriber_->valid())
-                                               ? subscriber_->connected_id()
-                                               : 0u;
+                    cc_id = (subscriber_ && subscriber_->valid()) ? subscriber_->connected_id()
+                                                                  : 0u;
                     peer_slot_ = control_plane_.acquire_peer_slot(attached_generation, cc_id);
                 }
+
+                /* 连接位耗尽 ⇒ **不能**宣布握手完成。
+                 *
+                 * libipc 的接收方连接位图是 cc_t = uint32_t, 只有 32 位; 位满时
+                 * connect() 返回 0(circ/elem_def.h 的 "connection-slot is full")。旧实现
+                 * 拿到 cc_id == 0 之后照样 handshake_completed.store(true), 于是第 33 个
+                 * 订阅者进入一种**假成功态**: InitChannel 不报错、日志正常、
+                 * handshake_completed 为真, 但一条消息都收不到 —— 而发布端只用
+                 * recv_count() 判有无接收者, 两端都看不见这个截断。
+                 *
+                 * 控制面的 PeerSlot 表是 64 槽而连接位只有 32 个, 这个 2× 差额正是黑洞的
+                 * 容量。acquire_peer_slot 本来就在 cc_id == 0 时返回 -1 —— 信号一直都在,
+                 * 只是被丢掉了。见 docs/shm_defect_fixes.md 第 2 条。
+                 *
+                 * 处置: 不置 handshake_completed, 退掉已登记的 peer, 让下一轮重试 ——
+                 * 有订阅者退出让出位时就能接上。告警**不受 verbose_ 约束**: 这是静默失败,
+                 * 不该要求开了调试开关才看得见。 */
+                if (cc_id == 0)
+                {
+                    static std::atomic<bool> warned_once{false};
+                    if (!warned_once.exchange(true, std::memory_order_relaxed))
+                    {
+                        std::cerr << "\033[31m[" << topic_name_
+                                  << "SubInfo] connection slots exhausted (max "
+                                  << kMaxShmReceiversPerTopic
+                                  << " receivers per topic); this subscriber is NOT connected and "
+                                     "will receive nothing. Retrying until a slot frees up.\033[0m"
+                                  << std::endl;
+                    }
+                    if (peer_registered)
+                    {
+                        control_plane_.remove_peer(attached_generation);
+                        peer_registered = false;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
+
                 if (peer_slot_ < 0 && verbose_)
                 {
                     std::cerr << "\033[33m[" << topic_name_
@@ -764,6 +811,23 @@ void shm_sub_ipc::get(Sample& out)
     {
         out = std::move(*s);
     }
+}
+
+bool shm_sub_ipc::get(Sample& out, std::uint64_t tm_ms)
+{
+    /* CircularQueue::pop 本来就支持超时(见其 tm 参数), 之前只是没接线 —— 于是只发 TLV 的
+     * 话题上调 get(Sample&) 会永久挂死。见 docs/shm_defect_fixes.md 第 4 条。 */
+    std::shared_ptr<Sample> s;
+    if (!view_queue_->pop(s, tm_ms))
+    {
+        return false;   // 超时
+    }
+    if (!s)
+    {
+        return false;
+    }
+    out = std::move(*s);
+    return true;
 }
 
 bool shm_sub_ipc::try_get(Sample& out)

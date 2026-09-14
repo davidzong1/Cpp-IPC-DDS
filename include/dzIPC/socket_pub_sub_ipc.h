@@ -131,6 +131,8 @@ public:
     /* 视图路径: socket 无 DZFlat 段, 恒 false。一律用 get_clone/try_get_clone。 */
     void get(Sample& out);
     bool try_get(Sample& out);
+    /// socket 无 DZFlat 段, 视图路径恒不可用 —— 立刻返回 false(不阻塞)。
+    bool get(Sample& out, std::uint64_t tm_ms);
 
     /* 物化路径。socket 的接收只走这条。 */
     void get_clone(std::shared_ptr<TopicData>& msg);

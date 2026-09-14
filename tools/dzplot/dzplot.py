@@ -756,22 +756,32 @@ class LiveSniffSource:
         return "".join(result)
 
     @staticmethod
-    def _channel_name_for_topic(topic: str) -> str:
+    def _channel_name_for_topic(topic: str, domain: int = 0) -> str:
         """Construct the SHM channel name for a pub/sub topic.
 
-        Matches the pattern used by shm_pub_sub_ipc and dzipc_topic_cat:
-          "dz_ipc_" + sanitize_topic_name(topic) + "_topic"
+        Must match dzIPC::shm_topic_segment_name() in
+        include/dzIPC/common/name_operator.h — that header is the single source
+        of truth for the naming rule; this is the Python transcription of it.
+
+        The name carries the domain id: without it there is no domain isolation
+        on SHM at all (see docs/shm_defect_fixes.md item 1).  A mismatch here is
+        silent — Sniffer.open() just fails and the topic shows as empty.
         """
-        return "dz_ipc_" + LiveSniffSource._sanitize_topic_name(topic) + "_topic"
+        return ("dz_ipc_d" + str(domain) + "_"
+                + LiveSniffSource._sanitize_topic_name(topic) + "_topic")
 
     @staticmethod
-    def _control_plane_name_for_topic(topic: str) -> str:
+    def _control_plane_name_for_topic(topic: str, domain: int = 0) -> str:
         """Construct the control plane SHM name for a pub/sub topic.
 
-        Matches the pattern used by shm_sniffer in dzipc_topic_cat:
-          "dz_ipc_" + sanitize_topic_name(topic) + "_topic_control"
+        C++ derives this from the data segment name by appending "_control2"
+        (see control_name_for() in src/dzIPC/shm_pub_sub_ipc.cc; the "2" suffix
+        is deliberate — TopicControl grew and the old name would mmap past the
+        end of the pre-existing smaller segment).  This transcription had
+        "_topic_control", which never matched; it now derives from the data
+        segment name the same way C++ does.
         """
-        return "dz_ipc_" + LiveSniffSource._sanitize_topic_name(topic) + "_topic_control"
+        return LiveSniffSource._channel_name_for_topic(topic, domain) + "_control2"
 
     def __init__(
         self,
@@ -854,8 +864,8 @@ class LiveSniffSource:
             if use_sniffer:
                 # Passive sniffer via ipc::sniffer pybind11 binding.
                 # Channel name matches what the publisher creates internally:
-                #   "dz_ipc_" + sanitize(topic) + "_topic"
-                ch_name = self._channel_name_for_topic(topic)
+                #   见 dzIPC::shm_topic_segment_name (name_operator.h)
+                ch_name = self._channel_name_for_topic(topic, dom)
                 sniffer = ipc.Sniffer()
                 if not sniffer.open(ch_name, ipc.SnifferTopology.route):
                     print(f"[dzplot] Sniffer.open() failed for {topic} "
@@ -872,7 +882,7 @@ class LiveSniffSource:
                     # Open control plane for publisher-restart detection.
                     # Mirrors dzipc_topic_cat shm_sniffer.cc:140-158.
                     try:
-                        cp_name = self._control_plane_name_for_topic(topic)
+                        cp_name = self._control_plane_name_for_topic(topic, dom)
                         control_plane = ipc.TopicControlPlane()
                         if control_plane.open(cp_name):
                             generation = control_plane.generation()
@@ -922,7 +932,7 @@ class LiveSniffSource:
                                   f"(generation {generation} → {current_gen}), "
                                   f"re-attaching sniffer...", flush=True)
                             sub.close()
-                            ch_name = self._channel_name_for_topic(topic)
+                            ch_name = self._channel_name_for_topic(topic, dom)
                             new_sniffer = ipc.Sniffer()
                             if new_sniffer.open(ch_name, ipc.SnifferTopology.route):
                                 new_sniffer.skip_to_latest()

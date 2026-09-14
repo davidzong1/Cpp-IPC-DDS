@@ -46,14 +46,18 @@ def sanitize_topic_name(topic: str) -> str:
     return "".join(result)
 
 
-def channel_name_for_topic(topic: str) -> str:
-    """Match dzplot's _channel_name_for_topic."""
-    return "dz_ipc_" + sanitize_topic_name(topic) + "_topic"
+def channel_name_for_topic(topic: str, domain: int = 0) -> str:
+    """Match dzplot's _channel_name_for_topic.
+
+    必须与 dzIPC::shm_topic_segment_name (include/dzIPC/common/name_operator.h) 一致 ——
+    段名含 domain_id, 不含就等于 SHM 上没有 domain 隔离(docs/shm_defect_fixes.md 第 1 条)。
+    """
+    return "dz_ipc_d" + str(domain) + "_" + sanitize_topic_name(topic) + "_topic"
 
 
-def control_plane_name_for_topic(topic: str) -> str:
-    """Match dzplot's _control_plane_name_for_topic."""
-    return "dz_ipc_" + sanitize_topic_name(topic) + "_topic_control"
+def control_plane_name_for_topic(topic: str, domain: int = 0) -> str:
+    """Match dzplot's _control_plane_name_for_topic (data segment + "_control2")."""
+    return channel_name_for_topic(topic, domain) + "_control2"
 
 
 def make_publisher(topic: str) -> "ipc.PublisherIPC":

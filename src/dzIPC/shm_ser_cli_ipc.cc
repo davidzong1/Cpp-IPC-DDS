@@ -116,11 +116,17 @@ using dzIPC::control_plane_shm::TopicState;
 
 namespace {
 
-std::string service_control_name_for(const std::string& topic_name)
+/* 段名规则的唯一出处在 dzIPC/common/name_operator.h, 这里只是转调。 */
+std::string service_prefix_for(const std::string& topic_name, size_t domain_id)
+{
+    return shm_service_prefix(topic_name, domain_id);
+}
+
+std::string service_control_name_for(const std::string& topic_name, size_t domain_id)
 {
     /* "_ser_control2": 与 pub-sub 侧同理, TopicControl 结构体已变大,
      * 必须换名以避免在旧的小共享内存段上越界映射。 */
-    return "dz_ipc_" + topic_name + "_ser_control2";
+    return service_prefix_for(topic_name, domain_id) + "_ser_control2";
 }
 
 // Internal envelope: carries a fast-path request together with the client's
@@ -258,9 +264,9 @@ shm_ser_ipc::~shm_ser_ipc()
 void shm_ser_ipc::InitChannel(std::string extra_info)
 {
     std::string r_name, w_name;
-    r_name = "dz_ipc_" + topic_name_ + "_ser_r";
-    w_name = "dz_ipc_" + topic_name_ + "_ser_w";
-    if (!control_plane_.open(service_control_name_for(topic_name_)))
+    r_name = service_prefix_for(topic_name_, domain_id_) + "_ser_r";
+    w_name = service_prefix_for(topic_name_, domain_id_) + "_ser_w";
+    if (!control_plane_.open(service_control_name_for(topic_name_, domain_id_)))
     {
         throw std::runtime_error("failed to open service control plane");
     }
@@ -545,7 +551,7 @@ void shm_cli_ipc::InitChannel(std::string extra_info)
 
 void shm_cli_ipc::cli_handshake()
 {
-    if (!control_plane_.open(service_control_name_for(topic_name_)))
+    if (!control_plane_.open(service_control_name_for(topic_name_, domain_id_)))
     {
         throw std::runtime_error("control plane open failed");
     }
@@ -567,8 +573,8 @@ void shm_cli_ipc::cli_handshake()
                     peer_registered = false;
                 }
                 std::string r_name, w_name;
-                r_name = "dz_ipc_" + topic_name_ + "_ser_w";
-                w_name = "dz_ipc_" + topic_name_ + "_ser_r";
+                r_name = service_prefix_for(topic_name_, domain_id_) + "_ser_w";
+                w_name = service_prefix_for(topic_name_, domain_id_) + "_ser_r";
                 {
                     std::lock_guard<std::mutex> lock(channel_mtx_);
                     if (ipc_r_ptr_ && ipc_r_ptr_->valid())

@@ -47,6 +47,16 @@ public:
     virtual void get(Sample& out) = 0;
     virtual bool try_get(Sample& out) = 0;
 
+    /* 带超时的视图 get: 超时返回 false 而不是永久阻塞。
+     *
+     * 为什么需要它: 视图队列只承载 DZFlat 段, 而"到达的段是不是 DZFlat"由**发布端**决定
+     * (开关未开 / 类型不支持 / 无接收方 / chunk 池耗尽都会静默回退 TLV, 见
+     * dzflat_shm.md §3.8)。所以在只发 TLV 的话题上, 视图队列**永远是空的** —— 不带超时的
+     * get() 不是"等数据", 而是**注定挂死**。
+     *
+     * tm 单位毫秒。socket 传输的视图路径恒不可用, 其实现立刻返回 false。 */
+    virtual bool get(Sample& out, std::uint64_t tm_ms) = 0;
+
     /* ---- 物化路径(TLV + 快速路径克隆对象 + schema-less 话题) ---- */
     virtual void get_clone(std::shared_ptr<TopicData>& msg) = 0;
     virtual bool try_get_clone(std::shared_ptr<TopicData>& msg) = 0;

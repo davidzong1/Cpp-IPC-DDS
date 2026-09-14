@@ -633,6 +633,13 @@ bool socket_sub_ipc::try_get(Sample& out)
     return false;
 }
 
+bool socket_sub_ipc::get(Sample& out, std::uint64_t tm_ms)
+{
+    (void)out;
+    (void)tm_ms;
+    return false;   /* socket 永远没有视图 —— 立刻返回, 不阻塞 */
+}
+
 void socket_sub_ipc::get_clone(std::shared_ptr<TopicData>& msg)
 {
     std::shared_ptr<IpcMsgBase> ipc_msg;

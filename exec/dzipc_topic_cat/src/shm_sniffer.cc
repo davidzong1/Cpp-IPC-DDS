@@ -88,20 +88,19 @@ bool shm_sniffer::open_channels(const std::string& topic_name, int, bool ser_or_
     // The shm publishers/servers do NOT open a route/server with the raw topic
     // name — they mangle it the same way the regular sub/cli does. The sniffer
     // must apply the exact same scheme to attach to the right SHM region.
-    //   topic mode  : "dz_ipc_<topic>_topic"            -> ipc::route
-    //   service mode: "dz_ipc_<topic>_ser_r" + "_ser_w" -> ipc::server
+    // 段名规则的唯一出处是 dzIPC/common/name_operator.h —— 不再在这里复刻,
+    // 否则规则一改这里就静默连不上(打不开只表现为一片空白)。
     shm_sniffer_options opt;
     opt.pref = "";
-    std::string sanitized = sanitize_topic_name(topic_name);
     if (ser_or_topic_)
     {
         opt.topo = ipc::sniffer::topology::server;
-        opt.name = "dz_ipc_" + sanitized + "_ser_r";
+        opt.name = shm_service_prefix(topic_name, domain_id_) + "_ser_r";
     }
     else
     {
         opt.topo = ipc::sniffer::topology::route;
-        opt.name = "dz_ipc_" + sanitized + "_topic";
+        opt.name = shm_topic_segment_name(topic_name, domain_id_);
     }
     req_ = std::make_unique<ipc::sniffer>();
     bool ok = opt.pref.empty() ? req_->open(opt.name.c_str(), opt.topo)
@@ -118,7 +117,7 @@ bool shm_sniffer::open_channels(const std::string& topic_name, int, bool ser_or_
     }
     if (ser_or_topic)
     {
-        std::string res_name = "dz_ipc_" + sanitized + "_ser_w";
+        std::string res_name = shm_service_prefix(topic_name, domain_id_) + "_ser_w";
         res_ = std::make_unique<ipc::sniffer>();
         bool ok = opt.pref.empty()
                       ? res_->open(res_name.c_str(), ipc::sniffer::topology::server)

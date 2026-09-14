@@ -41,6 +41,7 @@ public:
     /* 视图路径(零拷贝, DZFlat 段; 无 owning 对象可记日志)。 */
     void get(Sample& out);
     bool try_get(Sample& out);
+    bool get(Sample& out, std::uint64_t tm_ms);
 
     /* 物化路径(TLV + 快速路径对象; 记订阅事件日志)。 */
     void get_clone(std::shared_ptr<TopicData>& msg);
