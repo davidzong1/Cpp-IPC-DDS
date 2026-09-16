@@ -1,11 +1,13 @@
 #include "dzIPC/auto_ser_cli_ipc.h"
 #include <unistd.h>
 #include <algorithm>
+#include <iostream>
 #include <utility>
 #include "dzIPC/common/control_plane.h"
 #include "dzIPC/ipc_info_pool.h"
 #include "dzIPC/shm_ser_cli_ipc.h"
 #include "dzIPC/socket_ser_cli_ipc.h"
+#include "ipc_msg/ipc_msg_base/udp_id_init_msg.hpp"
 
 namespace dzIPC {
 namespace autopath {
@@ -16,6 +18,14 @@ namespace {
  * CPU, 对缩短 T_nego 没有帮助。 */
 constexpr uint64_t kPollMs = 20;
 constexpr uint64_t kIdlePollMs = 50;   // Active 期的存活巡检(比判定期更省)
+
+/* 握手帧里"协商正常推进"的那两个信号。取值直接取自 wire 枚举 —— 本文件里的每个
+ * 信号值都必须来自**同一个**出处(IpcPubSubIdInitMsg::PathState), 散落的裸数字一旦
+ * 与枚举脱钩就是静默错值(发 5 收到 4 这种错位不会报错, 只会记错原因)。
+ * ⛔ 撤销类信号(4..8)**不**在这里 —— 它们一律走 decode_peer_withdraw() 的映射表。 */
+constexpr uint8_t kSigProposeShm = static_cast<uint8_t>(IpcPubSubIdInitMsg::PathState::ProposeShm);
+constexpr uint8_t kSigConfirmShm = static_cast<uint8_t>(IpcPubSubIdInitMsg::PathState::ConfirmShm);
+constexpr uint8_t kSigWithdrawToSocket = static_cast<uint8_t>(IpcPubSubIdInitMsg::PathState::WithdrawToSocket);
 
 int64_t now_ns()
 {
@@ -125,6 +135,65 @@ bool shm_channel_occupied(const std::string& topic_name, size_t domain_id, int32
     catch (...)
     {
         return true;   // 探测本身失败同样走保守方向
+    }
+}
+
+uint8_t wire_signal_for_fallback(path::FallbackReason reason) noexcept
+{
+    using PS = IpcPubSubIdInitMsg::PathState;
+    switch (reason)
+    {
+    case path::FallbackReason::ShmChannelOccupied:
+        return static_cast<uint8_t>(PS::WithdrawChannelOccupied);
+    case path::FallbackReason::ShmEstablishFailed:
+        return static_cast<uint8_t>(PS::WithdrawEstablishFailed);
+    case path::FallbackReason::ShmRendezvousTimeout:
+        return static_cast<uint8_t>(PS::WithdrawRendezvousTimeout);
+    case path::FallbackReason::RemoteIoFailure:
+        return static_cast<uint8_t>(PS::WithdrawRuntimeDisconnect);
+    case path::FallbackReason::WithdrawnByPeer:
+    case path::FallbackReason::None:
+        /* WithdrawnByPeer: 对端已经撤销了,**我们**这一端没有新原因可说 —— 回它一个
+         * 泛化撤销即可(对端此时通常也已不在, 这条帧多半没有读者)。
+         * None: "没有回退"却要发撤销 = 调用方用错了参数, 兜底走 legacy 值,
+         * 绝不发 0 —— 0 是 Unknown("尚未提议"), 发出去会让对端以为本端还没裁定。 */
+        return static_cast<uint8_t>(PS::WithdrawToSocket);
+    }
+    return static_cast<uint8_t>(PS::WithdrawToSocket);   // 枚举将来扩了也退回安全值
+}
+
+bool decode_peer_withdraw(uint8_t sig, path::DecisionReason& decision, path::FallbackReason& fallback) noexcept
+{
+    using PS = IpcPubSubIdInitMsg::PathState;
+    switch (static_cast<PS>(sig))
+    {
+    case PS::WithdrawToSocket:
+        /* 老端(F2 之前)只会发这个, 且它对**所有**撤销原因都发它 ⇒ 原因不可考。
+         * 记成"对端撤销、原因未区分"是唯一诚实的写法: 猜成占用正是本次要修的错。 */
+        decision = path::DecisionReason::ShmNotReady;
+        fallback = path::FallbackReason::WithdrawnByPeer;
+        return true;
+    case PS::WithdrawChannelOccupied:
+        decision = path::DecisionReason::ChannelOccupied;
+        fallback = path::FallbackReason::ShmChannelOccupied;
+        return true;
+    case PS::WithdrawEstablishFailed:
+        decision = path::DecisionReason::ShmNotReady;
+        fallback = path::FallbackReason::ShmEstablishFailed;
+        return true;
+    case PS::WithdrawRendezvousTimeout:
+        decision = path::DecisionReason::Timeout;
+        fallback = path::FallbackReason::ShmRendezvousTimeout;
+        return true;
+    case PS::WithdrawRuntimeDisconnect:
+        decision = path::DecisionReason::ShmNotReady;
+        fallback = path::FallbackReason::RemoteIoFailure;
+        return true;
+    default:
+        /* 0(尚未提议)/1/2(协商中)/3(保留值)/以及**不认识的任何值**。
+         * 不认识的值不当撤销: 它可能是将来新增的积极信号, 读成拒绝会凭空造出一条
+         * 错误原因; 交给调用方继续等, 最终按 T_est 超时安全回退(与老端逐字一致)。 */
+        return false;
     }
 }
 
@@ -256,8 +325,11 @@ void auto_ser_ipc::withdraw_to_socket(path::FallbackReason reason)
     }
     if (socket_leg_)
     {
-        /* 告诉对端"退回 socket", 免得它单方面继续等 SHM 就绪。 */
-        socket_leg_->set_path_signal(static_cast<uint8_t>(4 /* WithdrawToSocket */));
+        /* 告诉对端"退回 socket", 免得它单方面继续等 SHM 就绪。
+         * F2: **带上原因**(不再一律发 4)。对端据此记下的 fallback 才与事实相符 ——
+         * 此前建腿失败/运行期断链都被对端记成"通道被占用"。老端不认 5..8 时的行为
+         * 已在 udp_id_init_msg.hpp 里论证: 等满 T_est 后按超时安全回退, 不会误判。 */
+        socket_leg_->set_path_signal(wire_signal_for_fallback(reason));
     }
     use_shm_.store(false, std::memory_order_release);
     status_.set_selected(path::Kind::Socket);
@@ -302,11 +374,41 @@ void auto_ser_ipc::supervise()
             }
             else if (shm_channel_occupied(topic_name_, domain_id_, static_cast<int32_t>(::getpid())))
             {
+                /* 这次连接已经完成一次切换判定。占用拒绝也是一次终态，必须锁住；
+                 * 否则 supervise 每轮都会重复递增 attempts/fallbacks 并重复公告。 */
+                attempted_this_connection = true;
+                /* F1 收口: 占用判定问的是**派生段名**, 不是 topic 名 —— 而派生规则会把
+                 * '/' 清成 '_'(name_operator.cc 的 minimal_segment_sanitize), 于是
+                 * "_foo" 与 "/foo" 是**同一个段**的两个别名。拒绝的真因在段名上, 光看
+                 * topic 名字面看不出来: 同一份日志里两次运行、两个不同的 topic 名, 却指向
+                 * 同一个段 —— 没有这条日志就只能去 /dev/shm 里按 topic 名找一个
+                 * **根本不存在的段**(而真正占用的那一段名字完全不同)。
+                 * ⛔ 门控在 verbose_ 上: 默认关(与仓内所有诊断输出一致), 打开时把
+                 * **原始 topic** 与**派生段名**一起打出来, 让"别名"这件事在日志里可见。 */
+                if (verbose_)
+                {
+                    std::cerr << "\033[33m[" << topic_name_ << "SerInfo] 拒绝切换: 目标 SHM 通道被占用; 原始 topic=\""
+                              << topic_name_ << "\" domain=" << domain_id_ << " 派生段名=\""
+                              << shm::ser_service_control_name(topic_name_, domain_id_)
+                              << "\" (占用判据按派生段名匹配 —— 名字不同但派生段相同的两个 topic 互为别名)"
+                              << "\033[0m" << std::endl;
+                }
                 status_.set_decision(path::DecisionReason::ChannelOccupied);
                 status_.set_fallback(path::FallbackReason::ShmChannelOccupied);
+                /* F2: 计数与标签必须同真。此前这一支只置标签不加计数, 于是
+                 * `fallback=ShmChannelOccupied` 与 `switch_fallbacks=0` 同时成立 ——
+                 * 按 `fallback=` 标签做监控会**漏报**一次真实回退(活体实测样本:
+                 * build/live_runs/20260915_232219_2580718/client.log:22-23)。
+                 * 目标不变量: switch_attempts == switch_successes + switch_fallbacks.
+                 * `attempts` 由此包含"已取得证据、但因通道被占用而**拒绝**建立"的一次 ——
+                 * 决策已作出, 故计入尝试(依据 F2 验收"失败路径各递增一次")。 */
+                status_.switch_attempts.fetch_add(1, std::memory_order_acq_rel);
+                status_.switch_fallbacks.fetch_add(1, std::memory_order_acq_rel);
                 /* 公告(T2 §3 D7 铁律 2: 回退必须公告)。不公告的话对端只能靠等满
-                 * T_est 才动, 而且它记下的原因是"对端没就绪"——与真实原因不符。 */
-                socket_leg_->set_path_signal(4 /* WithdrawToSocket */);
+                 * T_est 才动, 而且它记下的原因是"对端没就绪"——与真实原因不符。
+                 * F2: 公告**带上原因**(这一支发 5 = 通道被占用), 对端因此能记成
+                 * ChannelOccupied 而不是"超时"。 */
+                socket_leg_->set_path_signal(wire_signal_for_fallback(path::FallbackReason::ShmChannelOccupied));
             }
             else
             {
@@ -316,9 +418,14 @@ void auto_ser_ipc::supervise()
                 status_.set_state(path::State::Establish);
 
                 bool established = false;
+                /* F2: 区分"为什么没建成"。建腿抛异常(clear_storage/create/set_ready
+                 * 失败)与"腿建好了但对端没在 T_est 内接上"是两件不同的事, 此前都发
+                 * 同一个 4, 对端只好一并记成"通道被占用"。默认取"会合超时"(下面的
+                 * 等待循环是最可能走到的那条路), catch 里改判成"建腿失败"。 */
+                path::FallbackReason fail_reason = path::FallbackReason::ShmRendezvousTimeout;
                 try
                 {
-                    socket_leg_->set_path_signal(1 /* ProposeShm */);
+                    socket_leg_->set_path_signal(kSigProposeShm);
                     auto leg = std::make_unique<shm::shm_ser_ipc>(topic_name_, message_, callback_, domain_id_,
                                                                   verbose_);
                     leg->InitChannel();
@@ -350,6 +457,7 @@ void auto_ser_ipc::supervise()
                 catch (...)
                 {
                     established = false;
+                    fail_reason = path::FallbackReason::ShmEstablishFailed;
                 }
 
                 if (established && running_.load(std::memory_order_acquire))
@@ -359,7 +467,7 @@ void auto_ser_ipc::supervise()
                      * 中间不存在"两条腿都可发"的时刻。 */
                     if (socket_leg_)
                     {
-                        socket_leg_->set_path_signal(2 /* ConfirmShm */);
+                        socket_leg_->set_path_signal(kSigConfirmShm);
                         socket_leg_->stop_data_plane();
                     }
                     use_shm_.store(true, std::memory_order_release);
@@ -369,13 +477,11 @@ void auto_ser_ipc::supervise()
                 else
                 {
                     const bool peer_gone = !socket_leg_->handshake_completed();
-                    if (!peer_gone)
-                    {
-                        /* 建立失败也公告: 让对端立刻收手而不是干等 T_est。 */
-                        socket_leg_->set_path_signal(4 /* WithdrawToSocket */);
-                    }
-                    withdraw_to_socket(peer_gone ? path::FallbackReason::WithdrawnByPeer
-                                                 : path::FallbackReason::ShmRendezvousTimeout);
+                    /* 建立失败也要公告(让对端立刻收手而不是干等 T_est)。公告本身由
+                     * withdraw_to_socket() 按原因选信号发出 —— 这里**不再**单独写一次
+                     * 信号: 同一个字段有两个写入点, 先写的那个(永远是 legacy 4)会盖掉
+                     * 真原因, 那正是 F2 要修的错位。 */
+                    withdraw_to_socket(peer_gone ? path::FallbackReason::WithdrawnByPeer : fail_reason);
                     status_.switch_fallbacks.fetch_add(1, std::memory_order_acq_rel);
                 }
             }
@@ -541,6 +647,13 @@ void auto_cli_ipc::withdraw_to_socket(path::FallbackReason reason)
     {
         socket_leg_->restart_data_plane();
     }
+    /* ⛔ 这里**不**发撤销信号, 与 auto_ser_ipc 那边不对称 —— 这是事实而非疏漏:
+     * SHM 腿是**服务端**建的, 客户端只是 attach, 它没有"通道被我占了/我建不出来"
+     * 这类需要对端知道的原因; 而客户端真正会产生的两种撤销(对端没了 / 运行期腿断了)
+     * 服务端都会**自己观察到**(它巡检同一对腿), 不需要客户端告诉它。
+     * 补一句"反正也没人读": 服务端今天完全不读 peer_path_signal(见 auto_ser_ipc::
+     * supervise), 所以在这里加一次 set_path_signal() 只会得到一个没有读者的写入,
+     * 却会让"谁在什么时候公告什么"多出一处需要推理的地方。 */
     use_shm_.store(false, std::memory_order_release);
     status_.set_selected(path::Kind::Socket);
     status_.set_fallback(reason);
@@ -579,6 +692,10 @@ void auto_cli_ipc::supervise()
              * (shm_ser_ipc::InitChannel 无条件 clear_storage), 客户端先建会互相清存储。 */
             bool peer_ready = false;
             bool peer_rejected = false;
+            /* F2: 对端撤销时**它给的原因**。由 decode_peer_withdraw() 填, 不再由本端
+             * 猜测 —— 见下面 peer_rejected 分支。 */
+            path::DecisionReason peer_withdraw_decision = path::DecisionReason::Pending;
+            path::FallbackReason peer_withdraw_fallback = path::FallbackReason::None;
             if (ev.kind.load(std::memory_order_acquire) != 0)
             {
                 status_.set_decision(path::DecisionReason::PeerInPool);
@@ -588,15 +705,16 @@ void auto_cli_ipc::supervise()
                 {
                     /* 1(ProposeShm)/2(ConfirmShm) = 对端已把 SHM 腿建起来。这是**显式
                      * 裁定**: 不是客户端自己猜"我是不是同机", 而是对端告诉它。
-                     * 4 = 对端的显式撤销(它自己判断不该切, 例如目标通道被占用) ——
-                     * 立刻停手, 不要傻等满 T_est。 */
+                     * 4..8 = 对端的显式撤销(它自己判断不该切/没切成), 立刻停手, 不要
+                     * 傻等满 T_est。**具体是哪一种撤销由对端给出**, 本端只解码不猜测;
+                     * 老端只会发 4 ⇒ 记成"原因未区分"。 */
                     const uint8_t sig = socket_leg_->peer_path_signal();
-                    if (sig == 1 || sig == 2)
+                    if (sig == kSigProposeShm || sig == kSigConfirmShm)
                     {
                         peer_ready = true;
                         break;
                     }
-                    if (sig == 4)
+                    if (decode_peer_withdraw(sig, peer_withdraw_decision, peer_withdraw_fallback))
                     {
                         peer_rejected = true;
                         break;
@@ -618,6 +736,10 @@ void auto_cli_ipc::supervise()
                 status_.switch_attempts.fetch_add(1, std::memory_order_acq_rel);
                 status_.set_state(path::State::Establish);
                 bool established = false;
+                /* F2: 与服务端同因 —— 本端建腿抛异常(ShmEstablishFailed)与等满 T_est
+                 * 仍没接上(ShmRendezvousTimeout)是两件事, 此前都记成"会合超时"。
+                 * 客户端这一侧的标签是 F2 的主战场(它才是被监控那一端)。 */
+                path::FallbackReason fail_reason = path::FallbackReason::ShmRendezvousTimeout;
                 try
                 {
                     auto leg = std::make_unique<shm::shm_cli_ipc>(topic_name_, message_, domain_id_, verbose_);
@@ -648,6 +770,7 @@ void auto_cli_ipc::supervise()
                 catch (...)
                 {
                     established = false;
+                    fail_reason = path::FallbackReason::ShmEstablishFailed;
                 }
 
                 if (established && running_.load(std::memory_order_acquire))
@@ -665,21 +788,31 @@ void auto_cli_ipc::supervise()
                 else
                 {
                     const bool peer_gone = !socket_leg_->handshake_completed();
-                    withdraw_to_socket(peer_gone ? path::FallbackReason::WithdrawnByPeer
-                                                 : path::FallbackReason::ShmRendezvousTimeout);
+                    withdraw_to_socket(peer_gone ? path::FallbackReason::WithdrawnByPeer : fail_reason);
                     status_.set_decision(peer_gone ? path::DecisionReason::Timeout : path::DecisionReason::ShmNotReady);
                     status_.switch_fallbacks.fetch_add(1, std::memory_order_acq_rel);
                 }
             }
             else if (peer_rejected)
             {
-                /* 对端明确说不切(例如它自己查到目标 SHM 通道被占用): 照它的原因记账,
-                 * 而不是记成"超时"——后者会让一次有明确原因的拒绝看起来像一次故障。
-                 * 注意这一支必须在 `if (peer_ready)` **外面**: 收到撤销时 peer_ready
-                 * 是 false, 放在里面就永远不会被执行(本实现对的第一版就踩了这个)。 */
-                status_.set_decision(path::DecisionReason::ChannelOccupied);
-                status_.set_fallback(path::FallbackReason::ShmChannelOccupied);
-                socket_leg_->set_path_signal(4 /* WithdrawToSocket */);   // 回执, 免得对端重试
+                /* 对端明确说不切: 照**它给出的原因**记账, 而不是本端猜一个。
+                 * ⛔ 这一支是 F2 的落点。此前无论对端为什么撤销, 客户端都写死
+                 * ChannelOccupied / ShmChannelOccupied —— 于是"建腿失败"和"运行期断链"
+                 * 也被记成"通道被占用"(活体样本 build/live_runs/20260915_232219_2580718
+                 * client.log:22-23), 监控按这个标签定性就指错了方向。
+                 * 注意力放在**这一支的位置**: 它必须在 `if (peer_ready)` 外面 ——
+                 * 收到撤销时 peer_ready 是 false, 放在里面就永远不会被执行。 */
+                status_.set_decision(peer_withdraw_decision);
+                status_.set_fallback(peer_withdraw_fallback);
+                /* 计数与标签同真(否则按 fallback 标签监控会漏报一次真实回退)。 */
+                status_.switch_attempts.fetch_add(1, std::memory_order_acq_rel);
+                status_.switch_fallbacks.fetch_add(1, std::memory_order_acq_rel);
+                /* 回执: 告诉对端"我收到了你的撤销, 免得它重试"。⛔ 回执只发 legacy 4:
+                 * 回执**不是撤销**, 5..8 的语义是"我撤销的原因是 X", 让回执携带撤销原因
+                 * 等于给对端一条假原因。今天这个值没有读者(服务端从不读 peer_path_signal,
+                 * 见 auto_ser_ipc::supervise), 改成别的值既不产生新语义, 又会破坏与老端
+                 * 行为的逐字一致性。 */
+                socket_leg_->set_path_signal(kSigWithdrawToSocket);
             }
         }
         else if (!opts_.allow_shm)

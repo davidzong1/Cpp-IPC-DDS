@@ -111,8 +111,19 @@ struct handshake_snapshot
 };
 
 /* path_state 的显示名。⛔ 这里只做**显示**, 判定用的数值永远来自
- * IpcPubSubIdInitMsg::peek_path_state。产品将来若新增枚举值, 本函数落到 default
- * 分支会显示 "path_state(<数值>)" —— 降级为可见的数字, 不会静默说错话。 */
+ * IpcPubSubIdInitMsg::peek_path_state。
+ *
+ * ⚠️ default 分支返回的是 "path_state(?)" —— **不含数值**。上面那句"会显示
+ * path_state(<数值>)"是**错的**(与实现不符), 已就地更正为事实。
+ * 这个差距今天有实际后果: F2 把 5..8 变成线上可见量之后, "将来再加一个值"或"监控读到
+ * 比自己新的值"都会显示成**无法区分**的 "?" —— 分不清"未知的新原因"与"垃圾字节",
+ * 归因链在那里断掉。**未实施**的最小修法: default 用 thread_local 缓冲返回
+ * "path_state(<数值>)"(返回类型与 ABI 不变)。该项属 F2 复核清单, 待 leader 指派;
+ * 本文件本轮只更正注释, **不改行为**。
+ *
+ * F2 新增 5..8(撤销原因细化)。显示成 "Withdraw(原因)" 而不是照抄枚举名, 是因为
+ * 运维看的是**现象**: 这四行都是"对端撤销了", 区别只在原因; 名称前缀相同才一眼看得出
+ * 它们同族。老端只看得到无原因的 WithdrawToSocket, 所以那一行的显示名不带后缀。 */
 inline const char* path_state_name(uint8_t v) noexcept
 {
     using PS = IpcPubSubIdInitMsg::PathState;
@@ -123,6 +134,10 @@ inline const char* path_state_name(uint8_t v) noexcept
     case PS::ConfirmShm: return "ConfirmShm";
     case PS::ConfirmSocket: return "ConfirmSocket";
     case PS::WithdrawToSocket: return "WithdrawToSocket";
+    case PS::WithdrawChannelOccupied: return "Withdraw(ChannelOccupied)";
+    case PS::WithdrawEstablishFailed: return "Withdraw(EstablishFailed)";
+    case PS::WithdrawRendezvousTimeout: return "Withdraw(RendezvousTimeout)";
+    case PS::WithdrawRuntimeDisconnect: return "Withdraw(RuntimeDisconnect)";
     default: return "path_state(?)";
     }
 }

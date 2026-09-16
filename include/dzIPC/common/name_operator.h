@@ -31,8 +31,19 @@ std::string sanitize_topic_name(const std::string& topic_name);
 /// pub/sub 数据段: "dz_ipc_d<domain>_<sanitized>_topic"
 std::string shm_topic_segment_name(const std::string& topic_name, size_t domain_id);
 
-/// 服务通道段名前缀: "dz_ipc_d<domain>_<topic>"; 请求/响应各自追加 "_ser_r"/"_ser_w"
+/* 服务通道段名前缀: "dz_ipc_d<domain>_<topic>"; 请求/响应各自追加 "_ser_r"/"_ser_w"
+ *
+ * F1: 段名里的**内层** '/' 会让 POSIX shm_open 直接 EINVAL(22) —— 带前导斜杠的 topic
+ * (如 "/demo") 因而**从来建不出段**, 且失败被上层 catch 吞掉、静默降级 socket。
+ * 本函数现在做**最小清洗**: 仅把 '/' 换成 '_', 且仅在 POSIX 上(Windows 原样)。
+ * 只清 '/' 而非全量 sanitize, 是为了对不含 '/' 的 topic **逐字节保持不变** ⇒ 零改名、
+ * 跨版本互通不受影响 —— 详见 name_operator.cc 的 minimal_segment_sanitize() 注释。 */
 std::string shm_service_prefix(const std::string& topic_name, size_t domain_id);
+
+/* F1 之前的段名前缀规则(不清洗), 仅供**回滚基准与旧名探测**使用。
+ * ⛔ 对含 '/' 的 topic 它算出的名字恒为非法(带内层 '/'), 永远打不开 —— 因此它不构成
+ * 迁移路径, 只是让"旧名"可被显式表达与比对。 */
+std::string shm_service_legacy_prefix(const std::string& topic_name, size_t domain_id);
 
 /* pub/sub 控制面段名(数据段名 + "_control2")。
  *

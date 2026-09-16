@@ -55,7 +55,7 @@ enum class DecisionReason : uint8_t {
 /* 回退原因（T2 §3 D7）。 */
 enum class FallbackReason : uint8_t {
     None = 0,
-    ShmEstablishFailed = 1,     // clear_storage/create/set_ready 失败
+    ShmEstablishFailed = 1,     // SHM 腿 InitChannel() 抛出异常
     ShmRendezvousTimeout = 2,   // 对端未在 T_est 内确认就绪
     ShmChannelOccupied = 3,     // 目标通道被占用
     RemoteIoFailure = 4,        // 运行期 SHM I/O 连续失败

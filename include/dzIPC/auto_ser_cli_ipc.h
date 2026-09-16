@@ -94,6 +94,34 @@ IPC_EXPORT bool look_for_peer(const std::string& topic_name, size_t domain_id,
  * shm_ser_ipc::InitChannel 无条件 clear_storage, 会摧毁既有连接 (T2 §7 R3, V3/V4)。 */
 IPC_EXPORT bool shm_channel_occupied(const std::string& topic_name, size_t domain_id, int32_t self_pid);
 
+/* ------------------------------------------------------------------------- *
+ * F2: 握手 wire 信号 <-> 本端记账 的**唯一**映射表
+ *
+ * 为什么把两个方向收在一处: 发出去的原因和对方记下的原因必须是同一张表 ——
+ * 各写一份的下场是本仓已经吃过一次的教训(sniffer 段名规则在五处各存一份, 漏一处
+ * 就是静默失效)。这里让"编码"和"解码"物理相邻, 改一个必须看见另一个。
+ *
+ * ⛔ 二者**不是**互逆函数, 这是设计而非缺陷: `WithdrawToSocket(4)` 是老端的泛化
+ * 撤销, 它**有意**不带原因; 解码方向因此只能落到"原因未区分", 不许猜一个具体原因
+ * (猜成"占用"就是 F2 要修的那个错误归因)。
+ * ------------------------------------------------------------------------- */
+
+/* 本端要回退时, 该往握手帧里写哪个信号(取值 = IpcPubSubIdInitMsg::PathState)。
+ * `FallbackReason::None` 映射到 legacy 的 4 —— 它是"撤销但不区分原因"的兜底,
+ * 正常路径不会走到(None 的含义是"没发生回退")。 */
+IPC_EXPORT uint8_t wire_signal_for_fallback(path::FallbackReason reason) noexcept;
+
+/* 从对端帧里读到的信号 -> 本端该记的 (decision, fallback)。
+ * 返回 true  = 这个信号是**撤销**, 两个出参已被填好, 调用方应立刻停止等待;
+ * 返回 false = 它不是撤销(1/2 = 协商中的正常信号, 3 = 保留值, 0 = 尚未提议,
+ *              以及**本端不认识**的任何值) ⇒ 调用方继续按原逻辑等/建腿。
+ *
+ * ⛔ 不认识的值返回 false 而不是"当成撤销": 未知值可能是将来新增的**积极**信号,
+ * 把它读成拒绝会凭空造出一条错误的回退原因。返回 false 的后果是等满 T_est 后按
+ * 超时安全回退 —— 与老端的行为逐字一致(见 udp_id_init_msg.hpp 的兼容性论证)。 */
+IPC_EXPORT bool decode_peer_withdraw(uint8_t sig, path::DecisionReason& decision,
+                                     path::FallbackReason& fallback) noexcept;
+
 /* ------------------------------------------------------------------------- */
 
 class IPC_EXPORT auto_ser_ipc : public ser_ipc_base

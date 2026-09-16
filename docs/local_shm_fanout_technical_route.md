@@ -114,4 +114,35 @@ T1 落地后，§2 的事实清单需要补一条**与收益论证直接相关**
 
 另有命名兼容性缺陷保持单独立项：ser/cli topic 带前导 `/` 时，`shm_service_prefix()` 生成含第二个斜杠的 POSIX SHM 名，触发 `shm_open(EINVAL)` 并静默回退 socket；本轮不改变既有段名契约，需后续设计旧/新名迁移与跨版本兼容。
 
+> ⚠️ **2026-09-16 订正（writer-claude）**：上句"需后续设计旧/新名迁移"的前提**已被推翻** —— 含 `/` 的 topic **从来没有段**（`shm_ser_cli_ipc.cc:275-278` 控制面 open 失败即 `throw`，先于 `:280-281` 的 `clear_storage`），**无旧段名可发现、无迁移可做、无残留可清**；真正要做的是"改名 + 补可诊断日志"。验收边界见本文 §8，契约与用例见 `udp_shm_followup_tasks.md` §A/§B。
+
 该缺陷已用同一宿主环境完成承重对照：`build/live_runs/20260915_232219_2580718`（topic 带前导 `/`）出现两行 `shm_open[22]`、`FINAL kind=Socket`、`shm_events=0` 且业务仍为 8/8；与无斜杠基线相比，前导 `/` 至少构成充分阻断因素（必要性及其他非法字符组合仍需另测）。同时确认失败分支把原因误标为 `ChannelOccupied/ShmChannelOccupied` 且未递增 `switch_attempts/switch_fallbacks`，建议作为后续可观测性修复项。
+
+## 8. F1/F2/F3 验收边界与 F4 契约同步（2026-09-16）
+
+本节把 §7 两条缺陷的**验收边界**收口，并同步 §2 的 sniffer 相关约束。设计细节、完整代码锚点与用例定义见 `udp_shm_followup_tasks.md` §A/§B，此处只记与本文路线相关的结论与订正。
+
+### 8.1 订正 §7 的"迁移"前提（F1）
+
+§7 末句"需后续设计旧/新名迁移与跨版本兼容"的**前提不成立**：含 `/` 的 topic **从来没有段** —— POSIX `shm_open` 必 `EINVAL`，且 `src/dzIPC/shm_ser_cli_ipc.cc:275-278` 的控制面 open 失败即 `throw`，位置**先于** `:280-281` 的两次 `clear_storage`（连破坏性路径都到不了）⇒ **无旧段名可发现、无迁移可做、无残留可清**。要做的是「改名（POSIX 逐字符 `/`→`_`，Windows 原样；不截断、不哈希）+ 补可诊断日志」，而别名守卫**已存在**（`auto_ser_cli_ipc.cc:303` → `:121-128` 以**派生段名**探测）。合法 topic 的段名**逐字节不变**，故 §7 已记录的活体证据与 `_topic` 相关结论**不受影响**。
+
+### 8.2 F1 的验收边界：**不阻塞 F2**
+
+F1 的承重断言只取**服务端**指纹（`kind=Shm`、`switch_successes`、段是否存在），**不使用**客户端 `FINAL kind` —— 后者在 F2 修好前不可信（见 8.3）。另：`/topic` 用例必须在**改名后**跑；别名用例（先起 `_foo` 再起 `/foo`）**必须带变异条款**（关掉 `:121-128` 的派生命探测后须转红），否则它过的是"新人惰性"而非"守卫生效" —— 改名前的派生名对 topic 串是**单射**，别名对根本不存在。
+
+### 8.3 F2 的范围 = §7 第二条的对外可观测性
+
+§7 记录的"原因误标为 `ChannelOccupied/ShmChannelOccupied` 且计数器不递增"根因在 `src/dzIPC/auto_ser_cli_ipc.cc:244-265`：`withdraw_to_socket()` 对**任何**原因都发 sig 4，而客户端把**任何** 4 都读成"对端拒绝/占用"（`:660-683`）⇒ "对端建腿失败"被记成"通道占用"。⇒ **F2 负责客户端侧标签与计数，F1 不替它背断言**；§7 的活体对照（`..._2580718`：两行 `shm_open[22]`、`FINAL kind=Socket`、`shm_events=0`、业务 8/8）即 F2 的现网证据。
+
+### 8.4 F3 与本文的关系
+
+F3（UDP `rmem`/`wmem`）与 F1/F2 **互不阻塞**，需运维变更窗口；§7 记录的内核实测值（`rmem_max`/`wmem_max` = `212992`）即 F3 的起点基线。
+
+### 8.5 F4：公共 libipc 默认 `open_or_create` **不得变更**（本节对 §2/§3 是约束）
+
+- **冻结理由**：sniffer 的默认模式是**文档化公共契约**（`include/libipc/sniffer.h:64-67`："opens-or-creates … so calling open() before the publisher is fine"；`include/libipc/shm.h:16` 默认参数即 `create | open`），且"先于发布端 open"是调用侧**正依赖**的能力（`exec/dzipc_topic_cat/src/shm_sniffer.cc:76-79` 的 `open_channels()` 仍**无条件**调用、失败即 `std::exit(1)`）；`ipc::sniffer` 已导出到 Python（`python/src/interface.cc:476-490`、`tools/dzplot/main.py:955`/`:1027`）⇒ 加模式参数必须同时决定 pybind 口径。
+- ⇒ 本方案任何"工具侧不建段"的改动**只能走调用侧 open-only 探测**：`ipc::shm::acquire(name, 0, open)` → `get_mem` → **`release_no_unlink`**（⛔ **不可**用 `release()`，它会在引用计数归零时 `shm_unlink`）。既有同构先例：`src/dzIPC/common/control_plane.cc` 的 `occupied_by_other`、`exec/dzipc_topic_cat/include/control_plane_naming.h` 的 `control_plane_segment_exists`。**不得**改库默认、不得加公共 API。
+- ⛔ **残留射程订正**：真正机制是 **sniffer 永不 unlink**（`src/libipc/sniffer.cpp` 析构走 `release_no_unlink()`）⇒ **任何"工具比发布端活得久"的运行都会永久留下该段**（dzplot / `topic_cat` 的常见用法），"无发布端"只是最显眼的子集 ⇒ §4 里"没有发布端就别 open"这类调用侧门控**不足以收口**。
+- ⚠️ **HEAD 现状（2026-09-16 复核）**：工具侧控制面探测**已落地**（`shm_sniffer.cc:57-75` 用 `control_plane_segment_exists()` 门控，段不存在只提示、**不建**控制面段），但**数据通道侧仍未收口** —— `open_channels()`（`:76-79`）依旧无条件调用 ⇒ 无发布端时仍会**建出** `QU_CONN` 段，**对应验收用例 A1 在 HEAD 尚未通过**。
+
+⚠️ **锚点基准与漂移**：本节 `file:line` 的复核基准是 HEAD `9d91212`（复核时工作区对该文件无改动）。截至本次同步，**F1/F2 正在 `src/dzIPC/auto_ser_cli_ipc.cc` 与 `src/dzIPC/common/name_operator.{h,cc}` 上落码** ⇒ 落地后 ser/cli 侧行号**需重核**；libipc 侧锚点（`shm.h`、`sniffer.h`、`sniffer.cpp`、`shm.cpp`）不受影响。

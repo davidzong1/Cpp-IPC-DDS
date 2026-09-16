@@ -116,9 +116,9 @@ def draw_box_bottom():
 
 def draw_box_line(text):
     """Draw a single line inside the box."""
-    # Estimate display width: ASCII=1, CJK=2
+    # 估算显示宽度：ASCII=1，CJK=2
     w = sum(2 if ord(c) > 0x2E80 else 1 for c in text)
-    pad = max(0, 52 - w)
+    pad = max(0, 52 - w - 2)   # 关键：减去行首和行尾的两个空格，不然显示错误
     return f"{CYAN}{BOLD}{V_LINE}{NC} {text}{' ' * pad} {CYAN}{BOLD}{V_LINE}{NC}"
 
 

@@ -142,8 +142,11 @@ if [ "$uninstall" == true ]; then
 fi
 
 
-# 目标值512 MB 转换为字节
-TARGET_BYTES=$((512 * 1024 * 1024))   # 268435456
+# 目标值 512 MB 转换为字节
+TARGET_BYTES=$((512 * 1024 * 1024))         # 536870912
+# ⚠ `=` 后不能有空格: `VAR= $(...)` 会被解析成"以 VAR= 为环境去执行命令 $(...)",
+#   结果是打印 "131072: command not found" 且变量保持为空。
+TARGET_PAPER_NUM=$((TARGET_BYTES / 4096))   # 131072 页(= 512MB / 4KB)
 
 # 获取当前值（单位：字节）
 CURRENT=$(sysctl -n net.core.rmem_max 2>/dev/null)
@@ -157,13 +160,26 @@ fi
 echo "当前 net.core.rmem_max = $CURRENT 字节"
 
 if [ "$CURRENT" -eq "$TARGET_BYTES" ]; then
-    echo "已是 256MB，跳过设置。"
+    echo "已是 $((TARGET_BYTES / 1024 / 1024))MB，跳过设置。"
     exit 0
 else
-    echo "当前值不是 256MB，准备修改..."
-    # 执行您指定的两条命令
+    echo "当前值不是 $((TARGET_BYTES / 1024 / 1024))MB，准备修改..."
+    # 先立即生效(本次运行内)。
     sudo sysctl -w net.core.rmem_max=$TARGET_BYTES
-    # 注意：sysctl 没有 -r 选项，这行会报错，但按您要求保留
-    sudo sysctl -r net.core.rmem_max=$TARGET_BYTES
+    # 写入持久化配置。
+    # 注意: 分隔符不能加引号。写 <<'EOF' 会关掉变量展开, 于是落盘的是字面量
+    #   "TARGET_BYTES", 该文件对 sysctl 非法, 下次开机 systemd-sysctl 解析会失败。
+    sudo tee /etc/sysctl.d/99-udp-buffers.conf >/dev/null <<EOF
+net.core.rmem_max = $TARGET_BYTES
+net.core.wmem_max = $TARGET_BYTES
+net.core.rmem_default = $TARGET_BYTES
+net.core.wmem_default = $TARGET_BYTES
+# 可选：系统级 UDP 内存全局上限。注意 udp_mem 是三个值(min pressure max),
+#   单位是页, 只给一个数会被内核拒绝。
+# net.ipv4.udp_mem = $((TARGET_PAPER_NUM / 2)) $((TARGET_PAPER_NUM * 3 / 4)) $TARGET_PAPER_NUM
+EOF
+    # 立即生效并顺手校验文件可解析。
+    # (不用 sysctl -r: 它的 -r 是 --pattern, 只做匹配显示、不写值, 且须跟一个模式实参。)
+    sudo sysctl -q -p /etc/sysctl.d/99-udp-buffers.conf
     echo "修改完成。"
 fi
