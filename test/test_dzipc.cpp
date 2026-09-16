@@ -648,11 +648,14 @@ TEST(DzIpcSocket, CtrlCSignalCapture)
 }
 
 /* ------------------------------------------------------------------------- *
- * T0 决策 1: IPC_AUTO 传给发布/订阅必须**显式拒绝**。
+ * T0 决策 1: IPCType::Auto 传给发布/订阅必须**显式拒绝**。
  *
- * IPC_AUTO 是导出的公共常量(dzipc.h:19), 用户看得见就会试。它的实现依赖 ser-cli
- * 的握手通道做两阶段路径裁定, 而 pub/sub 没有这条通道 ⇒ 这里不可能有正确实现,
- * 只能拒绝。
+ * 注: dzipc.h 已不再导出 IPC_AUTO 常量(公开入口只剩 IPC_SHM/IPC_SOCKET/
+ * IPC_SOCKET_ONLY), 但该**枚举值**仍然存在 —— 它是 IPC_SOCKET 在 ser-cli 上的
+ * 归一化目标, 调用方也能直接写 IPCType::Auto, 所以这条拒绝逻辑与它的用例都必须留着。
+ *
+ * 它的实现依赖 ser-cli 的握手通道做两阶段路径裁定, 而 pub/sub 没有这条通道 ⇒
+ * 这里不可能有正确实现, 只能拒绝。
  *
  * 本用例钉三件事, 缺一都会退化成"看起来能用":
  *   ① 必须**抛异常**, 而不是安静地按 socket 建链(那样用户会以为拿到了自动选路,
@@ -671,11 +674,11 @@ TEST(DzIpcAutoType, PubSubRejectsIpcAutoExplicitly)
     std::string pub_what;
     try
     {
-        PublisherIPCPtr pub = PublisherIPCPtrMake(td, "AutoTypePubSub", 1, IPC_AUTO, false);
+        PublisherIPCPtr pub = PublisherIPCPtrMake(td, "AutoTypePubSub", 1, IPCType::Auto, false);
         /* 走到这里就已经违规: 没有抛异常。下面用 InitChannel 兼容"延后拒绝"的
          * 实现(若实现改成构造期不抛、建链期才抛, 本用例同样能判出来)。 */
         pub->InitChannel();
-        ADD_FAILURE() << "IPC_AUTO 传给发布者没有报错 —— 公共 API 静默降级脚枪仍在";
+        ADD_FAILURE() << "IPCType::Auto 传给发布者没有报错 —— 公共 API 静默降级脚枪仍在";
     }
     catch (const std::invalid_argument& e)
     {
@@ -689,8 +692,8 @@ TEST(DzIpcAutoType, PubSubRejectsIpcAutoExplicitly)
     EXPECT_TRUE(pub_threw) << "期望 std::invalid_argument, 实得: " << pub_what;
 
     /* ② 报错必须可操作: 认得 Auto, 且指路到显式传输。 */
-    EXPECT_NE(pub_what.find("IPC_AUTO"), std::string::npos)
-        << "报错未点名 IPC_AUTO, 调用方无法判断是自己的错还是传了非法枚举值: " << pub_what;
+    EXPECT_NE(pub_what.find("IPCType::Auto"), std::string::npos)
+        << "报错未点名 IPCType::Auto, 调用方无法判断是自己的错还是传了非法枚举值: " << pub_what;
     EXPECT_NE(pub_what.find("IPC_SHM"), std::string::npos)
         << "报错未指路到 IPC_SHM, 调用方最可能的反应是改成 IPC_SOCKET —— 那是更糟的解法: " << pub_what;
 
@@ -700,9 +703,9 @@ TEST(DzIpcAutoType, PubSubRejectsIpcAutoExplicitly)
     std::string sub_what;
     try
     {
-        SubscriberIPCPtr sub = SubscriberIPCPtrMake(td2, "AutoTypePubSub", 1, 10, IPC_AUTO, false);
+        SubscriberIPCPtr sub = SubscriberIPCPtrMake(td2, "AutoTypePubSub", 1, 10, IPCType::Auto, false);
         sub->InitChannel();
-        ADD_FAILURE() << "IPC_AUTO 传给订阅者没有报错 —— 只堵了一半";
+        ADD_FAILURE() << "IPCType::Auto 传给订阅者没有报错 —— 只堵了一半";
     }
     catch (const std::invalid_argument& e)
     {
@@ -714,7 +717,7 @@ TEST(DzIpcAutoType, PubSubRejectsIpcAutoExplicitly)
         sub_what = e.what();
     }
     EXPECT_TRUE(sub_threw) << "期望 std::invalid_argument, 实得: " << sub_what;
-    EXPECT_NE(sub_what.find("IPC_AUTO"), std::string::npos) << sub_what;
+    EXPECT_NE(sub_what.find("IPCType::Auto"), std::string::npos) << sub_what;
 
     /* ③ 既有两个传输不受影响: 构造与建链都正常(本用例不做收发, 收发由
      *    DzIpcSocket/DzIpcShm 两组既有用例覆盖 —— 这里只确认拒绝没有波及它们)。 */
@@ -730,12 +733,13 @@ TEST(DzIpcAutoType, PubSubRejectsIpcAutoExplicitly)
     }) << "IPC_SOCKET 路径被 Auto 的拒绝逻辑波及";
 
     /* 真·非法枚举值仍走原有的通用报错(Auto 的拒绝是**特例**而不是替换掉原分支)。
-     * 取 3 而不是更大的数: 无固定底层类型的枚举, 超出取值范围的值是 UB。 */
+     * 取 4 而不是更大的数: 无固定底层类型的枚举, 超出取值范围的值是 UB。
+     * ⛔ 不能再用 3 —— SocketOnly 加入后 3 已合法, 那样这条用例会静默失去意义。 */
     auto td5 = TopicDataPtrMake<dzIPC::Msg::TestMsg>(0);
     bool bogus_threw = false;
     try
     {
-        PublisherIPCPtr pub = PublisherIPCPtrMake(td5, "AutoTypeBogus", 1, static_cast<IPCType>(3), false);
+        PublisherIPCPtr pub = PublisherIPCPtrMake(td5, "AutoTypeBogus", 1, static_cast<IPCType>(4), false);
         pub->InitChannel();
     }
     catch (const std::invalid_argument&)

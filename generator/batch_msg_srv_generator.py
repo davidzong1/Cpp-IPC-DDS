@@ -47,6 +47,7 @@ class IPCType(Enum):
 
 IPC_SHM: IPCType
 IPC_SOCKET: IPCType
+IPC_SOCKET_ONLY: IPCType
 
 class IpcMsgBase:
     def set_msg_id(self, msg_id: int) -> None: ...

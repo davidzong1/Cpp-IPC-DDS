@@ -50,6 +50,15 @@ SCRIPT_REGISTRY = [
     },
 ]
 
+if not IS_WINDOWS:
+    SCRIPT_REGISTRY.append(
+        {
+            "name": "run_dzipc_perf",
+            "desc": "Run dzIPC performance tests (Only linux/macOS)",
+            "mode": "script",
+        }
+    )
+
 # For native script matching: scripts named as <base>.<ext>
 EXT = ".bat" if IS_WINDOWS else ".sh"
 

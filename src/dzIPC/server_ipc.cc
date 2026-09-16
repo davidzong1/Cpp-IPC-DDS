@@ -10,13 +10,12 @@
 
 namespace dzIPC {
 namespace {
-/* 日志的 TransportKind 必须读**当下**的传输, 不能读构造期的 IPCType:
- * IPCType::Auto 下两者不再相等(T2 §7 R5) —— 读构造期值会把切到 SHM 之后的日志
- * 一律记成 socket, 排查时把人引到错方向(T4/T5 都要靠这个字段判"到底走没走 SHM")。
- *
- * 取不到活值(腿还没建 / 正在拆)时回落到构造期映射, 与改动前逐字节一致。拆腿时
- * unique_ptr 先置空再析构, 所以"拿到 nullptr"本身就是"正在拆"的判据, 这里不会
- * 解引用一个正在析构的腿。 */
+
+IPCType normalize_sercli_type(IPCType t) noexcept
+{
+    return t == IPCType::Socket ? IPCType::Auto : t;
+}
+
 template<typename Leg>
 logger::TransportKind live_transport_kind(const Leg* leg, IPCType ipc_type) noexcept
 {
@@ -114,25 +113,30 @@ pimpl::server_ipc_impl::server_ipc_impl(const std::string& topic_name_, const st
 {
     impl(p_)->topic_name = topic_name_;
     impl(p_)->domain_id = domain_id;
-    impl(p_)->ipc_type = ipc_type;
+    /* 记录用**归一化**值(IPC_SOCKET → Auto): 日志的回落映射读构造期类型, 不归一化会把
+     * 自动选路记成强制 socket, 排查时把人引到错方向。
+     * 分派用**用户原始意图**: Socket 与 Auto 都落到自动选路, SocketOnly 落到纯 socket。 */
+    const IPCType normalized = normalize_sercli_type(ipc_type);
+    impl(p_)->ipc_type = normalized;
     callback = wrap_server_callback(
         std::move(callback), topic_name_, domain_id,
-        [this, ipc_type]() noexcept { return live_transport_kind(impl(p_) ? impl(p_)->ipc.get() : nullptr, ipc_type); });
+        [this, normalized]() noexcept { return live_transport_kind(impl(p_) ? impl(p_)->ipc.get() : nullptr, normalized); });
     if (ipc_type == IPCType::Shm)
     {
         impl(p_)->ipc = std::make_unique<shm::shm_ser_ipc>(topic_name_, msg, callback, domain_id, verbose,
                                                            enable_thread_qos, cpu_id, thread_priority);
     }
-    else if (ipc_type == IPCType::Socket)
+    else if (ipc_type == IPCType::Socket || ipc_type == IPCType::Auto)
     {
-        impl(p_)->ipc = std::make_unique<socket::socket_ser_ipc>(topic_name_, msg, callback, domain_id, verbose,
-                                                                 enable_thread_qos, cpu_id, thread_priority);
-    }
-    else if (ipc_type == IPCType::Auto)
-    {
+        /* Socket 走这里而不是纯 socket 腿 —— 这就是"IPC_SOCKET 强制自动选路"的落点。 */
         impl(p_)->ipc = std::make_unique<autopath::auto_ser_ipc>(topic_name_, msg, callback, domain_id,
                                                                  autopath::Options{}, verbose, enable_thread_qos,
                                                                  cpu_id, thread_priority);
+    }
+    else if (ipc_type == IPCType::SocketOnly)
+    {
+        impl(p_)->ipc = std::make_unique<socket::socket_ser_ipc>(topic_name_, msg, callback, domain_id, verbose,
+                                                                 enable_thread_qos, cpu_id, thread_priority);
     }
     else
     {
@@ -199,21 +203,23 @@ pimpl::client_ipc_impl::client_ipc_impl(const std::string& topic_name_, const st
 {
     impl(p_)->topic_name = topic_name_;
     impl(p_)->domain_id = domain_id;
-    impl(p_)->ipc_type = ipc_type;
+    /* 同服务端: 记录归一化值, 分派按原始意图。 */
+    const IPCType normalized = normalize_sercli_type(ipc_type);
+    impl(p_)->ipc_type = normalized;
     if (ipc_type == IPCType::Shm)
     {
         impl(p_)->ipc = std::make_unique<shm::shm_cli_ipc>(topic_name_, msg, domain_id, verbose,
                                                            enable_thread_qos, cpu_id, thread_priority);
     }
-    else if (ipc_type == IPCType::Socket)
-    {
-        impl(p_)->ipc = std::make_unique<socket::socket_cli_ipc>(topic_name_, msg, domain_id, verbose,
-                                                                 enable_thread_qos, cpu_id, thread_priority);
-    }
-    else if (ipc_type == IPCType::Auto)
+    else if (ipc_type == IPCType::Socket || ipc_type == IPCType::Auto)
     {
         impl(p_)->ipc = std::make_unique<autopath::auto_cli_ipc>(topic_name_, msg, domain_id, autopath::Options{},
                                                                  verbose, enable_thread_qos, cpu_id, thread_priority);
+    }
+    else if (ipc_type == IPCType::SocketOnly)
+    {
+        impl(p_)->ipc = std::make_unique<socket::socket_cli_ipc>(topic_name_, msg, domain_id, verbose,
+                                                                 enable_thread_qos, cpu_id, thread_priority);
     }
     else
     {

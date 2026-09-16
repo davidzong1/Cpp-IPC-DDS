@@ -1,18 +1,11 @@
-/* sercli_live_driver —— ser-cli Auto(IPC_AUTO) 的**跨进程**活体驱动。
- *
- * 为什么需要它(仓库事实, 不是偏好):
- *   - `exec/` 下只有 dzipc_list / dzipc_pub / dzipc_topic_cat, **没有任何 ser-cli 可执行**;
- *   - `python/ipc_demo.py` 的 pick_ipc_type() 只映射 shm/socket, 传不了 Auto;
- *   - Auto ser-cli API 在仓库内唯一的既有消费者是 gtest `test/test_sercli_auto_path.cpp`,
- *     而它的 Rig 是**同进程双线程** —— 拿它当"活体进程场景"是单测替代, 不成立。
- * 所以本文件是补齐"server 与 client 两个独立 OS 进程 + IPC_AUTO"这一条的夹具。
+/* sercli_live_driver —— ser-cli 自动选路(IPC_SOCKET 在 ser-cli 上的语义)的跨进程活体驱动。
  *
  * 两种构造方式(都真的走 Auto, 没有 shm/socket 硬编码):
  *   --via direct  (默认): 直接构造 `autopath::auto_ser_ipc` / `auto_cli_ipc`。
- *                          这就是 IPC_AUTO 在公共工厂里被派发到的**同一个类**
+ *                          这就是 IPC_SOCKET 在 ser-cli 工厂里被派发到的**同一个类**
  *                          (src/dzIPC/server_ipc.cc:131-136 与 :213 起), 额外好处是
  *                          能读 status() 拿到 decision/fallback。
- *   --via factory        : 走公共工厂 `ServerIPCPtrMake(..., IPC_AUTO, ...)`
+ *   --via factory        : 走公共工厂 `ServerIPCPtrMake(..., IPC_SOCKET, ...)`
  *                          (dzipc.h:49), 证明**产品公共 API 的 Auto 路径**本身可用。
  *                          代价: 公共包装只暴露 transport_current(), 于是
  *                          decision=/fallback= 只能打 na。
@@ -273,7 +266,7 @@ int run_server(const Args& a)
     if (a.via == "factory")
     {
         h.factory = dzIPC::ServerIPCPtrMake(a.topic, make_sd(), echo_plus_one, static_cast<size_t>(a.domain),
-                                            dzIPC::IPC_AUTO, a.verbose);
+                                            dzIPC::IPC_SOCKET, a.verbose);
     }
     else
     {
@@ -317,7 +310,7 @@ int run_client(const Args& a)
     ClientHandle h;
     if (a.via == "factory")
     {
-        h.factory = dzIPC::ClientIPCPtrMake(a.topic, make_sd(), static_cast<size_t>(a.domain), dzIPC::IPC_AUTO,
+        h.factory = dzIPC::ClientIPCPtrMake(a.topic, make_sd(), static_cast<size_t>(a.domain), dzIPC::IPC_SOCKET,
                                             a.verbose);
     }
     else

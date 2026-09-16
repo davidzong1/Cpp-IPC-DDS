@@ -671,22 +671,35 @@ TEST(DzipcLogRotation, CrossBagNoLossNoDup)
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// Test 11: 非 Auto 路径的记录**逐字节不变** —— 修 R5 不得动到既有传输的取值。
+// Test 11: ser-cli 的传输记录必须反映**实际**承载。
 //
-// 判据取 TransportPacket 的 transport 字节本身: IPC_SHM 必须记 kShm(0),
-// IPC_SOCKET 必须记 kSocket(1)。这条同时是"改动没有外溢"的证据 —— 没有它,
-// "只影响 Auto"就只是一句推理。
+// 【契约变更】本用例原判据是"IPC_SOCKET 必须记 kSocket(1)"。该判据依赖一个已被
+// **有意去掉**的性质: ser-cli 的 IPC_SOCKET 曾经等于"强制纯 socket"。现在工厂把
+// IPC_SOCKET 归一化成自动选路(server_ipc.cc 的 normalize_sercli_type), 同机必然切
+// SHM —— 于是那条断言测的是一个不再存在的契约, 它变红是**正确**的, 不是回归。
+//
+// 判据随之改为守**新**契约, 三个 case 各守一头:
+//   ① IPC_SHM          —— 强制共享内存, 构造期即 Shm, 记 kShm;
+//   ② IPC_SOCKET       —— 必须归一到自动选路, 同机切 SHM 后记 kShm。
+//      ② 同时是"归一化没被删掉"的回归门: 谁去掉 normalize_sercli_type, 它就会退回
+//      kSocket 而失败。
+//   ③ IPC_SOCKET_ONLY  —— 强制纯 socket, 不切, 记 kSocket。
+//      ③ 是"纯 socket 的日志取值"的见证 —— 契约变更一度让它失去覆盖, IPC_SOCKET_ONLY
+//      补回入口之后它重新可测; 谁把 SocketOnly 也接进自动选路, 它就会失败。
 // ---------------------------------------------------------------------------
-TEST(DzipcLog, NonAutoTransportIsUnchanged)
+TEST(DzipcLog, SerCliTransportIsRecordedAsActuallyUsed)
 {
     struct Case
     {
         const char* tag;
         IPCType type;
         uint8_t expected;
+        bool wait_for_shm;   // IPC_SOCKET 走自动选路: 须等两侧都切到 SHM 再发 RPC
     };
-    const Case cases[] = {{"shm", IPC_SHM, static_cast<uint8_t>(logger::TransportKind::kShm)},
-                          {"sock", IPC_SOCKET, static_cast<uint8_t>(logger::TransportKind::kSocket)}};
+    const Case cases[] = {
+        {"shm", IPC_SHM, static_cast<uint8_t>(logger::TransportKind::kShm), false},
+        {"sock", IPC_SOCKET, static_cast<uint8_t>(logger::TransportKind::kShm), true},
+        {"sock_only", IPC_SOCKET_ONLY, static_cast<uint8_t>(logger::TransportKind::kSocket), false}};
 
     for (const Case& c : cases)
     {
@@ -705,6 +718,24 @@ TEST(DzipcLog, NonAutoTransportIsUnchanged)
             auto client = ClientIPCPtrMake(service_topic, cli_data, 0, c.type, false);
             client->InitChannel("");
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+            if (c.wait_for_shm)
+            {
+                /* 等**两侧都**到 SHM。只等一侧会让 RPC 走在另一侧的 socket 上, 那时
+                 * 记成 socket 是正确行为, 判据却会把它当失败 —— 判据必须钉在"切换完成
+                 * 之后"这个状态上(与 Test 10 AutoPathLogsTheLiveTransport 同法)。 */
+                const auto dl = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+                while (std::chrono::steady_clock::now() < dl
+                       && !(client->transport_current() == path::Kind::Shm
+                            && server->transport_current() == path::Kind::Shm))
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                }
+                ASSERT_EQ(client->transport_current(), path::Kind::Shm)
+                    << c.tag << ": IPC_SOCKET 的 ser-cli 未归一到自动选路(同机应切 SHM)";
+                /* 两腿都报 Shm 与"SHM 数据面已能收发"不是同一时刻。 */
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            }
 
             auto req = std::make_shared<TestLogMsg>();
             auto srv_req = ServerDataPtrMake<TestLogMsg, TestLogMsg>(100);
@@ -754,9 +785,9 @@ TEST(DzipcLog, NonAutoTransportIsUnchanged)
 TEST(DzipcLog, PubSubRejectsAutoInsteadOfMislabeling)
 {
     auto td = TopicDataPtrMake<TestLogMsg>(42);
-    EXPECT_THROW(PublisherIPCPtrMake(td, "/t5_pubsub_auto", 0, IPC_AUTO, false), std::invalid_argument)
-        << "pub/sub 接受了 IPC_AUTO: 它会按 shm/socket 分支之外的路径走, 日志也无活值可读";
-    EXPECT_THROW(SubscriberIPCPtrMake(td, "/t5_pubsub_auto", 0, 8, IPC_AUTO, false), std::invalid_argument);
+    EXPECT_THROW(PublisherIPCPtrMake(td, "/t5_pubsub_auto", 0, IPCType::Auto, false), std::invalid_argument)
+        << "pub/sub 接受了 IPCType::Auto: 它会按 shm/socket 分支之外的路径走, 日志也无活值可读";
+    EXPECT_THROW(SubscriberIPCPtrMake(td, "/t5_pubsub_auto", 0, 8, IPCType::Auto, false), std::invalid_argument);
 }
 
 // ---------------------------------------------------------------------------
@@ -793,10 +824,10 @@ TEST(DzipcLog, AutoPathLogsTheLiveTransport)
 
     std::shared_ptr<pimpl::server_ipc_impl> server;
     std::shared_ptr<pimpl::client_ipc_impl> client;
-    server = ServerIPCPtrMake(service_topic, srv_data, cb, 0, IPC_AUTO, false);
+    server = ServerIPCPtrMake(service_topic, srv_data, cb, 0, IPC_SOCKET, false);
     server->InitChannel();
     auto cli_data = ServerDataPtrMake<TestLogMsg, TestLogMsg>(100);
-    client = ClientIPCPtrMake(service_topic, cli_data, 0, IPC_AUTO, false);
+    client = ClientIPCPtrMake(service_topic, cli_data, 0, IPC_SOCKET, false);
     client->InitChannel("");
 
     /* 等**两侧都**切到 SHM —— 服务端先建、客户端后接, 只等一侧会让 RPC 走在
@@ -870,7 +901,7 @@ TEST(DzipcLog, AutoPathLogsTheLiveTransport)
         /* 本环境没切到 SHM(例如池证据不足) ⇒ 该用例的判据无从检验, 如实跳过
          * 而不是假装通过。 */
         std::remove(path.c_str());
-        GTEST_SKIP() << "IPC_AUTO 未在本环境切到 SHM, 无法判定 transport 记录正确性";
+        GTEST_SKIP() << "IPC_SOCKET(自动选路) 未在本环境切到 SHM, 无法判定 transport 记录正确性";
     }
 
     /* 切换完成后本用例只发了一次 RPC, 它产生的每条记录(客户端请求/响应、服务端

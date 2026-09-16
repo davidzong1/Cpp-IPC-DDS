@@ -75,6 +75,7 @@ PYBIND11_MODULE(_dzipc_core, m)
 
     m.attr("IPC_SHM") = py::cast(dzIPC::IPC_SHM);
     m.attr("IPC_SOCKET") = py::cast(dzIPC::IPC_SOCKET);
+    m.attr("IPC_SOCKET_ONLY") = py::cast(dzIPC::IPC_SOCKET_ONLY);
 
     py::class_<IpcMsgBase, std::shared_ptr<IpcMsgBase>>(m, "IpcMsgBase")
         .def("set_msg_id", &IpcMsgBase::set_msg_id)

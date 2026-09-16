@@ -231,7 +231,7 @@ TEST(HandshakeWatch, RealSerCliPairIsObservableAndUnaffected)
                     res->response.assign(req->request.size(), 1.0);
                     ++served;
                 },
-                domain, IPC_SOCKET, false);
+                domain, IPC_SOCKET_ONLY, false);
             ipc->InitChannel();
             while (!stop_server.load(std::memory_order_acquire))
             {
@@ -247,7 +247,7 @@ TEST(HandshakeWatch, RealSerCliPairIsObservableAndUnaffected)
 
     ServerDataPtr cli_msg
         = ServerDataPtrMake<dzIPC::Srv::RequestResponseTestRequest, dzIPC::Srv::RequestResponseTestResponse>(msg_id);
-    ClientIPCPtr client = ClientIPCPtrMake(topic, cli_msg, domain, IPC_SOCKET, false);
+    ClientIPCPtr client = ClientIPCPtrMake(topic, cli_msg, domain, IPC_SOCKET_ONLY, false);
     client->InitChannel();
 
     std::vector<double> payload(64, 3.0);
@@ -274,7 +274,17 @@ TEST(HandshakeWatch, RealSerCliPairIsObservableAndUnaffected)
     EXPECT_TRUE(snap.server.seen) << "没看到服务端(host_flag)的握手帧";
     EXPECT_TRUE(snap.client.seen) << "没看到客户端(cli_flag)的握手帧";
     EXPECT_EQ(0u, snap.undecodable) << "收到了本通道之外的东西(解码判据过松?)";
-    /* 这一对是显式 IPC_SOCKET, 双方都不提议 SHM ⇒ path_state 停在 Unknown。
+    /* ⛔ 这一对必须用 IPC_SOCKET_ONLY, **不能**用 IPC_SOCKET。
+     *
+     * 本用例的判据是"双方都不提议 SHM ⇒ path_state 停在 Unknown"。而 ser-cli 的
+     * IPC_SOCKET 已被归一化为自动选路(server_ipc.cc 的 normalize_sercli_type):
+     * 同主机时服务端会 PeerInPool → 提议 SHM, 客户端跟进 ⇒ path_state 变成
+     * ProposeShm/ConfirmShm, 这条断言的前提就不成立了。
+     *
+     * 实测它一度仍然通过 —— 但那是**采样时序侥幸**: 快照取在协商完成之前, 此刻
+     * path_state 还是 Unknown。机器慢一点、或轮询晚一点, 它就会翻。IPC_SOCKET_ONLY
+     * 才是这个意图的正确表达: 强制纯 socket, 永不提议 SHM, 判据变成确定性的。
+     *
      * 注意旧帧与"没提议"在这里取值相同, 用 has_path_state 区分二者。 */
     EXPECT_TRUE(snap.server.has_path_state);
     EXPECT_TRUE(snap.client.has_path_state);
