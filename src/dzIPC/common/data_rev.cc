@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -12,6 +13,8 @@
 #include <unordered_set>
 #include <vector>
 #include "dzIPC/common/crc32c.h"
+#include "dzIPC/common/nodelet_config.h"
+#include "ipc_msg/ipc_msg_base/dzflat.h"
 #include "ipc_msg/ipc_msg_base/udp_rtps_ack_msg.hpp"
 
 namespace dzIPC {
@@ -612,6 +615,24 @@ uint64_t ack_first_wait_ms(const ipc::socket::UDPNode* node)
  * 采样截断残余: 迟到 NACK (晚于首匹配 ACK 的 return) 会被下一条消息的入口
  * drain 丢弃 —— 只漏报不误报; DZA2 随 ACK 同行, 不依赖 NACK 是否赶上。 */
 
+/* ---- 段8/段9 E2 ④ 传输时滞实验: F 延迟线 (env 门控, D=0 惰性) ----
+ * 只动反馈时滞 τ (F 信号→α EWMA 的跨轮相位滞后) 一个量。操作化:
+ * f_scaled 入控制律前按 D 轮延迟 (环形缓冲); 方案 B (tester 3a 确认):
+ * :777 降速触发同用延迟值 → 对端丢包被检测→α 反映 整体后移 D 轮。
+ * D = env DZIPC_TAU_DELAY_ROUNDS, 默认 0。⛔ D=0 时绕过环形缓冲, 编译后
+ * 行为与未补丁代码逐字节一致 (tester 惰性等价性门前置)。⛔ 控制律参数
+ * 一律不动, 仅延迟 F 输入; 生产默认关闭。 */
+constexpr uint32_t kMaxTauDelayRounds = 32;   // 延迟档 0/4/8/16 的上限裕量
+uint32_t tau_delay_rounds()
+{
+    const char* s = std::getenv("DZIPC_TAU_DELAY_ROUNDS");
+    if (s == nullptr)
+    {
+        return 0u;
+    }
+    return std::min<uint32_t>(static_cast<uint32_t>(std::strtoul(s, nullptr, 10)), kMaxTauDelayRounds);
+}
+
 struct RateLimitState
 {
     std::mutex mtx;                  // 保护本状态 (同 rtt_of 锁粒度结论)
@@ -628,6 +649,9 @@ struct RateLimitState
     std::size_t lost_last{0};         // 诊断快照 (同一 pattern 缺页数), 不参与控制
     /* ---- 段5 R1 新增: 活 α 的高位累积器 ---- */
     std::uint32_t alpha_accum{0};     // α×4096, EWMA 在 ×16 高位累积, 消除 /16 整数截断死区
+    /* ---- 段8 E2 (F 延迟线, env 门控, 仅 D>0 使用; D=0 惰性绕过) ---- */
+    std::uint32_t tau_delay_buf[kMaxTauDelayRounds]{};  // F 延迟环形缓冲
+    std::uint32_t tau_delay_head{0};                    // 写头
 };
 
 /* 复刻 rtt_of / peers_of 的查找范式: static mutex + unordered_map,
@@ -769,12 +793,29 @@ void adapt_rate_dctcp(ipc::socket::UDPNode* node, uint16_t page_cnt, uint32_t f_
     const bool at_floor = st.bps <= floor_bps;
     const bool track = frag_track_enabled().load(std::memory_order_relaxed);
     const uint32_t f_scaled = std::min<uint32_t>(f_max_scaled, 256);
+    /* E2 ④ (段8/段9, env 门控): F 延迟线。f_scaled 入控制律前按 D 轮延迟
+     * (环形缓冲), D = env DZIPC_TAU_DELAY_ROUNDS, 默认 0。D=0 时绕过缓冲,
+     * f_ewma = f_scaled, 与未补丁代码逐字节同构 (惰性)。方案 B: :777 触发
+     * 同用延迟值, 使「检测→α 反映」整体后移 D 轮 (τ 响应滞后)。 */
+    const uint32_t d = tau_delay_rounds();
+    uint32_t f_ewma;
+    if (d == 0)
+    {
+        f_ewma = f_scaled;   // 惰性: 不触碰环形缓冲, 编译后行为与未补丁一致
+    }
+    else
+    {
+        const uint32_t slot = (st.tau_delay_head + kMaxTauDelayRounds - d) % kMaxTauDelayRounds;
+        f_ewma = st.tau_delay_buf[slot];
+        st.tau_delay_buf[st.tau_delay_head] = f_scaled;
+        st.tau_delay_head = (st.tau_delay_head + 1) % kMaxTauDelayRounds;
+    }
     /* EWMA 每条消息都更新: F=0 时 α 按 (1−g) 衰减, 无拥塞余震。 */
     /* 段5 R1 修死区 (§4.3): α EWMA 改 ×4096 高位累积器, 消除 /16 整数截断死区。
      * 显式 cast 必须保留: 无 cast 时 f_scaled*16 若被提升为 unsigned 会改变负数语义 (§8.3)。 */
-    st.alpha_accum += (static_cast<int32_t>(f_scaled) * 16 - static_cast<int32_t>(st.alpha_accum)) / 16;
+    st.alpha_accum += (static_cast<int32_t>(f_ewma) * 16 - static_cast<int32_t>(st.alpha_accum)) / 16;
     st.alpha_scaled = static_cast<uint32_t>(st.alpha_accum >> 4);
-    if (f_scaled > 0)
+    if (f_ewma > 0)
     {
         const std::size_t old_bps = st.bps;
         /* 降幅 = bps × α/2, 向上取整; α 至少按 1 (≈0.4%) 计 —— F>0 而 α=0
@@ -785,7 +826,8 @@ void adapt_rate_dctcp(ipc::socket::UDPNode* node, uint16_t page_cnt, uint32_t f_
          * 最小降仍 = (bps×1+511)/512 ≥ bps/512 (裁定1(c), ⛔ 不许清零)。
          * 判拥塞 / 缺数据 (无首捕获 pattern 或 lost=0 分母退化) → 维持 R1 全量降
          * (裁定1(b) 保守按拥塞, 不 fail-open 成随机)。判别量只进 α_eff 增益,
-         * ⛔ 不进 bps= 赋值 (裁定1(a)); runs 从位图 NACK 派生 (liveness 仅 NACK 派生)。 */
+         * ⛔ 不进 bps= 赋值 (裁定1(a)); runs 从 NACK 派生 (位图或显式, 段6 任务1a;
+         * liveness 仅 NACK 派生)。 */
         const bool runs_random = kRunsCaptureEnabled && runs_first > 0 && lost_first > 0
                                  && runs_first * 1000 > static_cast<std::size_t>(kRatePlan3RunsRandom) * lost_first;
         const uint32_t alpha_eff = runs_random ? 1u : std::max<uint32_t>(st.alpha_scaled, 1);
@@ -948,8 +990,9 @@ void drain_self_loopback(ipc::socket::UDPNode& node)
 }
 
 /* ---- 段5 任务2h: runs 判别信号 (方案3 前置, 纯诊断, 不进 bps= 赋值) ----
- * runs = 位图 NACK 里连续缺失段的段数 (真拥塞≈1, 真随机≈lost)。RunsFirst 是
- * 每消息每对端的 T.3 首捕获记录 (见 drain_record_acks / chunk_send_ex)。 */
+ * runs = NACK 里连续缺失段的段数 (真拥塞≈1, 真随机≈lost), 位图或显式编码都采
+ * (段6 任务1a 扩展: 显式 NACK missing_pages 同导出)。RunsFirst 是每消息每对端的
+ * T.3 首捕获记录 (见 drain_record_acks / chunk_send_ex)。 */
 struct RunsFirst
 {
     bool captured{false};
@@ -976,6 +1019,32 @@ std::size_t count_bitmap_runs(const IpcRtpsNackBitmapMsg& nb, std::size_t page_c
             ++runs;   // 0→1 跳变 = 新 run 起点
         }
         prev_missing = missing;
+    }
+    return runs;
+}
+
+/* 显式 NACK 的 runs: missing_pages 由 send_nack_for_missing 按页号升序、去重
+ * push (每页至多一次), 连续缺失段数 = 相邻两页页号相差 1 的分组数。越界页与
+ * miss_cnt 同过滤 (页号 ∈ [1, page_cnt], 越界丢弃不参与分段)。lost 沿用调用
+ * 方已算好的 miss_cnt —— runs 与 lost 必须出自同一 pattern (同 count_bitmap_runs
+ * 同源纪律; ⛔ 采集/诊断, 不进 bps= 赋值)。 */
+std::size_t count_explicit_runs(const std::vector<uint16_t>& pages, std::size_t page_cnt)
+{
+    std::size_t runs = 0;
+    bool have_prev = false;
+    uint16_t prev = 0;   // 0 恒越界 (页号从 1 起), 可作"无上一有效页"哨兵
+    for (uint16_t page : pages)
+    {
+        if (page == 0 || static_cast<std::size_t>(page) > page_cnt)
+        {
+            continue;
+        }
+        if (!have_prev || page != static_cast<uint16_t>(prev + 1))
+        {
+            ++runs;   // 新 run 起点
+        }
+        have_prev = true;
+        prev = page;
     }
     return runs;
 }
@@ -1037,8 +1106,9 @@ void aggregate_runs_first(const std::unordered_map<uint32_t, RunsFirst>& m, std:
  * (record_peer_nack 不调, last_nack_ts 不更新 —— 与循环内的记录语义分离)。
  * lease_ms == 0 或 f_max_scaled 为 nullptr 时退化为纯记账 (保持旧行为)。
  * F 是"取 max 聚合"而非短路布尔 —— 每条非 ACK 帧都要解析完。
- * 段5 任务2h: runs_first_map != nullptr 时, 顺带对每对端第一条位图 NACK 做 T.3
- * 首捕获 (迟到 NACK 也采 —— 对端首条 NACK 可能晚于 got_ack 才入 drain 窗口)。 */
+ * 段5 任务2h (段6 任务1a 扩展): runs_first_map != nullptr 时, 顺带对每对端第一条
+ * NACK (位图或显式, 先到先采) 做 T.3 首捕获 (迟到 NACK 也采 —— 对端首条 NACK
+ * 可能晚于 got_ack 才入 drain 窗口)。 */
 void drain_record_acks(ipc::socket::UDPNode& node, const chunk_meta& meta,
                        const ipc::socket::UDPNode* rtt_key,
                        std::unordered_set<uint32_t>& seen,
@@ -1117,7 +1187,8 @@ void drain_record_acks(ipc::socket::UDPNode& node, const chunk_meta& meta,
                             *f_max_scaled =
                                 std::max(*f_max_scaled, scaled_loss_fraction(static_cast<uint32_t>(miss_cnt),
                                                                               meta.page_cnt));
-                            /* 段5 任务2h: T.3 首捕获 (每对端只采第一条位图 NACK)。 */
+                            /* 段5 任务2h (段6 任务1a): T.3 首捕获 —— 该对端尚未被
+                             * 任一编码 (位图/显式) 捕获时才采。 */
                             if (runs_first_map != nullptr && kRunsCaptureEnabled
                                 && runs_first_map->find(nb_msg.receiver_id) == runs_first_map->end())
                             {
@@ -1147,6 +1218,18 @@ void drain_record_acks(ipc::socket::UDPNode& node, const chunk_meta& meta,
                         *f_max_scaled =
                             std::max(*f_max_scaled, scaled_loss_fraction(static_cast<uint32_t>(miss_cnt),
                                                                           meta.page_cnt));
+                        /* 段6 任务1a: drain 迟到显式 NACK 同做 T.3 首捕获 —— 与位图
+                         * drain 分支共享 runs_first_map (每对端先到先采), 迟到也采
+                         * (对端首条 NACK 可能晚于 got_ack 才入 drain 窗口)。lost 沿用
+                         * miss_cnt (同 pattern、同一边界); 采集/诊断, ⛔ 不进 bps=。 */
+                        if (runs_first_map != nullptr && kRunsCaptureEnabled
+                            && runs_first_map->find(nack_msg.receiver_id) == runs_first_map->end())
+                        {
+                            runs_first_map->emplace(nack_msg.receiver_id,
+                                                    RunsFirst{true, count_explicit_runs(nack_msg.missing_pages,
+                                                                                         meta.page_cnt),
+                                                              miss_cnt});
+                        }
                     }
                 }
             }
@@ -1486,8 +1569,67 @@ ipc::buffer make_owned_copy(const void* src, std::size_t n)
     return ipc::buffer(mem, n, [](void* p, std::size_t) { delete[] static_cast<uint8_t*>(p); });
 }
 
-bool recv_chunk_common(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ack_node,
-                       std::shared_ptr<IpcMsgBase>& msg_ptr, uint64_t tm)
+/* 把分帧流里的**连续段**取出来(去掉每页尾部的 12 字节)。
+ *
+ * 为什么 socket 侧的"借样"仍要付一次拷贝, 而 SHM 侧不用:
+ *   - SHM 上 DZFlat 段是一整块连续 chunk, Sample 直接持有 chunk 引用即可;
+ *   - UDP 的分帧规则(每 1460 字节数据后跟 12 字节页尾, 见
+ *     serialize_data_cut / adapt_memcpy_tos)会把页尾**插进段中间** —— 段在 wire 上
+ *     不连续, 按段首算出的偏移一旦跨页就全错;
+ *   - 而且 first_page / assembled 都是本进程复用的缓冲(udp.h 的
+ *     "Temp buffer avoid copying"), Sample 不能引用它们。
+ * 所以交给 Sample 之前必须落成独立且连续的字节块。这一条是 socket 借样的固有成本,
+ * 不是实现偷懒 —— 见 docs/udp_shm_alignment_task_list.md 的 T1。
+ *
+ * 失败(分帧流不足以容纳该段)返回 false: 不猜、不截断。 */
+bool de_frame_dzflat(const void* stream, std::size_t stream_size, std::size_t seg_len, ipc::buffer& out)
+{
+    constexpr std::size_t kDataPerPage = UDP_MAX_SIZE - TAIL_SIZE;
+    if (seg_len < sizeof(dzflat::SegHeader))
+    {
+        return false;
+    }
+    /* 分帧流长度 = 段长 + 每页一个页尾。页数必须用**发送侧的同一公式**
+     * (IpcMsgBase::correct_total_size: total_len / IPC_MSG_MAX_SIZE + 1, 整数除),
+     * 而不是 ceil —— 段长恰为 1460 的整数倍时两者差 1(发送侧仍会多出一个只装页尾的
+     * 空页)。写成 ceil 会在那种长度上少算一个页尾, 于是守卫放行的上界偏小、最后 12
+     * 字节被误当成数据。 */
+    const std::size_t pages = seg_len / kDataPerPage + 1;
+    if (seg_len + pages * TAIL_SIZE > stream_size)
+    {
+        return false;
+    }
+    auto* mem = new uint8_t[seg_len];
+    const auto* src = static_cast<const uint8_t*>(stream);
+    std::size_t done = 0;
+    std::size_t read = 0;
+    while (done < seg_len)
+    {
+        const std::size_t n = std::min(kDataPerPage, seg_len - done);
+        std::memcpy(mem + done, src + read, n);
+        done += n;
+        read += n + TAIL_SIZE;
+    }
+    out = ipc::buffer(mem, seg_len, [](void* p, std::size_t) { delete[] static_cast<uint8_t*>(p); });
+    return true;
+}
+
+/* 本条 wire 是不是 DZFlat 段。判据与 wire_accept.cc 共用同一份
+ * (dzflat::looks_like_dzflat), 不另立一套 —— 两处判据漂移会让"该借样的被物化、
+ * 该物化的被借样", 且症状是静默错数据。 */
+bool wire_is_dzflat(const ipc::buffer& frame)
+{
+    return frame.size() > 0 && dzflat::looks_like_dzflat(frame.data(), frame.size());
+}
+
+/* 接收核心。`out_payload` 非空时额外把**重组后的 TLV 缓冲**交给调用方 —— 见头文件里
+ * chunk_rev_topic 带 out_payload 的重载(T1: socket 订阅端的借样分流)。
+ *
+ * 为什么出口参数做成"可空": 原有的两个 chunk_rev_topic 与两个 chunk_rev_server 都只
+ * 需要物化结果、不关心缓冲, 让它们继续传 nullptr, 行为与改动前逐字节一致 —— 这是
+ * "缺省即旧行为"的落点, 也是 out_payload 非空时才付那份拷贝的原因。 */
+bool recv_chunk_common_impl(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ack_node,
+                            std::shared_ptr<IpcMsgBase>& msg_ptr, uint64_t tm, ipc::buffer* out_payload)
 {
     const auto begin = std::chrono::steady_clock::now();
 
@@ -1523,7 +1665,30 @@ bool recv_chunk_common(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ack_nod
             fb_ok = (pending_hb.flags & IpcRtpsHeartbeatMsg::kFlagRateFeedback) != 0;
         }
         const uint32_t payload_crc32c = dzIPC::common::crc32c(first_page.data(), first_page.size());
-        msg_ptr->deserialize(first_page);
+        /* 双 wire 分流的第一道闸: 段首是 DZFlat ⇒ **不做 TLV 反序列化**。
+         * 理由见 wire_accept.h —— 两种 wire 的 msg_id 不在同一位置, DZFlat 段的尾部
+         * 是借来的 chunk 里没写到的部分, 拿它按 TLV 读必然走偏。SHM 侧靠 AcceptWire
+         * 挡这一下, socket 侧靠这一行。 */
+        const bool borrow = wire_is_dzflat(first_page) && (out_payload != nullptr);
+        if (borrow)
+        {
+            dzflat::SegHeader h{};
+            std::memcpy(&h, first_page.data(), sizeof(h));
+            if (!de_frame_dzflat(first_page.data(), first_page.size(), h.total_size, *out_payload))
+            {
+                /* 段头自相矛盾(总长落不进本片) ⇒ 丢弃, 且不发 ACK: 与 wire_accept.cc
+                 * 对 kDzFlatHeaderBad 的处置一致 —— 这条本来就不是能收下的东西。 */
+                dzIPC::detail::NoteDzFlatRx(dzIPC::detail::DzFlatRxEvent::kDzFlatHeaderBad);
+                return false;
+            }
+        }
+        else
+        {
+            /* 老调用方(out_payload == nullptr)与 TLV 走这里 —— 与改动前逐字节一致。
+             * DZFlat 帧仍需先拷成独立连续段: first_page 指向 UDPNode 复用的临时缓冲
+             * (udp.h 的 "Temp buffer avoid copying"), 而跨页时页尾还插在段中间。 */
+            msg_ptr->deserialize(first_page);
+        }
         send_ack(ack_out, meta, payload_crc32c, fb_ok, /*lost_pages=*/0, /*observed_bps=*/0);
         return true;
     }
@@ -1747,7 +1912,23 @@ bool recv_chunk_common(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ack_nod
     record_fragment_gaps(received, meta.page_cnt, true);
     const uint32_t payload_crc32c = dzIPC::common::crc32c(assembled.data(), meta.total_size);
     ipc::buffer assembled_view(assembled.data(), meta.total_size);
-    msg_ptr->deserialize(assembled_view);
+    /* 与单页分支同一道闸(说明见那里): DZFlat 段不做 TLV 反序列化。跨页时页尾插在段
+     * 中间, 交给调用方前必须去帧成连续段 —— 这一次拷贝是 socket 借样的固有成本。 */
+    const bool borrow = wire_is_dzflat(assembled_view) && (out_payload != nullptr);
+    if (borrow)
+    {
+        dzflat::SegHeader h{};
+        std::memcpy(&h, assembled.data(), sizeof(h));
+        if (!de_frame_dzflat(assembled.data(), assembled.size(), h.total_size, *out_payload))
+        {
+            dzIPC::detail::NoteDzFlatRx(dzIPC::detail::DzFlatRxEvent::kDzFlatHeaderBad);
+            return false;
+        }
+    }
+    else
+    {
+        msg_ptr->deserialize(assembled_view);
+    }
     /* 段4 方案E: observed_bps = 已组装字节 / 组装期 (assembly_begin 起, 含 NACK
      * 重传轮), 仅诊断不参与控制 (D-7 红线 —— 发送端是瓶颈时它恒等于发送速率,
      * 拿它设速率会永远不上涨)。elapsed < 1ms 时置 0 防除出垃圾值。 */
@@ -1764,28 +1945,35 @@ bool recv_chunk_common(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ack_nod
 bool chunk_rev_topic(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<TopicData>& rev_msg, uint64_t tm)
 {
     std::shared_ptr<IpcMsgBase> msg_ptr = rev_msg->topic();
-    return recv_chunk_common(*node, nullptr, msg_ptr, tm);
+    return recv_chunk_common_impl(*node, nullptr, msg_ptr, tm, nullptr);
 }
 
 bool chunk_rev_topic(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<TopicData>& rev_msg, uint64_t tm,
                      const std::shared_ptr<ipc::socket::UDPNode>& ack_node)
 {
     std::shared_ptr<IpcMsgBase> msg_ptr = rev_msg->topic();
-    return recv_chunk_common(*node, ack_node ? ack_node.get() : nullptr, msg_ptr, tm);
+    return recv_chunk_common_impl(*node, ack_node ? ack_node.get() : nullptr, msg_ptr, tm, nullptr);
+}
+
+bool chunk_rev_topic(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<TopicData>& rev_msg, uint64_t tm,
+                     const std::shared_ptr<ipc::socket::UDPNode>& ack_node, ipc::buffer* out_payload)
+{
+    std::shared_ptr<IpcMsgBase> msg_ptr = rev_msg->topic();
+    return recv_chunk_common_impl(*node, ack_node ? ack_node.get() : nullptr, msg_ptr, tm, out_payload);
 }
 
 bool chunk_rev_server(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<ServiceData>& rev_msg, uint64_t tm,
                       bool ser_or_cli)
 {
     std::shared_ptr<IpcMsgBase> msg_ptr = ser_or_cli ? rev_msg->request() : rev_msg->response();
-    return recv_chunk_common(*node, nullptr, msg_ptr, tm);
+    return recv_chunk_common_impl(*node, nullptr, msg_ptr, tm, nullptr);
 }
 
 bool chunk_rev_server(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<ServiceData>& rev_msg, uint64_t tm,
                       bool ser_or_cli, const std::shared_ptr<ipc::socket::UDPNode>& ack_node)
 {
     std::shared_ptr<IpcMsgBase> msg_ptr = ser_or_cli ? rev_msg->request() : rev_msg->response();
-    return recv_chunk_common(*node, ack_node ? ack_node.get() : nullptr, msg_ptr, tm);
+    return recv_chunk_common_impl(*node, ack_node ? ack_node.get() : nullptr, msg_ptr, tm, nullptr);
 }
 
 ipc::buffer chunk_rev_sniff(ipc::socket::UDPNode& node, uint64_t tm)
@@ -2134,8 +2322,10 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
      * drain_record_acks 据此去重, 每消息每对端至多计 1 次。 */
     std::unordered_set<uint32_t> acked_receivers;
     /* ---- 段5 任务2h: runs 判别信号 (纯诊断, 不进 bps=) ----
-     * T.3 首捕获去重: 每消息每对端只取第一条位图 NACK (主循环 + drain 共享此表);
-     * T.1 最拥塞聚合在消息结束时做 (aggregate_runs_first, 只上报原始 runs/lost)。 */
+     * T.3 首捕获去重: 每消息每对端只取第一条 NACK (位图或显式, 先到先采; 段6
+     * 任务1a 把显式编码并入采集源, 消除 q=0.078 位图-only 窄化), 主循环 + drain
+     * 共享此表; T.1 最拥塞聚合在消息结束时做 (aggregate_runs_first, 只上报原始
+     * runs/lost)。 */
     std::unordered_map<uint32_t, RunsFirst> runs_first_map;
 
     const auto ack_begin = std::chrono::steady_clock::now();
@@ -2345,7 +2535,8 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
                 {
                     f_max_scaled = std::max(
                         f_max_scaled, scaled_loss_fraction(static_cast<uint32_t>(nack_miss_cnt), meta.page_cnt));
-                    /* 段5 任务2h: T.3 首捕获 —— 主循环第一条位图 NACK 即采 (runs 与
+                    /* 段5 任务2h (段6 任务1a): T.3 首捕获 —— 主循环位图 NACK, 该对端
+                     * 尚未被任一编码捕获时即采 (runs 与
                      * lost 同 pattern、同一边界, lost 沿用 nack_miss_cnt)。 */
                     if (kRunsCaptureEnabled
                         && runs_first_map.find(nb_msg.receiver_id) == runs_first_map.end())
@@ -2388,6 +2579,18 @@ SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc:
             {
                 f_max_scaled = std::max(f_max_scaled,
                                         scaled_loss_fraction(static_cast<uint32_t>(nack_miss_cnt), meta.page_cnt));
+                /* 段6 任务1a: 显式 NACK 同做 T.3 首捕获 —— 与位图分支共享
+                 * runs_first_map (每对端先到先采), 消除"对端编码选显式时
+                 * runs/lost 恒 (0,0)"的采集窄化 (q=0.078 归因, 段5 任务2l)。
+                 * runs 从 missing_pages 升序列表数连续段, lost 沿用 nack_miss_cnt
+                 * (同 pattern、同一边界); 采集/诊断, ⛔ 不进 bps= 赋值。 */
+                if (kRunsCaptureEnabled
+                    && runs_first_map.find(nack_msg.receiver_id) == runs_first_map.end())
+                {
+                    runs_first_map.emplace(nack_msg.receiver_id,
+                                           RunsFirst{true, count_explicit_runs(nack_msg.missing_pages, chunks.size()),
+                                                     nack_miss_cnt});
+                }
             }
         }
 

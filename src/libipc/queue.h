@@ -183,16 +183,25 @@ public:
     template <typename T, typename F, typename... P>
     bool push(F&& prep, P&&... params) {
         if (elems_ == nullptr) return false;
-        return elems_->push(this, [&](void* p) {
-            if (prep(p)) ::new (p) T(std::forward<P>(params)...);
+        /* rem_cc 与 force_push 同义: 被覆写消息的"永远不会来取它"的读方位图。
+         * push 也会覆写被套圈的格子(见 prod_cons.h 里 <single,multi,broadcast>::push
+         * 的注释), 所以它同样需要把被丢弃消息的 chunk 交给 prep 处理。
+         * 默认实参是为了那些不传第二个参数的 policy(如 unicast 与 multi-multi), 它们
+         * 按 rem_cc = 0 处理 —— 只在 conns 已归零时归还, 最保守。 */
+        return elems_->push(this, [&](void* p, ipc::circ::cc_t rem_cc = 0) {
+            if (prep(p, rem_cc)) ::new (p) T(std::forward<P>(params)...);
         });
     }
 
     template <typename T, typename F, typename... P>
     bool force_push(F&& prep, P&&... params) {
         if (elems_ == nullptr) return false;
-        return elems_->force_push(this, [&](void* p) {
-            if (prep(p)) ::new (p) T(std::forward<P>(params)...);
+        // rem_cc: 被覆写消息的"永远看不到它"的接收方位图, 由 broadcast 策略的
+        // force_push 提供, 交给 prep 判定被丢弃消息的 chunk 能否立即归还。
+        // 默认实参是为了 <multi,multi,broadcast>::force_push 退化调用 push() 的
+        // 那一条路径 —— push() 只用 1 个实参调用回调, 此时 rem_cc 按 0 处理最保守。
+        return elems_->force_push(this, [&](void* p, ipc::circ::cc_t rem_cc = 0) {
+            if (prep(p, rem_cc)) ::new (p) T(std::forward<P>(params)...);
         });
     }
 
@@ -204,7 +213,9 @@ public:
         }
         else {
             return elems_->push_sniffer(this, [&](void* p) {
-                if (prep(p)) ::new (p) T(std::forward<P>(params)...);
+                /* push_sniffer 只在无接收方时使用, 不存在"被覆写消息的读方"这回事,
+                 * 故 rem_cc 恒为 0。 */
+                if (prep(p, ipc::circ::cc_t{0})) ::new (p) T(std::forward<P>(params)...);
             });
         }
     }

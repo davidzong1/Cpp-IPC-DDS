@@ -165,6 +165,15 @@ publish(msg)
 - **no_local_server** warning：请求时若无本地 server 注册，输出一次性 warning
 - **server_count > 1** warning：注册表异常（多余一个 server 队列），输出一次性 warning
 
+### 5.3 传输层单接收者约束（为什么不存在"饿死远端 server"）
+
+`_ser_r`/`_ser_w` 通道类型为 `ipc::server`（`chan<relat::single, relat::single, trans::unicast>`），是 **single-single 单消费者**通道：`_ser_r` 上**最多只允许一个 server receiver 连接**（`receiver_checker` 用单一 flag 放行首个 receiver，后续 receiver 的 `connect()` 静默失败）。因此：
+
+- **同一 topic 在传输层最多只有一个 server**。第二个 server（无论本地还是远端进程）无法挂上 `_ser_r`，也收不到 SHM 请求——这与 nodelet 开关无关。
+- 快速路径要求"恰好一个本地 server"（`snapshot.size() == 1`）天然被传输层约束保证，**不存在"快速路径跳过远端 server 导致其被静默饿死"的场景**——远端 server 根本无法与本地 server 共存于 `_ser_r`。
+- 多**本地** server（同一进程注册表出现多个队列）由 `server_count > 1` 告警覆盖：仅一个能持有 `_ser_r` receiver，其余只能处理快速路径请求（若有），超出正常部署。
+- 因此无需在快速路径判定中增加跨进程 server 检测（pub/sub 需要 `recv_count()` 是因为 `ipc::route` 是 multi-consumer 广播通道，远端订阅者可共存；ser/cli 通道类型不同，不适用该机制）。
+
 ---
 
 ## 6. Socket ser/cli

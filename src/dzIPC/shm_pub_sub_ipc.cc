@@ -7,6 +7,7 @@
 #include "dzIPC/common/local_pub_sub_registry.h"
 #include "dzIPC/common/name_operator.h"
 #include "dzIPC/common/nodelet_config.h"
+#include "dzIPC/common/wire_accept.h"
 
 namespace dzIPC {
 namespace shm {
@@ -15,17 +16,30 @@ using dzIPC::control_plane_shm::TopicState;
 
 namespace {
 
-std::string control_name_for(const std::string& data_name)
+/* 单 topic 的接收方上限 = libipc 连接位图的位宽(circ::cc_t = uint32_t)。
+ * 与 control_plane.h 的 kMaxPeerSlots(64) 不同 —— 那是控制面登记表的容量, 比这里大一倍;
+ * 两者的差额正是 docs/shm_defect_fixes.md 第 2 条那个黑洞的容量。 */
+constexpr std::size_t kMaxShmReceiversPerTopic = 32;
+
+/* 段名规则收在 dzIPC/common/name_operator.h —— 传输层、sniffer、工具都从那一处取,
+ * 免得规则一改要同时改五处且漏掉的那处是静默失效(见该头文件的说明)。
+ * 段名含 domain_id: 不含就等于 SHM 上没有 domain 隔离(docs/shm_defect_fixes.md 第 1 条),
+ * 代价是与旧版本进程不互通 —— 这是有意的, 旧进程段名不带 domain, 能互通就说明没生效。 */
+std::string shm_name_for_topic(const std::string& topic_name, size_t domain_id)
 {
-    /* "_control2": TopicControl 增加 PeerSlot 表后结构体变大, 沿用旧名会让
-     * ipc::shm::handle::acquire() 在已存在的小段上 mmap 出超出文件长度的区域,
-     * 访问越界部分直接 SIGBUS。换名等于强制新建一段, 同时也隔离了新旧版本进程。*/
-    return data_name + "_control2";
+    return shm_topic_segment_name(topic_name, domain_id);
 }
 
-std::string shm_name_for_topic(const std::string& topic_name)
+/* pub/sub 控制面段名 —— 本文件只是**转调**, 规则("数据段名 + _control2")的唯一出处在
+ * dzIPC/common/name_operator.h 的 shm_topic_control_name(), 与 ser 侧的
+ * service_control_name_for() 同构。
+ *
+ * 传原始 topic 名 + domain 而不是已经拼好的 topic_name_: 两处调用点手上都有
+ * (raw_topic_name_, domain_id_), 而收成一个组合完整的入参后, 这里再也不可能出现
+ * "把某个别的东西当数据段名传进来" 的写法 —— 段名拼错不报错, 只静默多出一个空段。 */
+std::string topic_control_name_for(const std::string& topic_name, size_t domain_id)
 {
-    return "dz_ipc_" + sanitize_topic_name(topic_name) + "_topic";
+    return shm_topic_control_name(topic_name, domain_id);
 }
 
 void wait_for_peer_drain(dzIPC::control_plane_shm::TopicControlPlane& control_plane)
@@ -45,7 +59,7 @@ void wait_for_peer_drain(dzIPC::control_plane_shm::TopicControlPlane& control_pl
 shm_pub_ipc::shm_pub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
                          bool verbose, bool enable_thread_qos, int cpu_id, int thread_priority)
     : pub_ipc_base(msg, topic_name, domain_id, verbose)
-    , topic_name_(shm_name_for_topic(topic_name))
+    , topic_name_(shm_name_for_topic(topic_name, domain_id))
     , raw_topic_name_(topic_name)
     , domain_id_(domain_id)
     , verbose_(verbose)
@@ -92,7 +106,7 @@ void shm_pub_ipc::InitChannel(std::string extra_info)
 {
     try
     {
-        if (!control_plane_.open(control_name_for(topic_name_)))
+        if (!control_plane_.open(topic_control_name_for(raw_topic_name_, domain_id_)))
         {
             throw std::runtime_error("failed to open topic control plane");
         }
@@ -277,6 +291,12 @@ bool shm_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_
 {
     try
     {
+        if (try_publish_dzflat(msg, tm))
+        {
+            dzIPC::detail::NoteDzFlatPublish(true);
+            return true;
+        }
+        dzIPC::detail::NoteDzFlatPublish(false);
         ipc::buffer response_data(std::move(msg->serialize()));
         if (publisher_->recv_count() == 0)
         {
@@ -295,10 +315,61 @@ bool shm_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
+/* DZFlat 借样发布: 借一块共享 chunk, 把消息**直接按平坦布局写进共享内存**, 省掉
+ * 「serialize() 整包 new + TLV 页尾分段拷贝 + send() 再 memcpy 进 chunk」这一整串。
+ *
+ * 返回 false 表示"本次不走 DZFlat", 调用方须回退既有整包路径。回退不是异常, 是常态:
+ *   - 开关未开 / 消息类型不支持(手写类型、GenericMessage);
+ *   - 该通道当前没有接收方(chunk 无人回收, loan 会拒绝);
+ *   - chunk 池耗尽(每尺寸档位 32 块) —— 这是背压, 回退整包路径仍能送达。
+ *
+ * 生命周期: loan 成功后每条出口都必须以 publish_loan 或 discard_loan 结束。
+ * publish_loan 失败时 chunk 已由其内部归还, 这里不得重复 discard。
+ */
+bool shm_pub_ipc::try_publish_dzflat(const std::shared_ptr<IpcMsgBase>& msg, std::uint64_t tm)
+{
+    if (!dzIPC::IsDzFlatEnabled() || !msg || !msg->dzflat_supported())
+    {
+        return false;
+    }
+    if (!publisher_ || publisher_->recv_count() == 0)
+    {
+        return false;
+    }
+    const std::uint32_t need = msg->dzflat_size();
+    if (need == 0)
+    {
+        return false;
+    }
+    auto lo = publisher_->loan(need);
+    if (!lo.valid())
+    {
+        return false;   // 池耗尽 / 无接收方 —— 回退整包
+    }
+    if (!msg->dzflat_write(lo.data, static_cast<std::uint32_t>(lo.size)))
+    {
+        publisher_->discard_loan(lo);
+        return false;
+    }
+    return publisher_->publish_loan(lo, tm);
+}
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
 bool shm_pub_ipc::publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg)
 {
     try
     {
+        /* 有接收方时优先借样(tm=0: 与 no_member_try_send 的 best-effort 语义一致)。
+         * 无接收方时必须走 no_member_try_send —— 那条路径会把负载送进 sniffer 环,
+         * 而 sniffer 侧解析的是 TLV, 所以不能用 DZFlat。 */
+        if (try_publish_dzflat(msg, 0))
+        {
+            dzIPC::detail::NoteDzFlatPublish(true);
+            return true;
+        }
+        dzIPC::detail::NoteDzFlatPublish(false);
         ipc::buffer response_data(std::move(msg->serialize()));
         return publisher_->no_member_try_send(response_data.data(), response_data.size(), 0);
     }
@@ -317,7 +388,7 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
                          const size_t queue_size, bool verbose, bool enable_thread_qos, int cpu_id,
                          int thread_priority)
     : sub_ipc_base(msg, topic_name, domain_id, queue_size, verbose)
-    , topic_name_(shm_name_for_topic(topic_name))
+    , topic_name_(shm_name_for_topic(topic_name, domain_id))
     , raw_topic_name_(topic_name)
     , domain_id_(domain_id)
     , verbose_(verbose)
@@ -326,6 +397,7 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
     topic_msg_.reset(msg->clone());
     msg_id_ = topic_msg_->topic()->msg_id();
     msg_queue_ = std::make_shared<CircularQueue<IpcMsgBase>>(queue_size);
+    view_queue_ = std::make_shared<CircularQueue<Sample>>(queue_size);
 }
 
 /******************************************************************************************************/
@@ -407,7 +479,7 @@ void shm_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
 /******************************************************************************************************/
 void shm_sub_ipc::sub_handshake()
 {
-    if (!control_plane_.open(control_name_for(topic_name_)))
+    if (!control_plane_.open(topic_control_name_for(raw_topic_name_, domain_id_)))
     {
         std::cerr << "\033[31m[" << topic_name_ << "SubInfo] Error opening control plane for topic: " << topic_name_
                   << "\033[0m" << std::endl;
@@ -458,13 +530,51 @@ void shm_sub_ipc::sub_handshake()
                 /* 向控制面登记本订阅者的 libipc 连接 bit, 并由下面的循环持续
                  * 刷新心跳。发布端据此判定死连接 —— 取代了 force_push 里那套
                  * "没读完就算无效读者"的误伤逻辑。 */
+                uint32_t cc_id = 0u;
                 {
                     std::lock_guard<std::mutex> lock(channel_mtx_);
-                    const uint32_t cc_id = (subscriber_ && subscriber_->valid())
-                                               ? subscriber_->connected_id()
-                                               : 0u;
+                    cc_id = (subscriber_ && subscriber_->valid()) ? subscriber_->connected_id()
+                                                                  : 0u;
                     peer_slot_ = control_plane_.acquire_peer_slot(attached_generation, cc_id);
                 }
+
+                /* 连接位耗尽 ⇒ **不能**宣布握手完成。
+                 *
+                 * libipc 的接收方连接位图是 cc_t = uint32_t, 只有 32 位; 位满时
+                 * connect() 返回 0(circ/elem_def.h 的 "connection-slot is full")。旧实现
+                 * 拿到 cc_id == 0 之后照样 handshake_completed.store(true), 于是第 33 个
+                 * 订阅者进入一种**假成功态**: InitChannel 不报错、日志正常、
+                 * handshake_completed 为真, 但一条消息都收不到 —— 而发布端只用
+                 * recv_count() 判有无接收者, 两端都看不见这个截断。
+                 *
+                 * 控制面的 PeerSlot 表是 64 槽而连接位只有 32 个, 这个 2× 差额正是黑洞的
+                 * 容量。acquire_peer_slot 本来就在 cc_id == 0 时返回 -1 —— 信号一直都在,
+                 * 只是被丢掉了。见 docs/shm_defect_fixes.md 第 2 条。
+                 *
+                 * 处置: 不置 handshake_completed, 退掉已登记的 peer, 让下一轮重试 ——
+                 * 有订阅者退出让出位时就能接上。告警**不受 verbose_ 约束**: 这是静默失败,
+                 * 不该要求开了调试开关才看得见。 */
+                if (cc_id == 0)
+                {
+                    static std::atomic<bool> warned_once{false};
+                    if (!warned_once.exchange(true, std::memory_order_relaxed))
+                    {
+                        std::cerr << "\033[31m[" << topic_name_
+                                  << "SubInfo] connection slots exhausted (max "
+                                  << kMaxShmReceiversPerTopic
+                                  << " receivers per topic); this subscriber is NOT connected and "
+                                     "will receive nothing. Retrying until a slot frees up.\033[0m"
+                                  << std::endl;
+                    }
+                    if (peer_registered)
+                    {
+                        control_plane_.remove_peer(attached_generation);
+                        peer_registered = false;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
+
                 if (peer_slot_ < 0 && verbose_)
                 {
                     std::cerr << "\033[33m[" << topic_name_
@@ -554,6 +664,108 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
                     {
                         continue;
                     }
+                    /* 双 wire 分流 + 拒收计数 (docs/dzflat_shm.md §3.8 / wire_accept.h)
+                     *
+                     * 段首 4 字节: DZFlat 是 magic 'DZFL', TLV 是首字段名的长度(小整数),
+                     * 结构上不可能碰撞, 故可无条件判别。分两条投递队列:
+                     *
+                     *   view 队列(借样 Sample)  ←  DZFlat 段 + 话题类型支持 DZFlat(typed/
+                     *       由 get()/try_get() 服务, 零拷贝         generator 生成, schema_hash≠0)
+                     *   clone 队列(物化对象)    ←  TLV 段, 以及发给 schema-less 话题
+                     *       由 get_clone()/try_get_clone() 服务   (GenericMessage / 手写类型)
+                     *       的 DZFlat 段 —— GenericMessage 无 C++ schema, 只能把段字节
+                     *       拷进 dzflat_seg_ 留待 Python 解码, 见 generic_message.hpp。
+                     *
+                     * 严格分流: TLV 消息永远不会被 get()/try_get() 物化; 混合 wire(灰度期)
+                     * 需要调用方两条都 drain。 */
+                    std::uint32_t exp_id = 0, exp_hash = 0;
+                    bool viewable = false;
+                    {
+                        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+                        if (!topic_msg_)
+                        {
+                            continue;
+                        }
+                        exp_id = msg_id_;   /* 注册键 = 话题模板的 msg_id */
+                        exp_hash = topic_msg_->topic()->dzflat_schema_hash();
+                        viewable = (exp_hash != 0);   /* 仅 generator 生成的 typed 话题 */
+                    }
+
+                    const bool is_dzflat =
+                        dzflat::looks_like_dzflat(raw_data.data(), raw_data.size());
+                    if (is_dzflat)
+                    {
+                        if (viewable)
+                        {
+                            std::uint32_t seg_id = 0;
+                            if (!IpcMsgBase::dzflat_peek_msg_id(raw_data.data(), raw_data.size(),
+                                                                seg_id)
+                                || seg_id != exp_id)
+                            {
+                                detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatIdSkipped);
+                                continue;
+                            }
+                            dzflat::SegHeader h{};
+                            std::memcpy(&h, raw_data.data(), sizeof(h));
+                            if (h.schema_hash != exp_hash)
+                            {
+                                detail::NoteDzFlatRx(
+                                    detail::DzFlatRxEvent::kDzFlatSchemaDrop);
+                                continue;
+                            }
+                            detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatAccepted);
+                            /* 借样: raw_data(buff_t) 让 chunk 的 conns 引用保持非零,
+                             * 原样移进 Sample —— chunk 在用户读完字段前不会归还池。 */
+                            view_queue_->push(std::make_shared<Sample>(
+                                std::move(raw_data), seg_id, exp_hash));
+                            continue;
+                        }
+                        /* schema-less 话题: 话题若是 GenericMessage, 把段**借**给它(不拷
+                         * 字节), Python 按段头 schema_hash 查表解码 —— 这是 Python 侧零拷贝
+                         * 的落点。msg_id 需对上; schema 无从在 C++ 校验(GenericMessage 无
+                         * schema)。话题不是 GenericMessage(手写类型)收到 DZFlat = 类型不匹配,
+                         * 丢弃。 */
+                        std::uint32_t seg_id = 0, seg_hash = 0;
+                        {
+                            dzflat::SegHeader h{};
+                            std::memcpy(&h, raw_data.data(), sizeof(h));
+                            seg_hash = h.schema_hash;
+                        }
+                        if (!IpcMsgBase::dzflat_peek_msg_id(raw_data.data(), raw_data.size(),
+                                                            seg_id)
+                            || seg_id != exp_id)
+                        {
+                            detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatIdSkipped);
+                            continue;
+                        }
+                        detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatAccepted);
+                        std::shared_ptr<TopicData> local_msg;
+                        {
+                            std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+                            if (!topic_msg_)
+                            {
+                                continue;
+                            }
+                            local_msg.reset(topic_msg_->clone());
+                        }
+                        if (local_msg->topic()->dzflat_adopt(std::move(raw_data), seg_hash))
+                        {
+                            std::shared_ptr<IpcMsgBase> ptr_cache;
+                            local_msg->swap(ptr_cache);
+                            msg_queue_->push(std::move(ptr_cache));
+                            continue;
+                        }
+                        continue;   /* 非 GenericMessage 的 schema-less 话题: 类型不匹配, 丢弃 */
+                    }
+                    else if (dzflat::has_dzflat_magic(raw_data.data(), raw_data.size()))
+                    {
+                        /* magic 在但 looks_like_dzflat 不过 ⇒ 段头自相矛盾 / layout_ver
+                         * 不认识 ⇒ 损坏段, 不是"不是 DZFlat"。 */
+                        detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatHeaderBad);
+                        continue;
+                    }
+
+                    /* TLV(或 schema-less 的 DZFlat)→ 物化, 与 ser/cli 共用 AcceptWire。 */
                     std::shared_ptr<TopicData> local_msg;
                     {
                         std::lock_guard<std::mutex> lock(topic_msg_mtx_);
@@ -563,11 +775,11 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
                         }
                         local_msg.reset(topic_msg_->clone());
                     }
-                    if (!local_msg->check_msg_id(raw_data))
+                    if (!AcceptWire(raw_data, local_msg->msg_id(), *local_msg->topic()))
+                    {
                         continue;
-                    local_msg->topic()->deserialize(raw_data);
-                    std::shared_ptr<IpcMsgBase> ptr_cache;
-                    local_msg->swap(ptr_cache);
+                    }
+                    std::shared_ptr<IpcMsgBase> ptr_cache;                    local_msg->swap(ptr_cache);
                     msg_queue_->push(std::move(ptr_cache));
                 }
                 else
@@ -594,7 +806,50 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
-void shm_sub_ipc::get(std::shared_ptr<TopicData>& msg)
+/* ---- 视图路径: 只服务借样的 DZFlat 段(见 subscribe 循环的分流) ---- */
+void shm_sub_ipc::get(Sample& out)
+{
+    std::shared_ptr<Sample> s;
+    view_queue_->pop(s);   /* 阻塞直到有 Sample; TLV-only 话题请用 get_clone, 见基类注释 */
+    if (s)
+    {
+        out = std::move(*s);
+    }
+}
+
+bool shm_sub_ipc::get(Sample& out, std::uint64_t tm_ms)
+{
+    /* CircularQueue::pop 本来就支持超时(见其 tm 参数), 之前只是没接线 —— 于是只发 TLV 的
+     * 话题上调 get(Sample&) 会永久挂死。见 docs/shm_defect_fixes.md 第 4 条。 */
+    std::shared_ptr<Sample> s;
+    if (!view_queue_->pop(s, tm_ms))
+    {
+        return false;   // 超时
+    }
+    if (!s)
+    {
+        return false;
+    }
+    out = std::move(*s);
+    return true;
+}
+
+bool shm_sub_ipc::try_get(Sample& out)
+{
+    std::shared_ptr<Sample> s;
+    if (!view_queue_->try_pop(s))
+    {
+        return false;
+    }
+    if (!s)
+    {
+        return false;
+    }
+    out = std::move(*s);
+    return true;
+}
+
+void shm_sub_ipc::get_clone(std::shared_ptr<TopicData>& msg)
 {
     std::shared_ptr<IpcMsgBase> ipc_msg;
     msg_queue_->pop(ipc_msg);
@@ -604,7 +859,7 @@ void shm_sub_ipc::get(std::shared_ptr<TopicData>& msg)
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
-bool shm_sub_ipc::try_get(std::shared_ptr<TopicData>& msg)
+bool shm_sub_ipc::try_get_clone(std::shared_ptr<TopicData>& msg)
 {
     std::shared_ptr<IpcMsgBase> ipc_msg;
     if (msg_queue_->try_pop(ipc_msg))

@@ -59,6 +59,16 @@ void log_subscribe_event(const std::string& topic, size_t domain_id, IPCType ipc
 }
 }  // namespace
 /* 执行指针重定向实现继承多态 */
+namespace {
+[[noreturn]] void throw_auto_unsupported_for_pubsub(const char* api_name)
+{
+    throw std::invalid_argument(std::string(api_name) +
+                                ": IPCType::Auto is not supported for publish/subscribe "
+                                "(no handshake channel to negotiate the path); "
+                                "pass IPC_SHM or IPC_SOCKET explicitly");
+}
+}   // namespace
+
 class pimpl::publisher_ipc_impl::publisher_ipc_impl_ : public ipc::pimpl<publisher_ipc_impl_>
 {
 public:
@@ -81,10 +91,16 @@ pimpl::publisher_ipc_impl::publisher_ipc_impl(const std::shared_ptr<TopicData>& 
         impl(p_)->ipc = std::make_unique<shm::shm_pub_ipc>(msg, topic_name, domain_id, verbose,
                                                            enable_thread_qos, cpu_id, thread_priority);
     }
-    else if (ipc_type == IPCType::Socket)
+    else if (ipc_type == IPCType::Socket || ipc_type == IPCType::SocketOnly)
     {
+        /* SocketOnly 与 Socket 在 pub/sub 上等价 —— pub/sub 本来就没有自动选路,
+         * 两者都落到同一个纯 socket 实现。 */
         impl(p_)->ipc = std::make_unique<socket::socket_pub_ipc>(msg, topic_name, domain_id, verbose,
                                                                  enable_thread_qos, cpu_id, thread_priority);
+    }
+    else if (ipc_type == IPCType::Auto)
+    {
+        throw_auto_unsupported_for_pubsub("publisher_ipc_impl");
     }
     else
     {
@@ -167,10 +183,14 @@ pimpl::subscriber_ipc_impl::subscriber_ipc_impl(const std::shared_ptr<TopicData>
         impl(p_)->ipc = std::make_unique<shm::shm_sub_ipc>(msg, topic_name, domain_id, queue_size, verbose,
                                                            enable_thread_qos, cpu_id, thread_priority);
     }
-    else if (ipc_type == IPCType::Socket)
+    else if (ipc_type == IPCType::Socket || ipc_type == IPCType::SocketOnly)
     {
         impl(p_)->ipc = std::make_unique<socket::socket_sub_ipc>(msg, topic_name, domain_id, queue_size, verbose,
                                                                  enable_thread_qos, cpu_id, thread_priority);
+    }
+    else if (ipc_type == IPCType::Auto)
+    {
+        throw_auto_unsupported_for_pubsub("subscriber_ipc_impl");
     }
     else
     {
@@ -193,18 +213,34 @@ void pimpl::subscriber_ipc_impl::reset_message(const std::shared_ptr<TopicData>&
     impl(p_)->ipc->reset_message(msg);
 }
 
-void pimpl::subscriber_ipc_impl::get(std::shared_ptr<TopicData>& msg)
+/* 视图路径: 零拷贝借样, 无 owning 对象, 不记订阅事件日志。 */
+void pimpl::subscriber_ipc_impl::get(Sample& out)
 {
-    impl(p_)->ipc->get(msg);
+    impl(p_)->ipc->get(out);
+}
+
+bool pimpl::subscriber_ipc_impl::try_get(Sample& out)
+{
+    return impl(p_)->ipc->try_get(out);
+}
+
+bool pimpl::subscriber_ipc_impl::get(Sample& out, std::uint64_t tm_ms)
+{
+    return impl(p_)->ipc->get(out, tm_ms);
+}
+
+void pimpl::subscriber_ipc_impl::get_clone(std::shared_ptr<TopicData>& msg)
+{
+    impl(p_)->ipc->get_clone(msg);
     if (msg && msg->topic()) {
         log_subscribe_event(impl(p_)->topic_name, impl(p_)->domain_id,
                             impl(p_)->ipc_type, msg->topic());
     }
 }
 
-bool pimpl::subscriber_ipc_impl::try_get(std::shared_ptr<TopicData>& msg)
+bool pimpl::subscriber_ipc_impl::try_get_clone(std::shared_ptr<TopicData>& msg)
 {
-    const bool ok = impl(p_)->ipc->try_get(msg);
+    const bool ok = impl(p_)->ipc->try_get_clone(msg);
     if (ok && msg && msg->topic()) {
         log_subscribe_event(impl(p_)->topic_name, impl(p_)->domain_id,
                             impl(p_)->ipc_type, msg->topic());

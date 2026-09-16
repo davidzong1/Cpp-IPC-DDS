@@ -12,8 +12,23 @@ namespace dzIPC {
 /************************************功能函数***************************************/
 /***********************************************************************************/
 /***********************************************************************************/
-constexpr IPCType IPC_SHM = IPCType::Shm;         // 共享内存通信模式
-constexpr IPCType IPC_SOCKET = IPCType::Socket;   // UDP通信模式
+/* ---- 传输选择: 三个公开常量, 三个互不重叠的含义 ----
+ *
+ *   IPC_SHM         强制共享内存。同机最省, **但跨不了主机**。
+ *   IPC_SOCKET      ser-cli: 自动选路(握手走 UDP 引导通道, 双方两阶段确认后同主机
+ *                   切 SHM、跨主机保持 socket); pub/sub: 纯 UDP socket。
+ *                   **这是推荐写法** —— 它表达的是"要能跨主机", 而不是"禁止共享内存"。
+ *   IPC_SOCKET_ONLY 强制纯 socket, 不做任何自动选路(ser-cli)。对照实验/基线/排查用,
+ *                   生产路径不该用它。
+ */
+constexpr IPCType IPC_SHM = IPCType::Shm;              // 共享内存通信模式(强制)
+constexpr IPCType IPC_SOCKET = IPCType::Socket;        // ser-cli 自动选路 / pub-sub 纯 UDP
+constexpr IPCType IPC_SOCKET_ONLY = IPCType::SocketOnly;  // 强制纯 socket(对照实验用)
+
+#define ENABLENODELET EnableNodelet(true); // 启用进程内快速路径
+#define DISABLENODELET EnableNodelet(false); // 禁用进程内快速路径
+#define ENABLEDZFLAT EnableDzFlat(true); // 启用DZFlat平坦布局(shm专用)
+#define DISABLEDZFLAT EnableDzFlat(false); // 禁用DZFlat平坦布局
 
 using msgPtr = std::shared_ptr<IpcMsgBase>;   // 基类消息智能指针类型定义，用于接收数据
 
@@ -81,15 +96,4 @@ IPC_EXPORT void RequestShutdown();
 // 查询是否已经请求退出
 IPC_EXPORT bool IsShutdownRequested();
 
-/***********************************************************************************/
-/***********************************************************************************/
-/**********************************进程级开关***************************************/
-/***********************************************************************************/
-/***********************************************************************************/
-// Nodelet (进程内快速路径) 开关。默认 false。
-// 开启后 SHM pub/sub、IPC_SOCKET (UDP) pub/sub 与 SHM ser/cli
-// 各自在满足条件时尝试跳过序列化直接传递 shared_ptr；
-// 条件不满足时自动回退正常通信路径，并按实例/原因输出一次性 warning。
-// 线程安全，可在任意时刻调用。
-// 声明自 dzIPC/common/nodelet_config.h，实现在 nodelet_config.cc。
-}   // namespace dzIPC
+}

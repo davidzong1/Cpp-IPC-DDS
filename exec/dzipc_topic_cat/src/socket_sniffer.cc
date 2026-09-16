@@ -40,12 +40,34 @@ void socket_sniffer::create_sniffer(const std::string& topic_name, int domain_id
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     }
+    /* 可选: 在 ser-cli 握手通道(base+2)上再挂一条**只读**监听。
+     *
+     * ⛔ 只对 ser-cli 开 —— pub/sub 根本没有这条通道(整个仓库只有 socket_ser_ipc::
+     *    server_handshake / socket_cli_ipc 建 +2), 开在那里只会白占一个端口。
+     * ⛔ 只试一次、不重试: 现有的 req_/res_ 挂了会每 1 秒红字重试, 那是**必需**通道;
+     *    观测是**附加**能力, 拿不到就降级, 绝不能让嗅探器本身不可用。 */
+    if (watch_handshake_ && ser_or_topic_)
+    {
+        if (hs_probe_.open(topic_name, domain_id))
+        {
+            std::fprintf(stdout, "\033[32m[%s sniffer] handshake watch opened (read-only) on %s:%u\033[0m\n",
+                         topic_name.c_str(), ip_hash.c_str(), static_cast<unsigned>(hs_probe_.snapshot().port));
+        }
+        else
+        {
+            std::fprintf(stderr, "\033[33m[%s sniffer] handshake watch unavailable, continuing without it\033[0m\n",
+                         topic_name.c_str());
+        }
+    }
     ready.store(true, std::memory_order_release);
     recv_thread_ = std::thread(
         [this]()
         {
             while (!stop_.load(std::memory_order_acquire))
             {
+                /* 握手观测先排空: 它用的是 receive_nowait(不阻塞), 且每轮有上限,
+                 * 所以**不会**给下面的数据面接收加任何等待时间。 */
+                hs_probe_.poll();
                 sniffer_info got = recv_inner(50);
                 // Only refresh the cache when we actually received something, so a
                 // timeout in this iteration doesn't clobber a payload that the
@@ -84,11 +106,14 @@ sniffer_info socket_sniffer::try_recv() noexcept
         std::lock_guard<std::mutex> lock(msg_mutex);
         info = std::move(msg_cache);
     }
-    if (info)
-    {
-        return std::move(*info);
-    }
-    return sniffer_info{ipc::buffer{}, ipc::buffer{}};
+    sniffer_info out = info ? std::move(*info) : sniffer_info{ipc::buffer{}, ipc::buffer{}};
+    /* 观测字段**每次都现场取**, 不跟着 msg_cache 走。
+     *
+     * 原因正是这条通道存在的理由: 切到 SHM 之后 socket 数据面被双侧停掉, msg_cache
+     * 永远为空 —— 若把观测挂在缓存上, 恰好在最需要看它的场景里(切换之后)什么都看不到。
+     * 取快照在探针内部加了锁并吞掉异常, 所以本函数仍是 noexcept 安全的。 */
+    out.hs = hs_probe_.snapshot();
+    return out;
 }
 
 sniffer_info socket_sniffer::recv_inner(std::uint64_t timeout_ms) noexcept

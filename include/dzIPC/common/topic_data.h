@@ -50,6 +50,16 @@ public:
 
     bool check_msg_id(const ipc::buffer& data) override { return topic_cache->check_id(data); }
 
+    /* DZFlat 段头里的 msg_id 校验。与 check_msg_id 一样走 topic_cache —— topic_ 会被
+     * swap() 移走, 只有 cache 始终持有本话题的类型与 msg_id。 */
+    bool check_dzflat_msg_id(const ipc::buffer& data) const
+    {
+        return topic_cache->check_dzflat_id(data);
+    }
+
+    /// 本话题的 msg_id。供 AcceptWire 校验用 —— topic_ 会被 swap() 移走, 这里始终有效。
+    uint32_t msg_id() const noexcept { return msg_id_; }
+
 private:
     TopicData(const TopicData& other)
     {

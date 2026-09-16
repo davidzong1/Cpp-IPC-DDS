@@ -767,9 +767,16 @@ struct Config
     }
 };
 
+/* pub/sub 用: 它没有自动选路, 所以 "socket" 就是纯 socket。 */
 dzIPC::IPCType type_of(const std::string& transport)
 {
     return transport == "shm" ? IPC_SHM : IPC_SOCKET;
+}
+
+
+dzIPC::IPCType sercli_type_of(const std::string& transport)
+{
+    return transport == "shm" ? IPC_SHM : IPC_SOCKET_ONLY;
 }
 
 /* UDP 端口由 topic 名与 domain_id 计算, 越界时库会直接抛异常。
@@ -888,7 +895,7 @@ int run_role_subscriber(const Config& cfg)
     {
         while (ctl->phase.load(std::memory_order_acquire) != 2)
         {
-            if (!sub->try_get(rcv))
+            if (!sub->try_get_clone(rcv))
             {
                 continue;
             }
@@ -989,7 +996,7 @@ int run_role_server(const Config& cfg)
                 /* 回显等长响应, 使请求/响应两个方向的负载对称 */
                 res->response.assign(req->request.begin(), req->request.end());
             },
-            cfg.domain, type_of(cfg.transport), false);
+            cfg.domain, sercli_type_of(cfg.transport), false);
         server->InitChannel("perf_bench");
     }
     catch (const std::exception& e)
@@ -1349,7 +1356,8 @@ CaseResult run_pubsub_case(const Config& cfg, const std::string& transport, std:
 
 CaseResult run_sercli_case(const Config& cfg, const std::string& transport, std::size_t payload_bytes)
 {
-    const dzIPC::IPCType type = type_of(transport);
+    /* 见 sercli_type_of 的说明: 这里不能用 type_of —— 那会让 "socket" 档测出 SHM。 */
+    const dzIPC::IPCType type = sercli_type_of(transport);
 
     CaseResult r;
     r.pattern = "sercli";

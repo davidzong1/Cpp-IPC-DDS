@@ -1,4 +1,5 @@
 #include "dzIPC/common/control_plane.h"
+#include <cerrno>
 #include <chrono>
 #include <thread>
 #include "libipc/shm.h"
@@ -6,6 +7,7 @@
 #if defined(_WIN32)
 #include <windows.h>
 #else
+#include <signal.h>   // ::kill —— 存活判据(pid_alive)
 #include <unistd.h>
 #endif
 
@@ -13,7 +15,9 @@ namespace dzIPC {
 namespace control_plane_shm {
 namespace {
 
-constexpr uint32_t kMagic = 0x445A4351U;   // v2: TopicControl 增加 PeerSlot 表, 与 v1 布局不兼容
+/* 魔数的唯一出处在 control_plane.h(kTopicControlMagic): 只读探测者(占用判定)
+ * 也必须校验同一个值, 两处不能各写一份。 */
+constexpr uint32_t kMagic = kTopicControlMagic;
 constexpr auto kRebuildPeerDrainTimeout = std::chrono::milliseconds(200);
 constexpr auto kRebuildPeerDrainPoll = std::chrono::milliseconds(2);
 
@@ -23,6 +27,38 @@ int32_t current_pid()
     return static_cast<int32_t>(::GetCurrentProcessId());
 #else
     return static_cast<int32_t>(::getpid());
+#endif
+}
+
+/* 进程存活判据。与 ipc_info_pool 的同类判据**同一规则**(EPERM 视为存活: pid
+ * 存在但无权限探测)——它是池的 file-local 帮手, 没有对外 API, 而把它挪进公共头
+ * 只为省这十行并不划算; 规则本身只有这一条, 不存在两套语义。 */
+bool pid_alive(int32_t pid) noexcept
+{
+    if (pid <= 0)
+    {
+        return false;
+    }
+#if defined(_WIN32)
+    HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+    if (h == nullptr)
+    {
+        return ::GetLastError() == ERROR_ACCESS_DENIED;
+    }
+    DWORD code = 0;
+    bool alive = false;
+    if (::GetExitCodeProcess(h, &code))
+    {
+        alive = (code == STILL_ACTIVE);
+    }
+    ::CloseHandle(h);
+    return alive;
+#else
+    if (::kill(static_cast<pid_t>(pid), 0) == 0)
+    {
+        return true;
+    }
+    return errno != ESRCH;
 #endif
 }
 
@@ -270,6 +306,60 @@ void TopicControlPlane::initialize_if_needed()
     control_->peer_count.store(0, std::memory_order_relaxed);
     clear_all_peer_slots();
     control_->magic.store(kMagic, std::memory_order_release);
+}
+
+bool occupied_by_other(const std::string& name, int32_t self_pid)
+{
+    if (name.empty() || self_pid <= 0)
+    {
+        return true;
+    }
+    /* mode 用 **open 而不是 create|open**: 这里只探测, 绝不能建段。
+     * (libipc 的 open 分支会把 size 归零, 于是下面的映射走 fstat 拿实际长度 ——
+     *  既不会 ftruncate 别人的段, 也不会因为长度不符把它改小。) */
+    ipc::shm::id_t id = ipc::shm::acquire(name.c_str(), sizeof(TopicControl), ipc::shm::open);
+    if (id == nullptr)
+    {
+        /* 段不存在 ⇒ 这条通道从没被 SHM 建过 ⇒ **不可能**有既有连接可摧毁。
+         * 这是本函数唯一返回 false 的情形。
+         *
+         * 已存在的段一定是能打开的: 建段用的是 0666, 所以这里把"打不开"等同
+         * "不存在"不会漏掉活着的占用者(漏判才是要防的方向)。 */
+        return false;
+    }
+    std::size_t mapped = 0;
+    void* mem = ipc::shm::get_mem(id, &mapped);
+    TopicControl* c = static_cast<TopicControl*>(mem);
+    bool occupied = true;   // 先取保守值, 下面每一步都在尝试把它放宽
+    if (c != nullptr && mapped >= sizeof(TopicControl) && c->magic.load(std::memory_order_acquire) == kMagic)
+    {
+        const auto owner = c->owner_pid.load(std::memory_order_acquire);
+        const auto st = static_cast<TopicState>(c->state.load(std::memory_order_acquire));
+        /* Empty: 段建出来但**从没**写过 —— 典型情形是曾经的客户端用
+         * create|open 建了个空壳却没有真实服务端(见 T2 §7 R2)。此时没有可摧毁
+         * 的连接, 不算占用。 */
+        if (st == TopicState::Empty)
+        {
+            occupied = false;
+        }
+        else if (owner == self_pid)
+        {
+            /* 本进程自己的(上一次没清干净)。owner_pid 只在 begin_rebuild() 里写,
+             * 所以"本进程是 owner"说明是本进程上次留下的 —— 换新进程时 pid 不复用
+             * 到同一 topic 的概率可忽略, 且判错的代价只是少切一次 SHM。 */
+            occupied = false;
+        }
+        else if (!pid_alive(owner))
+        {
+            /* owner 已死: 段是**残留**。死掉的 owner 不可能再持有活连接, 所以这里
+             * 可以放宽 —— 否则崩溃一次就会让该 topic 永久退不回 SHM。 */
+            occupied = false;
+        }
+    }
+    /* release_no_unlink: 绝不是 release() —— 后者在引用计数归零时会 shm_unlink,
+     * 那正是本函数存在的意义要防的事。(get_mem 成功时引用计数 +1, 这里 -1 抵平。) */
+    ipc::shm::release_no_unlink(id);
+    return occupied;
 }
 
 }   // namespace control_plane_shm

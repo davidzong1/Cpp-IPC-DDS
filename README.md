@@ -147,7 +147,23 @@ scripts/update_msg_srv.sh --reset
 scripts/update_msg_srv.sh --help
 ```
 
-## Test (TODO)
+## Test
+
+仓库当前**没有 CI**(且 `.gitignore` 忽略了 `.github/workflows/**`, 见 [docs/ci.md](docs/ci.md))。最小验证门是一个可跟踪的脚本:
+
+```bash
+python3.10 -m pip install ./python   # 一次性: 构建 dzipc 绑定(*.so 不入库, 干净检出必做)
+bash scripts/ci_check.sh             # 全量, 失败即停
+bash scripts/ci_check.sh --no-binding # 只跑不需要绑定的层(任意 python3)
+```
+
+它跑两层, 共 5 项: L1 = `tools/dzplot/test/test_dzplot.py`(静态规则 + 纯 Python 逻辑, 任意 CPython3);
+L2 = `dzipc._dzipc_core` 可导入 + 三条真实 SHM 运行时核对(`verify_segment_naming` / `verify_runtime_no_garbage` /
+`integration_pub_restart`, **必须 CPython 3.10** —— 绑定是 cpython-310 构建)。退出码 0=全过 / 1=有失败 / 2=前置不满足,
+**CI 里 2 按失败处理**(跳过不等于通过)。
+
+C++ 侧 gtest 目前**无 CTest 注册**(`test/CMakeLists.txt` 无 `enable_testing()`/`add_test()`), 需手工构建运行,
+尚未纳入上面这道门 —— 详见 [docs/ci.md](docs/ci.md) §5。
 
 # Reference
 

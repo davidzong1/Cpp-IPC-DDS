@@ -34,6 +34,31 @@ struct PeerSlot
     std::atomic<int64_t> heartbeat_ns;   // 最近一次心跳 (steady_clock)
 };
 
+/* 段头魔数(v2 布局: TopicControl 含 PeerSlot 表)。
+ *
+ * 只读探测者必须校验它: 段名规则是"topic+domain"派生的, 同名段可能是别人(别的
+ * 版本/别的用途)建出来的 —— 魔数不符就读不懂里面的 state/owner_pid, 这时必须
+ * 走保守方向, 不能把自己的语义套上去。 */
+inline constexpr uint32_t kTopicControlMagic = 0x445A4351U;
+
+/* 只读探测: 该控制面段是否被**别的活进程**占着(未建好/不确定时也按被占用算)。
+ *
+ * 引入原因: IpcInfoPool 是**登记**式的证据(T2 §3 D1), 只有主动 rebind 过的进程
+ * 才看得见; 而控制面段是**建出来**的 —— 谁真把这条 SHM 服务通道建起来, 段就在。
+ * 因此"段在 + 状态已建/正在重建 + owner 是活着的别的进程"是一条不依赖登记的
+ * 占用证据, 用来兜住池启发式的漏判。
+ *
+ * 判错方向的代价不对称, 所以本函数一律往"被占用"偏:
+ *   漏判占用 ⇒ 随后的 clear_storage 摧毁别人的活动连接(不可逆);
+ *   误判占用 ⇒ 少切一次 SHM, 退化为 socket(功能完好)。
+ *
+ * ⛔ 绝不创建段、绝不 unlink 段: open-only 打开, 释放走 release_no_unlink()。
+ *    (release() 在引用计数降到 0 时会 shm_unlink —— 那正是本函数要防的事。)
+ *
+ * 返回 false 的**唯一**含义是"段不存在": 这条通道从没被 SHM 建过, 不可能摧毁
+ * 任何既有连接。其余一切(读不出、魔数不符、owner 存活状态不明)都返回 true。 */
+bool occupied_by_other(const std::string& name, int32_t self_pid);
+
 /* 单 topic 支持的最大并发订阅者数。libipc 的接收方连接位图是 32 位
  * (circ::cc_t = uint32_t), 因此实际可用连接数上限本来就是 32; 这里取 64
  * 留出余量, 避免订阅者频繁重连时槽位回收不及时导致占满。 */

@@ -161,7 +161,7 @@ bool wait_until(Pred pred, int timeout_ms)
 /* 排空 subscriber 队列 */
 void drain_subscriber(shm::shm_sub_ipc& sub, std::shared_ptr<TopicData>& topic)
 {
-    while (sub.try_get(topic))
+    while (sub.try_get_clone(topic))
     {
     }
 }
@@ -172,7 +172,7 @@ bool bounded_never_received(shm::shm_sub_ipc& sub, std::shared_ptr<TopicData>& t
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline)
     {
-        if (sub.try_get(topic))
+        if (sub.try_get_clone(topic))
         {
             return false;   // 异常：收到了不该收到的消息
         }
@@ -211,7 +211,7 @@ TEST(ShmNodelet, SameProcessFastPathMetrics)
         m->value = i;
         m->marker = "warmup";
         pair.pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 500))
+        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 500))
             << "sub did not receive warmup " << i;
     }
 
@@ -222,7 +222,7 @@ TEST(ShmNodelet, SameProcessFastPathMetrics)
     msg->value = 42;
     msg->marker = "fast_path_target";
     pair.pub->publish(msg);
-    ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 500))
+    ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 500))
         << "subscriber did not receive fast-path message";
 
     /* 接收并断言消息内容正确 */
@@ -264,7 +264,7 @@ TEST(ShmNodelet, SnapshotImmutabilityAfterPublish)
         m->value = -1;
         m->marker = "warmup";
         pair.pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 500))
+        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 500))
             << "sub did not receive warmup " << i;
     }
 
@@ -277,7 +277,7 @@ TEST(ShmNodelet, SnapshotImmutabilityAfterPublish)
     msg->value = 999;
     msg->marker = "AFTER_MUTATION";
 
-    ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 500))
+    ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 500))
         << "subscriber did not receive";
 
     {
@@ -322,9 +322,9 @@ TEST(ShmNodelet, TwoSubscribersSameSnapshot)
         m->value = -1;
         m->marker = "warmup";
         pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return sub1->try_get(sub1_topic); }, 500))
+        ASSERT_TRUE(wait_until([&]() { return sub1->try_get_clone(sub1_topic); }, 500))
             << "sub1 did not receive warmup " << i;
-        ASSERT_TRUE(wait_until([&]() { return sub2->try_get(sub2_topic); }, 500))
+        ASSERT_TRUE(wait_until([&]() { return sub2->try_get_clone(sub2_topic); }, 500))
             << "sub2 did not receive warmup " << i;
     }
 
@@ -334,9 +334,9 @@ TEST(ShmNodelet, TwoSubscribersSameSnapshot)
     msg->marker = "twin";
     pub->publish(msg);
 
-    ASSERT_TRUE(wait_until([&]() { return sub1->try_get(sub1_topic); }, 500))
+    ASSERT_TRUE(wait_until([&]() { return sub1->try_get_clone(sub1_topic); }, 500))
         << "sub1 did not receive";
-    ASSERT_TRUE(wait_until([&]() { return sub2->try_get(sub2_topic); }, 500))
+    ASSERT_TRUE(wait_until([&]() { return sub2->try_get_clone(sub2_topic); }, 500))
         << "sub2 did not receive";
 
     {
@@ -430,7 +430,7 @@ TEST(ShmNodelet, TopicIsolation)
             m->value = -1;
             m->marker = "warmup";
             p->pub->publish(m);
-            ASSERT_TRUE(wait_until([&]() { return p->sub->try_get(p->sub_topic); }, 500))
+            ASSERT_TRUE(wait_until([&]() { return p->sub->try_get_clone(p->sub_topic); }, 500))
                 << "warmup receive failed";
         }
     }
@@ -441,7 +441,7 @@ TEST(ShmNodelet, TopicIsolation)
     msg_a->marker = "only_a";
     pair_a.pub->publish(msg_a);
 
-    bool a_got = wait_until([&]() { return pair_a.sub->try_get(pair_a.sub_topic); }, 500);
+    bool a_got = wait_until([&]() { return pair_a.sub->try_get_clone(pair_a.sub_topic); }, 500);
     ASSERT_TRUE(a_got) << "topic_a subscriber should receive message on its own topic";
     {
         auto rcvd = pair_a.sub_topic->topic()->msgcast<CountingMsg>();
@@ -492,7 +492,7 @@ TEST(ShmNodelet, MsgIdIsolation)
         m->value = -1;
         m->marker = "warmup";
         pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return sub_a->try_get(sub_a_topic); }, 500))
+        ASSERT_TRUE(wait_until([&]() { return sub_a->try_get_clone(sub_a_topic); }, 500))
             << "sub_a did not receive warmup " << i;
     }
     drain_subscriber(*sub_b, sub_b_topic);
@@ -505,7 +505,7 @@ TEST(ShmNodelet, MsgIdIsolation)
     pub->publish(msg);
 
     /* sub_a(msg_id=42) 应收到 */
-    bool a_got = wait_until([&]() { return sub_a->try_get(sub_a_topic); }, 500);
+    bool a_got = wait_until([&]() { return sub_a->try_get_clone(sub_a_topic); }, 500);
     ASSERT_TRUE(a_got) << "sub with matching msg_id should receive";
     {
         auto rcvd = sub_a_topic->topic()->msgcast<CountingMsg>();
@@ -546,7 +546,7 @@ TEST(ShmNodelet, PublishAfterSubDestroyNoCrash)
             m->value = -1;
             m->marker = "warmup";
             pub->publish(m);
-            ASSERT_TRUE(wait_until([&]() { return sub->try_get(sub_topic); }, 500))
+            ASSERT_TRUE(wait_until([&]() { return sub->try_get_clone(sub_topic); }, 500))
                 << "sub did not receive warmup " << i;
         }
         /* sub 离开作用域 → 析构 → 先注销再停止线程 */
@@ -600,7 +600,7 @@ TEST(ShmNodelet, TopologyCountChangeResetsK)
         m->value = i;
         m->marker = "K_build";
         pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return sub1->try_get(sub1_topic); }, 500))
+        ASSERT_TRUE(wait_until([&]() { return sub1->try_get_clone(sub1_topic); }, 500))
             << "sub1 did not receive warmup " << i;
     }
 
@@ -622,7 +622,7 @@ TEST(ShmNodelet, TopologyCountChangeResetsK)
             sniff->marker = "sniff_confirm";
             pub->publish_for_sniffer(sniff);
         }
-        if (wait_until([&]() { return sub2->try_get(sub2_topic); }, 200))
+        if (wait_until([&]() { return sub2->try_get_clone(sub2_topic); }, 200))
         {
             sub2_ready = true;
             break;
@@ -631,7 +631,7 @@ TEST(ShmNodelet, TopologyCountChangeResetsK)
     ASSERT_TRUE(sub2_ready) << "sub2 did not complete handshake within retry window";
 
     /* sub1 也应收到最后的 sniffer 确认消息 */
-    ASSERT_TRUE(wait_until([&]() { return sub1->try_get(sub1_topic); }, 500))
+    ASSERT_TRUE(wait_until([&]() { return sub1->try_get_clone(sub1_topic); }, 500))
         << "sub1 should receive sniffer confirmation";
 
     /* Phase 3: 首次普通 publish —— K 检测到 snapshot.size 变化（1→2）而重置，
@@ -643,8 +643,8 @@ TEST(ShmNodelet, TopologyCountChangeResetsK)
         m->marker = "post_join_1st";
         pub->publish(m);
     }
-    ASSERT_TRUE(wait_until([&]() { return sub1->try_get(sub1_topic); }, 500));
-    ASSERT_TRUE(wait_until([&]() { return sub2->try_get(sub2_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return sub1->try_get_clone(sub1_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return sub2->try_get_clone(sub2_topic); }, 500));
     EXPECT_GE(stats->serialize.load(), 1)
         << "1st publish after topology change MUST invoke serialize (K was reset)";
 
@@ -655,8 +655,8 @@ TEST(ShmNodelet, TopologyCountChangeResetsK)
         m->marker = "post_join_2nd";
         pub->publish(m);
     }
-    ASSERT_TRUE(wait_until([&]() { return sub1->try_get(sub1_topic); }, 500));
-    ASSERT_TRUE(wait_until([&]() { return sub2->try_get(sub2_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return sub1->try_get_clone(sub1_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return sub2->try_get_clone(sub2_topic); }, 500));
 
     /* Phase 5: 第三次普通 publish —— K=3 ≥ kFastPathConfirm，快速路径生效 */
     stats->reset();
@@ -666,8 +666,8 @@ TEST(ShmNodelet, TopologyCountChangeResetsK)
         m->marker = "fast_path";
         pub->publish(m);
     }
-    ASSERT_TRUE(wait_until([&]() { return sub1->try_get(sub1_topic); }, 500));
-    ASSERT_TRUE(wait_until([&]() { return sub2->try_get(sub2_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return sub1->try_get_clone(sub1_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return sub2->try_get_clone(sub2_topic); }, 500));
 
     EXPECT_EQ(stats->serialize.load(), 0)
         << "3rd publish after K re-confirmation MUST NOT invoke serialize (fast path)";
@@ -711,7 +711,7 @@ TEST(ShmNodelet, NodeletDisabledFallsBack)
         m->value = i;
         m->marker = "warmup";
         pair.pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 500));
+        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 500));
     }
 
     /* nodelet off → 始终走 SHM，serialize 必须被调用 */
@@ -720,7 +720,7 @@ TEST(ShmNodelet, NodeletDisabledFallsBack)
     msg->value = 100;
     msg->marker = "no_nodelet";
     pair.pub->publish(msg);
-    ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 500));
+    ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 500));
 
     EXPECT_GE(pair.stats->serialize.load(), 1)
         << "nodelet disabled: MUST invoke serialize (always SHM path)";
@@ -750,7 +750,7 @@ TEST(ShmNodelet, NodeletToggleRuntime)
         m->value = -1;
         m->marker = "warmup";
         pair.pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 500));
+        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 500));
     }
 
     /* Phase 1: nodelet on → 快速路径 */
@@ -760,7 +760,7 @@ TEST(ShmNodelet, NodeletToggleRuntime)
         m->value = 1;
         m->marker = "fast";
         pair.pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 500));
+        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 500));
     }
     EXPECT_EQ(pair.stats->serialize.load(), 0) << "nodelet on: fast path, no serialize";
     EXPECT_EQ(pair.stats->clone.load(), 1) << "nodelet on: clone once";
@@ -773,7 +773,7 @@ TEST(ShmNodelet, NodeletToggleRuntime)
         m->value = 2;
         m->marker = "shm";
         pair.pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 500));
+        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 500));
     }
     EXPECT_GE(pair.stats->serialize.load(), 1) << "nodelet off: must use SHM path";
 
@@ -785,7 +785,7 @@ TEST(ShmNodelet, NodeletToggleRuntime)
         m->value = -1;
         m->marker = "rewarm";
         pair.pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 500));
+        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 500));
     }
     pair.stats->reset();
     {
@@ -793,7 +793,7 @@ TEST(ShmNodelet, NodeletToggleRuntime)
         m->value = 3;
         m->marker = "fast_again";
         pair.pub->publish(m);
-        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get(pair.sub_topic); }, 500));
+        ASSERT_TRUE(wait_until([&]() { return pair.sub->try_get_clone(pair.sub_topic); }, 500));
     }
     EXPECT_EQ(pair.stats->serialize.load(), 0) << "nodelet re-enabled: fast path resumes after K=3";
     EXPECT_EQ(pair.stats->clone.load(), 1) << "nodelet re-enabled: clone once";

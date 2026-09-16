@@ -14,46 +14,54 @@ Verifies the publisher-restart fix for dzplot's LiveSniffSource:
 Uses the SAME channel naming convention as dzplot._channel_name_for_topic
 and _control_plane_name_for_topic, so this is a faithful E2E of the fix.
 
-Usage:
-    python3 tools/dzplot/test/integration_pub_restart.py
+用法: python3.10 tools/dzplot/test/integration_pub_restart.py
+      (绑定只有 cpython-310 的构建; 3.12 载入失败 ⇒ 退出码 2 = SKIP, 不当成通过)
+退出码: 0=全过, 1=有失败, 2=缺 dzipc 绑定(跳过)
 """
 
 import sys
 import os
 import time
 import gc
+import importlib.util
 
-# Use the same path setup as dzplot.py: append python/ for dzipc import
+# Use the same path setup as main.py (2026-09-13 由 dzplot.py 改名而来):
+# append python/ for dzipc import.
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.normpath(os.path.join(_SCRIPT_DIR, "..", "..", ".."))
+_DZPLOT_DIR = os.path.dirname(_SCRIPT_DIR)
+_REPO_ROOT = os.path.normpath(os.path.join(_DZPLOT_DIR, "..", ".."))
 _PYTHON_DIR = os.path.join(_REPO_ROOT, "python")
 if _PYTHON_DIR not in sys.path:
     sys.path.append(_PYTHON_DIR)
 
-import dzipc as ipc
+# 段名一律取自**被测工具自己**的静态方法 —— 本文件不复刻任何名字。
+# ⛔ 原先这里各抄了一份 sanitize_topic_name / channel_name_for_topic /
+#    control_plane_name_for_topic, 于是 C++ 侧改规则时它不会跟着动, 而且那份
+#    sanitize 用的是 str.isalnum()(认 Unicode, C++ 只认 ASCII)。E2E 用例里
+#    "两份字符串各自自洽"是最坏的情况: 它自证正确, 却与传输层无关。
+_DZPLOT_SRC = os.path.join(_DZPLOT_DIR, "main.py")
+_spec = importlib.util.spec_from_file_location("dzplot", _DZPLOT_SRC)
+dzplot = importlib.util.module_from_spec(_spec)
+sys.modules["dzplot"] = dzplot
+_spec.loader.exec_module(dzplot)
+LSS = dzplot.LiveSniffSource
+
+# ⛔ 绑定缺失必须是**显式 SKIP(rc=2)**, 不能是 import 异常回溯。三个运行时核对
+#    脚本(本文件 + verify_segment_naming + verify_runtime_no_garbage)共用同一套
+#    退出码约定, CI 门(scripts/ci_check.sh)按码分流; 少了这个 guard, 在默认
+#    python3(3.12) 下本文件会以 traceback 收场 —— 退出码 1, 与"真失败"无法区分,
+#    而且 pytest 收集阶段直接 ERROR, 整个文件一条用例都跑不到。
+try:
+    import dzipc as ipc
+except Exception as exc:                      # noqa: BLE001 — 任何载入失败都算 SKIP
+    print(f"SKIP: dzipc 绑定不可用({type(exc).__name__}: {exc})")
+    print("      → 用 python3.10 跑本脚本(绑定是 cpython-310 构建)")
+    sys.exit(2)
 
 
-def sanitize_topic_name(topic: str) -> str:
-    """Replicate dzIPC/common/name_operator.h sanitize_topic_name.
-    Keeps alphanumeric, '_', '-', '.'; replaces all other chars with '_'.
-    """
-    result = []
-    for ch in topic:
-        if ch.isalnum() or ch in ("_", "-", "."):
-            result.append(ch)
-        else:
-            result.append("_")
-    return "".join(result)
-
-
-def channel_name_for_topic(topic: str) -> str:
-    """Match dzplot's _channel_name_for_topic."""
-    return "dz_ipc_" + sanitize_topic_name(topic) + "_topic"
-
-
-def control_plane_name_for_topic(topic: str) -> str:
-    """Match dzplot's _control_plane_name_for_topic."""
-    return "dz_ipc_" + sanitize_topic_name(topic) + "_topic_control"
+sanitize_topic_name = LSS._sanitize_topic_name
+channel_name_for_topic = LSS._channel_name_for_topic
+control_plane_name_for_topic = LSS._control_plane_name_for_topic
 
 
 def make_publisher(topic: str) -> "ipc.PublisherIPC":
@@ -118,14 +126,17 @@ def test_publisher_restart_generation_change_and_reattach():
     ok = sniffer.open(ch_name, ipc.SnifferTopology.route)
     check(ok, f"Sniffer.open('{ch_name}', route) succeeded")
 
-    # Open control plane
-    cp = ipc.TopicControlPlane()
-    ok = cp.open(cp_name)
-    check(ok, f"TopicControlPlane.open('{cp_name}') succeeded")
+    # Open control plane — 走 dzplot 自己的只读路径, 不是裸 open。
+    # (裸 open 是 create|open: 段不存在时它会静默建一个空壳, 于是这条用例即使在
+    #  "控制面根本没被建出来"的情况下也会 PASS —— 那正是要防的恒绿。)
+    cp, gen_from_helper, cp_status = LSS._open_control_plane_readonly(ipc, cp_name)
+    check(cp_status == "attached" and cp is not None,
+          f"read-only control-plane attach succeeded (status={cp_status})")
 
     gen1 = cp.generation()
     state1 = cp.state()
     print(f"  Initial:  generation={gen1}, state={state1}")
+    check(gen1 == gen_from_helper, f"generation from helper == plane ({gen_from_helper})")
     check(gen1 > 0, f"Initial generation > 0 (got {gen1})")
     check(state1 == ipc.TopicState.Ready,
           f"Initial state is Ready (got {state1})")
@@ -273,6 +284,35 @@ def test_publisher_restart_generation_change_and_reattach():
                        and gen_zero != gen3)
     check(not should_reattach,
           f"generation==0 skips reattach (gen={gen_zero}, state={state_zero})")
+
+    # ---- Phase 7: 只读纪律 —— 段不存在时**不建段** ----
+    # 这是与旧写法的分界。判据不看"open 返回了什么"(create|open 恒真), 只看**盘**:
+    # 一个从没有过发布端的 topic, 走完只读路径后 /dev/shm 里必须干干净净。
+    print("\n--- Phase 7: read-only discipline (no segment created when absent) ---")
+    lonesome = "/e2e_restart_never_published"
+    lonely_cp_name = control_plane_name_for_topic(lonesome)
+    check(not LSS._control_plane_segment_exists(lonely_cp_name),
+          f"precondition: {lonely_cp_name} 不存在")
+
+    plane_lonely, gen_lonely, status_lonely = LSS._open_control_plane_readonly(
+        ipc, lonely_cp_name)
+    check(status_lonely == "absent" and plane_lonely is None,
+          f"absent 段返回 (None, 0, 'absent'), 得到 "
+          f"({plane_lonely}, {gen_lonely}, {status_lonely!r})")
+    check(not os.path.exists("/dev/shm/" + lonely_cp_name),
+          f"只读路径**没有**在 /dev/shm 建出空壳段 ({lonely_cp_name})")
+
+    # 反面对照: 旧写法(裸 create|open)确实会建段 —— 证明上一条不是恒真。
+    # 用一次性名字, 不碰上面的正确名字; 验完立刻清掉。
+    probe_name = lonely_cp_name + "_probe_must_be_removed"
+    probe = ipc.TopicControlPlane()
+    probe.open(probe_name)
+    created = os.path.exists("/dev/shm/" + probe_name)
+    check(created, "反面对照: 裸 create|open 确实会建段(证明判据有区分力)")
+    del probe
+    gc.collect()
+    if os.path.exists("/dev/shm/" + probe_name):
+        os.unlink("/dev/shm/" + probe_name)
 
     # Cleanup
     sniffer3.close()

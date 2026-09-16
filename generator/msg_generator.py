@@ -11,6 +11,8 @@ import re
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 
+from dzflat_generator import generate_dzflat_block
+
 
 @dataclass(frozen=True)
 class NestedTypeInfo:
@@ -86,6 +88,11 @@ class MessageGenerator:
     NESTED_TYPE_INDEX = 25
     NESTED_ARRAY_TYPE_INDEX = 26
 
+    # 是否发射 DZFlat 段(Root/Flat/View + IpcMsgBase 虚接口)。
+    # 子类若自己组装 .hpp 而不调用 generate_dzflat_section, 必须置为 False —— 否则
+    # 类里会留下已声明未定义的虚函数, 链接期报 undefined vtable。
+    emit_dzflat = True
+
     def __init__(self, nested_types: Optional[Dict[str, NestedTypeInfo]] = None):
         self.fields: List[FieldInfo] = []
         self.nested_types = nested_types or {}
@@ -140,6 +147,17 @@ class MessageGenerator:
 
     def _array_count_expr(self, field: FieldInfo) -> str:
         return str(field.array_size) if field.is_fixed_array else f"int32_t({field.field_name}.size())"
+
+    @staticmethod
+    def _count_guard(name, min_elem, indent):
+        """在 resize / reserve / 构造字符串**之前**插一道 count 闸。
+
+        必须在分配之前: resize 是先分配再拷, 所以 adapt_memcpy_tods 的边界检查根本轮不到
+        —— 实测把 count 篡改成 0x20000000 能让 vector<double> 提交 4.3GB(resize 会值
+        初始化, 是真写下去的), 内存紧张时抛 bad_alloc 而无人捕获 → 进程 abort。
+        判据与后果见 IpcMsgBase::tods_count_ok。"""
+        return (f"{indent}/* 分配前闸: count 来自 wire, 未校验就 resize 会变成无界分配 */\n"
+                f"{indent}if (!this->tods_count_ok(offset, {name}, {min_elem})) {{ return; }}")
 
     def _fixed_array_count_check(self, field: FieldInfo) -> str:
         if not field.is_fixed_array:
@@ -226,6 +244,7 @@ class MessageGenerator:
 #include <cstddef>
 #include <stdexcept>
 #include "ipc_msg/ipc_msg_base/ipc_msg_base.hpp"
+#include "ipc_msg/ipc_msg_base/dzflat.h"
 {nested_include_lines}namespace dzIPC::Msg {{
 class {class_name} : public IpcMsgBase
 {{
@@ -547,11 +566,19 @@ public:
                         f"          offset += sizeof(uint8_t); // 跳过类型标识",
                         f"          int32_t {field.field_name}_size;",
                         f"          this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_size));",
-                        f"          ipc::buffer {field.field_name}_buffer(new uint8_t[{field.field_name}_size], {field.field_name}_size, [](void* p, std::size_t) {{ delete[] static_cast<uint8_t*>(p); }});",
-                        f"          if ({field.field_name}_size > 0) {{",
-                        f"              this->adapt_memcpy_tods(static_cast<uint8_t *>({field.field_name}_buffer.data()), static_cast<const uint8_t *>(buffer.data()), offset, uint32_t({field.field_name}_size));",
+                        f"          // 嵌套子对象: 若位于同一数据页内则直接借用父 buffer 的字节(零分配零拷贝),",
+                        f"          // 否则(跨页)退回避尾拷贝路径, 由 adapt_memcpy_tods 负责剥离父缓冲的页尾字节",
+                        f"          if (this->region_is_contiguous(offset, {field.field_name}_size)) {{",
+                        f"              ipc::buffer {field.field_name}_buffer(const_cast<uint8_t *>(static_cast<const uint8_t *>(buffer.data()) + offset), {field.field_name}_size);",
+                        f"              {field.field_name}.deserialize({field.field_name}_buffer);",
+                        f"              offset += {field.field_name}_size;",
+                        f"          }} else {{",
+                        f"              ipc::buffer {field.field_name}_buffer(new uint8_t[{field.field_name}_size], {field.field_name}_size, [](void* p, std::size_t) {{ delete[] static_cast<uint8_t*>(p); }});",
+                        f"              if ({field.field_name}_size > 0) {{",
+                        f"                  this->adapt_memcpy_tods(static_cast<uint8_t *>({field.field_name}_buffer.data()), static_cast<const uint8_t *>(buffer.data()), offset, uint32_t({field.field_name}_size));",
+                        f"              }}",
+                        f"              {field.field_name}.deserialize({field.field_name}_buffer);",
                         f"          }}",
-                        f"          {field.field_name}.deserialize({field.field_name}_buffer);",
                         "",
                     ]
                 )
@@ -570,6 +597,7 @@ public:
                 if field.is_fixed_array:
                     lines.append(self._fixed_array_count_check(field))
                 else:
+                    lines.append(self._count_guard(f"{field.field_name}_count", 4, "          "))
                     lines.append(f"          {field.field_name}.clear();")
                     lines.append(f"          {field.field_name}.resize({field.field_name}_count);")
                 lines.extend(
@@ -577,11 +605,19 @@ public:
                         f"          for (int32_t i = 0; i < {field.field_name}_count; ++i) {{",
                         f"              int32_t nested_size;",
                         f"              this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&nested_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(nested_size));",
-                        f"              ipc::buffer nested_buffer(new uint8_t[nested_size], nested_size, [](void* p, std::size_t) {{ delete[] static_cast<uint8_t*>(p); }});",
-                        f"              if (nested_size > 0) {{",
-                        f"                  this->adapt_memcpy_tods(static_cast<uint8_t *>(nested_buffer.data()), static_cast<const uint8_t *>(buffer.data()), offset, uint32_t(nested_size));",
+                        f"              // 嵌套子对象: 若位于同一数据页内则直接借用父 buffer 的字节(零分配零拷贝),",
+                        f"              // 否则(跨页)退回避尾拷贝路径, 由 adapt_memcpy_tods 负责剥离父缓冲的页尾字节",
+                        f"              if (this->region_is_contiguous(offset, nested_size)) {{",
+                        f"                  ipc::buffer nested_buffer(const_cast<uint8_t *>(static_cast<const uint8_t *>(buffer.data()) + offset), nested_size);",
+                        f"                  {field.field_name}[i].deserialize(nested_buffer);",
+                        f"                  offset += nested_size;",
+                        f"              }} else {{",
+                        f"                  ipc::buffer nested_buffer(new uint8_t[nested_size], nested_size, [](void* p, std::size_t) {{ delete[] static_cast<uint8_t*>(p); }});",
+                        f"                  if (nested_size > 0) {{",
+                        f"                      this->adapt_memcpy_tods(static_cast<uint8_t *>(nested_buffer.data()), static_cast<const uint8_t *>(buffer.data()), offset, uint32_t(nested_size));",
+                        f"                  }}",
+                        f"                  {field.field_name}[i].deserialize(nested_buffer);",
                         f"              }}",
-                        f"              {field.field_name}[i].deserialize(nested_buffer);",
                         f"          }}",
                         "",
                     ]
@@ -599,6 +635,7 @@ public:
                         f"          (void){field.field_name}_type;",
                         f"          int32_t {field.field_name}_size;",
                         f"          this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&{field.field_name}_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof({field.field_name}_size));",
+                        self._count_guard(f"{field.field_name}_size", 1, "          "),
                         f"          {field.field_name}.resize({field.field_name}_size );",
                         f"          this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>({field.field_name}.data()), static_cast<const uint8_t *>(buffer.data()), offset, {field.field_name}_size);",
                         "",
@@ -620,6 +657,7 @@ public:
                 if field.is_fixed_array:
                     lines.append(self._fixed_array_count_check(field))
                 else:
+                    lines.append(self._count_guard(f"{field.field_name}_count", 4, "        "))
                     lines.append(f"        {field.field_name}.clear();")
                     lines.append(f"        {field.field_name}.reserve({field.field_name}_count);")
                 lines.extend(
@@ -627,6 +665,7 @@ public:
                         f"        for (int32_t i = 0; i < {field.field_name}_count; ++i) {{",
                         f"            int32_t str_size;",
                         f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t *>(&str_size), static_cast<const uint8_t *>(buffer.data()), offset, sizeof(str_size));",
+                        self._count_guard("str_size", 1, "            "),
                         f"            std::string str(str_size, '\\0');",
                         f"            this->adapt_memcpy_tods(reinterpret_cast<uint8_t*>(str.data()), static_cast<const uint8_t *>(buffer.data()), offset, str_size);",
                         f"            {'{field}[i] = std::move(str);'.format(field=field.field_name) if field.is_fixed_array else field.field_name + '.emplace_back(std::move(str));'}",
@@ -653,6 +692,7 @@ public:
                     if field.is_fixed_array:
                         lines.append(self._fixed_array_count_check(field))
                     else:
+                        lines.append(self._count_guard(f"{field.field_name}_count", 1, "          "))
                         lines.append(f"          {field.field_name}.clear();")
                         lines.append(f"          {field.field_name}.resize({field.field_name}_count);")
                     lines.extend(
@@ -682,6 +722,8 @@ public:
                     if field.is_fixed_array:
                         lines.append(self._fixed_array_count_check(field))
                     else:
+                        lines.append(self._count_guard(f"{field.field_name}_count",
+                                                       f"sizeof({base_type})", "          "))
                         lines.append(f"          {field.field_name}.resize({field.field_name}_count);")
                     lines.extend(
                         [
@@ -726,17 +768,50 @@ public:
         return self._normalize_indent("\n".join(lines))
 
     def generate_clone_function(self, class_name: str) -> str:
-        """生成克隆函数"""
+        """生成克隆函数 + DZFlat 虚接口声明。
+
+        DZFlat 的实现体依赖 XxxFlat / XxxView, 而它们定义在类之后, 所以这里只声明,
+        定义由 dzflat_generator 发射在 View 之后(见 generate_dzflat_block)。
+
+        emit_dzflat 为假时**连声明也不发**: 声明与定义必须成对出现, 只发声明会让类
+        带着未定义的虚函数, 链接期报 "undefined reference to vtable"。srv 生成器复用
+        本方法但自己组装文件、不发射 DZFlat 段, 故把它关掉(见 srv_generator)。
+        """
+        dzflat_decls = ""
+        if self.emit_dzflat:
+            dzflat_decls = """
+
+        /* DZFlat 平坦布局接口(SHM 旁路); 实现在类外, 见文件末尾 */
+        uint32_t dzflat_schema_hash() const noexcept override;
+        uint32_t dzflat_size() const override;
+        bool dzflat_write(void* seg, uint32_t cap) const override;
+        bool dzflat_read(const void* seg, size_t size) override;"""
         return f"""
         /* 克隆函数 */
         {class_name}* clone() const override
         {{
             return new {class_name}(*this);
-        }}"""
+        }}{dzflat_decls}"""
 
     def generate_class_footer(self) -> str:
-        """生成类尾部"""
-        return "\n};\n} // namespace dzIPC::Msg\n"
+        """生成类尾部(仅关闭消息类)。
+
+        命名空间的关闭挪到了 generate_hpp_file: DZFlat 段(Root/Flat/View)是类之外、
+        命名空间之内的独立类型, 必须插在两者之间。
+        """
+        return "\n};\n"
+
+    def generate_namespace_footer(self) -> str:
+        """关闭 dzIPC::Msg 命名空间"""
+        return "} // namespace dzIPC::Msg\n"
+
+    def generate_dzflat_section(self, class_name: str) -> str:
+        """生成 DZFlat 平坦布局段(Root/Flat/View), 位于消息类之后、命名空间之内。
+
+        与既有 TLV serialize/deserialize 完全并存: 本段只新增类型和静态函数, 不改动
+        消息类本身。设计见 docs/dzflat_shm.md。
+        """
+        return generate_dzflat_block(class_name, self.fields)
 
     def generate_hpp_file(self, class_name: str) -> str:
         """生成完整的.hpp文件"""
@@ -749,6 +824,8 @@ public:
             self.generate_deserialize_function(),
             self.generate_clone_function(class_name),
             self.generate_class_footer(),
+            self.generate_dzflat_section(class_name),
+            self.generate_namespace_footer(),
         ]
         return self._normalize_indent("\n".join(parts))
 

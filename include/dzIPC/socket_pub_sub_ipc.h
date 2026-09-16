@@ -12,8 +12,11 @@
 #include "dzIPC/common/circularqueue.h"
 #include "dzIPC/common/local_pub_sub_registry.h"
 #include "dzIPC/common/nodelet_config.h"
+#include "dzIPC/common/sample_message.h"
 #include "dzIPC/common/thread_dispatch.h"
 #include "dzIPC/common/topic_data.h"
+
+namespace dzIPC { class Sample; }
 #include "dzIPC/ipc_info_pool.h"
 #include "dzIPC/pub_sub_base.h"
 #include "libipc/udp.h"
@@ -126,8 +129,35 @@ public:
     ~socket_sub_ipc();
     void InitChannel(std::string extra_info = "");
     void reset_message(const std::shared_ptr<TopicData>& msg);
-    void get(std::shared_ptr<TopicData>& msg);
-    bool try_get(std::shared_ptr<TopicData>& msg);
+    /* ---- 视图路径(借样) ----
+     *
+     * 与 SHM 侧**同构**的两条互补队列:
+     *
+     *   view_queue_  ← DZFlat 段 + typed 话题(dzflat_schema_hash() != 0) → 借样 Sample
+     *   msg_queue_   ← TLV 段, 以及 schema-less 话题(GenericMessage/手写类型)的 DZFlat 段
+     *
+     * ⇒ `try_get` 只服务借样段, `try_get_clone` 只服务物化对象, 一条消息**只会进其中
+     * 一条**。混合 wire(灰度期)需要调用方两条都 drain, 见 pub_sub_base.h 与
+     * sample_message.h 的头注释。
+     *
+     * ⚠️ 两条使用约束(不写清会静默挂死, 与本仓已修过的第 4 条缺陷同类):
+     *   ① 话题恒发 TLV 时视图队列**永远为空** ⇒ 无超时的 get(Sample&) 会永久阻塞,
+     *      这类话题请用 get(Sample&, tm_ms) 或 get_clone/try_get_clone;
+     *   ② 开着 nodelet 快速路径(EnableNodelet(true))时, **同进程**发布者走
+     *      LocalPubSubRegistry 直接投进 msg_queue_ —— 视图队列拿不到那些消息, 该拓扑
+     *      下只能走物化路径。
+     *
+     * 生命周期与 SHM 一致: Sample 持有一段独立的连续段(见 chunk_rev_topic 的
+     * out_payload 契约), view<T>() / span 只在 Sample 活着时有效; Sample 是 move-only。 */
+    void get(Sample& out);
+    bool try_get(Sample& out);
+    /// 带超时的视图取: 超时返回 false 而不是永久阻塞(队列底能力本来就支持, 见
+    /// docs/shm_defect_fixes.md 第 4 条)。
+    bool get(Sample& out, std::uint64_t tm_ms);
+
+    /* 物化路径。socket 的接收只走这条。 */
+    void get_clone(std::shared_ptr<TopicData>& msg);
+    bool try_get_clone(std::shared_ptr<TopicData>& msg);
     /* 禁用拷贝 */
     socket_sub_ipc(const socket_sub_ipc&) = delete;
     socket_sub_ipc& operator=(const socket_sub_ipc&) = delete;
@@ -147,7 +177,8 @@ private:
     std::shared_ptr<ipc::socket::UDPNode> ack_tx_;
     std::shared_ptr<TopicData> topic_msg_;
     std::mutex topic_msg_mtx_;
-    std::shared_ptr<CircularQueue<IpcMsgBase>> msg_queue_;  // shared_ptr for fast-path fanout
+    std::shared_ptr<CircularQueue<IpcMsgBase>> msg_queue_;  // 物化队列(shared_ptr for fast-path fanout)
+    std::shared_ptr<CircularQueue<Sample>> view_queue_;     // 视图队列: 借样的 DZFlat 段
     std::thread* subscribe_thread_{nullptr};
     dzIPC::info_pool::ScopedRegistration pool_reg_;
     dzIPC::ThreadDispatch::ThreadOptions thread_options_;

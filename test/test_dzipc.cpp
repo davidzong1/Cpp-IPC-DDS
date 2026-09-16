@@ -196,7 +196,7 @@ void subscribe_thread_function()
     bool exit_flag = false;
     while (!exit_flag)
     {
-        if (subscriber->try_get(topic_msg_))
+        if (subscriber->try_get_clone(topic_msg_))
         {
             auto rev_msg = topic_msg_->topic()->msgcast<dzIPC::Msg::TestMsg>();
             socket_subscriber_count.fetch_add(1);
@@ -450,7 +450,7 @@ void shm_subscribe_thread_function()
     bool exit_flag = false;
     while (!exit_flag)
     {
-        if (subscriber->try_get(topic_msg_))
+        if (subscriber->try_get_clone(topic_msg_))
         {
             auto rev_msg = topic_msg_->topic()->msgcast<dzIPC::Msg::TestMsg>();
             shm_subscriber_count.fetch_add(1);
@@ -645,6 +645,108 @@ TEST(DzIpcSocket, CtrlCSignalCapture)
     std::signal(SIGINT, previous_sigint);
 
     EXPECT_TRUE(ctrlc_captured.load());
+}
+
+/* ------------------------------------------------------------------------- *
+ * T0 决策 1: IPCType::Auto 传给发布/订阅必须**显式拒绝**。
+ *
+ * 注: dzipc.h 已不再导出 IPC_AUTO 常量(公开入口只剩 IPC_SHM/IPC_SOCKET/
+ * IPC_SOCKET_ONLY), 但该**枚举值**仍然存在 —— 它是 IPC_SOCKET 在 ser-cli 上的
+ * 归一化目标, 调用方也能直接写 IPCType::Auto, 所以这条拒绝逻辑与它的用例都必须留着。
+ *
+ * 它的实现依赖 ser-cli 的握手通道做两阶段路径裁定, 而 pub/sub 没有这条通道 ⇒
+ * 这里不可能有正确实现, 只能拒绝。
+ *
+ * 本用例钉三件事, 缺一都会退化成"看起来能用":
+ *   ① 必须**抛异常**, 而不是安静地按 socket 建链(那样用户会以为拿到了自动选路,
+ *      实际永远走 UDP 且无任何告警 —— T0 决策清单 J-4 的公共 API 脚枪);
+ *   ② 报错信息必须**可操作**: 要认出是 Auto 且要指路到 IPC_SHM/IPC_SOCKET。
+ *      否则调用方看到通用报错会去改成 IPC_SOCKET —— pub/sub 的同机最优解通常是
+ *      SHM, 那是比现在更糟的解法;
+ *   ③ 现有 IPC_SHM/IPC_SOCKET 路径**不受影响**(拒绝不能顺手改变既有语义)。
+ * ------------------------------------------------------------------------- */
+TEST(DzIpcAutoType, PubSubRejectsIpcAutoExplicitly)
+{
+    auto td = TopicDataPtrMake<dzIPC::Msg::TestMsg>(0);
+
+    /* ① 发布者: 构造即拒绝, 且绝不返回一个"能用但不自动"的对象。 */
+    bool pub_threw = false;
+    std::string pub_what;
+    try
+    {
+        PublisherIPCPtr pub = PublisherIPCPtrMake(td, "AutoTypePubSub", 1, IPCType::Auto, false);
+        /* 走到这里就已经违规: 没有抛异常。下面用 InitChannel 兼容"延后拒绝"的
+         * 实现(若实现改成构造期不抛、建链期才抛, 本用例同样能判出来)。 */
+        pub->InitChannel();
+        ADD_FAILURE() << "IPCType::Auto 传给发布者没有报错 —— 公共 API 静默降级脚枪仍在";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        pub_threw = true;
+        pub_what = e.what();
+    }
+    catch (const std::exception& e)
+    {
+        pub_what = e.what();
+    }
+    EXPECT_TRUE(pub_threw) << "期望 std::invalid_argument, 实得: " << pub_what;
+
+    /* ② 报错必须可操作: 认得 Auto, 且指路到显式传输。 */
+    EXPECT_NE(pub_what.find("IPCType::Auto"), std::string::npos)
+        << "报错未点名 IPCType::Auto, 调用方无法判断是自己的错还是传了非法枚举值: " << pub_what;
+    EXPECT_NE(pub_what.find("IPC_SHM"), std::string::npos)
+        << "报错未指路到 IPC_SHM, 调用方最可能的反应是改成 IPC_SOCKET —— 那是更糟的解法: " << pub_what;
+
+    /* 订阅者与发布者是对称的两处(两个 pimpl 各有一段 dispatch), 必须都拒绝。 */
+    auto td2 = TopicDataPtrMake<dzIPC::Msg::TestMsg>(0);
+    bool sub_threw = false;
+    std::string sub_what;
+    try
+    {
+        SubscriberIPCPtr sub = SubscriberIPCPtrMake(td2, "AutoTypePubSub", 1, 10, IPCType::Auto, false);
+        sub->InitChannel();
+        ADD_FAILURE() << "IPCType::Auto 传给订阅者没有报错 —— 只堵了一半";
+    }
+    catch (const std::invalid_argument& e)
+    {
+        sub_threw = true;
+        sub_what = e.what();
+    }
+    catch (const std::exception& e)
+    {
+        sub_what = e.what();
+    }
+    EXPECT_TRUE(sub_threw) << "期望 std::invalid_argument, 实得: " << sub_what;
+    EXPECT_NE(sub_what.find("IPCType::Auto"), std::string::npos) << sub_what;
+
+    /* ③ 既有两个传输不受影响: 构造与建链都正常(本用例不做收发, 收发由
+     *    DzIpcSocket/DzIpcShm 两组既有用例覆盖 —— 这里只确认拒绝没有波及它们)。 */
+    auto td3 = TopicDataPtrMake<dzIPC::Msg::TestMsg>(0);
+    EXPECT_NO_THROW({
+        PublisherIPCPtr pub = PublisherIPCPtrMake(td3, "AutoTypeExplicitShm", 1, IPC_SHM, false);
+        pub->InitChannel();
+    }) << "IPC_SHM 路径被 Auto 的拒绝逻辑波及";
+    auto td4 = TopicDataPtrMake<dzIPC::Msg::TestMsg>(0);
+    EXPECT_NO_THROW({
+        SubscriberIPCPtr sub = SubscriberIPCPtrMake(td4, "AutoTypeExplicitSocket", 1, 10, IPC_SOCKET, false);
+        sub->InitChannel();
+    }) << "IPC_SOCKET 路径被 Auto 的拒绝逻辑波及";
+
+    /* 真·非法枚举值仍走原有的通用报错(Auto 的拒绝是**特例**而不是替换掉原分支)。
+     * 取 4 而不是更大的数: 无固定底层类型的枚举, 超出取值范围的值是 UB。
+     * ⛔ 不能再用 3 —— SocketOnly 加入后 3 已合法, 那样这条用例会静默失去意义。 */
+    auto td5 = TopicDataPtrMake<dzIPC::Msg::TestMsg>(0);
+    bool bogus_threw = false;
+    try
+    {
+        PublisherIPCPtr pub = PublisherIPCPtrMake(td5, "AutoTypeBogus", 1, static_cast<IPCType>(4), false);
+        pub->InitChannel();
+    }
+    catch (const std::invalid_argument&)
+    {
+        bogus_threw = true;
+    }
+    EXPECT_TRUE(bogus_threw) << "未知枚举值不再被拒绝 —— 通用分支被 Auto 的改动吃掉了";
 }
 
 int main(int argc, char** argv)

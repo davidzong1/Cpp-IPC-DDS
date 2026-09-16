@@ -48,40 +48,97 @@ class DzipcSubscriber(threading.Thread):
 
     @staticmethod
     def _sanitize_for_shm(topic: str) -> str:
-        """Mimic C++ sanitize_topic_name() character-level sanitisation.
+        """C++ sanitize_topic_name() 的 Python 转写 —— **逐字节**, 与 C++ 一致。
 
-        Replaces every character that is NOT alphanumeric, '_', '-', or '.'
-        with '_', matching the C++ implementation in name_operator.cc.
-        This does NOT add the "dz_ipc_" prefix or "_topic" suffix.
+        规则(src/dzIPC/common/name_operator.cc:13): 只保留 ASCII 字母数字与 '_' '-' '.',
+        其余一律 '_', 且按**字节**判断:
+
+            const bool is_alnum = (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z')
+                                  || (ch >= 'a' && ch <= 'z');
+            name.push_back(is_alnum || ch == '_' || ch == '-' || ch == '.' ? ch : '_');
+
+        ⛔ 所以这里**不能**用 str.isalnum() —— 它认 Unicode(如 '１２３'、'²'、'四'),
+        C++ 不认。实测 '/中文': 旧写法给出 '_中文', C++ 给出 '_______'(7 个字节各一个 '_'),
+        段名就此错开且**不报错**(控制面 open 是 create|open, 会按错名建一个空壳)。
+
+        errors='surrogateescape' 与 Python 解码 argv 的策略成对: 把命令行传来的、可能不是
+        合法 UTF-8 的原始字节原样取回, 与 C++ 从 argv 拿到的字节串一致。
+        返回必然是纯 ASCII(保留的字节全在 ASCII 区间)。
+
+        本方法**不**加 "dz_ipc_d<domain>_" 前缀与 "_topic" 后缀 —— 那是
+        _segment_name_for_topic() 的事。
         """
-        result: List[str] = []
-        for ch in topic:
-            if ch.isalnum() or ch in ('_', '-', '.'):
-                result.append(ch)
+        raw = topic.encode("utf-8", "surrogateescape")
+        out = bytearray()
+        for b in raw:
+            if (0x30 <= b <= 0x39) or (0x41 <= b <= 0x5A) or (0x61 <= b <= 0x7A) \
+                    or b in (0x5F, 0x2D, 0x2E):   # '_' '-' '.'
+                out.append(b)
             else:
-                result.append('_')
-        return ''.join(result)
+                out.append(0x5F)                  # '_'
+        return out.decode("ascii")
 
     @staticmethod
-    def _clean_shm_for_topic(topic: str) -> None:
-        """Remove stale SHM connection files for *topic*.
+    def _segment_name_for_topic(topic: str, domain: int = 0) -> str:
+        """数据段名 —— C++ shm_topic_segment_name() 的 Python 转写。
+
+        唯一出处 include/dzIPC/common/name_operator.h(实现在 name_operator.cc:25):
+
+            "dz_ipc_d" + std::to_string(domain_id) + "_" + sanitize_topic_name(topic) + "_topic"
+
+        domain 参与命名, 漏掉它 SHM 上就没有 domain 隔离(docs/shm_defect_fixes.md 第 1 条)。
+        """
+        return ("dz_ipc_d" + str(domain) + "_"
+                + DzipcSubscriber._sanitize_for_shm(topic) + "_topic")
+
+    @staticmethod
+    def _shm_globs_for_topic(topic: str, domain: int = 0) -> List[str]:
+        """该 topic+domain 在 /dev/shm 里**全部**落盘文件名(glob 形式)。
+
+        实测(2026-09-15, python3.10 起真实 SHM 发布端后逐个核对)传输层为
+        dz_ipc_d0__<san>_topic 建出的文件是:
+
+            __IPC_SHM__QU_CONN__<seg>__<queue_size>__<max_receivers>
+            __IPC_SHM__AC_CONN__<seg>
+            __IPC_SHM__{CC,RD,WT}_CONN__<seg>_WAITER_{COND,LOCK,STATE}_
+            <seg>_control2                                   ← 控制面, **裸文件**
+
+        即: 数据/等待者通道带 libipc 的 __IPC_SHM__ 前缀, 控制面不带。所以需要
+        "带前缀的三条 + 裸的一条"。段名以 '__' 或 '_WAITER_' 为界收尾, 因此下面每条都在
+        段名后立刻收窄 —— 裸 '...<seg>*' 会误伤名字更长的邻居 topic(实测
+        dz_ipc_d0__x_topic 的 pattern 会匹配 dz_ipc_d0__x_topic_extra_topic 的通道)。
+
+        ⚠️ 旧写法是 f"...__dz_ipc__{san}*" / f"...__dz_ipc_{san}*" —— 既缺 `d<domain>_`
+        也缺 `_topic`, 对**任何**真实文件都不匹配, 于是这个"清理"函数一直是**静默空转**。
+        """
+        seg = DzipcSubscriber._segment_name_for_topic(topic, domain)
+        return [
+            f"/dev/shm/__IPC_SHM__*__{seg}",              # AC_CONN(无后缀)
+            f"/dev/shm/__IPC_SHM__*__{seg}__*",           # QU_CONN(带 queue/receiver 后缀)
+            f"/dev/shm/__IPC_SHM__*__{seg}_WAITER_*",     # CC/RD/WT 的等待者三元组
+            f"/dev/shm/{seg}_control2",                   # 控制面(裸文件, 无前缀)
+        ]
+
+    @staticmethod
+    def _clean_shm_for_topic(topic: str, domain: int = 0) -> None:
+        """Remove stale SHM connection files for *topic* (on *domain*).
 
         This is a last-resort offline cleanup helper.  Normal display
         removal must not call it because display removal does not own the
-        publisher's live SHM segments.  We match against the
-        C++-sanitised topic name to cover control-plane, queue, waiter,
-        and counter SHM segments when no publisher is running.
+        publisher's live SHM segments.
 
         IMPORTANT: Do NOT call this while a publisher is still running on
         the same topic — that would delete the publisher's live SHM files,
         creating a split-brain where publisher writes to old (unlinked)
         memory and the new subscriber reads from fresh (empty) files.
+
+        ⚠️ domain 是段名的一部分, 必须由调用方给出(默认 0 只为兼容旧调用点):
+        给错 domain 不会报错, 只会按**另一个** domain 的段名去找 —— 找不到就静默什么
+        都不删(安全), 但若那个 domain 恰好有活在跑, 就会删掉它的段。dzviz 的
+        TopicSpec.from_config() 默认值是 1(topic_spec.py:45), 而 dzplot 默认 0,
+        调用时务必传 spec.domain。
         """
-        sanitised = DzipcSubscriber._sanitize_for_shm(topic)
-        for pat in (
-            f"/dev/shm/__IPC_SHM__*__dz_ipc__{sanitised}*",
-            f"/dev/shm/__IPC_SHM__*__dz_ipc_{sanitised}*",
-        ):
+        for pat in DzipcSubscriber._shm_globs_for_topic(topic, domain):
             for path in glob.glob(pat):
                 try:
                     os.unlink(path)
@@ -242,7 +299,7 @@ class DzipcSubscriber(threading.Thread):
                     )
                     return
                 try:
-                    ok, out = sub.try_get(topic_data)
+                    ok, out = sub.try_get_clone(topic_data)
                     if ok:
                         got_data = True
                         self._process_sample(
@@ -288,7 +345,7 @@ class DzipcSubscriber(threading.Thread):
             try:
                 while not self.stop_event.is_set():
                     try:
-                        ok, out = sub.try_get(topic_data)
+                        ok, out = sub.try_get_clone(topic_data)
                         if not ok:
                             if (
                                 idle_reconnect_timeout > 0

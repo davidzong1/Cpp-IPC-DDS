@@ -18,7 +18,8 @@ public:
         INT,
         DOUBLE,
         BOOL,
-        FLAG,   // 仅作为布尔标志，不接受值
+        FLAG,       // 仅作为布尔标志，不接受值
+        OPT_BOOL,   // 布尔开关, 值**可选**: 裸写即为真, 也可显式跟 true/false
     };
 
     struct Argument
@@ -31,6 +32,7 @@ public:
         Type type = Type::STRING;
         bool required = false;
         bool is_flag = false;   // Boolean flag, e.g., --verbose
+        bool is_opt_bool = false;   // OPT_BOOL: 出现即为真, 但允许显式跟 true/false
         bool is_positional = false;
         bool present = false;   // Whether it was explicitly set
     };
@@ -55,6 +57,7 @@ public:
         a.default_value = default_value;
         a.value = default_value;
         a.is_flag = (type == Type::FLAG);
+        a.is_opt_bool = (type == Type::OPT_BOOL);
         a.is_positional = name.empty() || name[0] != '-';
         a.present = !default_value.empty();
 
@@ -105,11 +108,30 @@ public:
                 Argument& a = args_[it->second];
                 if (a.is_flag)
                 {
+                    /* FLAG 保持"出现即真"不动 —— dzipc_pub 的 --once 就是它, 行为不许变。 */
                     a.value = "true";
                 }
                 else if (!inline_val.empty())
                 {
+                    /* `--name=value` 形式对**所有**非 FLAG 类型都优先: 显式写了值就以它为准。
+                     * OPT_BOOL 靠这一支拿到 `--watch_handshake=false`。 */
                     a.value = inline_val;
+                }
+                else if (a.is_opt_bool)
+                {
+                    /* OPT_BOOL 且没写 `=值`: 裸写 ⇒ 真; `-w false` ⇒ 假。
+                     * 只看**紧邻的下一个 token 是不是布尔字面量**决定要不要消费它:
+                     *   - `-w -f 4` ⇒ 下一个是 `-f`, 非字面量 ⇒ 判真且**不消费**它。
+                     *     (BOOL 的毛病正是无条件消费 ⇒ 把 `-f` 吞成值, 开关静默关闭, 频率一起丢。)
+                     *   - `-w false` ⇒ 消费, 值为假。 */
+                    if (i + 1 < argc && is_bool_literal(argv[i + 1]))
+                    {
+                        a.value = argv[++i];
+                    }
+                    else
+                    {
+                        a.value = "true";
+                    }
                 }
                 else
                 {
@@ -195,6 +217,16 @@ public:
     }
 
 private:
+    /* 是否为"是/否"布尔字面量 —— OPT_BOOL 据此决定"要不要吃掉下一个 token 当自己的值"。
+     * ⛔ 这份清单与 convert<bool>() 的**真值集**必须对齐: 前 4 个为真、后 4 个为假。
+     * 漂移的后果是静默反向 —— 例如把 `yes` 列进来却让 convert<bool> 解成 false, 于是
+     * `-w yes` 看起来"明明写了 yes"却关掉了开关, 而屏幕上只表现为"什么都没有"。 */
+    static bool is_bool_literal(const std::string& s)
+    {
+        return s == "true" || s == "1" || s == "yes" || s == "on" || s == "false" || s == "0" || s == "no" ||
+               s == "off";
+    }
+
     template<typename T>
     static T convert(const std::string& s)
     {

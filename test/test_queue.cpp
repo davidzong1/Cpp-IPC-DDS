@@ -44,7 +44,9 @@ constexpr int ThreadMax = 8;
 
 template <typename Que>
 void push(Que & que, int p, int d) {
-    for (int n = 0; !que.push([](void*) { return true; }, p, d); ++n) {
+    /* prep 回调现在统一收 (void*, cc_t): push 也要归还被覆写消息的资源
+     * (见 prod_cons.h 里 <single,multi,broadcast>::push 的注释)。 */
+    for (int n = 0; !que.push([](void*, ipc::circ::cc_t) { return true; }, p, d); ++n) {
         ASSERT_NE(n, PushRetry);
         std::this_thread::yield();
     }

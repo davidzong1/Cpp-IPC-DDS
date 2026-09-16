@@ -163,10 +163,24 @@ public:
             ::setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
 #endif
 
+            /* 绑**组播组地址**而不是 INADDR_ANY。
+             *
+             * 绑 INADDR_ANY 时, 同机所有 topic 只要落到同一端口就会互相收包 —— 实测
+             * (docs/shm_defect_fixes.md 第 3 条): 默认 domain_id=0 下端口公式退化成常数
+             * 11451, 于是两个不同 topic 的组播组虽不同, 却各自收到了对方的**全部**数据;
+             * 若两者 msg_id 又都是默认 0, check_id 会放行, 直接按错误类型反序列化。
+             *
+             * 绑到组地址后由内核按组过滤, 同端口不同组不再串。寻址方案(端口/组公式)不变,
+             * 所以不影响互操作。 */
             sockaddr_in local_addr{};
             local_addr.sin_family = AF_INET;
-            local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
             local_addr.sin_port = htons(port);
+            if (::inet_pton(AF_INET, ip, &local_addr.sin_addr) != 1)
+            {
+                ::close(server_fd);
+                server_fd = -1;
+                return false;
+            }
 
             if (::bind(server_fd, reinterpret_cast<sockaddr*>(&local_addr), sizeof(local_addr)) < 0)
             {

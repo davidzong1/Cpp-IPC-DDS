@@ -98,6 +98,36 @@ IPC_EXPORT bool chunk_rev_server(std::shared_ptr<ipc::socket::UDPNode>& node, st
  * 刻意做成重载而非默认参数: 保留原符号, 已链接的二进制不受影响。 */
 IPC_EXPORT bool chunk_rev_topic(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<TopicData>& rev_msg,
                                 uint64_t tm, const std::shared_ptr<ipc::socket::UDPNode>& ack_node);
+
+/* --------- T1: UDP 话题订阅端的"借样"出口 ---------
+ *
+ * 与上面两个重载走**同一条**可靠路径(同样的分片重组 + NACK 重传轮 + ACK), 唯一区别是
+ * 交回什么:
+ *
+ *   out_payload 非空 且 收到的是一条 DZFlat 段(段首 magic 判别)
+ *        ⇒ **不做 TLV 反序列化**, 把该段**去帧**(去掉页尾)后放进 *out_payload, 返回 true。
+ *          调用方据此走借样/视图路径, 且**不得**再把它当 TLV 物化。
+ *   其余情况(TLV, 或 out_payload == nullptr)
+ *        ⇒ 与老行为逐字节一致: 反序列化进 rev_msg->topic(), *out_payload 不被触碰。
+ *
+ * 判据是 out_payload 是否为空 —— 调用方必须**先清空自己的 buffer**再传进来, 否则无法
+ * 区分"收到 TLV"与"什么都没收到"(返回 false 表示超时/丢片, 此时 out_payload 不动)。
+ *
+ * 契约与边界(必须写清, 否则会被误用):
+ *   - DZFlat 段在 UDP 上**必须**是分帧流里的连续段: 每 1460 字节数据后跟 12 字节页尾,
+ *     去帧由本函数负责; 段本身仍是"位置无关、无指针"的 DZFlat 段, 语义与 SHM 上那份
+ *     完全一致(可整体 memcpy, 见 dzflat.h 的三条性质);
+ *   - 这一次去帧拷贝是**省不掉**的: UDP 的分帧会把页尾插进段中间, 且接收缓冲是本进程
+ *     复用的临时内存(platform/posix/udp.h 的 "Temp buffer avoid copying")。所以 socket
+ *     侧叫"借样", 但它的成本是"一次整段拷贝", 不是 SHM 侧那种零拷贝;
+ *   - 段头自相矛盾(总长落不进分帧流)⇒ 丢弃并返回 false, **不发 ACK**(与 wire_accept.cc
+ *     对 kDzFlatHeaderBad 的处置一致) —— Reliable 发送端会重传。
+ *
+ * 为什么做成重载而不是给旧的重载加默认参数: 会改函数签名与符号名, 已链接旧 libipc 的
+ * 二进制会找不到符号(与 UDPNode 的 NodeRole 重载同一理由)。 */
+IPC_EXPORT bool chunk_rev_topic(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<TopicData>& rev_msg,
+                                uint64_t tm, const std::shared_ptr<ipc::socket::UDPNode>& ack_node,
+                                ipc::buffer* out_payload);
 IPC_EXPORT bool chunk_rev_server(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<ServiceData>& rev_msg,
                                  uint64_t tm, bool ser_or_cli,
                                  const std::shared_ptr<ipc::socket::UDPNode>& ack_node);
@@ -188,16 +218,18 @@ struct FragmentLossStats
     std::size_t rate_bps_now{0};     // 当前生效速率快照 (采样周期读, 非自旋)
     std::size_t observed_bps_now{0}; // 最近 DZA2 的接收观测速率 (仅诊断)
 
-    /* ---- 段5 任务2h (方案3 前置): runs 判别信号 (发送端位图 NACK 派生, 仅诊断) ----
+    /* ---- 段5 任务2h (方案3 前置): runs 判别信号 (发送端 NACK 派生, 位图或显式, 仅诊断) ----
      * runs_now/lost_now = 最近一条消息的 runs 首捕获快照 (方案3 判别信号, 采集/
      * 诊断字段, 不进任何 bps= 赋值 —— 与 observed_bps 同一把尺子, D-7 精神)。
      * 语义 (T.3 + T.1, 裁定 T):
-     *   - T.3 首捕获: 每消息每对端只取第一条位图 NACK 的 pattern (重传后 pattern
-     *     逐轮缩小, 混入不同轮会失真); 与 lost_pages 首 NACK 前捕获同口径。
+     *   - T.3 首捕获: 每消息每对端只取第一条 NACK (位图或显式, 先到先采) 的 pattern
+     *     (重传后 pattern 逐轮缩小, 混入不同轮会失真); 段6 任务1a 起显式 NACK
+     *     missing_pages 也导出 runs/lost (runs = 升序缺页列表的连续段数, lost = 缺页数),
+     *     与 lost_pages 首 NACK 前捕获同口径。
      *   - T.1 跨对端聚合: 取最拥塞 (runs/lost 最小) 对端, 只上报该对端原始量。
      *   - runs = 连续缺失段数 (真拥塞≈1, 真随机≈lost); lost = 同一 pattern 缺页数。
      *     两量分别上报, 比值 runs/lost 留给判读侧算 (P.3: 分离度标定要看分布)。
-     *   - 该消息无位图 NACK pattern 时 (干净 / 只来 DZA2 / 只来显式 NACK) → (0,0)。 */
+     *   - 该消息无任何 NACK pattern 时 (干净 / 只来 DZA2) → (0,0)。 */
     std::size_t runs_now{0};
     std::size_t lost_now{0};
 
