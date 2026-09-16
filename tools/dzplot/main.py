@@ -7,7 +7,7 @@ Serves a web UI for plotting dzIPC topic data from two sources:
   --sniff   Online:  subscribe to live dzIPC topics via SHM/socket
 
 Architecture:
-  Browser <--WebSocket--> dzplot.py (asyncio)
+  Browser <--WebSocket--> main.py (asyncio)
                             ├── BagReplaySource  (offline, file → timed replay)
                             └── LiveSniffSource  (online, dzIPC subscriber)
 
@@ -707,8 +707,11 @@ class LiveSniffSource:
     (e.g. _dzipc_core.so not yet rebuilt after interface.cc change).
 
     Channel naming follows the same convention as dzipc_topic_cat and the
-    publisher internals (dzIPC/common/name_operator.h):
-      "dz_ipc_" + sanitize(topic) + "_topic"  → ipc::route topology
+    publisher internals.  唯一出处是 dzIPC/common/name_operator.h —— 本类只是它的
+    Python 转写(该头文件的注释把本文件列为"已知复刻点", 改 C++ 规则时须同步此处):
+      shm_topic_segment_name(topic, domain) = "dz_ipc_d<domain>_<sanitized>_topic"
+      shm_topic_control_name(topic, domain) = 上面那个 + "_control2"
+    domain 参与命名: 漏掉它就没有 domain 隔离(见 docs/shm_defect_fixes.md 第 1 条)。
 
     Uses per-topic RateController instances (team shared module) for
     thread-safe adaptive poll interval and backpressure-aware sampling.
@@ -743,17 +746,91 @@ class LiveSniffSource:
 
     @staticmethod
     def _sanitize_topic_name(topic: str) -> str:
-        """Replicate dzIPC/common/name_operator.h sanitize_topic_name.
+        """Replicate dzIPC::sanitize_topic_name (src/dzIPC/common/name_operator.cc:13).
 
-        Keeps alphanumeric, '_', '-', '.'; replaces all other chars with '_'.
+        C++ 侧只保留 ASCII 字母数字与 '_' '-' '.', 其余换 '_', 且**逐字节**判定:
+
+            const bool is_alnum = (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z')
+                                  || (ch >= 'a' && ch <= 'z');
+            name.push_back(is_alnum || ch == '_' || ch == '-' || ch == '.' ? ch : '_');
+
+        ⛔ 所以这里也按**字节**走, 不能用 str.isalnum(): 它认 Unicode, C++ 只认 ASCII。
+        两者对非 ASCII topic 名算出的段名不同 —— 实测 '/中文'(UTF-8 七个字节): 旧写法
+        给出 3 个字符 '_中文', C++ 给出 7 个 '_'。危害是**静默**的: Sniffer.open() 挂不上
+        传输层建的段(会打印失败并回退订阅者), 而控制面按错名 open 会建出一个谁都不认的
+        垃圾段, 发布端重启检测**永久失效**。
+
+        传输层收到的是 Python str 经 pybind11 编码后的 UTF-8 字节, 所以本函数先
+        encode('utf-8') 再逐个字节判定, 与 C++ 看到的字节序列逐字节一致。errors 用
+        surrogateescape 是因为 --topic 来自命令行: Python 用同一策略解码 argv, 这里
+        再编码回原始的、可能不是合法 UTF-8 的字节, 与 C++ 从 argv 拿到的完全一致。
+        返回的字符串必然是纯 ASCII(保留的字节全在 ASCII 区间), 故 decode('ascii') 安全。
         """
-        result: List[str] = []
-        for ch in topic:
-            if ch.isalnum() or ch in ("_", "-", "."):
-                result.append(ch)
+        raw = topic.encode("utf-8", "surrogateescape")
+        out = bytearray()
+        for b in raw:
+            if (0x30 <= b <= 0x39) or (0x41 <= b <= 0x5A) or (0x61 <= b <= 0x7A) \
+                    or b in (0x5F, 0x2D, 0x2E):   # '_' '-' '.'
+                out.append(b)
             else:
-                result.append("_")
-        return "".join(result)
+                out.append(0x5F)                  # '_'
+        return out.decode("ascii")
+
+    @staticmethod
+    def _control_plane_segment_exists(name: str, shm_dir: Optional[Path] = None) -> bool:
+        """**只读**探测: 控制面段是否已存在。绝不建段、绝不 unlink。
+
+        为什么不能拿 TopicControlPlane.open() 当探测: 它是
+        `ipc::shm::handle::acquire(name, sizeof(TopicControl), create | open)`
+        (src/dzIPC/common/control_plane.cc:89) —— 段不存在时**静默建一个空壳**, 且
+        initialize_if_needed() 会把它写上一个合法 magic(control_plane.cc:292), 于是
+        valid() 为真、generation() 恒 0、state() 恒 Empty。调用方看到的是"控制面在,
+        只是发布端还没起来", 真相却是"这条 SHM 通道从来没被建过" —— 重启检测从此永久
+        提前返回, 每次运行还在 /dev/shm 留一个垃圾段。
+
+        与 C++ 侧同族做法对齐: dzipc_topic_cat 用 control_plane_segment_exists()
+        (exec/dzipc_topic_cat/include/control_plane_naming.h) 走 libipc 的 **open**
+        分支(size 归零 ⇒ 不 ftruncate 也不建段) + release_no_unlink 配平。Python 侧
+        够不到 libipc 的 acquire, 等价物就是查文件: 控制面段是**裸文件**
+        /dev/shm/<段名>(libipc 的 shm_open 名字须以 '/' 开头, object_name() 会补上),
+        而带 __IPC_SHM__ 前缀的那些是传输层的数据通道, 不是它。
+
+        shm_dir 只为测试注入(默认 /dev/shm 就是 glibc shm_open 的落盘处)。
+        """
+        root = Path("/dev/shm") if shm_dir is None else Path(shm_dir)
+        try:
+            return (root / name.lstrip("/")).exists()
+        except OSError:
+            return False
+
+    @classmethod
+    def _open_control_plane_readonly(cls, ipc_mod: Any, cp_name: str,
+                                     shm_dir: Optional[Path] = None):
+        """只读语义打开控制面, 返回 (plane | None, generation, status)。
+
+        **段不存在就根本不 open** —— 这是与旧写法的唯一区别:
+
+            旧: control_plane.open(cp_name)                          # create|open ⇒ 造空壳
+            新: segment_exists(cp_name) 为假 ⇒ 直接返回 (None, 0, …)  # 不 open, 不建段
+
+        段不存在时返回 None 是**有意义**的状态, 不是失败: 上层据此走"无控制面"分支
+        (不做重启检测), 与传输层的真实情况一致。留一个空壳则相反 —— 它让上层以为
+        "控制面在、发布端未就绪", 两者对重启检测的处置完全不同, 且后者永不恢复。
+
+        status 三态, 供调用方给出不误导的日志:
+          "attached"    段在且挂上了
+          "absent"      段不存在(**没有**建段, 这是正确行为)
+          "open_failed" 段在但 open 失败(权限/长度不符等真异常)
+
+        注意 open() 成功**不等于**名字对上了: create|open 对任何名字都返回真。名字对不对
+        的行为级证据是 generation() > 0(见 verify_segment_naming.py 判据 4)。
+        """
+        if not cls._control_plane_segment_exists(cp_name, shm_dir):
+            return None, 0, "absent"
+        plane = ipc_mod.TopicControlPlane()
+        if not plane.open(cp_name):
+            return None, 0, "open_failed"
+        return plane, plane.generation(), "attached"
 
     @staticmethod
     def _channel_name_for_topic(topic: str, domain: int = 0) -> str:
@@ -774,12 +851,21 @@ class LiveSniffSource:
     def _control_plane_name_for_topic(topic: str, domain: int = 0) -> str:
         """Construct the control plane SHM name for a pub/sub topic.
 
-        C++ derives this from the data segment name by appending "_control2"
-        (see control_name_for() in src/dzIPC/shm_pub_sub_ipc.cc; the "2" suffix
-        is deliberate — TopicControl grew and the old name would mmap past the
-        end of the pre-existing smaller segment).  This transcription had
-        "_topic_control", which never matched; it now derives from the data
-        segment name the same way C++ does.
+        唯一出处: dzIPC/common/name_operator.h 的 shm_topic_control_name() ——
+        即 shm_topic_segment_name(topic, domain) + "_control2"(2026-09-15 之前该字符串
+        锁在 src/dzIPC/shm_pub_sub_ipc.cc 的匿名 namespace 里, 见该头文件注释)。
+
+        后缀那个 "2" 是必需的: TopicControl 增加 PeerSlot 表后结构体变大, 沿用旧名会让
+        ipc::shm::handle::acquire() 在已存在的小段上 mmap 出超出文件长度的区域, 越界
+        访问直接 SIGBUS。换名等于强制新建一段。
+
+        ⛔ 本方法以前拼的是 "..._topic_control" —— 这个名字**从来不存在**。而它表现不出
+        错: TopicControlPlane::open() 是 create|open, 名字错了不报错, 只在 /dev/shm 建一个
+        谁都不映射的空壳, 于是 generation() 恒 0、state() 恒 Empty, 发布端重启检测
+        **永久静默失效**。见 test_dzplot.py::TestControlPlaneReattach 的五条名字判据。
+
+        实现上由**数据段名**派生(而不是另拼一份) —— 这样"数据段名改了、控制面名没跟"
+        这类漂移在本地就不可能出现。
         """
         return LiveSniffSource._channel_name_for_topic(topic, domain) + "_control2"
 
@@ -880,14 +966,19 @@ class LiveSniffSource:
                     topic_data = None   # not needed for sniffer path
 
                     # Open control plane for publisher-restart detection.
-                    # Mirrors dzipc_topic_cat shm_sniffer.cc:140-158.
+                    # Mirrors dzipc_topic_cat shm_sniffer.cc:52-74 — 同一套只读纪律:
+                    # 段不存在就不 open, 绝不造空壳。
                     try:
                         cp_name = self._control_plane_name_for_topic(topic, dom)
-                        control_plane = ipc.TopicControlPlane()
-                        if control_plane.open(cp_name):
-                            generation = control_plane.generation()
+                        control_plane, generation, cp_status = \
+                            self._open_control_plane_readonly(ipc, cp_name)
+                        if cp_status == "attached":
                             print(f"[dzplot] Control plane attached to {topic} "
                                   f"({cp_name}, generation={generation})", flush=True)
+                        elif cp_status == "absent":
+                            print(f"[dzplot] Control plane absent for {topic} "
+                                  f"({cp_name}), restart detection disabled "
+                                  f"(not creating it)", flush=True)
                         else:
                             print(f"[dzplot] Control plane open failed for {topic} "
                                   f"({cp_name}), restart detection disabled", flush=True)

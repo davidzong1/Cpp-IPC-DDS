@@ -39,11 +39,15 @@ public:
     virtual ~sub_ipc_base() = 0;
     virtual void InitChannel(std::string extra_info) = 0;
     virtual void reset_message(const std::shared_ptr<TopicData>& msg) = 0;
-    /* ---- 视图路径(零拷贝, 只服务 DZFlat 段; socket 恒返回 false) ----
+    /* ---- 视图路径(借样, 只服务 DZFlat 段) ----
      *
      * get() 阻塞直到拿到一个借样 Sample。注意: 若本话题恒发 TLV(DZFlat 未开/类型
      * 不支持), 视图队列永无 Sample, get() 会一直阻塞 —— 那类话题请用 get_clone()。
-     * 混合 wire(灰度期)需要调用方 get()+get_clone() 双 drain, 见 Sample 头注释。 */
+     * 混合 wire(灰度期)需要调用方 get()+get_clone() 双 drain, 见 Sample 头注释。
+     *
+     * 两种传输都有这条路径, 但**成本不同**: SHM 上是真零拷贝(借发布方写好的 chunk),
+     * UDP 上恒有一次整段拷贝(接收缓冲是本进程复用的临时内存, 且分帧会把页尾插进段
+     * 中间 —— 见 chunk_rev_topic 的 out_payload 契约)。语义与生命周期两边一致。 */
     virtual void get(Sample& out) = 0;
     virtual bool try_get(Sample& out) = 0;
 
@@ -54,7 +58,7 @@ public:
      * dzflat_shm.md §3.8)。所以在只发 TLV 的话题上, 视图队列**永远是空的** —— 不带超时的
      * get() 不是"等数据", 而是**注定挂死**。
      *
-     * tm 单位毫秒。socket 传输的视图路径恒不可用, 其实现立刻返回 false。 */
+     * tm 单位毫秒。两种传输都由队列的超时能力实现(circularqueue.h 的 pop(MsgPtr&, tm))。 */
     virtual bool get(Sample& out, std::uint64_t tm_ms) = 0;
 
     /* ---- 物化路径(TLV + 快速路径克隆对象 + schema-less 话题) ---- */

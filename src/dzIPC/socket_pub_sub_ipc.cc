@@ -7,6 +7,8 @@
 #include "dzIPC/common/hash.h"
 #include "dzIPC/common/local_pub_sub_registry.h"
 #include "dzIPC/common/name_operator.h"
+#include "dzIPC/common/wire_accept.h"
+#include "ipc_msg/ipc_msg_base/dzflat.h"
 #include "ipc_msg/ipc_msg_base/udp_id_init_msg.hpp"
 #include "libipc/platform/detail.h"
 #define ListenerWaitTime 1'000   // 1 second
@@ -454,6 +456,8 @@ socket_sub_ipc::socket_sub_ipc(const std::shared_ptr<TopicData>& msg, const std:
     this->port_hash_ = dzIPC::common::udp_discovery_port_calculate(topic_name, domain_id);
     this->ipaddr_ = dzIPC::common::udp_discovery_addr_calculate(topic_name);
     this->msg_queue_ = std::make_shared<CircularQueue<IpcMsgBase>>(queue_size);
+    /* 视图队列与物化队列同容量: 两条队列各自承接一种 wire, 单条上的压力不会超过总入流。 */
+    this->view_queue_ = std::make_shared<CircularQueue<Sample>>(queue_size);
     this->msg_id_ = topic_msg_->topic()->msg_id();
 }
 
@@ -584,11 +588,68 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
                             }
                             local_msg.reset(topic_msg_->clone());
                         }
-                        if (chunk_rev_topic(subscriber_, local_msg, 50, ack_tx_))   // rev timeput 50ms
+                        /* 分流所需的期望值, 与 SHM 订阅循环同源(shm_pub_sub_ipc.cc:685-687
+                         * 的 exp_id/exp_hash): msg_id 取**注册键**(模板会被 swap 移走),
+                         * schema_hash 取模板 —— 0 表示非 generator 生成的 typed 话题。 */
+                        std::uint32_t exp_id = 0;
+                        std::uint32_t exp_hash = 0;
                         {
-                            std::shared_ptr<IpcMsgBase> ptr_cache;
-                            local_msg->swap(ptr_cache);
-                            msg_queue_->push(std::move(ptr_cache));
+                            std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+                            exp_id = msg_id_;
+                            exp_hash = (topic_msg_ && topic_msg_->topic())
+                                           ? topic_msg_->topic()->dzflat_schema_hash()
+                                           : 0u;
+                        }
+                        ipc::buffer wire;
+                        /* rev timeout 50ms。out_payload 非空 ⇒ 收到 DZFlat 段时**不做 TLV
+                         * 反序列化**, 段(已去帧)从 wire 交回; 收到 TLV 时 wire 保持为空 ——
+                         * 判据是 wire 是否为空, 见 data_rev.h 的契约。 */
+                        if (chunk_rev_topic(subscriber_, local_msg, 50, ack_tx_, &wire))   // rev timeput 50ms
+                        {
+                            if (wire.empty())
+                            {
+                                /* ---- 物化路径: TLV, 以及 schema-less 话题的 DZFlat 段 ---- */
+                                std::shared_ptr<IpcMsgBase> ptr_cache;
+                                local_msg->swap(ptr_cache);
+                                msg_queue_->push(std::move(ptr_cache));
+                                continue;
+                            }
+                            /* ---- 借样路径: 段首是 DZFlat(见 data_rev.cc 的分流闸) ---- */
+                            const bool viewable = (exp_hash != 0);
+                            if (!viewable)
+                            {
+                                /* schema-less 话题(GenericMessage / 手写类型): 没有 C++ flat
+                                 * 视图可绑, 与 SHM 侧同样物化 —— GenericMessage 覆写
+                                 * dzflat_read/adopt 把段字节收下, 手写类型则类型不匹配。
+                                 * 多一次拷贝, 换来的是与 SHM 完全一致的归宿。 */
+                                if (!AcceptWire(wire, exp_id, *local_msg->topic()))
+                                {
+                                    continue;
+                                }
+                                std::shared_ptr<IpcMsgBase> ptr_cache;
+                                local_msg->swap(ptr_cache);
+                                msg_queue_->push(std::move(ptr_cache));
+                                continue;
+                            }
+                            std::uint32_t seg_id = 0;
+                            if (!IpcMsgBase::dzflat_peek_msg_id(wire.data(), wire.size(), seg_id)
+                                || seg_id != exp_id)
+                            {
+                                dzIPC::detail::NoteDzFlatRx(dzIPC::detail::DzFlatRxEvent::kDzFlatIdSkipped);
+                                continue;
+                            }
+                            dzflat::SegHeader h{};
+                            std::memcpy(&h, wire.data(), sizeof(h));
+                            if (h.schema_hash != exp_hash)
+                            {
+                                dzIPC::detail::NoteDzFlatRx(dzIPC::detail::DzFlatRxEvent::kDzFlatSchemaDrop);
+                                continue;
+                            }
+                            dzIPC::detail::NoteDzFlatRx(dzIPC::detail::DzFlatRxEvent::kDzFlatAccepted);
+                            /* 借样: wire 是一段**独立、连续**的 DZFlat 段(由接收层去帧保证),
+                             * 原样移进 Sample 即可 —— 用户读字段期间它一直有效(Sample 是
+                             * move-only 的持有者, 见 sample_message.h 的三条契约)。 */
+                            view_queue_->push(std::make_shared<Sample>(std::move(wire), seg_id, exp_hash));
                         }
                         else
                         {
@@ -621,23 +682,48 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
-/* 视图路径: socket 无 DZFlat 段, 恒不可用。 */
+/* ---- 视图路径: 只服务借样的 DZFlat 段(见头注释与 subscribe 循环的分流) ----
+ * 与 shm 侧逐行同构(shm_pub_sub_ipc.cc:806-846) —— 同一套语义, 不另立第二套。 */
 void socket_sub_ipc::get(Sample& out)
 {
-    (void)out;
+    std::shared_ptr<Sample> s;
+    view_queue_->pop(s);   /* 阻塞直到有 Sample; TLV-only 话题请用 get_clone, 见头注释 */
+    if (s)
+    {
+        out = std::move(*s);
+    }
 }
 
 bool socket_sub_ipc::try_get(Sample& out)
 {
-    (void)out;
-    return false;
+    std::shared_ptr<Sample> s;
+    if (!view_queue_->try_pop(s))
+    {
+        return false;
+    }
+    if (!s)
+    {
+        return false;
+    }
+    out = std::move(*s);
+    return true;
 }
 
 bool socket_sub_ipc::get(Sample& out, std::uint64_t tm_ms)
 {
-    (void)out;
-    (void)tm_ms;
-    return false;   /* socket 永远没有视图 —— 立刻返回, 不阻塞 */
+    /* CircularQueue::pop 本来就支持超时(见其 tm 参数) —— 这里只是把它接上。
+     * 恒发 TLV 的话题上视图队列永远是空的, 不带超时的 get() 是注定挂死而非等待。 */
+    std::shared_ptr<Sample> s;
+    if (!view_queue_->pop(s, tm_ms))
+    {
+        return false;   // 超时
+    }
+    if (!s)
+    {
+        return false;
+    }
+    out = std::move(*s);
+    return true;
 }
 
 void socket_sub_ipc::get_clone(std::shared_ptr<TopicData>& msg)

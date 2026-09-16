@@ -2,7 +2,7 @@
  * dzplot — Time-series visualization frontend.
  *
  * Vanilla JS + Canvas 2D charts. No framework dependencies.
- * Communicates with dzplot.py backend via WebSocket.
+ * Communicates with main.py backend via WebSocket (2026-09-13 由 dzplot.py 改名).
  */
 
 // ---------------------------------------------------------------------------

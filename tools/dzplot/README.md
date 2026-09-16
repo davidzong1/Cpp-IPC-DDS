@@ -6,10 +6,10 @@ Web-based time-series visualization for dzIPC topic data. Supports offline `.bag
 
 ```bash
 # Serve a .bag file replay
-python3 tools/dzplot/dzplot.py --bag /path/to/events.bag --port 8766
+python3 tools/dzplot/main.py --bag /path/to/events.bag --port 8766
 
 # Sniff live topics
-python3 tools/dzplot/dzplot.py --sniff --topic /test:StdRawMessage --transport shm
+python3 tools/dzplot/main.py --sniff --topic /test:StdRawMessage --transport shm
 
 # Browser: open http://127.0.0.1:8766
 ```
@@ -31,7 +31,7 @@ python3 tools/dzplot/dzplot.py --sniff --topic /test:StdRawMessage --transport s
 ```
 Browser (Canvas 2D charts)
   ↕ WebSocket (JSON frames, batched)
-dzplot.py (asyncio server)
+main.py (asyncio server)
   ├── PlotHub (client management, command dispatch)
   ├── BagReplaySource (offline .bag → BoundedPubQueue)
   ├── LiveSniffSource (online dzIPC → BoundedPubQueue)
@@ -68,12 +68,43 @@ Input cap: 1000 Hz. Output cap: configurable (default 60 fps). Watermark >50% tr
 
 ## Tests
 
+四个入口, 按**是否需要 dzipc 绑定**分两类 —— 绑定是 CPython **3.10** 的构建产物
+(`_dzipc_core.cpython-310-*.so`, 且 `*.so` 不入库), 在默认 `python3`(常为 3.12)下
+`import dzipc` 必失败。**解释器不能随手指**:
+
+| 脚本 | 解释器 | 退出码 | 查什么 |
+|------|--------|--------|--------|
+| `test/test_dzplot.py` | 任意 CPython3 | 0/1 | 静态规则 + 纯 Python 逻辑(自带 runner, 不需要 pytest) |
+| `test/verify_segment_naming.py` | **3.10** | 0/1/2 | 推导出的段名是不是传输层**真建出的那一个** |
+| `test/verify_runtime_no_garbage.py` | **3.10** | 0/1/2 | 运行时有没有在 `/dev/shm` 多建段 |
+| `test/integration_pub_restart.py` | **3.10** | 0/1/2 | 发布端重启 → generation 变化 → 重挂 |
+
 ```bash
+# 无绑定层(任意 python3)
 python3 tools/dzplot/test/test_dzplot.py
+
+# 需绑定层(必须 3.10; 绑定未构建先 python3.10 -m pip install ./python)
+python3.10 tools/dzplot/test/verify_segment_naming.py
+python3.10 tools/dzplot/test/verify_runtime_no_garbage.py
+python3.10 tools/dzplot/test/integration_pub_restart.py
 ```
 
-Covers: BagReader parsing, BoundedPubQueue zone transitions/overflow, PlotHub commands and state management,
-TransportPacket roundtrip, sniffer poll scheduling, decode_payload fallback, input rate cap, backpressure zones.
+后三者共用退出码约定 **0=全过 / 1=有失败 / 2=缺 dzipc 绑定(跳过)**。
+⛔ **`2` 在 CI 里必须按失败处理** —— `SKIP` 和 `PASS` 在 CI 面板上一样是绿的,
+当成通过就等于门是摆设。
+
+一次跑全部(失败即停, 并做绑定可导入前置检查):
+
+```bash
+bash scripts/ci_check.sh              # 全量
+bash scripts/ci_check.sh --no-binding # 只跑无绑定层
+```
+
+⚠️ 后三条会起**真实 SHM 段**, 不可并行 —— 同机同时跑两个, 或一边跑它们一边跑
+C++ gtest, 会互相干扰出假红。详见 [docs/ci.md](../../docs/ci.md)。
+
+Covers (test_dzplot.py): BagReader parsing, BoundedPubQueue zone transitions/overflow, PlotHub commands and state management,
+TransportPacket roundtrip, sniffer poll scheduling, decode_payload fallback, input rate cap, backpressure zones, 段名/sanitize 规则核对。
 
 ## Message Deserialization
 

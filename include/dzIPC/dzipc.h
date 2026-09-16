@@ -14,6 +14,15 @@ namespace dzIPC {
 /***********************************************************************************/
 constexpr IPCType IPC_SHM = IPCType::Shm;         // 共享内存通信模式
 constexpr IPCType IPC_SOCKET = IPCType::Socket;   // UDP通信模式
+/* 自动选路: 握手先走 UDP 引导通道, 双方两阶段确认后同主机切 SHM、跨主机保持
+ * socket。当下实际传输查 transport_current()。
+ *
+ * ⛔ **仅服务-客户(ser-cli)可用。** 发布/订阅没有握手通道可供两阶段裁定, 所以
+ * 把它传给 PublisherIPCPtrMake/SubscriberIPCPtrMake 会**显式抛
+ * std::invalid_argument 并指路到 IPC_SHM/IPC_SOCKET**, 不会静默按 socket 建链
+ * (静默降级会让调用方以为拿到了自动选路)。见 test_dzipc.cpp 的
+ * DzIpcAutoType.PubSubRejectsIpcAutoExplicitly。 */
+constexpr IPCType IPC_AUTO   = IPCType::Auto;
 
 #define ENABLENODELET EnableNodelet(true); // 启用进程内快速路径
 #define DISABLENODELET EnableNodelet(false); // 禁用进程内快速路径

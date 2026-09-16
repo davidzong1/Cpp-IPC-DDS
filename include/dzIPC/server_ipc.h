@@ -1,4 +1,5 @@
 #pragma once
+#include "dzIPC/common/path_switch.h"
 #include "dzIPC/shm_ser_cli_ipc.h"
 #include "dzIPC/socket_ser_cli_ipc.h"
 #include "dzIPC/type.h"
@@ -19,6 +20,9 @@ public:
     void reset_callback(std::function<void(std::shared_ptr<ServiceData>&)> callback);
     bool exit_flag() const;
     bool handshake_completed() const;
+    /* 当下实际传输。⛔ 切换之后它与构造期 IPCType 不再一致 (T2 §7 R5),
+     * 日志的 TransportKind 必须读这里, 否则会被记成错的传输。 */
+    path::Kind transport_current() const;
 
 private:
     class server_ipc_impl_;
@@ -37,6 +41,7 @@ public:
     bool send_request(std::shared_ptr<ServiceData>& request, uint64_t rev_tm = std::numeric_limits<uint32_t>::max());
     bool exit_flag() const;
     bool handshake_completed() const;
+    path::Kind transport_current() const;
 
 private:
     class client_ipc_impl_;

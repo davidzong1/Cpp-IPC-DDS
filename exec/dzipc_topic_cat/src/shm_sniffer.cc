@@ -10,6 +10,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include "control_plane_naming.h"
 #include "dzIPC/common/name_operator.h"
 
 namespace dzIPC {
@@ -48,15 +49,28 @@ void shm_sniffer::create_sniffer(const std::string& topic_name, int domain_id, b
     domain_id_ = domain_id;
     this->ser_or_topic_ = ser_or_topic;
     this->msg_id_ = msg_id;
-    std::string control_name =
-        ser_or_topic_ ? "dz_ipc_" + sanitize_topic_name(topic_name) + "_ser_control"
-                      : "dz_ipc_" + sanitize_topic_name(topic_name) + "_topic_control";
-    if (!control_plane_.open(control_name))
+    /* 控制面段名转调唯一出处(见 control_plane_naming.h 的头注释: 这里原先是一份
+     * 与传输层三处不符的复刻字符串), 并且**先用只读探测确认段存在**再打开 ——
+     * TopicControlPlane::open() 是 create|open, 对不存在的段它会静默建一个空壳,
+     * 那正是"重挂判定永久失效 + /dev/shm 留垃圾段"的来源。 */
+    const std::string control_name =
+        dzipc_topic_cat::control_plane_name(topic_name, static_cast<std::size_t>(domain_id), ser_or_topic);
+    if (!dzipc_topic_cat::control_plane_segment_exists(control_name))
     {
-        std::fprintf(stderr, "error: failed to open control plane '%s'\n", control_name.c_str());
-        std::exit(1);
+        /* 段不存在 = 该 topic 从未被 SHM 建过控制面(例如对端是 socket 路径,
+         * 或发布端还没起来)。这是正常时序, **不是**致命错误: 工具的主职责是转发
+         * 数据, 控制面只用来跟随"发布端重建"。明确提示后放弃跟踪即可, 不建段。 */
+        std::fprintf(stderr, "note: control plane '%s' not present; publish/restart tracking disabled\n",
+                     control_name.c_str());
     }
-    generation_ = control_plane_.generation();
+    else if (!control_plane_.open(control_name))
+    {
+        std::fprintf(stderr, "warning: control plane '%s' exists but could not be opened\n", control_name.c_str());
+    }
+    else
+    {
+        generation_ = control_plane_.generation();
+    }
     if (!open_channels(topic_name, domain_id, ser_or_topic))
     {
         std::exit(1);

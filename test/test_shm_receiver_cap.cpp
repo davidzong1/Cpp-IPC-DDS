@@ -114,9 +114,10 @@ TEST(ShmReceiverCap, ThirtyThirdSubscriberDoesNotSilentlyPretendToBeConnected)
      * peer_count 会计到 kCap + 1; 修复后它 remove_peer 退掉登记并重试, peer_count
      * 收敛到不超过连接位上限。
      *
-     * 控制面段名与数据段名同源(control_name_for = 数据段名 + "_control2")。 */
+     * 控制面段名与数据段名同源(shm_topic_control_name = 数据段名 + "_control2"),
+     * 且该名字现在由产品侧导出 —— 这里转调而不是再复刻一遍后缀。 */
     dzIPC::control_plane_shm::TopicControlPlane cp;
-    ASSERT_TRUE(cp.open(shm_topic_segment_name(topic, 0) + "_control2"))
+    ASSERT_TRUE(cp.open(shm_topic_control_name(topic, 0)))
         << "打不开控制面段, 无法验证本条判据";
     const uint32_t peers = cp.peer_count();
     EXPECT_LE(peers, static_cast<uint32_t>(kCap))

@@ -21,14 +21,6 @@ namespace {
  * 两者的差额正是 docs/shm_defect_fixes.md 第 2 条那个黑洞的容量。 */
 constexpr std::size_t kMaxShmReceiversPerTopic = 32;
 
-std::string control_name_for(const std::string& data_name)
-{
-    /* "_control2": TopicControl 增加 PeerSlot 表后结构体变大, 沿用旧名会让
-     * ipc::shm::handle::acquire() 在已存在的小段上 mmap 出超出文件长度的区域,
-     * 访问越界部分直接 SIGBUS。换名等于强制新建一段, 同时也隔离了新旧版本进程。*/
-    return data_name + "_control2";
-}
-
 /* 段名规则收在 dzIPC/common/name_operator.h —— 传输层、sniffer、工具都从那一处取,
  * 免得规则一改要同时改五处且漏掉的那处是静默失效(见该头文件的说明)。
  * 段名含 domain_id: 不含就等于 SHM 上没有 domain 隔离(docs/shm_defect_fixes.md 第 1 条),
@@ -36,6 +28,18 @@ std::string control_name_for(const std::string& data_name)
 std::string shm_name_for_topic(const std::string& topic_name, size_t domain_id)
 {
     return shm_topic_segment_name(topic_name, domain_id);
+}
+
+/* pub/sub 控制面段名 —— 本文件只是**转调**, 规则("数据段名 + _control2")的唯一出处在
+ * dzIPC/common/name_operator.h 的 shm_topic_control_name(), 与 ser 侧的
+ * service_control_name_for() 同构。
+ *
+ * 传原始 topic 名 + domain 而不是已经拼好的 topic_name_: 两处调用点手上都有
+ * (raw_topic_name_, domain_id_), 而收成一个组合完整的入参后, 这里再也不可能出现
+ * "把某个别的东西当数据段名传进来" 的写法 —— 段名拼错不报错, 只静默多出一个空段。 */
+std::string topic_control_name_for(const std::string& topic_name, size_t domain_id)
+{
+    return shm_topic_control_name(topic_name, domain_id);
 }
 
 void wait_for_peer_drain(dzIPC::control_plane_shm::TopicControlPlane& control_plane)
@@ -102,7 +106,7 @@ void shm_pub_ipc::InitChannel(std::string extra_info)
 {
     try
     {
-        if (!control_plane_.open(control_name_for(topic_name_)))
+        if (!control_plane_.open(topic_control_name_for(raw_topic_name_, domain_id_)))
         {
             throw std::runtime_error("failed to open topic control plane");
         }
@@ -475,7 +479,7 @@ void shm_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
 /******************************************************************************************************/
 void shm_sub_ipc::sub_handshake()
 {
-    if (!control_plane_.open(control_name_for(topic_name_)))
+    if (!control_plane_.open(topic_control_name_for(raw_topic_name_, domain_id_)))
     {
         std::cerr << "\033[31m[" << topic_name_ << "SubInfo] Error opening control plane for topic: " << topic_name_
                   << "\033[0m" << std::endl;

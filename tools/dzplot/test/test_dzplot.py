@@ -20,8 +20,15 @@ DZPLOT_DIR = TOOLS_DIR / "dzplot"
 sys.path.insert(0, str(TOOLS_DIR / "dzviz"))
 sys.path.insert(0, str(DZPLOT_DIR))
 
-# Load dzplot as a module from file path
-spec = importlib.util.spec_from_file_location("dzplot", str(DZPLOT_DIR / "dzplot.py"))
+# Load dzplot as a module from file path.
+#
+# ⛔ 源文件名是 main.py: 2026-09-13 由 dzplot.py 改名而来(逐字节相同), 但本测试的加载
+#    路径没跟着改 —— 于是整个文件在 import 阶段就 FileNotFoundError, **所有用例一起失效**
+#    (不是某条断言失败, 是 suite 根本跑不起来)。只留这一处 DZPLOT_SRC, 下面
+#    TestSysPathPriority 复用它, 免得再出现两份路径各自过期。
+DZPLOT_SRC = DZPLOT_DIR / "main.py"
+assert DZPLOT_SRC.is_file(), f"dzplot 源码不在 {DZPLOT_SRC} —— 工具模块又被改名了?"
+spec = importlib.util.spec_from_file_location("dzplot", str(DZPLOT_SRC))
 dzplot = importlib.util.module_from_spec(spec)
 sys.modules["dzplot"] = dzplot  # register before exec so dataclass resolves .__module__
 spec.loader.exec_module(dzplot)
@@ -40,6 +47,19 @@ try:
     from transport.backpressure import BackpressureController
 except ImportError:
     BackpressureController = None
+
+
+class SkipTest(Exception):
+    """Raised when a test's *preconditions* (not its subject) are unavailable.
+
+    The runner counts these separately: a skipped test must never print PASS,
+    otherwise "green" would silently mean "did not actually check anything".
+    """
+
+
+# Repo root, for tests that cross-check the Python transcription against the
+# C++ single source of truth (include/dzIPC/common/name_operator.h).
+REPO_ROOT = DZPLOT_DIR.parents[1]
 
 # ---------------------------------------------------------------------------
 # Helpers: create a minimal valid ROS bag v2.0 file
@@ -679,19 +699,87 @@ class TestSnifferBinding:
         assert callable(dzplot.LiveSniffSource._check_sniffer)
 
     def test_sanitize_topic_name(self):
-        """_sanitize_topic_name replaces non-alphanumeric chars with _."""
+        """_sanitize_topic_name 与 C++ sanitize_topic_name 同规则。
+
+        C++ 侧(name_operator.cc:13)只保留 ASCII 字母数字与 '_' '-' '.', 其余换 '_',
+        且按**字节**判定。这里钉的是**同一份规则**, 而不是"看起来像个段名"。
+        """
         assert hasattr(dzplot.LiveSniffSource, "_sanitize_topic_name")
-        result = dzplot.LiveSniffSource._sanitize_topic_name("/test/topic")
-        assert "/" not in result, f"slashes should be replaced: {result}"
-        assert result.startswith("_") or result[0].isalnum()
+        sanitize = dzplot.LiveSniffSource._sanitize_topic_name
+        assert sanitize("/test/topic") == "_test_topic", sanitize("/test/topic")
+        # '_' '-' '.' 是**保留**字符 —— 若实现漏掉白名单里的某一个, 这两条立刻红
+        assert sanitize("/a-b.c_d") == "_a-b.c_d", sanitize("/a-b.c_d")
+        # 其余一律 '_'
+        assert sanitize("a@b/c:d e") == "a_b_c_d_e", sanitize("a@b/c:d e")
+
+    def test_sanitize_topic_name_is_bytewise_not_unicode(self):
+        """⛔ 非 ASCII 必须按**字节**换 '_', 不是按字符 —— 这里钉死 str.isalnum() 那个坑。
+
+        修复前本函数用 ch.isalnum(), 它认 Unicode ⇒ '/中文' 得到 3 个字符 '_中文',
+        而 C++ 逐字节判定得到 7 个 '_'(6 个 UTF-8 字节 + 前导 '/')。段名就此错开, 且
+        下游**不报错**: Sniffer.open() 挂不上会回退订阅者(有打印), 但控制面按错名 open
+        会建出一个谁都不认的空壳, 重启检测永久失效。
+
+        这几条同时也是**变异判据**: 任何"改回按字符判断"的实现都会立刻红。
+        """
+        sanitize = dzplot.LiveSniffSource._sanitize_topic_name
+        # '/中文' = 1 + 3 + 3 字节 ⇒ 7 个 '_'; 按字符判断只会得到 3 个
+        assert sanitize("/中文") == "_______", repr(sanitize("/中文"))
+        # 'ё' 是 2 字节(Cyrillic), 且 str.isalnum() 对它返回 True
+        assert sanitize("ёё") == "____", repr(sanitize("ёё"))
+        # 全角数字 '１２３' 也是 isalnum()==True 但 C++ 不认: 每个 3 字节
+        assert sanitize("１２３") == "_________", repr(sanitize("１２３"))
+        # emoji: 4 字节
+        assert sanitize("🚀") == "____", repr(sanitize("🚀"))
+        # 输出必须是纯 ASCII —— 段名要走 std::string/文件系统, 非 ASCII 一定是 bug
+        for probe in ("/中文", "ёё", "🚀", "/test/ok", ""):
+            san = sanitize(probe)
+            assert all(ord(c) < 128 for c in san), f"{probe!r} -> {san!r} 含非 ASCII"
+
+    def test_sanitize_topic_name_matches_cxx_rule_character_by_character(self):
+        """对着 C++ 的**字节规则**逐个字符核 —— 不靠手写期望值。
+
+        从 name_operator.cc 的 sanitize_topic_name 里取出规则本身(ASCII 三段区间 +
+        三个保留字符), 在这里独立实现一遍, 再与 Python 转写逐字符比。这样"C++ 改了
+        白名单而 Python 没跟"会立刻红, 而不是等到某天段名对不上。
+        """
+        impl = REPO_ROOT / "src" / "dzIPC" / "common" / "name_operator.cc"
+        if not impl.is_file():
+            raise SkipTest(f"C++ 唯一出处不在 {REPO_ROOT} —— 跳过核对")
+        src = impl.read_text()
+        for frag in ("ch >= '0' && ch <= '9'", "ch >= 'A' && ch <= 'Z'",
+                     "ch >= 'a' && ch <= 'z'", "ch == '_'", "ch == '-'", "ch == '.'"):
+            assert frag in src, f"sanitize 白名单变了(缺 {frag!r}) —— 需同步 Python 转写"
+
+        def cxx(text: str) -> str:
+            out = []
+            for b in text.encode("utf-8"):
+                is_alnum = (0x30 <= b <= 0x39) or (0x41 <= b <= 0x5A) or (0x61 <= b <= 0x7A)
+                out.append(chr(b) if (is_alnum or b in (0x5F, 0x2D, 0x2E)) else "_")
+            return "".join(out)
+
+        sanitize = dzplot.LiveSniffSource._sanitize_topic_name
+        for probe in ("/test/topic", "/a-b.c_d", "a@b/c:d e", "/中文", "ёё", "🚀",
+                      "", "/", "A0z_.-", "\t\n", "/a b+c=d"):
+            assert sanitize(probe) == cxx(probe), (
+                f"{probe!r}: python={sanitize(probe)!r} cxx={cxx(probe)!r}"
+            )
 
     def test_channel_name_for_topic(self):
-        """_channel_name_for_topic produces the expected dzIPC channel name."""
+        """_channel_name_for_topic == C++ shm_topic_segment_name 的 Python 转写。
+
+        段名**必须含 domain**(不含就等于 SHM 上没有 domain 隔离, docs/shm_defect_fixes.md
+        第 1 条), 所以这里把 domain 一起钉死, 而不是只查 "以 dz_ipc_ 开头"。修复前这条
+        用例只查前缀/后缀 ⇒ domain 丢了也不红, 属于**恒绿**用例。
+        """
         assert hasattr(dzplot.LiveSniffSource, "_channel_name_for_topic")
         ch = dzplot.LiveSniffSource._channel_name_for_topic("/test/foo")
-        assert ch.startswith("dz_ipc_")
-        assert ch.endswith("_topic")
-        assert "_test_foo" in ch
+        assert ch == "dz_ipc_d0__test_foo_topic", f"unexpected name: {ch}"
+        # domain 参与命名: 换 domain 必须换段名, 否则跨 domain 串台
+        assert (dzplot.LiveSniffSource._channel_name_for_topic("/test/foo", 7)
+                == "dz_ipc_d7__test_foo_topic")
+        assert (dzplot.LiveSniffSource._channel_name_for_topic("/test/foo", 0)
+                != dzplot.LiveSniffSource._channel_name_for_topic("/test/foo", 7))
 
     def test_check_sniffer_returns_bool(self):
         result = dzplot.LiveSniffSource._check_sniffer()
@@ -707,7 +795,7 @@ class TestSnifferBinding:
     def test_live_sniff_source_creates_rate_ctrls(self):
         """LiveSniffSource creates per-topic RateControllers.
 
-        NOTE: dzplot.py LiveSniffSource.__init__ passes q_high/q_low/alpha_down/alpha_up
+        NOTE: main.py LiveSniffSource.__init__ passes q_high/q_low/alpha_down/alpha_up
         to RateControllerConfig, but those attrs don't exist in the shared
         RateControllerConfig.  This test verifies the conceptual design;
         the TypeError is a known dzplot issue to fix.
@@ -1211,21 +1299,21 @@ class TestBagFlowControl:
 # ---------------------------------------------------------------------------
 
 class TestSysPathPriority:
-    """Verify dzplot.py's module-level sys.path setup does not override
+    """Verify main.py's module-level sys.path setup does not override
     an explicitly-configured PYTHONPATH.
 
-    dzplot.py must only *append* the dzipc fallback directories, never
+    main.py (2026-09-13 由 dzplot.py 改名) must only *append* the dzipc fallback
+    directories, never
     prepend them.  The dzviz shared-module path is repo-local and may
     be prepended safely — it has no external alternative.
     """
 
     def test_dzipc_fallback_paths_are_appended_not_prepended(self):
-        """When dzplot.py loads, it appends (not inserts) the dzipc
+        """When main.py loads, it appends (not inserts) the dzipc
         candidate paths, so any explicitly-configured PYTHONPATH
         entry ahead of them keeps its priority."""
         # Read the dzplot source to verify the pattern directly.
-        dzplot_src = DZPLOT_DIR / "dzplot.py"
-        source = dzplot_src.read_text()
+        source = DZPLOT_SRC.read_text()
 
         # The dzviz line may use insert(0), but the dzipc lines must use append.
         # Check that we do NOT have insert(0) for the dzipc fallback dirs.
@@ -1254,7 +1342,7 @@ class TestSysPathPriority:
 
     def test_explicit_pythonpath_takes_priority(self):
         """Simulate: a custom PYTHONPATH entry is in sys.path before
-        dzplot.py's path setup runs.  After the fallback paths are
+        main.py's path setup runs.  After the fallback paths are
         appended, the custom entry is still at its original position
         — append never reorders existing entries."""
         # Build a clean copy of sys.path
@@ -1262,7 +1350,7 @@ class TestSysPathPriority:
         custom = "/tmp/dzipc_custom_build"
         test_paths = [custom] + [p for p in original if p != custom]
 
-        # Simulate what dzplot.py does: append fallback candidates
+        # Simulate what main.py does: append fallback candidates
         repo_python = str(DZPLOT_DIR.parents[1] / "python")
         local_python = str(DZPLOT_DIR.parents[1] / "local" / "lib" / "python")
         for candidate in (repo_python, local_python):
@@ -1493,11 +1581,83 @@ class TestControlPlaneReattach:
         assert callable(dzplot.LiveSniffSource._control_plane_name_for_topic)
 
     def test_control_plane_name_for_topic_format(self):
-        """Control plane channel name follows dz_ipc_<sanitized>_topic_control."""
+        """控制面段名 = pub/sub 数据段名 + "_control2"。
+
+        ⛔ 修复前本用例的 docstring 与断言写的是 "dz_ipc_<sanitized>_topic_control" ——
+        那个名字**从来就不存在**: C++ 侧是 shm_pub_sub_ipc.cc 的 control_name_for()
+        「数据段名 + _control2」(后缀那个 "2" 是必需的 —— TopicControl 变大后沿用旧名会在
+        旧的小段上越界 mmap, 直接 SIGBUS)。实现早就修正过, 只有这里的文案留在旧世界,
+        而且因为断言只查 startswith("dz_ipc_") / endswith("_topic_control") 之一的形态,
+        一直**恒绿**。现在钉死完整名字。
+        """
         name = dzplot.LiveSniffSource._control_plane_name_for_topic("/test/foo")
-        assert name.startswith("dz_ipc_"), f"unexpected name: {name}"
-        assert name.endswith("_topic_control"), f"unexpected name: {name}"
-        assert "_test_foo" in name, f"unexpected name: {name}"
+        assert name == "dz_ipc_d0__test_foo_topic_control2", f"unexpected name: {name}"
+
+    def test_control_plane_name_is_not_the_stale_form(self):
+        """反面对照: 两个过期形态都不许再出现。
+
+        旧文案有两条候选错误串: "_topic_control"(dzplot 原样) 与 数据段名 + "_control"
+        (早期测试的写法)。两个都对应**从来不存在的段** —— 而它表现不出错: 控制面
+        open 是 create|open, 名字错了不报错, 只在 /dev/shm 建一个空壳, generation 恒 0,
+        发布端重启检测**永久静默失效**。所以这里必须把错形态显式钉死。
+        """
+        name = dzplot.LiveSniffSource._control_plane_name_for_topic("/t", 3)
+        assert name.endswith("_control2"), f"unexpected name: {name}"
+        assert not name.endswith("_topic_control"), f"回到过期文案了: {name}"
+        assert not name.endswith("_control"), f"少了那个 '2': {name}"
+
+    def test_control_plane_name_carries_domain(self):
+        """domain 必须参与控制面命名 —— 否则跨 domain 会挂到别人的控制面上。"""
+        n0 = dzplot.LiveSniffSource._control_plane_name_for_topic("/t", 0)
+        n5 = dzplot.LiveSniffSource._control_plane_name_for_topic("/t", 5)
+        assert n0 == "dz_ipc_d0__t_topic_control2", f"unexpected name: {n0}"
+        assert n5 == "dz_ipc_d5__t_topic_control2", f"unexpected name: {n5}"
+
+    def test_control_plane_derives_from_data_segment_name(self):
+        """控制面名由**数据段名**派生(而不是另拼一份) —— 数据段名含 domain, 控制面
+        就必须一致地含。两者一旦各拼各的, 就是本仓反复出现的"复刻字符串漂移"。"""
+        for dom in (0, 1, 7):
+            ch = dzplot.LiveSniffSource._channel_name_for_topic("/t/x", dom)
+            cp = dzplot.LiveSniffSource._control_plane_name_for_topic("/t/x", dom)
+            assert cp == ch + "_control2", f"domain={dom}: {cp} != {ch} + '_control2'"
+
+    def test_control_plane_name_matches_cxx_single_source_of_truth(self):
+        """对着 C++ 唯一出处核一遍规则本身。
+
+        Python 调不到 C++, 但可以核对**规则的出处**: 若哪天 C++ 改了段名前缀/后缀或
+        控制面后缀, 这条会红 —— 这正是"复刻字符串"最怕的漂移方向(改 C++ 的人不知道
+        Python 有一份转写)。源不在本仓(工具被单独拷出去跑)时跳过, 不伪装成通过。
+
+        锚点: name_operator.h 导出 shm_topic_segment_name / shm_topic_control_name,
+        实现在同名 .cc —— pub/sub 控制面名原先锁在 shm_pub_sub_ipc.cc 的匿名 namespace
+        里, 2026-09-15 已收进唯一出处(该头文件的注释把本文件与 main.py 列为"已知复刻点")。
+        """
+        header = REPO_ROOT / "include" / "dzIPC" / "common" / "name_operator.h"
+        impl = REPO_ROOT / "src" / "dzIPC" / "common" / "name_operator.cc"
+        if not (header.is_file() and impl.is_file()):
+            raise SkipTest(f"C++ 唯一出处不在 {REPO_ROOT} —— 跳过核对")
+
+        header_src = header.read_text()
+        assert "shm_topic_segment_name" in header_src, (
+            "name_operator.h 不再导出 shm_topic_segment_name —— 段名唯一出处变了"
+        )
+        assert "shm_topic_control_name" in header_src, (
+            "name_operator.h 不再导出 shm_topic_control_name —— 控制面名唯一出处变了, "
+            "dzplot 的 _control_plane_name_for_topic 需要重新对齐"
+        )
+
+        impl_src = impl.read_text()
+        assert '"dz_ipc_d"' in impl_src, (
+            "段名前缀变了(不是 'dz_ipc_d' + domain) —— "
+            "dzplot._channel_name_for_topic 需要同步"
+        )
+        assert '"_topic"' in impl_src, (
+            "pub/sub 段名后缀不再是 '_topic' —— dzplot._channel_name_for_topic 需要同步"
+        )
+        assert '"_control2"' in impl_src, (
+            "控制面后缀 '_control2' 没了/改了 —— "
+            "dzplot._control_plane_name_for_topic 需要同步(改这个后缀会让旧段越界 mmap)"
+        )
 
     def test_generation_zero_skips_reattach(self):
         """When generation is 0 (publisher not yet started), skip reattach.
@@ -1572,13 +1732,257 @@ class TestControlPlaneReattach:
         )
 
     def test_control_plane_name_matches_sniffer_pattern(self):
-        """The control plane name is the sniffer channel name + '_control' suffix."""
+        """控制面名以 sniffer 通道名(数据段名)为前缀。
+
+        ⛔ 本用例原先断言的是 data_name + "_control" —— 少了那个 "2", 与
+        control_name_for() 不符。它正是"文案过期"的第二种形态: 断言的不是真实规则,
+        而是当时以为的规则。正确形态见 test_control_plane_derives_from_data_segment_name。
+        """
         sniffer_ch = dzplot.LiveSniffSource._channel_name_for_topic("/t")
         control_ch = dzplot.LiveSniffSource._control_plane_name_for_topic("/t")
-        assert control_ch == sniffer_ch + "_control", (
-            f"control plane should be sniffer channel + '_control': "
-            f"{control_ch} != {sniffer_ch}_control"
+        assert control_ch.startswith(sniffer_ch), (
+            f"控制面名应以数据段名开头: {control_ch} / {sniffer_ch}"
         )
+        assert control_ch == sniffer_ch + "_control2", (
+            f"控制面应为数据段名 + '_control2': "
+            f"{control_ch} != {sniffer_ch}_control2"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 控制面只读纪律
+# ---------------------------------------------------------------------------
+
+class _FakePlane:
+    """假的 TopicControlPlane —— 只记录"有没有人开我"。
+
+    用它当哨兵: 段不存在时连 TopicControlPlane() 都不该被构造, 更不该有 open()。
+    """
+
+    def __init__(self, generation: int = 7) -> None:
+        self._generation = generation
+        self.open_calls: List[str] = []
+
+    def open(self, name: str) -> bool:
+        self.open_calls.append(name)
+        return True
+
+    def generation(self) -> int:
+        return self._generation
+
+
+class _FakeIPC:
+    """假的 dzipc 模块: 记录 TopicControlPlane() 被构造过几次。"""
+
+    def __init__(self) -> None:
+        self.constructed: List[_FakePlane] = []
+
+    def TopicControlPlane(self) -> _FakePlane:
+        plane = _FakePlane()
+        self.constructed.append(plane)
+        return plane
+
+
+class TestControlPlaneReadOnly:
+    """控制面**只读纪律**: 段不存在时只探测, 绝不建段。
+
+    为什么要单独立一类: 旧写法 `cp = TopicControlPlane(); cp.open(name)` 里的 open 是
+    ipc::shm::handle::acquire(..., create | open)(control_plane.cc:89) —— 段不存在时它
+    **静默建一个空壳**, 且 initialize_if_needed() 会写上一个合法 magic(:292), 于是
+    valid() 为真、generation() 恒 0、state() 恒 Empty。调用方以为"控制面在, 发布端还没
+    起来", 真相是"这条 SHM 通道从没被建过" —— 重启检测永久提前返回, 且每次运行都在
+    /dev/shm 留一个垃圾段。
+
+    ⚠️ 这些用例**不看 open() 的返回值** —— create|open 对任何名字都返回真, 那正是旧写法
+    恒绿的原因。判据一律落在"盘上有没有多出文件"与"有没有去 open"上。
+    """
+
+    def test_segment_exists_is_false_for_absent_name(self):
+        """只读探测对不存在的名字返回 False, 且**不创建**任何文件。"""
+        with tempfile.TemporaryDirectory() as d:
+            shm = Path(d)
+            assert not dzplot.LiveSniffSource._control_plane_segment_exists(
+                "dz_ipc_d0__no_such_topic_control2", shm_dir=shm)
+            assert list(shm.iterdir()) == [], "探测不应在盘上留下任何东西"
+
+    def test_segment_exists_is_true_for_present_name(self):
+        """存在则返回 True —— 否则上面那条 False 可能只是"恒 False"。"""
+        with tempfile.TemporaryDirectory() as d:
+            shm = Path(d)
+            name = "dz_ipc_d0__t_topic_control2"
+            (shm / name).write_bytes(b"\0" * 64)
+            assert dzplot.LiveSniffSource._control_plane_segment_exists(
+                name, shm_dir=shm)
+
+    def test_open_readonly_absent_does_not_construct_or_open(self):
+        """⛔ 核心判据: 段不存在时**连 TopicControlPlane() 都不该被构造**, 更不该 open。
+
+        旧写法在这里会造出空壳段; 新写法返回 (None, 0, 'absent')。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            ipc = _FakeIPC()
+            plane, gen, status = dzplot.LiveSniffSource._open_control_plane_readonly(
+                ipc, "dz_ipc_d0__absent_topic_control2", shm_dir=Path(d))
+            assert (plane, gen, status) == (None, 0, "absent"), (plane, gen, status)
+            assert ipc.constructed == [], (
+                "段不存在却构造了 TopicControlPlane —— create|open 会就此建出一个空壳段"
+            )
+            assert list(Path(d).iterdir()) == [], "只读路径不应建段"
+
+    def test_open_readonly_present_attaches_and_reports_generation(self):
+        """段存在则照常挂上 —— 否则"不建段"可能只是"永远不工作"。"""
+        with tempfile.TemporaryDirectory() as d:
+            shm = Path(d)
+            name = "dz_ipc_d0__t_topic_control2"
+            (shm / name).write_bytes(b"\0" * 64)
+            ipc = _FakeIPC()
+            plane, gen, status = dzplot.LiveSniffSource._open_control_plane_readonly(
+                ipc, name, shm_dir=shm)
+            assert status == "attached" and gen == 7, (plane, gen, status)
+            assert len(ipc.constructed) == 1
+            assert ipc.constructed[0].open_calls == [name], "open 用的名字必须是要探测的那个"
+
+    def test_open_readonly_reports_open_failure_distinctly(self):
+        """段在但 open 失败 ⇒ "open_failed", 与 "absent" 分开(日志不该误导)。"""
+        class _RefusingIPC:
+            def TopicControlPlane(self):
+                class _P:
+                    def open(self, _name):
+                        return False
+                return _P()
+
+        with tempfile.TemporaryDirectory() as d:
+            shm = Path(d)
+            name = "dz_ipc_d0__t_topic_control2"
+            (shm / name).write_bytes(b"\0" * 64)
+            plane, gen, status = dzplot.LiveSniffSource._open_control_plane_readonly(
+                _RefusingIPC(), name, shm_dir=shm)
+            assert (plane, gen, status) == (None, 0, "open_failed"), (plane, gen, status)
+
+    def test_sniff_loop_uses_readonly_helper(self):
+        """调用点必须走只读 helper —— 防"helper 写对了但没人用/被改回去"。
+
+        源码级判据: _sniff_loop 里出现 _open_control_plane_readonly, 且**没有**裸的
+        `TopicControlPlane()` 构造(那等于重新引入 create|open 造空壳)。
+        """
+        import inspect
+        source = inspect.getsource(dzplot.LiveSniffSource._sniff_loop)
+        assert "_open_control_plane_readonly" in source, (
+            "_sniff_loop 必须经 _open_control_plane_readonly 挂控制面"
+        )
+        assert "TopicControlPlane()" not in source, (
+            "_sniff_loop 不应直接构造 TopicControlPlane —— open() 是 create|open, 会建空壳"
+        )
+
+    def test_default_shm_dir_is_dev_shm(self):
+        """默认探测目录必须是 /dev/shm —— glibc 的 shm_open 就落在那里。
+
+        传了自定义 shm_dir 的用例覆盖的是逻辑; 这一条覆盖"默认值本身没写错", 否则
+        测试全绿而真实运行永远判"段不存在"(反向静默失效)。
+        """
+        import inspect
+        source = inspect.getsource(dzplot.LiveSniffSource._control_plane_segment_exists)
+        assert '"/dev/shm"' in source, "默认 shm_dir 不是 /dev/shm"
+
+
+# ---------------------------------------------------------------------------
+# 跨文件命名一致性(dzplot ↔ dzviz ↔ C++)
+# ---------------------------------------------------------------------------
+
+class TestCrossFileNamingConsistency:
+    """同一份段名规则在仓库里有几处 Python 转写, 它们必须彼此一致。
+
+    为什么值得单测: C++ 唯一出处 name_operator.h 把自己的"已知复刻点"逐个列了出来, 而
+    Python 侧没有任何编译期约束 —— 一处改了另一处不动, 症状是**静默**(挂不上段、清理
+    清理不掉), 不是报错。这里把三处钉在一起: dzplot.main / dzviz.subscriber / C++ 源。
+    """
+
+    @staticmethod
+    def _dzviz_subscriber():
+        try:
+            import component.subscriber as mod  # noqa: PLC0415 — 延迟导入, 缺依赖时 SKIP
+        except Exception as exc:                  # noqa: BLE001
+            raise SkipTest(f"dzviz component.subscriber 不可导入({type(exc).__name__})")
+        return mod.DzipcSubscriber
+
+    def test_dzviz_sanitize_matches_dzplot(self):
+        """dzviz 的 _sanitize_for_shm 与 dzplot 的 _sanitize_topic_name 必须逐字节相同。"""
+        sub = self._dzviz_subscriber()
+        mine = dzplot.LiveSniffSource._sanitize_topic_name
+        for probe in ("/test/topic", "/a-b.c_d", "a@b/c:d e", "/中文", "ёё", "🚀",
+                      "", "/", "１２３"):
+            assert sub._sanitize_for_shm(probe) == mine(probe), (
+                f"{probe!r}: dzviz={sub._sanitize_for_shm(probe)!r} "
+                f"dzplot={mine(probe)!r}"
+            )
+
+    def test_dzviz_segment_name_matches_dzplot(self):
+        """dzviz 的 _segment_name_for_topic 与 dzplot 的 _channel_name_for_topic 同形。"""
+        sub = self._dzviz_subscriber()
+        for topic in ("/demo/depth_image", "/test", "/中文"):
+            for dom in (0, 1, 7):
+                assert (sub._segment_name_for_topic(topic, dom)
+                        == dzplot.LiveSniffSource._channel_name_for_topic(topic, dom)), (
+                    f"{topic!r} domain={dom}"
+                )
+
+    def test_dzviz_globs_cover_the_real_on_disk_names_and_nothing_else(self):
+        """dzviz 清理用的 glob 必须**覆盖真实落盘名**, 且不误伤邻居 topic / 别的 domain。
+
+        真实落盘名是实测出来的(2026-09-15, 起真实 SHM 发布端后逐个核对), 不是推的:
+        数据/等待者通道带 libipc 的 __IPC_SHM__ 前缀, 控制面是**裸文件**。
+        旧写法 f"...__dz_ipc__{san}*" 既缺 `d<domain>_` 也缺 `_topic`, 对**任何**真实文件
+        都不匹配 —— 于是清理函数一直静默空转(不报错、也不干活)。
+        """
+        import fnmatch
+        sub = self._dzviz_subscriber()
+        pats = sub._shm_globs_for_topic("/x", 0)
+        real = [
+            "__IPC_SHM__AC_CONN__dz_ipc_d0__x_topic",
+            "__IPC_SHM__CC_CONN__dz_ipc_d0__x_topic_WAITER_COND_",
+            "__IPC_SHM__CC_CONN__dz_ipc_d0__x_topic_WAITER_LOCK_",
+            "__IPC_SHM__CC_CONN__dz_ipc_d0__x_topic_WAITER_STATE_",
+            "__IPC_SHM__QU_CONN__dz_ipc_d0__x_topic__64__16",
+            "__IPC_SHM__RD_CONN__dz_ipc_d0__x_topic_WAITER_COND_",
+            "__IPC_SHM__WT_CONN__dz_ipc_d0__x_topic_WAITER_STATE_",
+            "dz_ipc_d0__x_topic_control2",
+        ]
+        not_ours = [
+            "__IPC_SHM__QU_CONN__dz_ipc_d0__x_topic_extra_topic__64__16",
+            "__IPC_SHM__AC_CONN__dz_ipc_d0__x_topic_extra_topic",
+            "__IPC_SHM__CC_CONN__dz_ipc_d0__x_topic_extra_topic_WAITER_COND_",
+            "dz_ipc_d0__x_topic_extra_topic_control2",
+            "__IPC_SHM__QU_CONN__dz_ipc_d1__x_topic__64__16",
+            "__IPC_SHM__QU_CONN__dz_ipc_d0__x_topic_control2__64__16",
+        ]
+        for name in real:
+            assert any(fnmatch.fnmatch("/dev/shm/" + name, p) for p in pats), (
+                f"真实落盘文件没被覆盖(清理会空转): {name}"
+            )
+        for name in not_ours:
+            assert not any(fnmatch.fnmatch("/dev/shm/" + name, p) for p in pats), (
+                f"glob 越界, 会误删别的 topic/domain 的段: {name}"
+            )
+
+    def test_dzviz_default_domain_matches_topic_spec_reader(self):
+        """dzviz 的 TopicSpec 默认 domain 取自 config, 而清理函数的 domain 必须由调用方给。
+
+        钉的是"不要以为不传 domain 就等于对": 段名含 domain, 给错 domain 不会报错,
+        只会去找**另一个** domain 的段。这里只固化"函数签名有 domain 且默认 0"这一事实,
+        并在 docstring 里写明 dzviz 的 TopicSpec.from_config 默认是 1。
+        """
+        import inspect
+        sub = self._dzviz_subscriber()
+        sig = inspect.signature(sub._clean_shm_for_topic)
+        assert "domain" in sig.parameters, (
+            "_clean_shm_for_topic 必须能接 domain —— 段名含 domain, 否则清理必错"
+        )
+        spec_src = (REPO_ROOT / "tools" / "dzviz" / "component" / "topic_spec.py")
+        if spec_src.is_file():
+            text = spec_src.read_text()
+            assert 'defaults.get("domain", 1)' in text, (
+                "dzviz TopicSpec 的 domain 默认值变了 —— subscriber 清理的默认值说明要同步"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1607,9 +2011,12 @@ def run_tests():
         TestSniffLoopRegression,
         TestTopicMetaNormalization,
         TestControlPlaneReattach,
+        TestControlPlaneReadOnly,
+        TestCrossFileNamingConsistency,
     ]
     passed = 0
     failed = 0
+    skipped = 0
 
     for cls in test_classes:
         instance = cls()
@@ -1620,12 +2027,19 @@ def run_tests():
                     method()
                     print(f"  PASS {cls.__name__}.{name}")
                     passed += 1
+                except SkipTest as e:
+                    # 前置条件不满足 —— 必须与 PASS 区分开, 否则"绿"会等于"其实没测"
+                    print(f"  SKIP {cls.__name__}.{name}: {e}")
+                    skipped += 1
                 except Exception as e:
                     print(f"  FAIL {cls.__name__}.{name}: {e}")
                     traceback.print_exc()
                     failed += 1
 
-    print(f"\n{passed} passed, {failed} failed")
+    summary = f"\n{passed} passed, {failed} failed"
+    if skipped:
+        summary += f", {skipped} skipped"
+    print(summary)
     return failed == 0
 
 

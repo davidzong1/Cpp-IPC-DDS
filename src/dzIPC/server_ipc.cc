@@ -3,23 +3,51 @@
 #include <new>
 #include <typeinfo>
 #include <utility>
+#include "dzIPC/auto_ser_cli_ipc.h"
 #include "dzIPC/ipc_info_pool.h"
 #include "dzIPC/logger/dzipc_log.h"
 #include "libipc/utility/pimpl.h"
 
 namespace dzIPC {
 namespace {
+/* 日志的 TransportKind 必须读**当下**的传输, 不能读构造期的 IPCType:
+ * IPCType::Auto 下两者不再相等(T2 §7 R5) —— 读构造期值会把切到 SHM 之后的日志
+ * 一律记成 socket, 排查时把人引到错方向(T4/T5 都要靠这个字段判"到底走没走 SHM")。
+ *
+ * 取不到活值(腿还没建 / 正在拆)时回落到构造期映射, 与改动前逐字节一致。拆腿时
+ * unique_ptr 先置空再析构, 所以"拿到 nullptr"本身就是"正在拆"的判据, 这里不会
+ * 解引用一个正在析构的腿。 */
+template<typename Leg>
+logger::TransportKind live_transport_kind(const Leg* leg, IPCType ipc_type) noexcept
+{
+    const path::Kind k = leg ? leg->transport_current() : path::Kind::None;
+    if (k == path::Kind::Shm)
+    {
+        return logger::TransportKind::kShm;
+    }
+    if (k == path::Kind::Socket)
+    {
+        return logger::TransportKind::kSocket;
+    }
+    return ipc_type == IPCType::Shm ? logger::TransportKind::kShm : logger::TransportKind::kSocket;
+}
+
+/* 服务端回调的传输取值器。为什么不直接传 ipc_type: 回调是在**建腿之前**包好的
+ * (腿要把回调收进去), 那一刻只拿得到构造期类型; 而腿的活值要等回调被调用时才有。
+ * 所以传一个取值器, 在调用点求值。 */
+using TransportGetter = std::function<logger::TransportKind()>;
+
 std::function<void(std::shared_ptr<ServiceData>&)> wrap_server_callback(
     std::function<void(std::shared_ptr<ServiceData>&)> callback,
-    std::string topic, size_t domain_id, IPCType ipc_type)
+    std::string topic, size_t domain_id, TransportGetter transport_of)
 {
-    return [callback = std::move(callback), topic = std::move(topic), domain_id, ipc_type]
+    return [callback = std::move(callback), topic = std::move(topic), domain_id,
+            transport_of = std::move(transport_of)]
         (std::shared_ptr<ServiceData>& data)
     {
-        const auto transport = (ipc_type == IPCType::Shm) ? logger::TransportKind::kShm
-                                                           : logger::TransportKind::kSocket;
         if (logger::IsDzipcLogRunning() && data)
         {
+            const auto transport = transport_of();
             try {
                 /* owned_copy: DZFlat 视图槽也能物化成 owning 供序列化记录。 */
                 auto snapshot = data->request_owned_copy();
@@ -49,6 +77,7 @@ std::function<void(std::shared_ptr<ServiceData>&)> wrap_server_callback(
 
         if (logger::IsDzipcLogRunning() && data)
         {
+            const auto transport = transport_of();
             try {
                 auto snapshot = data->response_owned_copy();
                 if (!snapshot) throw std::bad_alloc();
@@ -86,7 +115,9 @@ pimpl::server_ipc_impl::server_ipc_impl(const std::string& topic_name_, const st
     impl(p_)->topic_name = topic_name_;
     impl(p_)->domain_id = domain_id;
     impl(p_)->ipc_type = ipc_type;
-    callback = wrap_server_callback(std::move(callback), topic_name_, domain_id, ipc_type);
+    callback = wrap_server_callback(
+        std::move(callback), topic_name_, domain_id,
+        [this, ipc_type]() noexcept { return live_transport_kind(impl(p_) ? impl(p_)->ipc.get() : nullptr, ipc_type); });
     if (ipc_type == IPCType::Shm)
     {
         impl(p_)->ipc = std::make_unique<shm::shm_ser_ipc>(topic_name_, msg, callback, domain_id, verbose,
@@ -96,6 +127,12 @@ pimpl::server_ipc_impl::server_ipc_impl(const std::string& topic_name_, const st
     {
         impl(p_)->ipc = std::make_unique<socket::socket_ser_ipc>(topic_name_, msg, callback, domain_id, verbose,
                                                                  enable_thread_qos, cpu_id, thread_priority);
+    }
+    else if (ipc_type == IPCType::Auto)
+    {
+        impl(p_)->ipc = std::make_unique<autopath::auto_ser_ipc>(topic_name_, msg, callback, domain_id,
+                                                                 autopath::Options{}, verbose, enable_thread_qos,
+                                                                 cpu_id, thread_priority);
     }
     else
     {
@@ -120,9 +157,11 @@ void pimpl::server_ipc_impl::reset_message(const std::shared_ptr<ServiceData>& m
 
 void pimpl::server_ipc_impl::reset_callback(std::function<void(std::shared_ptr<ServiceData>&)> callback)
 {
-    impl(p_)->ipc->reset_callback(
-        wrap_server_callback(std::move(callback), impl(p_)->topic_name,
-                             impl(p_)->domain_id, impl(p_)->ipc_type));
+    impl(p_)->ipc->reset_callback(wrap_server_callback(
+        std::move(callback), impl(p_)->topic_name, impl(p_)->domain_id,
+        [this]() noexcept {
+            return live_transport_kind(impl(p_) ? impl(p_)->ipc.get() : nullptr, impl(p_)->ipc_type);
+        }));
 }
 
 bool pimpl::server_ipc_impl::exit_flag() const
@@ -133,6 +172,11 @@ bool pimpl::server_ipc_impl::exit_flag() const
 bool pimpl::server_ipc_impl::handshake_completed() const
 {
     return impl(p_)->ipc->handshake_completed();
+}
+
+path::Kind pimpl::server_ipc_impl::transport_current() const
+{
+    return impl(p_)->ipc->transport_current();
 }
 
 /******************************************************************************************************/
@@ -166,6 +210,11 @@ pimpl::client_ipc_impl::client_ipc_impl(const std::string& topic_name_, const st
         impl(p_)->ipc = std::make_unique<socket::socket_cli_ipc>(topic_name_, msg, domain_id, verbose,
                                                                  enable_thread_qos, cpu_id, thread_priority);
     }
+    else if (ipc_type == IPCType::Auto)
+    {
+        impl(p_)->ipc = std::make_unique<autopath::auto_cli_ipc>(topic_name_, msg, domain_id, autopath::Options{},
+                                                                 verbose, enable_thread_qos, cpu_id, thread_priority);
+    }
     else
     {
         throw std::invalid_argument("Unsupported IPC type");
@@ -192,8 +241,7 @@ bool pimpl::client_ipc_impl::send_request(std::shared_ptr<ServiceData>& request,
     // Logger hook: record service request
     if (dzIPC::logger::IsDzipcLogRunning()) {
         try {
-            auto transport = (impl(p_)->ipc_type == IPCType::Shm) ? dzIPC::logger::TransportKind::kShm
-                                                                  : dzIPC::logger::TransportKind::kSocket;
+            auto transport = live_transport_kind(impl(p_)->ipc.get(), impl(p_)->ipc_type);
             auto snapshot = request->request_owned_copy();
             if (!snapshot) throw std::bad_alloc();
             ipc::buffer buf = snapshot->serialize();
@@ -209,8 +257,7 @@ bool pimpl::client_ipc_impl::send_request(std::shared_ptr<ServiceData>& request,
     const bool ok = impl(p_)->ipc->send_request(request, rev_tm);
     if (ok && dzIPC::logger::IsDzipcLogRunning() && request) {
         try {
-            auto transport = (impl(p_)->ipc_type == IPCType::Shm) ? dzIPC::logger::TransportKind::kShm
-                                                                  : dzIPC::logger::TransportKind::kSocket;
+            auto transport = live_transport_kind(impl(p_)->ipc.get(), impl(p_)->ipc_type);
             auto snapshot = request->response_owned_copy();
             if (!snapshot) throw std::bad_alloc();
             ipc::buffer buf = snapshot->serialize();
@@ -244,6 +291,11 @@ bool pimpl::client_ipc_impl::exit_flag() const
 bool pimpl::client_ipc_impl::handshake_completed() const
 {
     return impl(p_)->ipc->handshake_completed();
+}
+
+path::Kind pimpl::client_ipc_impl::transport_current() const
+{
+    return impl(p_)->ipc->transport_current();
 }
 
 }   // namespace dzIPC

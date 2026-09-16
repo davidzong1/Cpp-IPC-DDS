@@ -14,6 +14,10 @@ include_directories(
     ${LIBIPC_PROJECT_DIR}/test
     ${LIBIPC_PROJECT_DIR}/3rdparty
     ${LIBIPC_PROJECT_DIR}/3rdparty/gtest/include
+    # dzipc_topic_cat 的只读握手观测探针(handshake_probe.h / info.h)。
+    # 只有一个测试(test_handshake_probe.cpp)用它, 但 include_directories 是全局的,
+    # 加在这里比给单个 target 加更省事、也不会改变任何既有 target 的行为。
+    ${LIBIPC_PROJECT_DIR}/exec/dzipc_topic_cat/include
     ${LIBIPC_PROJECT_DIR})
 
 file(GLOB SRC_FILES
@@ -102,6 +106,28 @@ foreach(src_file ${SRC_FILES})
         
     message(STATUS "Created test executable: ${test_name}")
 endforeach()
+
+# ================================================================
+# CTest 注册(按需登记, 不是全量)
+# ----------------------------------------------------------------
+# 上面 file(GLOB) 造出来的 target 默认**不进 CTest**; enable_testing() 在顶层
+# CMakeLists.txt 的 LIBIPC_BUILD_TESTS 块里(必须在构建根调用)。
+#
+# 这里只登记 test_udp_port_boundary 一个: 它此前**没有复现入口** —— 只能手工构建
+# build/bin/test_udp_port_boundary 来跑, 而 file(GLOB) 不重跑 cmake 就不会把新
+# .cpp 编进构建树, 于是源码改了二进制还是旧的(见共享区 udp_port_overflow_fix_架构评审.md)。
+# 其余 target 仍未登记, 不在本次射程 —— ctest 目前只跑这一个。
+#
+# 命名规范: 与 target 名一致(本项目 target 名 = 源文件 basename, test_ 前缀), 不另起别名。
+#
+# 用法: cmake -S . -B build && cmake --build build --target test_udp_port_boundary \
+#         && ctest --test-dir build -R test_udp_port_boundary --output-on-failure
+add_test(NAME test_udp_port_boundary COMMAND test_udp_port_boundary)
+
+# 第 7 个用例 PreviouslyFatalTopicNowConnectsEndToEnd 起真 pub/sub: 1.5s 等握手 + 2.5s
+# 发布, 正常约 5s; 组播不可用时它 GTEST_SKIP 而不是挂住。给 120s 只为卡死时 ctest 报
+# 超时而非永久阻塞, 不是性能判据。
+set_tests_properties(test_udp_port_boundary PROPERTIES TIMEOUT 120)
 
 #target_link_libraries(${PROJECT_NAME} tcmalloc_minimal)
 

@@ -21,16 +21,26 @@ namespace dzIPC::common
     /******************************************************************************************************/
     uint16_t udp_discovery_port_calculate(const std::string &topic_name, int domain_id)
     {
-        uint64_t hash_value = static_cast<uint16_t>(dzIPC::common::fnv1a64(topic_name) % 10000);
-        uint64_t limited_port = UDP_DISCOVERY_BASE_PORT + domain_id * hash_value;
-        /* 一个 topic 实际占用 base .. base+kUdpPortOffsetMax 这一段, 所以校验
-         * 上界的是段尾而不是段首 —— 否则基址刚好落在 65535 附近时, ACK 通道会
-         * 静默回绕到低端口, 撞上别的 topic。 */
-        if (limited_port + dzIPC::common::kUdpPortOffsetMax > 65535)
-        {
-            throw std::runtime_error("Calculated port number exceeds the maximum allowed value of 65535. Please choose a different topic name or domain ID.");
-        }
-        return static_cast<uint16_t>(limited_port); // 确保端口号在有效范围内
+        /* 10000 是端口公式的一半, 不是可调参数: 改它等于改**每一个** topic 的端口,
+         * 新旧版本进程会各自绑到不同端口上并且都"成功"(组播不受影响), 表现为静默互不通。 */
+        constexpr uint64_t kTopicPortSpan = 10000;
+
+        const uint64_t hash_value = dzIPC::common::fnv1a64(topic_name) % kTopicPortSpan;
+        const uint64_t offset = static_cast<uint64_t>(domain_id) * hash_value;
+        const uint64_t base = UDP_DISCOVERY_BASE_PORT;
+        const uint64_t window = dzIPC::common::kUdpPortWindow;
+
+        /* 修复前这里是 throw std::runtime_error, 于是 domain_id ≥ 6 就已经有 topic
+         * 名直接打死调用进程(实测 domain=6 为 9.9%, domain=32 为 83%, domain≥541 近 100%),
+         * 而调用点全是 socket 传输层构造函数 —— 抛出来没有任何一处能降级处理。
+         *
+         * 判据是"越界就折回", 而折回用的取模**只在越界时起作用**: 旧实现抛异常的条件
+         * 恰好是 offset ≥ window, 所以凡旧版本能返回结果的输入, 这里 offset < window,
+         * `offset % window == offset` —— 逐位不变(见 hash.h 的 kUdpPortWindow 注释)。 */
+        const uint64_t folded = offset < window ? offset : offset % window;
+        /* base + folded ≤ base + window - 1 == 65535 - kUdpPortOffsetMax, 加上
+         * kUdpPortOffsetMax 的 ACK 段也仍在 65535 内 —— 段尾校验由这里保证, 不再抛。 */
+        return static_cast<uint16_t>(base + folded);
     }
     /******************************************************************************************************/
     /******************************************************************************************************/

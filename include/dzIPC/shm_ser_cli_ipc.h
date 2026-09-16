@@ -19,6 +19,13 @@ namespace shm {
 class shm_ser_ipc;
 class shm_cli_ipc;
 
+/* 服务通道控制面段名("_ser_control2")。
+ *
+ * T3 补充: 占用判定(autopath::shm_channel_occupied)需要**只读**探测这个段
+ * (见 control_plane_shm::occupied_by_other), 而段名拼接的唯一出处是
+ * shm_ser_cli_ipc.cc —— 在这里导出它, 避免出现第二份字符串规则。 */
+IPC_EXPORT std::string ser_service_control_name(const std::string& topic_name, size_t domain_id);
+
 class IPC_EXPORT shm_ser_ipc : public ser_ipc_base
 {
 public:
@@ -32,6 +39,7 @@ public:
     void InitChannel(std::string extra_info = "");
 
     bool handshake_completed() const override { return handshake_completed_.load(std::memory_order_acquire); }
+    path::Kind transport_current() const override { return path::Kind::Shm; }
 
     /* 禁用拷贝 */
     shm_ser_ipc(const shm_ser_ipc&) = delete;
@@ -83,6 +91,7 @@ public:
     shm_cli_ipc& operator=(const shm_cli_ipc&) = delete;
 
     bool handshake_completed() const override { return handshake_completed_.load(std::memory_order_acquire); }
+    path::Kind transport_current() const override { return path::Kind::Shm; }
 
 protected:
     void cli_handshake();

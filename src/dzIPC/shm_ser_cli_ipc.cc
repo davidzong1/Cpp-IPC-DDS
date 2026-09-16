@@ -124,9 +124,8 @@ std::string service_prefix_for(const std::string& topic_name, size_t domain_id)
 
 std::string service_control_name_for(const std::string& topic_name, size_t domain_id)
 {
-    /* "_ser_control2": 与 pub-sub 侧同理, TopicControl 结构体已变大,
-     * 必须换名以避免在旧的小共享内存段上越界映射。 */
-    return service_prefix_for(topic_name, domain_id) + "_ser_control2";
+    /* 段名的实现只有一份, 在 dzIPC::shm 里(占用判定也要用同一个名字)。 */
+    return dzIPC::shm::ser_service_control_name(topic_name, domain_id);
 }
 
 // Internal envelope: carries a fast-path request together with the client's
@@ -160,6 +159,13 @@ private:
 };
 
 }   // namespace
+
+std::string ser_service_control_name(const std::string& topic_name, size_t domain_id)
+{
+    /* "_ser_control2": 与 pub-sub 侧同理, TopicControl 结构体已变大,
+     * 必须换名以避免在旧的小共享内存段上越界映射。 */
+    return shm_service_prefix(topic_name, domain_id) + "_ser_control2";
+}
 
 /******************************************************************************************************/
 /******************************************************************************************************/
@@ -551,9 +557,16 @@ void shm_cli_ipc::InitChannel(std::string extra_info)
 
 void shm_cli_ipc::cli_handshake()
 {
+    /* ⛔ 这里**不能抛**: 本函数是 std::thread 的入口, 抛出去就是 std::terminate
+     * ——一个"控制面段打不开"的局部失败会变成整个进程 abort。而这条路径现在是
+     * 路径切换的常规分支(同机判定成立后客户端必然走这里), 失败必须是**可回退的**:
+     * 直接返回 -> handshake_completed_ 保持 false -> 上层的有界等待超时 -> 回退
+     * 到 socket。 */
     if (!control_plane_.open(service_control_name_for(topic_name_, domain_id_)))
     {
-        throw std::runtime_error("control plane open failed");
+        std::cerr << "\033[31m[" << topic_name_
+                  << "_CliInfo] control plane open failed; staying on the previous path\033[0m" << std::endl;
+        return;
     }
     uint32_t attached_generation = 0;
     bool peer_registered = false;

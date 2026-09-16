@@ -121,6 +121,13 @@ add_subdirectory(exec/dzipc_topic_cat)
 add_subdirectory(exec/dzipc_pub)
 
 if (LIBIPC_BUILD_TESTS)
+    # CTest 必须在**构建根目录**启用: ctest 从构建根找 CTestTestfile.cmake, 只有在顶层
+    # 调过 enable_testing() 才会生成那一份(子目录里调只会生成子目录那份, 从根跑 ctest
+    # 看不到)。gtest 自带的那句在 `if (gtest_build_tests)` 里
+    # (3rdparty/gtest/CMakeLists.txt:187), 本项目该选项为 OFF、从不执行 ⇒ 加这句之前
+    # 整棵构建树没有任何 CTest 注册。
+    enable_testing()
+
     set(GOOGLETEST_VERSION 1.10.0)
     if (LIBIPC_USE_STATIC_CRT)
         set(gtest_force_shared_crt OFF)

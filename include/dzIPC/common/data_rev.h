@@ -98,6 +98,36 @@ IPC_EXPORT bool chunk_rev_server(std::shared_ptr<ipc::socket::UDPNode>& node, st
  * 刻意做成重载而非默认参数: 保留原符号, 已链接的二进制不受影响。 */
 IPC_EXPORT bool chunk_rev_topic(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<TopicData>& rev_msg,
                                 uint64_t tm, const std::shared_ptr<ipc::socket::UDPNode>& ack_node);
+
+/* --------- T1: UDP 话题订阅端的"借样"出口 ---------
+ *
+ * 与上面两个重载走**同一条**可靠路径(同样的分片重组 + NACK 重传轮 + ACK), 唯一区别是
+ * 交回什么:
+ *
+ *   out_payload 非空 且 收到的是一条 DZFlat 段(段首 magic 判别)
+ *        ⇒ **不做 TLV 反序列化**, 把该段**去帧**(去掉页尾)后放进 *out_payload, 返回 true。
+ *          调用方据此走借样/视图路径, 且**不得**再把它当 TLV 物化。
+ *   其余情况(TLV, 或 out_payload == nullptr)
+ *        ⇒ 与老行为逐字节一致: 反序列化进 rev_msg->topic(), *out_payload 不被触碰。
+ *
+ * 判据是 out_payload 是否为空 —— 调用方必须**先清空自己的 buffer**再传进来, 否则无法
+ * 区分"收到 TLV"与"什么都没收到"(返回 false 表示超时/丢片, 此时 out_payload 不动)。
+ *
+ * 契约与边界(必须写清, 否则会被误用):
+ *   - DZFlat 段在 UDP 上**必须**是分帧流里的连续段: 每 1460 字节数据后跟 12 字节页尾,
+ *     去帧由本函数负责; 段本身仍是"位置无关、无指针"的 DZFlat 段, 语义与 SHM 上那份
+ *     完全一致(可整体 memcpy, 见 dzflat.h 的三条性质);
+ *   - 这一次去帧拷贝是**省不掉**的: UDP 的分帧会把页尾插进段中间, 且接收缓冲是本进程
+ *     复用的临时内存(platform/posix/udp.h 的 "Temp buffer avoid copying")。所以 socket
+ *     侧叫"借样", 但它的成本是"一次整段拷贝", 不是 SHM 侧那种零拷贝;
+ *   - 段头自相矛盾(总长落不进分帧流)⇒ 丢弃并返回 false, **不发 ACK**(与 wire_accept.cc
+ *     对 kDzFlatHeaderBad 的处置一致) —— Reliable 发送端会重传。
+ *
+ * 为什么做成重载而不是给旧的重载加默认参数: 会改函数签名与符号名, 已链接旧 libipc 的
+ * 二进制会找不到符号(与 UDPNode 的 NodeRole 重载同一理由)。 */
+IPC_EXPORT bool chunk_rev_topic(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<TopicData>& rev_msg,
+                                uint64_t tm, const std::shared_ptr<ipc::socket::UDPNode>& ack_node,
+                                ipc::buffer* out_payload);
 IPC_EXPORT bool chunk_rev_server(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<ServiceData>& rev_msg,
                                  uint64_t tm, bool ser_or_cli,
                                  const std::shared_ptr<ipc::socket::UDPNode>& ack_node);

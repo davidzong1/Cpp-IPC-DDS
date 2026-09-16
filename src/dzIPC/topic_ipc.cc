@@ -59,6 +59,29 @@ void log_subscribe_event(const std::string& topic, size_t domain_id, IPCType ipc
 }
 }  // namespace
 /* 执行指针重定向实现继承多态 */
+namespace {
+/* ⛔ 发布/订阅**不支持** IPC_AUTO(T0 决策 1)。
+ *
+ * 为什么必须显式拒绝而不是让它落进通用分支:
+ *   ① IPC_AUTO 现在是**导出的公共常量**(dzipc.h:19), 用户看得见就会试;
+ *   ② 它的实现依赖 ser-cli 的握手通道做两阶段路径裁定(pub/sub 没有这条通道),
+ *      所以这里**不可能**有正确实现 —— 只能拒绝;
+ *   ③ 但拒绝必须是**可操作的**: 通用报错("Unsupported IPC type")会让调用方以为
+ *      自己传了个非法枚举值, 而 Auto 是合法值、只是不适用于这条 API。真正的
+ *      风险是调用方看到通用报错就去改成 IPC_SOCKET —— 那正是最糟的解法, 因为
+ *      pub/sub 的同机最优解通常是 SHM。
+ *
+ * ⛔ 也绝不能静默按 socket 建链: 用户会以为拿到了"自动选路", 实际永远走 UDP,
+ *    且没有任何地方告警(T0 决策清单 J-4 的公共 API 脚枪)。 */
+[[noreturn]] void throw_auto_unsupported_for_pubsub(const char* api_name)
+{
+    throw std::invalid_argument(std::string(api_name) +
+                                ": IPC_AUTO is not supported for publish/subscribe "
+                                "(no handshake channel to negotiate the path); "
+                                "pass IPC_SHM or IPC_SOCKET explicitly");
+}
+}   // namespace
+
 class pimpl::publisher_ipc_impl::publisher_ipc_impl_ : public ipc::pimpl<publisher_ipc_impl_>
 {
 public:
@@ -85,6 +108,10 @@ pimpl::publisher_ipc_impl::publisher_ipc_impl(const std::shared_ptr<TopicData>& 
     {
         impl(p_)->ipc = std::make_unique<socket::socket_pub_ipc>(msg, topic_name, domain_id, verbose,
                                                                  enable_thread_qos, cpu_id, thread_priority);
+    }
+    else if (ipc_type == IPCType::Auto)
+    {
+        throw_auto_unsupported_for_pubsub("publisher_ipc_impl");
     }
     else
     {
@@ -171,6 +198,10 @@ pimpl::subscriber_ipc_impl::subscriber_ipc_impl(const std::shared_ptr<TopicData>
     {
         impl(p_)->ipc = std::make_unique<socket::socket_sub_ipc>(msg, topic_name, domain_id, queue_size, verbose,
                                                                  enable_thread_qos, cpu_id, thread_priority);
+    }
+    else if (ipc_type == IPCType::Auto)
+    {
+        throw_auto_unsupported_for_pubsub("subscriber_ipc_impl");
     }
     else
     {
