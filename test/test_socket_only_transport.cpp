@@ -1,13 +1,12 @@
 /* IPC_SOCKET_ONLY: ser-cli 的"强制纯 socket"逃生口
  *
- * 背景: ser-cli 的 IPC_SOCKET 已被归一化为自动选路(server_ipc.cc 的
- * normalize_sercli_type), 于是"我要纯 socket"这个意图一度**没有公共表达方式**。
- * IPC_SOCKET_ONLY 补上它, 用途是**对照实验/基线**与排查("到底是 SHM 腿还是 socket
- * 腿出问题")。
+ * 背景: ser-cli 的 IPC_SOCKET 就是自动选路(工厂按用户意图分派, 见 server_ipc.cc),
+ * 于是"我要纯 socket"这个意图一度**没有公共表达方式**。IPC_SOCKET_ONLY 补上它,
+ * 用途是**对照实验/基线**与排查("到底是 SHM 腿还是 socket 腿出问题")。
  *
  * 本文件钉两件互为一体的事:
  *   ① IPC_SOCKET_ONLY → 传输**始终**是 socket, 同机也不切 SHM(逃生口是真的);
- *   ② IPC_SOCKET      → 同机**确实**切到 SHM(归一化没被写坏)。
+ *   ② IPC_SOCKET      → 同机**确实**切到 SHM(自动选路仍然生效)。
  * 两条缺一不可: 只有①, 一个"永远不切"的实现也能全绿; 只有②, 逃生口不存在也测不出来。
  */
 #include <atomic>
@@ -111,12 +110,12 @@ TEST(SocketOnlyTransport, ForcesPureSocketEvenOnSameHost)
         << "IPC_SOCKET_ONLY 的服务端切到了 SHM —— 逃生口是假的";
 }
 
-/* ② IPC_SOCKET: 同机必须切 SHM(否则归一化被写坏了)。 */
+/* ② IPC_SOCKET: 同机必须切 SHM(自动选路仍然生效)。 */
 TEST(SocketOnlyTransport, IpcSocketStillSwitchesToShmOnSameHost)
 {
     const Observed o = run_once(dzIPC::IPC_SOCKET);
     ASSERT_TRUE(o.rpc_ok) << "IPC_SOCKET 的 RPC 没通";
     EXPECT_EQ(o.client_kind, dzIPC::path::Kind::Shm)
-        << "IPC_SOCKET 没有归一到自动选路(同机应切 SHM)—— 归一化被写坏了";
+        << "IPC_SOCKET 没有走自动选路(同机应切 SHM)—— 工厂的分派被改坏了";
     EXPECT_EQ(o.server_kind, dzIPC::path::Kind::Shm);
 }

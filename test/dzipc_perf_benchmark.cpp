@@ -776,7 +776,7 @@ dzIPC::IPCType type_of(const std::string& transport)
 
 dzIPC::IPCType sercli_type_of(const std::string& transport)
 {
-    return transport == "shm" ? IPC_SHM : IPC_SOCKET_ONLY;
+    return transport == "shm" ? IPC_SHM : dzIPC::IPC_SOCKET_ONLY;
 }
 
 /* UDP 端口由 topic 名与 domain_id 计算, 越界时库会直接抛异常。

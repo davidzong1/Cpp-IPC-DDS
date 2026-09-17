@@ -675,14 +675,14 @@ TEST(DzipcLogRotation, CrossBagNoLossNoDup)
 //
 // 【契约变更】本用例原判据是"IPC_SOCKET 必须记 kSocket(1)"。该判据依赖一个已被
 // **有意去掉**的性质: ser-cli 的 IPC_SOCKET 曾经等于"强制纯 socket"。现在工厂把
-// IPC_SOCKET 归一化成自动选路(server_ipc.cc 的 normalize_sercli_type), 同机必然切
-// SHM —— 于是那条断言测的是一个不再存在的契约, 它变红是**正确**的, 不是回归。
+// ser-cli 的 IPC_SOCKET 就是自动选路(见 server_ipc.cc 的分派), 同机必然切 SHM ——
+// 于是那条断言测的是一个不再存在的契约, 它变红是**正确**的, 不是回归。
 //
 // 判据随之改为守**新**契约, 三个 case 各守一头:
 //   ① IPC_SHM          —— 强制共享内存, 构造期即 Shm, 记 kShm;
 //   ② IPC_SOCKET       —— 必须归一到自动选路, 同机切 SHM 后记 kShm。
-//      ② 同时是"归一化没被删掉"的回归门: 谁去掉 normalize_sercli_type, 它就会退回
-//      kSocket 而失败。
+//      ② 同时是"IPC_SOCKET 仍被分派到自动选路"的回归门: 谁把它改回纯 socket 腿,
+//      它就会退回 kSocket 而失败。
 //   ③ IPC_SOCKET_ONLY  —— 强制纯 socket, 不切, 记 kSocket。
 //      ③ 是"纯 socket 的日志取值"的见证 —— 契约变更一度让它失去覆盖, IPC_SOCKET_ONLY
 //      补回入口之后它重新可测; 谁把 SocketOnly 也接进自动选路, 它就会失败。
@@ -785,15 +785,15 @@ TEST(DzipcLog, SerCliTransportIsRecordedAsActuallyUsed)
 TEST(DzipcLog, PubSubRejectsAutoInsteadOfMislabeling)
 {
     auto td = TopicDataPtrMake<TestLogMsg>(42);
-    EXPECT_THROW(PublisherIPCPtrMake(td, "/t5_pubsub_auto", 0, IPCType::Auto, false), std::invalid_argument)
-        << "pub/sub 接受了 IPCType::Auto: 它会按 shm/socket 分支之外的路径走, 日志也无活值可读";
-    EXPECT_THROW(SubscriberIPCPtrMake(td, "/t5_pubsub_auto", 0, 8, IPCType::Auto, false), std::invalid_argument);
+    EXPECT_THROW(PublisherIPCPtrMake(td, "/t5_pubsub_auto", 0, static_cast<IPCType>(2), false), std::invalid_argument)
+        << "pub/sub 接受了那个空洞值: 它会按 shm/socket 分支之外的路径走, 日志也无活值可读";
+    EXPECT_THROW(SubscriberIPCPtrMake(td, "/t5_pubsub_auto", 0, 8, static_cast<IPCType>(2), false), std::invalid_argument);
 }
 
 // ---------------------------------------------------------------------------
 // Test 10: 日志的 TransportKind 必须读**当下**的传输 (T2 §7 R5)。
 //
-// IPCType::Auto 下构造期类型与实际承载不再相等; 若日志仍读构造期值, 切到 SHM
+// 自动选路下构造期类型与实际承载不再相等; 若日志仍读构造期值, 切到 SHM
 // 之后的所有记录都会被记成 socket, 排查时把人引到错方向。
 //
 // 判据取 bag 里 TransportPacket 的 transport 字节(0=kShm/1=kSocket)本身, 不看

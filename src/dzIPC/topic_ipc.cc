@@ -60,12 +60,31 @@ void log_subscribe_event(const std::string& topic, size_t domain_id, IPCType ipc
 }  // namespace
 /* 执行指针重定向实现继承多态 */
 namespace {
+/* 枚举里那个空洞(值 2)。用具名常量而不是裸字面量: 让 grep 能追到所有引用点。 */
+constexpr IPCType kReservedAutoSlot = static_cast<IPCType>(2);
+
+/* pub/sub 收到"既不是 Shm 也不是 Socket/SocketOnly"的 IPCType 时拒绝。
+ *
+ * 值 2(曾经是 Auto)现在是**空洞**。它被删的理由: 自动选路的语义已由 IPC_SOCKET 承担,
+ * 而"把 Socket 归一化成 Auto"那套代码经变异测试证明**没有任何可观测行为**(改成恒等后
+ * 49/49 仍全绿)。删掉后枚举只剩三个值, 语义互不重叠。
+ *
+ * 但**拒绝逻辑必须留着**: 该值可能来自旧二进制、旧配置或手写的 IPCType 字面量;
+ * 而自动选路依赖 ser-cli 的握手通道做两阶段裁定 —— pub/sub 没有这条通道, 所以这里
+ * 不可能有正确实现。
+ *
+ * 报文必须**可操作**: 通用报错("Unsupported IPC type")会让调用方以为传了个随便的非法
+ * 枚举值, 而它其实有来历。所以点名该值并指路到合法选项。
+ *
+ * ⛔ 绝不能静默按 socket 建链: 用户会以为拿到了"自动选路", 实际永远走 UDP 且无任何
+ * 告警(T0 决策清单 J-4 的公共 API 脚枪)。 */
 [[noreturn]] void throw_auto_unsupported_for_pubsub(const char* api_name)
 {
     throw std::invalid_argument(std::string(api_name) +
-                                ": IPCType::Auto is not supported for publish/subscribe "
-                                "(no handshake channel to negotiate the path); "
-                                "pass IPC_SHM or IPC_SOCKET explicitly");
+                                ": IPCType value 2 (was Auto, now a reserved hole) is not "
+                                "supported for publish/subscribe (no handshake channel to "
+                                "negotiate the path); pass IPC_SHM, IPC_SOCKET or "
+                                "IPC_SOCKET_ONLY explicitly");
 }
 }   // namespace
 
@@ -98,7 +117,7 @@ pimpl::publisher_ipc_impl::publisher_ipc_impl(const std::shared_ptr<TopicData>& 
         impl(p_)->ipc = std::make_unique<socket::socket_pub_ipc>(msg, topic_name, domain_id, verbose,
                                                                  enable_thread_qos, cpu_id, thread_priority);
     }
-    else if (ipc_type == IPCType::Auto)
+    else if (ipc_type == kReservedAutoSlot)
     {
         throw_auto_unsupported_for_pubsub("publisher_ipc_impl");
     }
@@ -188,7 +207,7 @@ pimpl::subscriber_ipc_impl::subscriber_ipc_impl(const std::shared_ptr<TopicData>
         impl(p_)->ipc = std::make_unique<socket::socket_sub_ipc>(msg, topic_name, domain_id, queue_size, verbose,
                                                                  enable_thread_qos, cpu_id, thread_priority);
     }
-    else if (ipc_type == IPCType::Auto)
+    else if (ipc_type == kReservedAutoSlot)
     {
         throw_auto_unsupported_for_pubsub("subscriber_ipc_impl");
     }

@@ -11,10 +11,24 @@
 namespace dzIPC {
 namespace {
 
-IPCType normalize_sercli_type(IPCType t) noexcept
-{
-    return t == IPCType::Socket ? IPCType::Auto : t;
-}
+/* ser-cli 的 IPC_SOCKET 走自动选路 —— 调用方无需(也无从)手动选。
+ *
+ * 理由: 调用方传 IPC_SOCKET 表达的意图是"**跨主机**通信", 而不是"禁止共享内存"。
+ * socket 腿本身就能跨主机; 同主机时它只是绕远路(两个进程之间还要穿内核 UDP 栈两遍)。
+ * 让自动选路去裁定"同机切 SHM、跨机保持 socket", 正是这个意图的正确实现。
+ *
+ * 与 pub/sub 的区别: 自动选路依赖 ser-cli 的握手通道做两阶段裁定, pub/sub 没有这条
+ * 通道 —— 那边对"自动选路"**没有实现**(见 topic_ipc.cc)。
+ *
+ * 想让 ser-cli **只用** socket(对照实验/基线/排查), 用 IPC_SOCKET_ONLY —— 它是唯一
+ * 表达这个意图的入口。不要靠"传 IPC_SOCKET 再指望它别切"来表达: 那正是被自动选路
+ * 接管的那个。
+ *
+ * 注: 这里**不再**把 IPC_SOCKET 归一化成单独的枚举值。曾经这么做过(归一化成 Auto),
+ * 但变异测试证明它没有任何可观测行为 —— 存进去的 ipc_type 只被 live_transport_kind
+ * 当**回落**用, 而那里的判据只需区分"是不是 Shm", Socket 与 SocketOnly 落到同一个
+ * 结果(改成恒等后 49/49 仍全绿)。既然不改变任何行为就删掉, 免得读代码的人以为
+ * 那里有语义。 */
 
 template<typename Leg>
 logger::TransportKind live_transport_kind(const Leg* leg, IPCType ipc_type) noexcept
@@ -113,22 +127,20 @@ pimpl::server_ipc_impl::server_ipc_impl(const std::string& topic_name_, const st
 {
     impl(p_)->topic_name = topic_name_;
     impl(p_)->domain_id = domain_id;
-    /* 记录用**归一化**值(IPC_SOCKET → Auto): 日志的回落映射读构造期类型, 不归一化会把
-     * 自动选路记成强制 socket, 排查时把人引到错方向。
-     * 分派用**用户原始意图**: Socket 与 Auto 都落到自动选路, SocketOnly 落到纯 socket。 */
-    const IPCType normalized = normalize_sercli_type(ipc_type);
-    impl(p_)->ipc_type = normalized;
+    /* 原样记录用户传的类型: 它只被日志的**回落**映射用, 而那里的判据只需区分
+     * "是不是 Shm"(见 live_transport_kind)。 */
+    impl(p_)->ipc_type = ipc_type;
     callback = wrap_server_callback(
         std::move(callback), topic_name_, domain_id,
-        [this, normalized]() noexcept { return live_transport_kind(impl(p_) ? impl(p_)->ipc.get() : nullptr, normalized); });
+        [this, ipc_type]() noexcept { return live_transport_kind(impl(p_) ? impl(p_)->ipc.get() : nullptr, ipc_type); });
     if (ipc_type == IPCType::Shm)
     {
         impl(p_)->ipc = std::make_unique<shm::shm_ser_ipc>(topic_name_, msg, callback, domain_id, verbose,
                                                            enable_thread_qos, cpu_id, thread_priority);
     }
-    else if (ipc_type == IPCType::Socket || ipc_type == IPCType::Auto)
+    else if (ipc_type == IPCType::Socket)
     {
-        /* Socket 走这里而不是纯 socket 腿 —— 这就是"IPC_SOCKET 强制自动选路"的落点。 */
+        /* Socket 走这里而不是纯 socket 腿 —— 这就是"IPC_SOCKET 走自动选路"的落点。 */
         impl(p_)->ipc = std::make_unique<autopath::auto_ser_ipc>(topic_name_, msg, callback, domain_id,
                                                                  autopath::Options{}, verbose, enable_thread_qos,
                                                                  cpu_id, thread_priority);
@@ -203,15 +215,14 @@ pimpl::client_ipc_impl::client_ipc_impl(const std::string& topic_name_, const st
 {
     impl(p_)->topic_name = topic_name_;
     impl(p_)->domain_id = domain_id;
-    /* 同服务端: 记录归一化值, 分派按原始意图。 */
-    const IPCType normalized = normalize_sercli_type(ipc_type);
-    impl(p_)->ipc_type = normalized;
+    /* 同服务端: 原样记录, 按用户意图分派。 */
+    impl(p_)->ipc_type = ipc_type;
     if (ipc_type == IPCType::Shm)
     {
         impl(p_)->ipc = std::make_unique<shm::shm_cli_ipc>(topic_name_, msg, domain_id, verbose,
                                                            enable_thread_qos, cpu_id, thread_priority);
     }
-    else if (ipc_type == IPCType::Socket || ipc_type == IPCType::Auto)
+    else if (ipc_type == IPCType::Socket)
     {
         impl(p_)->ipc = std::make_unique<autopath::auto_cli_ipc>(topic_name_, msg, domain_id, autopath::Options{},
                                                                  verbose, enable_thread_qos, cpu_id, thread_priority);

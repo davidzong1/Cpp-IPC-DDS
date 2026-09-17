@@ -277,8 +277,8 @@ TEST(HandshakeWatch, RealSerCliPairIsObservableAndUnaffected)
     /* ⛔ 这一对必须用 IPC_SOCKET_ONLY, **不能**用 IPC_SOCKET。
      *
      * 本用例的判据是"双方都不提议 SHM ⇒ path_state 停在 Unknown"。而 ser-cli 的
-     * IPC_SOCKET 已被归一化为自动选路(server_ipc.cc 的 normalize_sercli_type):
-     * 同主机时服务端会 PeerInPool → 提议 SHM, 客户端跟进 ⇒ path_state 变成
+     * ser-cli 的 IPC_SOCKET **就是**自动选路(见 server_ipc.cc 的分派): 同主机时
+     * 服务端会 PeerInPool → 提议 SHM, 客户端跟进 ⇒ path_state 变成
      * ProposeShm/ConfirmShm, 这条断言的前提就不成立了。
      *
      * 实测它一度仍然通过 —— 但那是**采样时序侥幸**: 快照取在协商完成之前, 此刻
