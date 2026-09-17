@@ -229,6 +229,16 @@ def print_usage(args: argparse.Namespace) -> None:
 def publish_images(args: argparse.Namespace) -> None:
     print_usage(args)
     ipc = load_dzipc()
+    # DZFlat 平坦段发布(docs/dzflat_shm.md §9.7): 开关打开时由 Python 按生成的
+    # schema 写好段交给传输层(publish_dzflat), 接收侧借样零拷贝 —— 一张 1MB 的图
+    # 不再变成百万元素的 Python list。取不到 schema/无接收方/池耗尽时内部回退 TLV,
+    # 实走的形态由下面的 wire= 字段给出。
+    if args.dzflat and hasattr(ipc, "EnableDzFlat"):
+        ipc.EnableDzFlat(True)
+    print(
+        f"[image-demo] DZFlat: {'enabled' if args.dzflat else 'disabled'}"
+        " (平坦段优先, 不可用则回退 TLV)"
+    )
     data, width, height, encoding, step, source = build_image_payload(args)
 
     template = ipc.StdImage()
@@ -268,9 +278,14 @@ def publish_images(args: argparse.Namespace) -> None:
             msg.step = step
             msg.data = data_list
 
-            ok = pub.publish(msg.to_generic())
+            if args.dzflat and hasattr(ipc, "publish_dzflat"):
+                wire = "flat" if ipc.publish_dzflat(pub, msg) else "tlv"
+                ok = True      # publish_dzflat 内部已发布(平坦段或回退 TLV)
+            else:
+                ok = pub.publish(msg.to_generic())
+                wire = "tlv"
             print(
-                f"[image-demo] seq={seq} ok={ok} stamp={msg.header.stamp:.6f} "
+                f"[image-demo] seq={seq} ok={ok} wire={wire} stamp={msg.header.stamp:.6f} "
                 f"{width}x{height} {encoding} data={len(data)} bytes",
                 flush=True,
             )
@@ -293,6 +308,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--transport", choices=["socket", "shm"], default="shm")
     parser.add_argument("--extra", default="", help="InitChannel(extra_info)")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--dzflat", dest="dzflat", action="store_true", default=True,
+        help="enable DZFlat borrow publishing for SHM (default: on)",
+    )
+    parser.add_argument(
+        "--no-dzflat", dest="dzflat", action="store_false",
+        help="disable DZFlat borrow publishing",
+    )
     parser.add_argument(
         "--period", type=float, default=1.0 / 60.0, help="publish interval in seconds"
     )

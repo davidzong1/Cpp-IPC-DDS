@@ -199,6 +199,7 @@ python3 tool/visualizer/dzipc_web_bridge.py \
   "poll": 0.03,          // 全局轮询间隔（秒）
   "extra": "",           // 全局 InitChannel extra 参数
   "verbose": false,      // 全局详细日志
+  "dzflat": true,        // SHM 链路启用 DZFlat 借样旁路(docs/dzflat_shm.md)
 
   "topics": [],           // 普通 topic 订阅列表
   "robot_displays": [],   // 机器人模型列表（URDF）
@@ -302,6 +303,23 @@ python3 tool/visualizer/dzipc_web_bridge.py --help
 | `--load-config` | false | 启动时自动加载 `--config` 指定的配置文件 |
 | `--transport` | socket | 全局默认传输方式 |
 | `--domain` | 1 | 全局默认 domain ID |
+| `--dzflat` / `--no-dzflat` | 开(配置文件 `dzflat`) | SHM 链路启用 DZFlat 借样旁路；`--no-dzflat` 退回 TLV 物化。socket 链路不受影响(DZFlat 为 SHM 专属) |
+
+### DZFlat 借样（SHM 默认开启）
+
+- **订阅端**：SHM 话题的 DZFlat 段被传输层零拷贝借样进 `GenericMessage`，Python 按
+  `dzipc.dzflat` 生成的 schema 解码（`from_generic()` 自动识别 TLV / DZFlat 两种 wire）。
+  首个 DZFlat 样本到达时终端会打印一条 `[dzviz] DZFlat wire detected on <topic>
+  (borrowed=True/False)` 日志，作为借样是否生效的直接证据。
+- **发布端**：Python demo 发布脚本默认调 `EnableDzFlat(True)`，并经
+  `dzipc.publish_dzflat()` 发布 —— 它用生成的 Python schema 把**平坦段**写出来
+  （`dzipc.dzflat.pack()`），接收侧因此走借样路径；取不到 schema / 无接收方 / chunk 池
+  耗尽 / 非 SHM 时**内部回退普通 TLV**（回退是设计内常态，不是错误，两条路都送达）。
+  demo 每行日志的 `wire=flat|tlv` 就是本次实走的形态；起始几条在订阅者完成握手前会
+  是 `wire=tlv`，属正常。注意 `--publish-mode best-effort` 走的是另一条腿
+  （`publish_best_effort()`），那里没有平坦段，恒 `wire=tlv`；机器人 demo 的默认值就是它。
+  前提：`local/` 下的 Python 包要跟着重装（`scripts/install.sh`），否则加载到的是旧
+  副本，此时脚本会检测不到 `publish_dzflat` 而整段走 TLV（同样不丢消息）。
 
 ---
 

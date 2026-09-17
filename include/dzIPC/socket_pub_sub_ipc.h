@@ -2,6 +2,8 @@
 // #include <semaphore.h>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -52,6 +54,13 @@ public:
     bool publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm) override;
     bool publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg) override;
 
+    /* 预构造段发布(见 pub_ipc_base.h)。
+     *
+     * 段直接作为 UDP 载荷送出 —— 分帧仍是既有的 1460+12 页尾, wire 格式**没变**; 变的
+     * 只是"载荷是平坦段还是 TLV"。接收侧的 T1 分流(data_rev.cc 的 out_payload 闸)认的
+     * 正是这个, 于是 UDP 的借样腿由此有了第一个生产者(见 test_socket_borrow.cpp)。 */
+    bool publish_prebuilt_segment(const void* seg, std::size_t len) override;
+
     /* 是否已有订阅者。
      *
      * 与 SHM 的语义对齐(SHM 由 pub_handshake() 线程从控制面回填), socket 侧
@@ -101,6 +110,14 @@ private:
     std::shared_ptr<TopicData> topic_msg_;
     dzIPC::ThreadDispatch::ThreadOptions thread_options_;
 
+    /* 本话题模板的 msg_id —— 预构造段发布拿它复核段头(SHM 侧 dzflat_msg_id() 的对应物)。
+     * 读取方式与既有 nodelet 块一致(不额外加锁): 模板只在 reset_message() 里换, 那是
+     * 话题类型变更路径, 与今天 pub 其它读法的并发语义相同。 */
+    std::uint32_t template_msg_id() const
+    {
+        return (topic_msg_ && topic_msg_->topic()) ? topic_msg_->topic()->msg_id() : 0;
+    }
+
     // ---- intra-process fast-path state ----
     // K=3 consecutive publishes with the same (key, local snapshot size,
     // IpcInfoPool SocketSub count) must be observed before the fast path
@@ -136,6 +153,10 @@ public:
      *   view_queue_  ← DZFlat 段 + typed 话题(dzflat_schema_hash() != 0) → 借样 Sample
      *   msg_queue_   ← TLV 段, 以及 schema-less 话题(GenericMessage/手写类型)的 DZFlat 段
      *
+     * ⚠️ "schema-less 的 DZFlat 段进物化队列" **不等于**"它被物化了": GenericMessage
+     * 覆写 dzflat_adopt, 段字节仍是**借**来的(不拷), 只是没有 C++ flat 视图可绑, 所以
+     * 归到物化队列这条归宿上 —— Python 侧正是从这条队列拿到借样 + memoryview 的。
+     *
      * ⇒ `try_get` 只服务借样段, `try_get_clone` 只服务物化对象, 一条消息**只会进其中
      * 一条**。混合 wire(灰度期)需要调用方两条都 drain, 见 pub_sub_base.h 与
      * sample_message.h 的头注释。
@@ -155,7 +176,7 @@ public:
     /// docs/shm_defect_fixes.md 第 4 条)。
     bool get(Sample& out, std::uint64_t tm_ms);
 
-    /* 物化路径。socket 的接收只走这条。 */
+    /* 物化路径。socket 的接收走这条(TLV 与 schema-less 的借样段都从这里出)。 */
     void get_clone(std::shared_ptr<TopicData>& msg);
     bool try_get_clone(std::shared_ptr<TopicData>& msg);
     /* 禁用拷贝 */

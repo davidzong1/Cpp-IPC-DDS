@@ -21,6 +21,9 @@ public:
     bool publish_best_effort(std::shared_ptr<IpcMsgBase> msg);
     bool publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm);
     bool publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg);
+    /* 预构造段发布(见 pub_sub_base.h): 段由调用方按自己的 schema 写好交来。
+     * 返回 false = 没走平坦段, 调用方须回退 publish()。 */
+    bool publish_prebuilt_segment(const void* seg, std::size_t len);
     bool has_subscribed() const;
     bool exit_flag() const;
 

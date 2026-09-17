@@ -9,9 +9,13 @@
 而 GenericMessage 的默认实现就是返回 false。所以本文件的第一条断言是"收到了", 第二条
 才是"字段对"。
 
-发布端必须是 C++(bin/dzflat_py_publisher): Python 发不出 DZFlat —— GenericMessage 没有
-schema, 写不出定长布局。读则可以, 因为 generator 另外把 schema 以数据形式发到了 Python
-(python/dzipc/gen_msgs/_dzflat_schema.py)。
+读的路径见 docs/dzflat_shm.md §9.6: generator 把 schema 以数据形式发到了 Python
+(python/dzipc/gen_msgs/_dzflat_schema.py), 由 python/dzipc/dzflat.py 解码。
+
+**发**的路径也已经打通(§9.7): `dzipc.publish_dzflat()` 用同一份 schema 把段写出来
+(`dzflat.pack()`), 再交给 `PublisherIPC.publish_prebuilt_segment()` 借 chunk 送出;
+段不可用时回退普通 TLV。所以 [1]-[6] 需要 C++ 发布端(dzflat_py_publisher), 而 [9]-[12]
+是 Python 自己发、自己收。
 
 用法: python3 test/test_dzflat_python.py [--publisher build/bin/dzflat_py_publisher]
 退出码 0 = 全部通过。
@@ -110,10 +114,11 @@ def check(cond, what):
     return cond
 
 
-def _subscribe(topic, msg_id, queue=32):
+def _subscribe(topic, msg_id, queue=32, transport=None):
     td = ipc.make_topic_data(GenericMessage(), msg_id) if hasattr(ipc, "make_topic_data") \
         else ipc.TopicDataPtrMake(GenericMessage(), msg_id)
-    sub = ipc.SubscriberIPCPtrMake(td, topic, 0, queue, ipc.IPC_SHM, False)
+    sub = ipc.SubscriberIPCPtrMake(td, topic, 0, queue,
+                                   ipc.IPC_SHM if transport is None else transport, False)
     sub.InitChannel()
     return sub, td
 
@@ -341,6 +346,260 @@ def test_rx_counters(pub_bin):
           "把指纹改回去就该解开 —— 证明 6.2 改的确实是指纹那 4 个字节")
 
 
+def test_borrow_pins_the_chunk(pub_bin):
+    """借样必须**钉住**共享 chunk: 持有一条消息期间, 后续流量不得改写它的字节。
+
+    这条是"零拷贝"的另一半。只断言 dzflat_is_borrowed() 说明的是实现选了借样这条路;
+    这里断言借样**真的是共享内存** —— 段若指向一个发布端可复用的 chunk, 后面几条消息
+    发完它就已经被写花了。SHM 的 chunk 池每尺寸档只有 32 块, 所以收满 8 条就足够把
+    没被钉住的块抢回去(实现若退回整段拷贝, 这条仍会过 —— 它守的是生命周期, 不是拷贝;
+    两者相加才是 C++ 侧 Sample 的三条契约在 Python 上的对应物)。
+    """
+    print("\n[8] 借样钉住 chunk: 持有期间后续流量不得改写它")
+    got, _ = _collect(pub_bin, "/dzflat_py/pin", 67, True, "image", 8)
+    if not check(len(got) > 0, "收到了借样消息"):
+        return
+    held = got[0]
+    if not check(held.dzflat_is_borrowed(), "第 1 条是借样(未拷贝)"):
+        return
+    held_view = held.dzflat_memoryview()      # 传阅视图: 不拷贝, 指向共享 chunk
+    before = bytes(held_view)                 # 取一份副本当对照
+    check(len(got) >= 8, "8 条都收齐了 —— 后续流量确实发生过(实测 %d 条)" % len(got))
+    check(bytes(held_view) == before,
+          "持有中的段字节没被后续流量改写(chunk 被借样钉住了)")
+
+    d = dzflat.decode_generic(held)
+    check(d is not None and list(d["data"]) == EXPECT_IMG_DATA,
+          "持有期间借样段仍解码出正确字段")
+
+
+# --------------------------------------------------------------- Python 侧发布
+#
+# 历史: Python 只能**收** DZFlat(GenericMessage 没有 schema, 写不出定长布局)。现在
+# dzipc.dzflat.pack() 按生成 schema 把段写出来, 由 PublisherIPC.publish_prebuilt_segment()
+# 借一块 chunk 送出去(见 docs/dzflat_shm.md §9.6)。发布端仍有**一次 memcpy**(段在 Python
+# 地址空间生成), 但省掉了 TLV 组装与页尾分段, 而接收侧照旧借样零拷贝。
+
+
+def _make_publisher(topic, msg_id, transport):
+    td = ipc.make_topic_data(GenericMessage(), msg_id)
+    pub = ipc.PublisherIPCPtrMake(td, topic, 0, transport, False)
+    pub.InitChannel()
+    return pub, td
+
+
+def _make_std_image():
+    """与 test/dzflat_py_publisher.cpp 共享的期望值造一条等价的 StdImage。"""
+    img = ipc.StdImage()
+    img.header.frame_id = EXPECT_IMG["frame_id"]
+    img.header.stamp = EXPECT_IMG["stamp"]
+    img.width = IMG_W
+    img.height = IMG_H
+    img.step = IMG_STEP
+    img.encoding = EXPECT_IMG["encoding"]
+    img.data = list(EXPECT_IMG_DATA)
+    return img
+
+
+def _drain_one(sub, td, budget=3.0):
+    deadline = time.time() + budget
+    while time.time() < deadline:
+        ok, out = sub.try_get_clone(td)
+        if ok:
+            return out.topic() if out is not None else td.topic()
+        time.sleep(0.005)
+    return None
+
+
+def _first_diff(a: bytes, b: bytes) -> str:
+    """逐字节比对失败时给出**第一个**不符的偏移与上下文 —— 只说"不一致"对布局问题是废话。"""
+    n = min(len(a), len(b))
+    for i in range(n):
+        if a[i] != b[i]:
+            lo = max(0, i - 8)
+            return ("首个不符字节 @%d: 参考 %s | 我方 %s"
+                    % (i, a[lo:i + 8].hex(), b[lo:i + 8].hex()))
+    return "前 %d 字节相同, 但长度不同(参考 %d, 我方 %d)" % (n, len(a), len(b))
+
+
+def test_encoder_matches_cpp_writer(pub_bin):
+    """Python 编码器与 C++ 写端**逐字节一致**。
+
+    这是发布路径上最关键的一条门: 布局差一个字节, 对端要么按 kDzFlatSchemaDrop 拒收,
+    要么指纹对上却读出错位的数据。判据不是"解出来差不多", 而是把同一份内容再写一遍, 与
+    C++ 写端产出的段做逐字节比对(含段头 total_size / msg_id / 对齐填充)。
+    两种入参都测: decode() 出的 dict, 与生成的封装对象(发布路径用的就是后者)。
+    msg_id 故意取**非零**(7): 全零的段头会让"编码器根本没写 msg_id"也通过比对。
+    """
+    print("\n[9] 编码器与 C++ 写端逐字节一致")
+    for label, kind, topic in (("StdImage", "image", "/dzflat_py/enc_img"),
+                               ("StdPointCloud", "cloud", "/dzflat_py/enc_cloud")):
+        got, _ = _collect(pub_bin, topic, 7, True, kind, 1)
+        if not check(len(got) > 0, "%s: 收到 C++ 写端产出的段" % label):
+            continue
+        msg = got[-1]
+        ref = bytes(msg.dzflat_bytes())            # C++ 写端的段(AcceptWire → dzflat_read 拷贝, 内容等价)
+        d = dzflat.decode_generic(msg, zero_copy=True)
+        schema = dzflat.schema_of(msg)
+        if not check(d is not None and schema is not None, "%s: 解码并找到 schema" % label):
+            continue
+
+        mine = dzflat.pack(d, schema, msg_id=7)    # (a) dict 入参
+        if check(mine is not None and bytes(mine) == ref,
+                 "%s: dict 入参重新编码 = 原段(%d 字节, msg_id=7)" % (label, len(ref))):
+            pass
+        else:
+            print("       " + _first_diff(ref, bytes(mine) if mine is not None else b""))
+
+        wrapper = getattr(ipc, label).from_generic(msg)
+        mine2 = dzflat.pack(wrapper, msg_id=7)     # (b) 封装对象入参
+        if check(mine2 is not None and bytes(mine2) == ref,
+                 "%s: 封装对象入参重新编码 = 原段" % label):
+            pass
+        else:
+            print("       " + _first_diff(ref, bytes(mine2) if mine2 is not None else b""))
+        # 比对本身得**有牙**: 段头里的 msg_id 必须真的参与编码, 否则上面两条只是在
+        # 证明"布局一致"(全零也能对上)。
+        other = dzflat.pack(d, schema, msg_id=8)
+        check(other is not None and bytes(other) != ref,
+              "%s: 改 msg_id 会改变段头(比对不是空转)" % label)
+
+
+def test_python_publishes_dzflat():
+    """Python 发布平坦段 → Python 订阅借样: 两条传输各跑一遍。
+
+    接收侧走的是同一套借样路径(schema-less 话题 → 物化队列 + dzflat_adopt), 所以判据与
+    C++ 发布端那几条完全一致。SHM 借的是发布方写好的 chunk; UDP 借的是接收层去帧出来的
+    独立块 —— 后者正是 T1 那条"能力就绪但无生产者"的腿, 本轮给了它第一个生产者。
+    """
+    print("\n[10] Python 发布平坦段 → Python 订阅借样(SHM 与 UDP)")
+    prior = ipc.IsDzFlatEnabled()
+    ipc.EnableDzFlat(True)
+    try:
+        for label, transport in (("SHM", ipc.IPC_SHM), ("UDP", ipc.IPC_SOCKET)):
+            topic = "/dzflat_py/pub_%s" % label.lower()
+            sub, td = _subscribe(topic, 0, transport=transport)
+            # msg_id 用 0: 与今日 Python 用法一致(模板与消息两侧都默认 0), 也是平坦段
+            # 段头自证必须与话题模板相符的那一项场景。
+            pub, _ptd = _make_publisher(topic, 0, transport)
+            time.sleep(0.5)                                    # 会合: SHM 握手 / UDP 组播入组
+            ipc.ResetDzFlatCounters()
+
+            img = _make_std_image()
+            msg = None
+            went_flat = False
+            deadline = time.time() + 5.0
+            while msg is None and time.time() < deadline:
+                went_flat = ipc.publish_dzflat(pub, img) or went_flat
+                msg = _drain_one(sub, td, 0.2)
+            if not check(msg is not None, "%s: 收到了 Python 自己发布的段" % label):
+                continue
+            check(went_flat, "%s: publish_dzflat 报告走了平坦段" % label)
+            check(msg.has_dzflat(), "%s: 收到的是 DZFlat 段(不是回退的 TLV)" % label)
+            check(msg.dzflat_is_borrowed(), "%s: 段是借样(未拷贝) —— 零拷贝已生效" % label)
+            check(ipc.DzFlatPublishCount() > 0,
+                  "%s: DZFlat 发布计数已增长(实测 %d)" % (label, ipc.DzFlatPublishCount()))
+
+            out = ipc.StdImage.from_generic(msg)
+            check(out.width == IMG_W and out.height == IMG_H and out.step == IMG_STEP,
+                  "%s: 标量字段往返一致" % label)
+            check(out.encoding == EXPECT_IMG["encoding"], "%s: string 字段往返一致" % label)
+            check(out.header.frame_id == EXPECT_IMG["frame_id"],
+                  "%s: 嵌套 string 往返一致" % label)
+            check(abs(out.header.stamp - EXPECT_IMG["stamp"]) < 1e-9,
+                  "%s: 嵌套 float64 往返一致" % label)
+            check(list(out.data) == EXPECT_IMG_DATA, "%s: 大数组逐字节往返一致" % label)
+    finally:
+        ipc.EnableDzFlat(prior)
+
+
+def test_publish_fallback():
+    """回退矩阵: 不可用时必须退化成 TLV **送达**, 而不是丢消息或抛异常。
+
+    三种成因各起一个话题, 每一条都同时断言两件事: `publish_dzflat` 返回 False, 且消息
+    仍然以 TLV 到达(字段可读)。只断言返回值会漏掉"返回了 False 但其实没发"这种形态。
+    """
+    print("\n[11] 回退矩阵(开关关 / 无 schema / 段头 msg_id 不符)")
+    prior = ipc.IsDzFlatEnabled()
+    try:
+        # (a) 开关关: 库级默认态, 也是灰度期最短的那一档
+        ipc.EnableDzFlat(False)
+        sub, td = _subscribe("/dzflat_py/fb_off", 0)
+        pub, _ = _make_publisher("/dzflat_py/fb_off", 0, ipc.IPC_SHM)
+        time.sleep(0.5)
+        check(ipc.publish_dzflat(pub, _make_std_image()) is False, "开关关: 返回 False")
+        msg = _drain_one(sub, td)
+        check(msg is not None and not msg.has_dzflat() and msg.field_count() > 0,
+              "开关关: 仍以 TLV 送达且字段可读")
+        ipc.EnableDzFlat(prior)
+
+        # (b) 类型没有 schema: 裸 GenericMessage —— pack() 返回 None, 直接回退
+        sub, td = _subscribe("/dzflat_py/fb_noschema", 0)
+        pub, _ = _make_publisher("/dzflat_py/fb_noschema", 0, ipc.IPC_SHM)
+        time.sleep(0.5)
+        g = GenericMessage()
+        g.set_uint32("width", IMG_W)
+        g.set_string("encoding", EXPECT_IMG["encoding"])
+        check(dzflat.pack(g) is None, "无 schema: pack() 返回 None(回退信号)")
+        check(ipc.publish_dzflat(pub, g) is False, "无 schema: 返回 False")
+        msg = _drain_one(sub, td)
+        check(msg is not None and not msg.has_dzflat(), "无 schema: 仍以 TLV 送达")
+        check(msg is not None and msg.get_uint32("width") == IMG_W,
+              "无 schema: TLV 字段可读")
+
+        # (c) 段头 msg_id 与本话题模板不符 ⇒ C++ 侧复核后拒绝发出(对端只会静默丢), 回退 TLV
+        sub, td = _subscribe("/dzflat_py/fb_badid", 0)
+        pub, _ = _make_publisher("/dzflat_py/fb_badid", 0, ipc.IPC_SHM)
+        time.sleep(0.5)
+        check(dzflat.pack(_make_std_image(), msg_id=1000) is not None,
+              "msg_id 不符: 编码本身成功(段头写的就是 1000)")
+        check(ipc.publish_dzflat(pub, _make_std_image(), msg_id=1000) is False,
+              "msg_id 不符: 发布端复核后返回 False")
+        msg = _drain_one(sub, td)
+        check(msg is not None and not msg.has_dzflat(), "msg_id 不符: 仍以 TLV 送达")
+    finally:
+        ipc.EnableDzFlat(prior)
+
+
+def test_mixed_wire_on_one_topic():
+    """同一话题上平坦段与 TLV 混跑: Python 侧两种 wire 都从**物化队列**出。
+
+    与 C++ typed 话题不同, Python 的话题模板恒为 schema-less(GenericMessage), 所以两条
+    wire 走同一条队列, 靠 has_dzflat() 判别 —— 不存在"漏 drain"问题。这条钉住这个差异,
+    免得把 C++ 的双 drain 要求照搬到 Python 侧(那是无用的复杂度)。
+    """
+    print("\n[12] 混跑: 同一话题上平坦段 + TLV")
+    prior = ipc.IsDzFlatEnabled()
+    ipc.EnableDzFlat(True)
+    try:
+        sub, td = _subscribe("/dzflat_py/mixed", 0)
+        pub, _ = _make_publisher("/dzflat_py/mixed", 0, ipc.IPC_SHM)
+        time.sleep(0.5)
+        img = _make_std_image()
+        flat_ok = False
+        for _ in range(20):
+            flat_ok = ipc.publish_dzflat(pub, img)
+            pub.publish(img.to_generic())          # 同一条内容的 TLV 形态
+            time.sleep(0.02)
+        check(flat_ok, "混合对流中至少一次走了平坦段")
+
+        seen = {}
+        deadline = time.time() + 4.0
+        while len(seen) < 2 and time.time() < deadline:
+            m = _drain_one(sub, td, 0.3)
+            if m is None:
+                continue
+            seen[bool(m.has_dzflat())] = m
+        check(set(seen.keys()) == {True, False},
+              "两种 wire 都收到了(平坦段与 TLV; 实测 %r)" % sorted(seen.keys()))
+        for is_flat, m in seen.items():
+            w = ipc.StdImage.from_generic(m)
+            check(w.width == IMG_W and list(w.data) == EXPECT_IMG_DATA,
+                  "%s 形态读出的字段一致" % ("平坦段" if is_flat else "TLV"))
+    finally:
+        ipc.EnableDzFlat(prior)
+
+
 def test_switch_not_inverted():
     """EnableDzFlat(False) 必须真的关掉。
 
@@ -377,6 +636,11 @@ def main():
     test_typed_wrapper_both_wires(args.publisher)
     test_tamper_rejected()
     test_rx_counters(args.publisher)
+    test_borrow_pins_the_chunk(args.publisher)
+    test_encoder_matches_cpp_writer(args.publisher)
+    test_python_publishes_dzflat()
+    test_publish_fallback()
+    test_mixed_wire_on_one_topic()
     test_switch_not_inverted()
 
     print("\n" + "=" * 60)

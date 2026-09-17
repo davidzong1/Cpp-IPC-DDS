@@ -448,6 +448,7 @@ class WebHub:
             data_serializer=to_jsonable,
             field_getter=get_field,
             time_ms=now_ms,
+            dzflat_enabled=bool(self.defaults.get("dzflat", True)),
         )
         self.subscribers[spec.topic] = worker
         worker.start()
@@ -639,6 +640,7 @@ class WebHub:
             "poll": self.defaults.get("poll", 0.03),
             "extra": self.defaults.get("extra", ""),
             "verbose": self.defaults.get("verbose", False),
+            "dzflat": self.defaults.get("dzflat", True),
             "topics": [worker.spec.to_config() for worker in self.subscribers.values()],
             "displays": {
                 "robot_displays": self.robot_display_configs(),
@@ -781,6 +783,16 @@ def normalize_defaults(
     transport = str(config.get("transport", fallback.get("transport", "socket")))
     if transport not in {"shm", "socket"}:
         transport = "socket"
+    # DZFlat 借样旁路(docs/dzflat_shm.md): SHM 链路默认尝试启用; socket 不受影响
+    # (DZFlat 是 SHM 专属)。显式 false / "0" / "no" 可关闭。未给出时默认 True,
+    # 但若 fallback 里也没有(旧配置)同样默认 True —— 即 SHM 默认走借样。
+    raw_dzflat = config.get(
+        "dzflat", fallback.get("dzflat", True)
+    )
+    if isinstance(raw_dzflat, str):
+        dzflat = raw_dzflat.strip().lower() not in {"0", "false", "no", "off", ""}
+    else:
+        dzflat = bool(raw_dzflat)
     return {
         "domain": int(config.get("domain", fallback.get("domain", 1))),
         "transport": transport,
@@ -790,6 +802,7 @@ def normalize_defaults(
         ),
         "extra": str(config.get("extra", fallback.get("extra", ""))),
         "verbose": bool(config.get("verbose", fallback.get("verbose", False))),
+        "dzflat": dzflat,
     }
 
 
@@ -1033,6 +1046,10 @@ async def run_server(args: argparse.Namespace) -> None:
                 args.extra if args.extra is not None else file_config.get("extra", "")
             ),
             "verbose": args.verbose or bool(file_config.get("verbose", False)),
+            "dzflat": (
+                args.dzflat if args.dzflat is not None
+                else file_config.get("dzflat", True)
+            ),
         }
     )
     robot_configs = normalize_robot_displays(file_config.get("robot_displays", file_config.get("robot_models", [])))
@@ -1053,6 +1070,16 @@ async def run_server(args: argparse.Namespace) -> None:
 
     if args.load_config:
         hub.apply_config(file_config, replace=False)
+
+    # DZFlat 借样旁路状态横幅。真正的 EnableDzFlat(True) 由各 SHM 订阅线程在
+    # 拿到 ipc 后设置(subscriber.py) —— --demo / 无绑定环境下 import dzipc
+    # 会失败, 这里只打印意图, 不提前 import。
+    dzflat_on = bool(defaults.get("dzflat", True))
+    print(
+        f"[dzipc-web] DZFlat borrow path (SHM): {'enabled' if dzflat_on else 'disabled'}"
+        f"{'  (--no-dzflat)' if not dzflat_on else ''}",
+        flush=True,
+    )
 
     for raw in args.topic:
         hub.add_topic(parse_topic_spec(raw, defaults))
@@ -1110,6 +1137,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--extra", default=None)
     parser.add_argument("--poll", type=float, default=None)
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--dzflat",
+        dest="dzflat",
+        action="store_true",
+        default=None,
+        help="enable DZFlat borrow path for SHM topics (default: on)",
+    )
+    parser.add_argument(
+        "--no-dzflat",
+        dest="dzflat",
+        action="store_false",
+        help="disable DZFlat borrow path (fall back to TLV materialization)",
+    )
     parser.add_argument(
         "--demo", action="store_true", help="Publish demo data without importing dzipc"
     )

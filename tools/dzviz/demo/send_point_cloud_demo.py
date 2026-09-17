@@ -121,6 +121,16 @@ def build_point_cloud(ipc, args: argparse.Namespace, seq: int):
 def publish_point_clouds(args: argparse.Namespace) -> None:
     print_usage(args)
     ipc = load_dzipc()
+    # DZFlat 平坦段发布(docs/dzflat_shm.md §9.7): 开关打开时由 Python 按生成的
+    # schema 写好段交给传输层(publish_dzflat), 接收侧借样零拷贝。
+    # 取不到 schema/无接收方/池耗尽时内部回退普通 TLV —— 回退是常态不是错误,
+    # 所以开关打开也是安全的; 实走的形态由下面的 wire= 字段给出。
+    if args.dzflat and hasattr(ipc, "EnableDzFlat"):
+        ipc.EnableDzFlat(True)
+    print(
+        f"[pointcloud-demo] DZFlat: {'enabled' if args.dzflat else 'disabled'}"
+        " (平坦段优先, 不可用则回退 TLV)"
+    )
     args.report_every = max(1, args.report_every)
 
     template = ipc.StdPointCloud()
@@ -155,14 +165,19 @@ def publish_point_clouds(args: argparse.Namespace) -> None:
             generic = msg.to_generic()
             if args.publish_mode == "best-effort":
                 ok = pub.publish_best_effort(generic)
+                wire = "tlv"   # 平坦段只有 publish() 那条腿, best-effort 恒 TLV
+            elif args.dzflat and hasattr(ipc, "publish_dzflat"):
+                wire = "flat" if ipc.publish_dzflat(pub, msg) else "tlv"
+                ok = True      # publish_dzflat 内部已发布(平坦段或回退 TLV)
             else:
                 ok = pub.publish(generic)
+                wire = "tlv"
             elapsed = time.monotonic() - start_time
             if seq % args.report_every == 0:
                 actual_fps = (seq + 1) / max(1e-6, elapsed)
                 publish_ms = (time.monotonic() - publish_start) * 1000.0
                 print(
-                    f"[pointcloud-demo] seq={seq} ok={ok} fps={actual_fps:.1f} "
+                    f"[pointcloud-demo] seq={seq} ok={ok} wire={wire} fps={actual_fps:.1f} "
                     f"publish_ms={publish_ms:.1f} stamp={msg.header.stamp:.6f} "
                     f"points={len(msg.points)} colors={len(msg.colors)}",
                     flush=True,
@@ -186,6 +201,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--transport", choices=["socket", "shm"], default="shm")
     parser.add_argument("--extra", default="", help="InitChannel(extra_info)")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--dzflat", dest="dzflat", action="store_true", default=True,
+        help="enable DZFlat borrow publishing for SHM (default: on)",
+    )
+    parser.add_argument(
+        "--no-dzflat", dest="dzflat", action="store_false",
+        help="disable DZFlat borrow publishing",
+    )
     parser.add_argument("--period", type=float, default=0.05)
     parser.add_argument("--count", type=int, default=0, help="0 means infinite")
     parser.add_argument("--points", type=int, default=100000)

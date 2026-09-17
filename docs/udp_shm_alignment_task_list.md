@@ -40,14 +40,24 @@ T1/T3 已落码，原「T3 必须等待 T2」的排期已过期，依赖栏已�
      只有 `seg_len ≤ 1460` 才连续。现实中的 DZFlat 段常是多页（T1 用例即 40 页 / 57.6KB）。
 - **消除它只有两条路**：重构 libipc 共享接收路径，或改 wire —— 后者与 `docs/dzflat_shm.md:438`
   「不动 socket/UDP wire」的既有裁决正面相撞。
-- **契约落地位置**：`include/dzIPC/pub_sub_base.h:48-50`（"SHM 上是真零拷贝；UDP 上恒有一次
+- **契约落地位置**：`include/dzIPC/pub_sub_base.h:60-68`（"SHM 上是真零拷贝；UDP 上恒有一次
   整段拷贝"）、`include/dzIPC/common/data_rev.h`（`chunk_rev_topic(..., ipc::buffer* out_payload)`
   重载与 out_payload 契约）。
 - **使用约束**：⛔ **不得**用 socket 借样论证 S2/S3 的零拷贝收益 —— 本机那一跳的真零拷贝
   仍只能来自 DZFlat over SHM。
-- **附加事实**：该路径今天**没有生产者**——全仓 UDP 发送恒 `msg->serialize()` = TLV
-  （`src/dzIPC/socket_pub_sub_ipc.cc:337/385/422`），除测试自造帧外视图队列现网为空。
-  ⇒ T1 的准确表述是**能力就绪，非生效**。
+
+> **2026-09-17 兑现细分**："UDP 恒有一次整段拷贝" 指的是 `de_frame_dzflat` 把去帧后的段落成
+> 独立连续块那一次（分帧格式的固有成本）。在此之上**还曾多拷一次** —— 接收循环对 schema-less
+> 话题走 `AcceptWire` → `GenericMessage::dzflat_read()` 又把段整段拷进 `dzflat_seg_`。现两者
+> 都已改用 `dzflat_adopt`（与 SHM 腿同构），UDP 上只剩前者；`test_socket_borrow.cpp` 的
+> `GenericMessageTopicBorrowsTheSegmentOverUdp` 钉住 `dzflat_is_borrowed()`。
+- **附加事实**（2026-09-17 更新）：常规 UDP 发送仍恒 `msg->serialize()` = TLV（`publish` /
+  `publish_best_effort` / `publish_for_sniffer`），但已新增**显式入口**
+  `socket_pub_ipc::publish_prebuilt_segment()`（`src/dzIPC/socket_pub_sub_ipc.cc`）与它在
+  SHM 上的同构实现，只接受调用方按 schema 写好的平坦段；Python 的 `dzipc.publish_dzflat()`
+  就是它的第一个生产者（见 `docs/dzflat_shm.md` §9.7）。
+  ⇒ T1 的准确表述是**能力就绪、且已有选择性的生产者**，但**默认路径仍是 TLV**（无 schema 的
+  类型、开关未开、无接收方、nodelet 拓扑、池耗尽都会回退）；视图队列在现网仍近乎为空。
 
 ### 拍板 2 · `IPC_AUTO` 传给 pub/sub：显式拒绝，禁止静默降级
 

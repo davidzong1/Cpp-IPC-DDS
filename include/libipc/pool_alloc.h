@@ -85,7 +85,17 @@ inline void* alloc(std::size_t size) {
 
 template <typename T, typename... P>
 T* alloc(P&&... params) {
-    return construct<T>(pool_alloc::alloc(sizeof(T)), std::forward<P>(params)...);
+    void* p = pool_alloc::alloc(sizeof(T));
+    /* ⛔ 必须在**就地构造之前**判空。construct() 是在传进来的地址上 placement new,
+     * 传 nullptr 进去就是让构造函数往地址 0 写 —— 现象是一个只有 ip 的 SIGSEGV
+     * (写 NULL / 写 0x10 之类的低位地址), 现场完全看不出"这是分配失败"。
+     * 实测: 把 malloc 定向注成失败(64 字节档)后, `ipc::shm::handle` 的构造函数
+     * 就在地址 0 上崩掉了(见 docs/shm_defect_fixes.md 第 7 条)。
+     * 返回 nullptr 与下面 `alloc(size_t)` 的语义一致, 既有调用方都按空指针处理。 */
+    if (p == nullptr) {
+        return nullptr;
+    }
+    return construct<T>(p, std::forward<P>(params)...);
 }
 
 inline void free(void* p, std::size_t size) {

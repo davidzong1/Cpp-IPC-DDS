@@ -1,8 +1,12 @@
 #include "dzIPC/common/sample_message.h"
 #include "dzIPC/socket_pub_sub_ipc.h"
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <typeinfo>
+#include <vector>
 #include "dzIPC/common/data_rev.h"
 #include "dzIPC/common/hash.h"
 #include "dzIPC/common/local_pub_sub_registry.h"
@@ -432,11 +436,121 @@ bool socket_pub_ipc::publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg)
         }
     }
     catch (const std::exception& e)
-    {
-        std::cerr << "\033[31m[" << topic_name_ << "PubInfo] Error publishing message (sniffer): " << e.what() << "\033[0m"
-                  << std::endl;
+    {        std::cerr << "\033[31m[" << topic_name_ << "PubInfo] Error publishing message (sniffer): " << e.what()
+                  << "\033[0m" << std::endl;
         return false;
     }
+    return true;
+}
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
+/* 预构造段发布(见 pub_ipc_base.h): 段由调用方按自己的 schema 写好, 原样当作 UDP 载荷送出。
+ *
+ * 分帧完全复用既有腿 —— 与 publish_best_effort 的 UDP 分支逐行同构(同一套 1460+12 页尾、
+ * 同一套 BestEffort/None), 所以 wire 格式没变, 变的只是"载荷是平坦段还是 TLV"。接收侧
+ * 认得出它: 段首 magic 的分流闸在 data_rev.cc(socket 侧的 T1)。
+ *
+ * 三道门与 SHM 腿同源: 开关 / 段头自证 / 段头 msg_id == 本话题模板的 msg_id。 */
+bool socket_pub_ipc::publish_prebuilt_segment(const void* seg, std::size_t len)
+{
+    if (!dzIPC::IsDzFlatEnabled() || seg == nullptr || !dzflat::looks_like_dzflat(seg, len))
+    {
+        return false;
+    }
+    dzflat::SegHeader h{};
+    std::memcpy(&h, seg, sizeof(h));
+    if (h.msg_id != template_msg_id())
+    {
+        return false;
+    }
+    /* nodelet 拓扑: 同进程订阅者是从**对象队列**取消息的(见 publish_best_effort 的头注释),
+     * 段路径在这条拓扑下不可达 —— 没有对象可投。返回 false 让调用方回退 TLV, 由那条路去
+     * 做本地 fanout(它已经处理好了 K=3 稳定性与同/跨进程判定, 这里不重复那套逻辑)。 */
+    if (dzIPC::IsNodeletEnabled()
+        && !LocalPubSubRegistry::instance()
+                .subscriber_snapshot(ChannelKey{topic_name_, domain_id_, h.msg_id, ChannelKind::SocketPubSub})
+                .empty())
+    {
+        return false;
+    }
+
+    /* UDP 的 wire 是"每 1460 字节数据后跟 12 字节页尾", 所以段在 wire 上**不连续** ——
+     * 接收端正是按这个格式去帧还原成连续段的(data_rev.cc 的 de_frame_dzflat), 而
+     * chunk_send_ex 要求载荷自带页尾(它只就地改写 now_page 字段)。所以这里必须先铺帧:
+     * 这一跳拷贝是 UDP 平坦段的固有成本(TLV 路径的那一份由 serialize() 付)。 */
+    constexpr std::size_t kDataPerPage = 1'460;   /* == IPC_MSG_MAX_SIZE */
+    constexpr std::size_t kTailSize = 12;         /* == TAIL_SIZE */
+    /* 接收端 valid_chunk_meta 的上界(data_rev.cc 的 MAX_RECV_TOTAL_SIZE), 超出必被丢。 */
+    constexpr std::size_t kMaxWireBytes = 64 * 1'024 * 1'024;
+    const std::size_t total = static_cast<std::size_t>(h.total_size);
+    /* 页数算法必须与 IpcMsgBase::correct_total_size 同式(整数除 + 1), 与接收端的
+     * 上下界也要对得上 —— 差一页会让整条消息进不来(place_page 逐片比对 page_cnt)。 */
+    const std::size_t pages = total / kDataPerPage + 1;
+    const std::size_t wire_size = total + pages * kTailSize;
+    if (wire_size > kMaxWireBytes)
+    {
+        return false;
+    }
+    std::vector<std::uint8_t> wire(wire_size, 0);
+    const auto* src = static_cast<const std::uint8_t*>(seg);
+    std::size_t copied = 0;
+    std::size_t at = 0;
+    for (std::size_t page = 1; page <= pages; ++page)
+    {
+        const std::size_t n = std::min(kDataPerPage, total - copied);
+        std::memcpy(wire.data() + at, src + copied, n);
+        copied += n;
+        at += n;
+        /* 页尾: 大端, 与 IpcMsgBase::add_tail_msg 逐字节同序
+         * (page_cnt / now_page / total_size / msg_id)。now_page 随后会被 chunk_send_ex
+         * 就地纠正成 [1..N], 这里写对是为了让本次载荷自洽(valid_chunk_meta 先看前两项)。 */
+        /* 页尾的 total_size 是**分帧流总长**(含全部页尾), 不是段长 —— 接收端按它分配
+         * 组装缓冲, 再从中去帧还原段(见 correct_total_size 与 de_frame_dzflat 的配套)。
+         * 写错这一项的症状是整条消息静默进不来。 */
+        const auto wire_total = static_cast<std::uint32_t>(wire_size);
+        auto* t = wire.data() + at;
+        t[0] = static_cast<std::uint8_t>(pages >> 8);
+        t[1] = static_cast<std::uint8_t>(pages & 0xFF);
+        t[2] = static_cast<std::uint8_t>(page >> 8);
+        t[3] = static_cast<std::uint8_t>(page & 0xFF);
+        t[4] = static_cast<std::uint8_t>(wire_total >> 24);
+        t[5] = static_cast<std::uint8_t>((wire_total >> 16) & 0xFF);
+        t[6] = static_cast<std::uint8_t>((wire_total >> 8) & 0xFF);
+        t[7] = static_cast<std::uint8_t>(wire_total & 0xFF);
+        t[8] = static_cast<std::uint8_t>(h.msg_id >> 24);
+        t[9] = static_cast<std::uint8_t>((h.msg_id >> 16) & 0xFF);
+        t[10] = static_cast<std::uint8_t>((h.msg_id >> 8) & 0xFF);
+        t[11] = static_cast<std::uint8_t>(h.msg_id & 0xFF);
+        at += kTailSize;
+    }
+    if (copied != total || at != wire_size)
+    {
+        return false;   /* 铺帧算术自洽性 —— 不成立就宁可不发 */
+    }
+    try
+    {
+        /* 非拥有 view, 但 chunk_send_ex 会**就地改写**页尾的 now_page(见其注释),
+         * 所以缓冲区必须可写、且至少活到本函数返回 —— wire 是本函数的栈上对象。 */
+        ipc::buffer payload(wire.data(), wire.size());
+        SocketSendOptions options;
+        options.delivery = SocketDeliveryMode::BestEffort;
+        options.integrity = SocketIntegrityMode::None;
+        const SocketSendReport report = chunk_send_ex(publisher_, payload, options);
+        if (!report.ok())
+        {
+            return false;
+        }
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "\033[31m[" << topic_name_ << "PubInfo] Error publishing prebuilt segment: " << e.what()
+                  << "\033[0m" << std::endl;
+        return false;
+    }
+    /* 失败不在这里计数: 调用方随后那次 TLV publish() 会记一次回退(与 SHM 腿同一约定)。 */
+    dzIPC::detail::NoteDzFlatPublish(true);
     return true;
 }
 
@@ -608,7 +722,7 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
                         {
                             if (wire.empty())
                             {
-                                /* ---- 物化路径: TLV, 以及 schema-less 话题的 DZFlat 段 ---- */
+                                /* ---- 物化路径: TLV(收不到段时 wire 恒空, 见 data_rev.h) ---- */
                                 std::shared_ptr<IpcMsgBase> ptr_cache;
                                 local_msg->swap(ptr_cache);
                                 msg_queue_->push(std::move(ptr_cache));
@@ -619,12 +733,36 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
                             if (!viewable)
                             {
                                 /* schema-less 话题(GenericMessage / 手写类型): 没有 C++ flat
-                                 * 视图可绑, 与 SHM 侧同样物化 —— GenericMessage 覆写
-                                 * dzflat_read/adopt 把段字节收下, 手写类型则类型不匹配。
-                                 * 多一次拷贝, 换来的是与 SHM 完全一致的归宿。 */
-                                if (!AcceptWire(wire, exp_id, *local_msg->topic()))
+                                 * 视图可绑, 所以走物化队列; 但段字节**是借的**, 不拷 ——
+                                 * wire 是接收层去帧出来的独立连续块, 自带所有权
+                                 * (data_rev.cc 的 de_frame_dzflat 用 delete[] 收尾), 直接
+                                 * 移进消息即可。GenericMessage 覆写 dzflat_adopt 收下它, 于是
+                                 * Python 侧拿到 memoryview 而非拷贝(见 python/src/interface.cc
+                                 * 的 dzflat_memoryview)。
+                                 *
+                                 * 手写类型没有覆写 dzflat_adopt ⇒ 返回 false ⇒ 按"类型不匹配"
+                                 * 丢弃, 与 AcceptWire 对这类话题的处置一致(它读不了 DZFlat 段)。
+                                 *
+                                 * 这一条与 SHM 腿逐行同构(shm_pub_sub_ipc.cc 的 dzflat_adopt
+                                 * 分支), 差别只在 UDP 已先付过一次固有去帧拷贝。 */
+                                std::uint32_t seg_id = 0, seg_hash = 0;
                                 {
+                                    dzflat::SegHeader h{};
+                                    std::memcpy(&h, wire.data(), sizeof(h));
+                                    seg_hash = h.schema_hash;
+                                }
+                                if (!IpcMsgBase::dzflat_peek_msg_id(wire.data(), wire.size(), seg_id)
+                                    || seg_id != exp_id)
+                                {
+                                    dzIPC::detail::NoteDzFlatRx(
+                                        dzIPC::detail::DzFlatRxEvent::kDzFlatIdSkipped);
                                     continue;
+                                }
+                                dzIPC::detail::NoteDzFlatRx(
+                                    dzIPC::detail::DzFlatRxEvent::kDzFlatAccepted);
+                                if (!local_msg->topic()->dzflat_adopt(std::move(wire), seg_hash))
+                                {
+                                    continue;   /* 非 GenericMessage: 类型不匹配, 丢弃 */
                                 }
                                 std::shared_ptr<IpcMsgBase> ptr_cache;
                                 local_msg->swap(ptr_cache);

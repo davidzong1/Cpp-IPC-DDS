@@ -36,6 +36,7 @@
 #include "dzIPC/common/topic_data.h"
 #include "dzIPC/socket_pub_sub_ipc.h"
 #include "ipc_msg/ipc_msg_base/dzflat.h"
+#include "ipc_msg/ipc_msg_base/generic_message.hpp"
 #include "ipc_msg/std_msgs/std_image.hpp"
 #include "libipc/udp.h"
 
@@ -373,4 +374,126 @@ TEST(SocketBorrow, MismatchedSegmentIdIsDropped)
     auto sink = make_td();
     EXPECT_FALSE(sub.try_get_clone(sink)) << "更不得进物化队列(它不是 TLV, 反序列化只会读出错数据)";
     EXPECT_GT(dzIPC::DzFlatRxCounters().dzflat_id_skipped, 0u) << "拒收必须可观测";
+}
+
+/* ⑤ schema-less 话题(GenericMessage —— Python 用的就是它)在 UDP 上也必须是**借样**。
+ *
+ * 为什么单独钉一条: Python 侧的话题模板恒为 GenericMessage(无 C++ schema,
+ * dzflat_schema_hash() == 0), 所以它永远走不到 ① 的视图队列那条路 —— 它的零拷贝全靠
+ * "段进物化队列, 但字节是借来的"这条契约(见 socket_pub_sub_ipc.h 的视图路径注释)。
+ * 现网今天没有 UDP DZFlat 发布端, 所以这条契约只能由本文件自造帧来验; 一旦实现被改回
+ * AcceptWire(整段拷贝), dzflat_is_borrowed() 会变 false, 本用例立刻报出来。 */
+TEST(SocketBorrow, GenericMessageTopicBorrowsTheSegmentOverUdp)
+{
+    const std::string topic = unique_topic("generic");
+    auto sub_td = std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::GenericMessage>(), kMsgId);
+    dzIPC::socket::socket_sub_ipc sub{sub_td, topic, kDomain, 8, false};
+    sub.InitChannel("borrow");
+    std::this_thread::sleep_for(500ms);
+
+    const auto src = make_image(160, 120);   // 跨页(段约 57.6 KB ⇒ 40 页)
+    const auto seg = make_segment(src);
+
+    auto sink = std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::GenericMessage>(), kMsgId);
+    dzIPC::GenericMessage* got = nullptr;
+    for (int attempt = 0; attempt < 20 && got == nullptr; ++attempt)
+    {
+        if (!send_segment(topic, seg, kMsgId))
+        {
+            GTEST_SKIP() << "UDP multicast socket is not available in this environment";
+        }
+        const auto deadline = std::chrono::steady_clock::now() + 100ms;
+        while (std::chrono::steady_clock::now() < deadline && got == nullptr)
+        {
+            if (sub.try_get_clone(sink))
+            {
+                got = static_cast<dzIPC::GenericMessage*>(sink->topic().get());
+            }
+            else
+            {
+                std::this_thread::sleep_for(5ms);
+            }
+        }
+    }
+    ASSERT_TRUE(got != nullptr) << "GenericMessage 话题没收到 DZFlat 段";
+    ASSERT_TRUE(got->has_dzflat()) << "段没被收下 —— Python 侧会静默读不到字段";
+    EXPECT_TRUE(got->dzflat_is_borrowed())
+        << "UDP 上段被整段拷了(dzflat_read 而非 dzflat_adopt) ⇒ Python 零拷贝断了";
+    EXPECT_EQ(got->dzflat_len(), seg.size())
+        << "借样长度必须是段头声明的 total_size(不是 chunk 容量)";
+    EXPECT_EQ(std::memcmp(got->dzflat_data(), seg.data(), seg.size()), 0)
+        << "借样段内容与发送侧不一致(跨页去帧有错)";
+
+    /* schema-less 话题没有 C++ flat 视图可绑 ⇒ 段不得出现在视图队列。 */
+    dzIPC::Sample sample;
+    EXPECT_FALSE(sub.try_get(sample)) << "schema-less 话题的段不该进视图队列";
+}
+
+/* ⑥ 预构造段经 UDP 送达: 段由调用方写好, 由 socket 发布端当作载荷发出。
+ *
+ * 这是 T1 的 UDP 借样腿的**第一个真生产者** —— Python 的 dzipc.publish_dzflat() 走的
+ * 就是这条路, 之前那条腿只有本文件自造帧在喂它。分帧仍是既有的 1460+12 页尾, wire 格式
+ * 没变, 变的只是"载荷是平坦段还是 TLV"(接收侧靠段首 magic 分流)。 */
+TEST(SocketBorrow, PrebuiltSegmentOverUdpLandsOnTheViewPath)
+{
+    const std::string topic = unique_topic("prebuilt");
+    auto pub_td = make_td();
+    auto sub_td = make_td();
+    dzIPC::socket::socket_pub_ipc pub{pub_td, topic, kDomain, false};
+    dzIPC::socket::socket_sub_ipc sub{sub_td, topic, kDomain, 8, false};
+    pub.InitChannel("borrow");
+    sub.InitChannel("borrow");
+    std::this_thread::sleep_for(500ms);
+
+    const auto src = make_image(160, 120);   // 跨页 ⇒ 段约 57.6 KB / 40 页
+    const auto seg = make_segment(src);
+    const auto seg_len = declared_seg_len(seg);
+
+    /* 负例: 开关关、段头 msg_id 与话题模板不符 —— 两种都必须返回 false, 好让调用方回退 TLV。 */
+    {
+        DzFlatSwitch off{false};
+        EXPECT_FALSE(pub.publish_prebuilt_segment(seg.data(), seg.size()))
+            << "开关关时不得发出";
+    }
+    {
+        auto bad = seg;
+        bad[24] = 0xEE;   /* SegHeader.msg_id 的低字节 */
+        DzFlatSwitch on{true};
+        EXPECT_FALSE(pub.publish_prebuilt_segment(bad.data(), bad.size()))
+            << "段头 msg_id 与话题模板不符时不得发出";
+    }
+
+    DzFlatSwitch on{true};
+    /* 正面: 发布必须真的走通平坦段(否则下面那句"没送达"指向的是另一个问题) —— 铺帧、
+     * 页尾、chunk_send_ex 任一步不对都会在这里就返回 false。 */
+    ASSERT_TRUE(pub.publish_prebuilt_segment(seg.data(), seg.size()))
+        << "预构造段没能从 UDP 发出(铺帧/页尾/chunk_send_ex 某一步不成立)";
+    dzIPC::ResetDzFlatRxCounters();
+    dzIPC::Sample sample;
+    bool got = false;
+    for (int attempt = 0; attempt < 20 && !got; ++attempt)
+    {
+        pub.publish_prebuilt_segment(seg.data(), seg.size());
+        got = wait_borrow(sub, sample, 100ms);
+    }
+    ASSERT_TRUE(got) << "预构造段没有经 UDP 走到借样路径";
+    EXPECT_EQ(sample.msg_id(), kMsgId);
+    EXPECT_EQ(sample.schema_hash(), src.dzflat_schema_hash());
+    EXPECT_EQ(sample.size(), seg_len);
+    EXPECT_EQ(std::memcmp(sample.data(), seg.data(), seg_len), 0)
+        << "UDP 借样段内容与源不一致";
+    EXPECT_GT(dzIPC::DzFlatRxCounters().dzflat_accepted, 0u);
+
+    auto v = sample.view<dzIPC::Msg::StdImageFlat>();
+    ASSERT_TRUE(v.valid()) << "bind 应通过";
+    EXPECT_EQ(v.width(), src.width);
+    EXPECT_EQ(v.height(), src.height);
+    auto px = v.data();
+    ASSERT_EQ(px.size(), src.data.size());
+    EXPECT_EQ(std::memcmp(px.data(), src.data.data(), px.size()), 0)
+        << "大数组内容与源不一致(跨页去帧有错)";
+
+    /* 严格二选一: 同一条段不得同时进物化队列。 */
+    auto sink = make_td();
+    EXPECT_FALSE(sub.try_get_clone(sink)) << "段同时进了两条队列 —— 违反严格分流";
 }

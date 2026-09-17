@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""DZFlat 段的 Python 解码器 (设计见 docs/dzflat_shm.md §3, 落地见 §9.6)
+"""DZFlat 段的 Python 编解码器 (设计见 docs/dzflat_shm.md §3, 落地见 §9.6)
 
 为什么需要它
 ------------
@@ -8,8 +8,14 @@
 schema 只存在于 generator 产出的物件里, 且**没有任何 TU 会编译那些生成头文件**
 (Python 进程尤其如此), 所以 C++ 侧拿不到。
 
-于是分工是: C++ 侧把段原样直通(`GenericMessage::dzflat_read`), schema 以数据形式发到
-Python(`gen_msgs/_dzflat_schema.py`), 由本模块解码。
+于是分工是: schema 以数据形式发到 Python(`gen_msgs/_dzflat_schema.py`), 由本模块
+**解码**(`decode` / `decode_generic`) —— C++ 侧只负责把段原样直通
+(`GenericMessage::dzflat_read` / `dzflat_adopt`)。
+
+**发**也走同一份 schema: `pack()` 把字段写成一个完整的段, 交给
+`PublisherIPC.publish_prebuilt_segment()`(见 `dzipc.publish_dzflat`)。方向相反, 但布局
+规则是同一套 —— 所以两边必须逐字节一致, 由 test/test_dzflat_python.py 的
+"编码器与 C++ 写端逐字节一致"一条钉住。
 
 顺带的好处
 ----------
@@ -25,6 +31,7 @@ Python 读 DZFlat 比读 TLV **更省**: 没有页尾交错要剥, 而大数组�
 
 from __future__ import annotations
 
+import array
 import struct
 from typing import Any, Dict, NamedTuple, Optional, Tuple
 
@@ -199,6 +206,212 @@ def _decode_record(buf, total: int, schema: "Schema", root: int,
         else:   # pragma: no cover - schema 由 generator 产出, 不应出现未知形态
             raise ValueError("未知的 DZFlat 字段形态: %r" % (k,))
     return out
+
+
+# ------------------------------------------------------------------ 编码
+#
+# 与解码器对称: 同一份 schema, 反着走一遍。布局规则必须与 C++ 写端(generator 发射的
+# XxxFlat::write + dzflat.h 的 Writer)**逐字节一致** —— 偏差的后果不是"慢", 而是对端按
+# kDzFlatSchemaDrop 拒收, 或者更糟: 指纹对上却读出错位的数据。所以下面每条规则都对应
+# 生成头文件里的一行:
+#
+#   ① 段头 32B + Root 区先整块清零(覆盖成员间与尾部的填充, 不把 Python 堆上的旧内容泄漏出去);
+#   ② 变长区起点 = align_up(32 + root_size); 每块 reserve 时把水位对齐到 8 并补零;
+#   ③ 空字段(n == 0 / cnt == 0)**不占位**, VarRef{0,0};
+#   ④ string    → 追加 utf-8 字节;            VarRef{off, 字节数}
+#   ⑤ 标量数组  → 追加连续元素(原生小端);      VarRef{off, 元素数}
+#   ⑥ string[]  → 先占 cnt*8 的 VarRef 表, 再逐项追加字符串并回填表项;
+#   ⑦ nested    → Root 内联在字段偏移处, 其变长负载紧接着本次字段遍历追加(递归);
+#   ⑧ Msg[]     → 先占 cnt*root_size 的 Root 块(清零), 再逐元素递归 ——
+#                 元素自己的变长负载全部排在整块 Root 之后, 按元素顺序;
+#   ⑨ 段头 total_size = 变长区水位(不向上对齐)。
+
+_ALIGN = 8
+
+
+def _align_up(n: int) -> int:
+    """变长区每块的对齐(dzflat.h 的 kAlign)。"""
+    return (n + (_ALIGN - 1)) & ~(_ALIGN - 1)
+
+
+def _varlen_start(root_size: int) -> int:
+    """Root 区结束 = 变长区起点。与 dzflat::varlen_start 同式。"""
+    return _align_up(SEG_HEADER_SIZE + root_size)
+
+
+class _Writer:
+    """变长区追加器 —— dzflat::Writer 的镜像。
+
+    reserve(n) 把水位对齐到 8(填充字节补零, 不把未初始化内存写进 wire), 把 n 字节的
+    占位补出来, 并返回**段内偏移**由调用方填内容。0 恒表示"空字段" —— 变长区不从 0
+    开始(_varlen_start >= 32), 所以 0 可以安全地兼作空值。
+    """
+
+    __slots__ = ("buf", "cur")
+
+    def __init__(self, buf: bytearray, cur: int):
+        self.buf = buf
+        self.cur = cur
+
+    def reserve(self, n: int) -> int:
+        if n <= 0:
+            return 0
+        at = _align_up(self.cur)
+        if at > self.cur:
+            self.buf.extend(b"\x00" * (at - self.cur))
+        self.buf.extend(b"\x00" * n)
+        self.cur = at + n
+        return at
+
+
+# IDL 标量 → array 的 typecode(bool 在 wire 上是 uint8)。用 array 而不是
+# struct.pack_into(*values): 后者会把百万元素的图先变成一个百万长的 tuple。
+_ARRAY_TYPECODE = {
+    "bool": "B", "int8": "b", "uint8": "B", "int16": "h", "uint16": "H",
+    "int32": "i", "uint32": "I", "int64": "q", "uint64": "Q",
+    "float32": "f", "float64": "d",
+}
+
+
+def _scalar_value(base: str, v):
+    """标量入参规整: bool 在 wire 上是 uint8, 其余原样交给 struct。"""
+    if base == "bool":
+        return 1 if v else 0
+    return v
+
+
+def _array_bytes(base: str, values) -> bytes:
+    """把一个标量数组变成 wire 上的连续字节。
+
+    快路径(与 wire 同形, 一次拷贝): memoryview / bytes / bytearray —— 解码器默认返回的
+    就是 memoryview(零拷贝直读段), 直接回写不必逐元素过 Python 对象。
+    其余(list/tuple)走 array.array: 本机小端, 与 C++ 写端同为原生序。
+    """
+    if isinstance(values, memoryview):
+        want = _SCALAR[base][1]
+        if values.itemsize != want:
+            raise ValueError("数组元素尺寸不符: 段内 %d 字节, 字段是 %s(%d)"
+                             % (values.itemsize, base, want))
+        return bytes(values)
+    if isinstance(values, (bytes, bytearray)):
+        return bytes(values)
+    if isinstance(values, array.array):
+        return values.tobytes()
+    return array.array(_ARRAY_TYPECODE[base], values).tobytes()
+
+
+def _put_ref(buf: bytearray, at: int, off: int, cnt: int) -> None:
+    struct.pack_into("<II", buf, at, off, cnt)
+
+
+def _field_value(obj, name):
+    """按字段名取值 —— 支持两种入参: decode() 出的 dict, 或生成的封装对象。"""
+    if isinstance(obj, dict):
+        if name not in obj:
+            raise KeyError("DZFlat 编码缺字段: %r" % (name,))
+        return obj[name]
+    return getattr(obj, name)
+
+
+def _as_bytes(v) -> bytes:
+    """string 字段: str 走 utf-8(str 的长度单位是**字节**, 与 C++ std::string 一致)。"""
+    if isinstance(v, str):
+        return v.encode("utf-8")
+    if v is None:
+        return b""
+    return bytes(v)
+
+
+def _emit(buf: bytearray, w: _Writer, schema: "Schema", root: int, obj) -> None:
+    """把 obj 写进 buf 的 [root, root + root_size) 记录, 变长负载追加到 w。"""
+    for f in schema.fields:
+        at = root + f.offset
+        v = _field_value(obj, f.name)
+        k = f.kind
+
+        if k == "scalar":
+            fmt, _sz = _SCALAR[f.base]
+            struct.pack_into("<" + fmt, buf, at, _scalar_value(f.base, v))
+
+        elif k == "fixed_scalar_array":
+            raw = _array_bytes(f.base, v)
+            want = f.count * _SCALAR[f.base][1]
+            if len(raw) != want:
+                raise ValueError("定长数组 %s 长度不符: 期望 %d 字节, 得到 %d"
+                                 % (f.name, want, len(raw)))
+            buf[at:at + want] = raw
+
+        elif k == "string":
+            raw = _as_bytes(v)
+            off = w.reserve(len(raw))
+            if off:
+                buf[off:off + len(raw)] = raw
+            _put_ref(buf, at, off, len(raw))
+
+        elif k == "var_scalar_array":
+            raw = _array_bytes(f.base, v)
+            esz = _SCALAR[f.base][1]
+            off = w.reserve(len(raw))
+            if off:
+                buf[off:off + len(raw)] = raw
+            _put_ref(buf, at, off, len(raw) // esz)
+
+        elif k == "string_array":
+            items = list(v)
+            tbl = w.reserve(len(items) * VARREF_SIZE)
+            for i, s in enumerate(items):
+                raw = _as_bytes(s)
+                off = w.reserve(len(raw))
+                if off:
+                    buf[off:off + len(raw)] = raw
+                _put_ref(buf, tbl + i * VARREF_SIZE, off, len(raw))
+            _put_ref(buf, at, tbl, len(items))
+
+        elif k == "nested":
+            # 嵌套 Root 内联在本记录里(任意深度), 变长负载紧接着本字段追加。
+            _emit(buf, w, f.nested, at, v)
+
+        elif k == "nested_array":
+            items = list(v)
+            esz = f.nested.root_size
+            blk = w.reserve(len(items) * esz)
+            for i, item in enumerate(items):
+                _emit(buf, w, f.nested, blk + i * esz, item)
+            _put_ref(buf, at, blk, len(items))
+
+        else:   # pragma: no cover - schema 由 generator 产出, 不应出现未知形态
+            raise ValueError("未知的 DZFlat 字段形态: %r" % (k,))
+
+
+def pack(obj, schema: Optional["Schema"] = None, msg_id: int = 0) -> Optional[bytearray]:
+    """把字段按 schema 写成一个**完整的 DZFlat 段**(可直接交给
+    `PublisherIPC.publish_prebuilt_segment()`, 见 `dzipc.publish_dzflat`)。
+
+    入参两种都行: `decode()` 出的 dict(键 = 字段名), 或生成的封装对象(按属性名取)。
+    dict 入参必须显式给 schema —— dict 自己没有类型。
+
+    返回 **None** 表示这个类型没有 schema(不是 DZFlat 类型): 这是**回退信号**而不是
+    错误, 调用方应改走普通 TLV 发布。
+
+    msg_id 写进段头。它必须等于接收方话题注册用的 msg_id(默认 0, 与今日 Python 用法
+    一致); C++ 发布端还会拿本话题模板的 msg_id 复核, 不符则**拒绝发出**(对端只会静默
+    丢弃, 发出去等于白丢一条)。
+    """
+    if schema is None:
+        schema = SCHEMA_BY_NAME.get(type(obj).__name__)
+    if schema is None:
+        return None
+
+    buf = bytearray(SEG_HEADER_SIZE + schema.root_size)   # 段头 + Root, 全零(①)
+    start = _varlen_start(schema.root_size)
+    if start > len(buf):
+        buf.extend(b"\x00" * (start - len(buf)))          # ②
+    w = _Writer(buf, start)
+    _emit(buf, w, schema, SEG_HEADER_SIZE, obj)
+    _HDR.pack_into(buf, 0, MAGIC, schema.schema_hash, SEG_HEADER_SIZE,
+                   schema.root_size, w.cur, LAYOUT_VER, 0, msg_id, 0)   # ⑨
+    del buf[w.cur:]
+    return buf
 
 
 # ------------------------------------------------------------------ 接收计数

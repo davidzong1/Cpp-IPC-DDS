@@ -68,20 +68,34 @@ buffer& buffer::operator=(buffer rhs) {
     return *this;
 }
 
+/* ⛔ 下面三个访问器必须容忍 impl 为空。
+ *
+ * `buffer_` 走的是 pimpl 的"不舒服"分支(sizeof(T) > sizeof(void*)) ⇒ 它是
+ * `mem::alloc<buffer_>()` 拿到的, **分配失败时 p_ 就是 nullptr**; 而这个分配器
+ * (`static_alloc` = malloc)在失败/尺寸为 0 时返回空而不抛。旧实现直接
+ * `impl(p_)->p_` 解引用空指针 —— 又一个"崩在地址 0、内核日志只有一个 ip"的入口。
+ * 实测: 把 malloc 定向注成失败后, `buffer::data()`/`empty()` 都会踩到这里
+ * (见 docs/shm_defect_fixes.md 第 7 条"同一族"一节)。
+ * 返回空/0 与 buffer 自身的"空"语义一致, 调用方本来就要处理空 buffer
+ * (例如 peer cache_t::append 就是用 data() == nullptr 当作"这条消息丢弃")。 */
 bool buffer::empty() const noexcept {
-    return (impl(p_)->p_ == nullptr) || (impl(p_)->s_ == 0);
+    auto ip = impl(p_);
+    return (ip == nullptr) || (ip->p_ == nullptr) || (ip->s_ == 0);
 }
 
 void* buffer::data() noexcept {
-    return impl(p_)->p_;
+    auto ip = impl(p_);
+    return (ip == nullptr) ? nullptr : ip->p_;
 }
 
 void const * buffer::data() const noexcept {
-    return impl(p_)->p_;
+    auto ip = impl(p_);
+    return (ip == nullptr) ? nullptr : ip->p_;
 }
 
 std::size_t buffer::size() const noexcept {
-    return impl(p_)->s_;
+    auto ip = impl(p_);
+    return (ip == nullptr) ? 0 : ip->s_;
 }
 
 } // namespace ipc

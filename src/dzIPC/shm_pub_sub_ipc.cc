@@ -357,6 +357,60 @@ bool shm_pub_ipc::try_publish_dzflat(const std::shared_ptr<IpcMsgBase>& msg, std
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
+/* 预构造段发布(见 pub_ipc_base.h): 段由调用方(今天的唯一使用者是 Python)按自己的 schema
+ * 写好交来, 这里只负责借一块 chunk 把它**原样**送出去。
+ *
+ * 与 try_publish_dzflat 的关系: 门槛完全同源(开关 / 接收方 / chunk 池), 差别只在"段是
+ * 谁写的" —— 那边是消息类型就地写进借来的 chunk(发布端也零拷贝), 这边是段已在调用方
+ * 地址空间里, 唯一能做的是那一跳 memcpy。接收侧两条路完全一致(都是 DZFlat 段, 都借样)。
+ *
+ * 不记 publish 事件日志: log_publish_event 需要 owning 消息对象去 clone + serialize,
+ * 段路径没有(段本身就是序列化结果)。这是取舍, 见函数末尾注释。 */
+bool shm_pub_ipc::publish_prebuilt_segment(const void* seg, std::size_t len)
+{
+    if (!dzIPC::IsDzFlatEnabled() || seg == nullptr)
+    {
+        return false;
+    }
+    /* 段头先自证: magic / layout_ver / total_size <= len / root_off。坏段一律不发 ——
+     * 送出去只会被对端按 kDzFlatHeaderBad 丢掉, 还白占一块 chunk。 */
+    if (!dzflat::looks_like_dzflat(seg, len))
+    {
+        return false;
+    }
+    dzflat::SegHeader h{};
+    std::memcpy(&h, seg, sizeof(h));
+    /* 段头 msg_id 必须等于本话题模板的 msg_id。订阅端判"这条是不是我的话题"用的就是
+     * 这个值(shm_pub_sub_ipc.cc 订阅循环的 exp_id = 话题注册键), 不符 ⇒ 对端**静默丢弃**。
+     * 宁可让调用方回退 TLV 走慢路径, 也不要发一条注定被丢的段。 */
+    if (h.msg_id != dzflat_msg_id())
+    {
+        return false;
+    }
+    if (!publisher_ || publisher_->recv_count() == 0)
+    {
+        return false;
+    }
+    auto lo = publisher_->loan(h.total_size);
+    if (!lo.valid())
+    {
+        return false;   // 池耗尽 —— 背压, 回退整包
+    }
+    std::memcpy(lo.data, seg, h.total_size);
+    const bool ok = publisher_->publish_loan(lo, 0);
+    if (ok)
+    {
+        dzIPC::detail::NoteDzFlatPublish(true);
+    }
+    /* 失败不在这里计数: 调用方随后那次 TLV publish() 会记一次回退。两边各记一次会把
+     * fallback/(dzflat+fallback) 这个比值算歪 —— 那个比值是判断"收益有没有生效"的唯一
+     * 指标(nodelet_config.h), 不能因为记账方式失真。 */
+    return ok;
+}
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
 bool shm_pub_ipc::publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg)
 {
     try

@@ -31,6 +31,7 @@ class DzipcSubscriber(threading.Thread):
         data_serializer: Optional[Callable[[Any, int], Any]] = None,
         field_getter: Optional[Callable[[Any, str, Any], Any]] = None,
         time_ms: Optional[Callable[[], int]] = None,
+        dzflat_enabled: bool = True,
     ) -> None:
         super().__init__(daemon=True)
         self.hub = hub
@@ -38,6 +39,8 @@ class DzipcSubscriber(threading.Thread):
         self.stop_event = threading.Event()
         self.sample_seq = 0
         self._cooldown_remain = cooldown_remain
+        self._dzflat_enabled = bool(dzflat_enabled)
+        self._dzflat_wire_logged = False
         self._ipc_loader = ipc_loader
         self._msg_resolver = msg_resolver
         self._image_encoder = image_encoder
@@ -177,13 +180,29 @@ class DzipcSubscriber(threading.Thread):
         self, sub: Any, topic_data: Any, out: Any,
         msg_cls: Any, resolved_msg_type: str,
     ) -> None:
-        """Decode and publish one sample from the subscriber."""
+        """Decode and publish one sample from the subscriber.
+
+        DZFlat 话题(SHM + 开关开启): 传输层把借样段收进 GenericMessage
+        (dzflat_adopt, 零拷贝), 此时 fields_ 为空 —— 必须走 from_generic() 的
+        DZFlat 分支(python/dzipc/dzflat.py 按 schema 解码)才能拿到字段, 否则是
+        静默空数据。RobotState 一并统一走 from_generic: 它的 joint_state 在
+        note(JSON string)里, 下游 _unwrap_joint_state 本就支持从 note 解出,
+        这里只负责把两种 wire 统一成封装对象(TLV 分支行为不变)。
+        """
         msg_obj = out.topic() if out is not None else topic_data.topic()
-        if (
-            resolved_msg_type != "RobotState"
-            and hasattr(msg_cls, "from_generic")
-            and hasattr(msg_obj, "field_count")
-        ):
+        if hasattr(msg_cls, "from_generic") and hasattr(msg_obj, "field_count"):
+            if not self._dzflat_wire_logged:
+                self._dzflat_wire_logged = True
+                try:
+                    if msg_obj.has_dzflat():
+                        print(
+                            f"[dzviz] DZFlat wire detected on {self.spec.topic} "
+                            f"(borrowed={msg_obj.dzflat_is_borrowed()}); "
+                            "decoding via dzipc.dzflat schema",
+                            flush=True,
+                        )
+                except Exception:
+                    pass
             msg_obj = msg_cls.from_generic(msg_obj)
         self.sample_seq = (self.sample_seq + 1) & 0xFFFFFFFF
         event: Dict[str, Any] = {
@@ -252,6 +271,22 @@ class DzipcSubscriber(threading.Thread):
                 if self._ipc_loader is None:
                     raise RuntimeError("ipc_loader is required for DzipcSubscriber")
                 ipc = self._ipc_loader()
+                # DZFlat 借样开关: SHM 话题默认启用(见 dzflat_shm.md)。开关是
+                # 发布端进程级原子量; 本进程内发布(若有)与订阅判别共用它。
+                # 幂等且无竞态危害 —— 多话题并发重复 set 同值等价于一次。socket
+                # 话题不触碰它(DZFlat 是 SHM 专属旁路, socket 默认配置不受影响)。
+                if (
+                    self._dzflat_enabled
+                    and self.spec.transport == "shm"
+                    and hasattr(ipc, "EnableDzFlat")
+                ):
+                    try:
+                        ipc.EnableDzFlat(True)
+                    except Exception as exc:
+                        print(
+                            f"[dzviz] EnableDzFlat(True) failed on {self.spec.topic}: {exc}",
+                            flush=True,
+                        )
                 if self._msg_resolver is None:
                     raise RuntimeError("msg_resolver is required for DzipcSubscriber")
                 resolved_msg_type, msg_cls = self._msg_resolver(

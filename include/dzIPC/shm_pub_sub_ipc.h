@@ -38,6 +38,10 @@ public:
     bool publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm) override;
     bool publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg) override;
 
+    /* 预构造段发布(见 pub_ipc_base.h)。段由调用方写好, 这里只负责借 chunk 送出去 ——
+     * 发布端因此**有一次整段 memcpy**(段在调用方地址空间里), 接收侧照旧真零拷贝。 */
+    bool publish_prebuilt_segment(const void* seg, std::size_t len) override;
+
     bool has_subscribed() const { return subscribed_; }
 
     /* ------------------------------------------------------------------ B 级借样

@@ -12,8 +12,15 @@ ROOT_DIR = Path(__file__).resolve().parents[3]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from tool.visualizer.component.kin import kinematics
-from tool.visualizer.component.kin.kinematics import RobotKinematics, robot_kin
+# tool.visualizer.component.kin 是重构前的旧包布局; 现为 tools/dzviz/component/kin。
+# 与 test_visualizer_components.py 的 BRIDGE_PATH 同类: 源码改名/搬目录后测试路径
+# 没跟上 —— 不修这里整个文件在 import 阶段就 ModuleNotFoundError。
+DZVIZ_DIR = Path(__file__).resolve().parents[1]
+if str(DZVIZ_DIR) not in sys.path:
+    sys.path.insert(0, str(DZVIZ_DIR))
+
+from component.kin import kinematics
+from component.kin.kinematics import RobotKinematics, robot_kin
 
 
 TINY_URDF = """<?xml version="1.0"?>

@@ -4,6 +4,7 @@
   "queue": 10,
   "poll": 0.03,
   "extra": "",
+  "dzflat": true,
   "topics": [],
   "robot_displays": [],
   "robot_state_displays": [],

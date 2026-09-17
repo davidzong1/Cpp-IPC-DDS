@@ -166,6 +166,14 @@ bool pimpl::publisher_ipc_impl::publish_for_sniffer(std::shared_ptr<IpcMsgBase> 
     return impl(p_)->ipc->publish_for_sniffer(msg);
 }
 
+/* 预构造段发布: **不记** publish 事件日志 —— log_publish_event 需要 owning 消息对象去
+ * clone + serialize, 而这条路径手里只有一个已经序列化完的段, 没有对象。取舍而不是遗漏:
+ * 要记的话得让调用方把消息也一并交来(那等于再拷一份), 代价大于日志的价值。 */
+bool pimpl::publisher_ipc_impl::publish_prebuilt_segment(const void* seg, std::size_t len)
+{
+    return impl(p_)->ipc->publish_prebuilt_segment(seg, len);
+}
+
 bool pimpl::publisher_ipc_impl::has_subscribed() const
 {
     return impl(p_)->ipc->has_subscribed();

@@ -101,7 +101,10 @@ PYBIND11_MODULE(_dzipc_core, m)
             [](dzIPC::GenericMessage& self)
             {
                 /* 零拷贝视图: 生命周期与本 GenericMessage 绑定。Python 侧的解码器在
-                 * 消息存活期间读它; 需要留存就自己 copy。这与 C++ 侧 View 的契约一致。 */
+                 * 消息存活期间读它; 需要留存就自己 copy。这与 C++ 侧 View 的契约一致。
+                 *
+                 * 两种承载共用这一个入口: 借样(共享 chunk / 去帧块)与 legacy 拷贝段
+                 * (AcceptWire → dzflat_read)。判别用 dzflat_is_borrowed()。 */
                 const auto* base = self.dzflat_data();
                 return py::memoryview::from_memory(
                     const_cast<std::uint8_t*>(base),
@@ -326,6 +329,26 @@ PYBIND11_MODULE(_dzipc_core, m)
              py::arg("msg"), py::arg("tm"), py::call_guard<py::gil_scoped_release>())
         .def("publish_for_sniffer", &dzIPC::pimpl::publisher_ipc_impl::publish_for_sniffer,
              py::call_guard<py::gil_scoped_release>())
+        /* 预构造段发布: 段由 Python 按生成 schema 写好(python/dzipc/dzflat.py 的 pack()),
+         * 这里原样交给传输层。参数用 py::buffer 而不是 py::bytes —— 后者会在边界上再拷
+         * 一次整段(bytearray → bytes), 而 memcpy 进 chunk 那一次才是真省不掉的。 */
+        .def(
+            "publish_prebuilt_segment",
+            [](dzIPC::pimpl::publisher_ipc_impl& self, py::buffer seg)
+            {
+                const py::buffer_info info = seg.request();
+                const auto* base = static_cast<const std::uint8_t*>(info.ptr);
+                const auto len = static_cast<std::size_t>(info.size) * static_cast<std::size_t>(info.itemsize);
+                bool ok = false;
+                {
+                    py::gil_scoped_release release;
+                    ok = self.publish_prebuilt_segment(base, len);
+                }
+                return ok;
+            },
+            py::arg("segment"),
+            "发布一条**已构造好的 DZFlat 段**(含 32B 段头, 由 Python 按 schema 写成)。\n"
+            "返回 False = 本次没走平坦段, 调用方须回退普通 publish()(见 dzipc.publish_dzflat)。")
         .def("has_subscribed", &dzIPC::pimpl::publisher_ipc_impl::has_subscribed);
 
     py::class_<dzIPC::pimpl::subscriber_ipc_impl,
@@ -333,10 +356,16 @@ PYBIND11_MODULE(_dzipc_core, m)
         .def("InitChannel", &dzIPC::pimpl::subscriber_ipc_impl::InitChannel, py::arg("extra_info") = "",
              py::call_guard<py::gil_scoped_release>())
         .def("reset_message", &dzIPC::pimpl::subscriber_ipc_impl::reset_message)
-        /* C++ 侧 get/try_get 已翻转为零拷贝 Sample 视图(见 pub_sub_base.h)。
-         * Python 的 GenericMessage 载体是 schema-less 直通体, 无 C++ 类型可 bind 成
-         * XxxView; Python 的零拷贝视图(borrowed bytes + memoryview)是后续独立改动。
-         * 因此这里把 get/try_get 指到 clone 路径, 保留 Python 今日的行为。 */
+        /* get/try_get 指到 clone 路径 —— 但**不等于** Python 侧只能收拷贝:
+         *
+         * C++ 的 get(Sample&) 服务"typed 话题的 DZFlat 段"(视图队列), 而 Python 的话题
+         * 模板恒为 schema-less 的 GenericMessage(dzflat_schema_hash() == 0), 那些段被
+         * 分流进**物化队列**并 dzflat_adopt 收下 —— 段字节仍是借来的共享 chunk, 没有拷贝。
+         * Python 因此本来就拿得到零拷贝视图: 用 has_dzflat() / dzflat_is_borrowed() 判别,
+         * dzflat_memoryview() 直读, 见 python/dzipc/dzflat.py。
+         *
+         * 两条传输一致: SHM 借发布方写好的 chunk; UDP 借接收层去帧出来的独立块(UDP 上
+         * 那一次去帧拷贝是分帧格式的固有成本, 与这里无关)。 */
         .def(
             "get",
             [](dzIPC::pimpl::subscriber_ipc_impl& self, std::shared_ptr<dzIPC::TopicData> msg)

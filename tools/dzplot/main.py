@@ -497,24 +497,87 @@ def _serialize_message_fields(msg_obj: Any) -> Dict[str, Any]:
     return fields
 
 
+_DZFLAT_DECODE_OK: Optional[bool] = None   # None=未探测, True/False=dzipc.dzflat 可用性
+_DZFLAT_WARNED: Set[str] = set()           # 按 type_name 去重, 避免逐样本刷屏
+
+
+def _load_dzflat_module():
+    """加载 dzipc.dzflat 并触发 schema 注册; 不可用时返回 None。
+
+    dzipc.dzflat 与生成的 schema 注册表都是**纯 Python**, 不依赖 pybind 绑定。
+    做成模块级函数是为了可测性: 纯 Python L1 测试可以 monkeypatch 它, 注入
+    独立加载的 dzflat 模块副本, 而不必带着 pybind 跑(与 test_dzplot 的 L1 原则一致)。
+    """
+    try:
+        from dzipc import dzflat as _dzflat_mod
+        from dzipc.gen_msgs import _dzflat_schema as _dzflat_schemas  # noqa: F401  触发注册
+        return _dzflat_mod
+    except Exception:
+        return None
+
+
+def _decode_dzflat_payload(type_name: str, raw_buf: bytes) -> Optional[Dict[str, Any]]:
+    """DZFlat 段(嗅探腿拿到的裸 SHM 字节)→ 结构化 dict。
+
+    发布端开 DZFlat 时, 段首是平坦布局的 magic('DZFL' + schema 指纹), 不是 TLV ——
+    通用的 create_message().deserialize() 解不了它, 原本会静默掉进 base64 兜底,
+    前端只能看到一团 base64。这里按 magic 识别后交给 dzipc.dzflat 按指纹查
+    本进程注册的 schema 解码; 字段名与 TLV 路径同源(同一套 generator), 前端无感。
+
+    返回 None 表示"不是 DZFlat 段, 或解不了(schema 不在本进程/段损坏)",
+    调用方走原有 TLV/base64 路径 —— 解不了总比错解好。
+    """
+    global _DZFLAT_DECODE_OK
+    if _DZFLAT_DECODE_OK is False:
+        return None
+    dzflat_mod = _load_dzflat_module()
+    if dzflat_mod is None:
+        _DZFLAT_DECODE_OK = False
+        return None
+    _DZFLAT_DECODE_OK = True
+    if not dzflat_mod.looks_like_dzflat(raw_buf):
+        return None
+    try:
+        decoded = dzflat_mod.decode(raw_buf, zero_copy=False)
+    except Exception as exc:
+        if type_name not in _DZFLAT_WARNED:
+            _DZFLAT_WARNED.add(type_name)
+            print(f"[dzplot] NOTE: DZFlat decode failed for type={type_name}, "
+                  f"falling back to base64. Reason: {exc}", flush=True)
+        return None
+    if decoded is None:
+        # magic 对但指纹查不到/对不上 —— 对端换了 msg 定义而本进程没重跑 generator,
+        # 或两侧 schema 版本不同。这原本是完全静默的, 至少提醒一次。
+        if type_name not in _DZFLAT_WARNED:
+            _DZFLAT_WARNED.add(type_name)
+            print(f"[dzplot] NOTE: DZFlat segment on type={type_name} has no matching "
+                  f"schema (rx={dzflat_mod.rx_stats()}); falling back to base64. "
+                  f"Publisher msgs changed without regenerating schemas?", flush=True)
+        return None
+    return decoded
+
+
 def _decode_payload(type_name: str, raw: bytes,
                     _decode_warned: Optional[Set[str]] = None) -> Dict[str, Any]:
     """Try to deserialise raw bytes into structured fields for *type_name*.
 
-    Uses dzIPC ``create_message(type_name)`` → ``deserialize(raw)`` →
-    ``_serialize_message_fields`` to produce a nested dict with typed scalar
-    and array fields.  If the type is unknown or deserialisation fails, falls
-    back to ``{"data": base64(raw)}`` so the frontend always gets something.
+    DZFlat 段(SHM 嗅探腿, 发布端开了平坦布局)优先走 _decode_dzflat_payload;
+    其余情况维持原逻辑: dzIPC ``create_message(type_name)`` → ``deserialize(raw)``
+    → ``_serialize_message_fields`` 产出嵌套 dict。未知类型或反序列化失败时回退
+    ``{"data": base64(raw)}``, 前端总能拿到东西。
 
     The optional ``_decode_warned`` set tracks per-type warnings to avoid
     log spam.
     """
     if _decode_warned is None:
         _decode_warned = set()
+    raw_buf = bytes(raw)
+    dzflat_fields = _decode_dzflat_payload(type_name, raw_buf)
+    if dzflat_fields is not None:
+        return dzflat_fields
     try:
         import dzipc as ipc_mod
         msg = ipc_mod.create_message(type_name)
-        raw_buf = bytes(raw)
         # Some GenericMessage subclasses expect buffer, others bytes
         if hasattr(msg, "deserialize_bytes"):
             msg.deserialize_bytes(raw_buf)

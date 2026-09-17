@@ -10,6 +10,9 @@
 > **怎么用**: 每条写明「症状 → 成因(带 file:line 证据) → 判据 → 进度」。症状一栏是给
 > 排查者看的 —— 这四条**全都不以报错形式出现**, 表现成"通道明明通了却收不到"或
 > "两个本该隔离的域互相看见了"。
+> **未修条目的去处**: §7 排查中又发现几条同类缺陷(分配失败 → 空指针、共享池无崩溃回收、
+> 库接管进程退出), 它们**没有**在本文件里展开, 已单独收口到
+> [unfixed_defects.md](unfixed_defects.md) —— 要看"还有哪些没修"看那份。
 
 ---
 
@@ -23,6 +26,7 @@
 | 4 | `get(Sample&)` 无超时重载 → TLV-only 话题上永久阻塞 | 低(易绕开) | 极低 | ✅ 已修(见 §修复记录 4) |
 | 5 | 组播**组地址碰撞**: 8192 topic 下 60% 与他人共组(默认 domain 下即完全串扰) | **高(规模相关)** | 低(改端口公式) | ⬜ 未修(**已实测**, 见 §5) |
 | 6 | 端口公式**越界抛异常** → domain≥6 起部分 topic 名**建连接直接打死进程** | **高(可用性)** | 低 | ✅ 已修(实测坐实, 见 §修复记录 6) |
+| 7 | 大消息 `buff_t` 的析构器**解引用已释放的 conn_info** → 偶发 `SIGSEGV at 0`(写 NULL, 内核日志只剩一个 ip) | **高(偶发且不可复现)** | 低 | ✅ 已修(ASAN 坐实 + 变异验证, 见 §修复记录 7) |
 
 **修复顺序**: 1 → 2 → 3 → 4。第 1 条排头不只因为影响最大, 还因为它是**任何 DDS 门面的
 前提**(见 [dds_interface_roadmap.md](dds_interface_roadmap.md) 路 A) —— 一个不隔离 domain 的
@@ -613,11 +617,141 @@ return static_cast<uint16_t>(base + folded);
 
 ---
 
+### 7. 偶发 `SIGSEGV at 0`(写 NULL, in libc): 大消息 buff_t 的析构器解引用已释放的 conn_info(2026-09-17)
+
+**现象**。内核日志里两次、同一签名:
+
+```
+python3[1417097]: segfault at 0 ip 00007c53f6fa0b7e sp 00007ffe68548f88 error 6 in libc.so.6
+Code: ... c5 fe 6f 4e 20 <c5 fe 7f 07> c5 fe 7f 4f 20 49 89 f8 49 83 e0 3f ...
+```
+
+- `at 0` + `error 6`(写、非存在页) + 指令 `<vmovdqu %ymm0,(%rdi)>`(`rdi=0`) —— 这是 glibc
+  AVX 拷贝循环在往**空指针**写 32 字节。
+- 进程名 `python3`, 两次都落在同一条命令上的 `test/test_dzflat_python.py` 循环里; 而且**该文件
+  全部断言都已通过**(一次甚至是在第 `[9]` 节执行中途), 所以从应用侧看它"与本轮改动无关"。
+- 频率: 约 30 次运行 2 次 / 另一次 4 次运行 1 次 —— 典型的堆运气依赖。
+
+**先量化、再定位**。内核日志只有一个 ip, 现场不足以反查, 所以分三步收敛:
+
+1. **守门人**: 预加载一个 SIGSEGV/SIGBUS 处理器(打印寄存器 + `backtrace_symbols_fd`)后循环跑真实
+   复现脚本, 抓到完整 C 层栈:
+
+```
+__memmove_avx_unaligned_erms   ← 写 (nil)
+  basic_string<...>::_M_construct<char*>(char*, char*)
+  (anonymous)::chunk_handle_t::get_info(conn_info_head*, size_t)   ipc.cpp:324
+  (anonymous)::chunk_storage_info(conn_info_head*, size_t)         ipc.cpp:377
+  (anonymous)::recycle_storage<flag_t>(...)                        ipc.cpp:504
+  detail_impl<...>::recv(...)::{lambda(void*, size_t)#2}::_FUN     ipc.cpp:1304
+ipc::buffer::~buffer() → buffer_::~buffer_()
+```
+
+2. **符号化**: `addr2line` 解析 libipc 的三个偏移 → `chunk_storage_info` / `get_info` /
+   `recv(...)::{lambda(void*,unsigned long)#2}::_FUN`。结论: 崩点在"**大消息(storage 路径)的
+   `buff_t` 析构器**"里。
+3. **坐实**: 用 ASAN 单独构建 libipc + 一个 30 行探针(见下), 由 ASAN 直接给出 heap-use-after-free
+   与 alloc/free 双方栈。
+
+**根因**(两个缺陷叠加。前者是 bug, 后者只负责把它放大成"写 NULL"):
+
+1. **use-after-free(真正的 bug)**。大消息的 `buff_t` 析构时要"归还 chunk", 为此需要 `CHUNK_INFO__<size>`
+   段名, 而段名 = **接收方 `conn_info` 里的前缀**。旧实现把 `conn_info_t *inf` 这个裸指针捕进
+   `recycle_t`(ipc.cpp:1280 附近), 于是"**消息活过接收方**"这个完全合法的顺序 ——
+   接收方析构 → `chan_impl::destroy` → `mem::free(conn_info)`(ipc.cpp:828), 之后消息才析构 ——
+   就是在读已释放内存。`conn_info_t` 实测 224 字节, 正好落在 tcache 的尺寸类里: `free()` 时 glibc
+   把 `next`/`key` 写进块头(offset 0 / 8), 恰好就是 `prefix_._M_p` / `_M_string_length` 的位置,
+   于是"字符串长度"变成**一个指针值**(实测 135193289566176 ≈ 1.35e14)。
+2. **放大器**。`allocator_wrapper::allocate` 是 `noexcept` 且失败/越界**返回 `nullptr`**, 而不是按标准抛
+   `bad_alloc`。libstdc++ 的 `basic_string::_M_construct` 因此拿不到异常, 直接
+   `memmove(nullptr, src, huge_len)` → 写地址 0。换言之, **在这个分配器下, 任何一次"分配返回空"
+   都会以"写 NULL 的 SIGSEGV"收场**, 这也是为什么本文件里两类不同缺陷的现象长得一模一样。
+
+**为什么"偶发"**: UAF 只有在"那块内存已经被别人改写"时才崩; 没被改写就只是读到完好的旧值,
+一切照常。所以它是**析构顺序 + 堆布局**双重依赖的 —— 这正是"一次性、复现不了"的来源。ASAN 下必报。
+
+**复现(确定性)**。序列就三步: 同进程 tx+rx → 发 8192 字节(走 storage 路径) →
+`held = rx.recv()` → **析构 rx** → 用同尺寸类分配毒化刚释放的块 → 析构 `held`。
+它已经落在 `test/test_chunk_hold.cpp` 的 `ChunkHold.HeldLargeMessageSurvivesItsReceiver` 里
+(带毒化 ⇒ 不需要 ASAN 也有牙)。
+
+下次再遇到"只有一个 ip 的 SIGSEGV"时, 用 ASAN 单建 libipc + 一个几十行的同序探针就能拿到因果;
+不必重configure整仓 —— libipc 只有 12 个 TU(注意 `a0_*` 是 C, 要用 gcc 先编成 `.o`):
+
+```bash
+gcc -fsanitize=address -g -I src -I src/libipc/platform -I src/libipc/platform/linux -I include \
+    -c src/libipc/platform/platform.c -o /tmp/platform.o
+g++ -std=c++17 -fsanitize=address -g -DLIBIPC_LIBRARY_SHARED_USING__ \
+    -I include -I src -I src/libipc/platform -I src/libipc/platform/linux -I . \
+    probe.cpp src/libipc/{buffer,ipc,pool_alloc,shm,sniffer}.cpp src/libipc/socket/udp.cpp \
+    src/libipc/sync/*.cpp src/libipc/platform/posix/shm_posix.cpp /tmp/platform.o \
+    -o probe_asan -lpthread -lrt
+```
+
+| 构建 | 结果 |
+|---|---|
+| ASAN, 修复前 | `ERROR: AddressSanitizer: heap-use-after-free ... READ of size 8 in basic_string::_M_data()` + alloc/free 双栈 |
+| ASAN, 修复后 | 无任何报告(探针打印"存活") |
+
+**修法**(`src/libipc/ipc.cpp`, 只动这一条路径):
+
+- `recycle_t` 不再存 `conn_info_t*`, 改存**前缀的拷贝**(接收时拷 —— 那一刻 conn_info 必然活着)。
+- `recycle_storage` / `chunk_storage_info` / `chunk_handle_t::get_info` 的入参由 `conn_info_head*` 改成
+  `ipc::string const&`(前缀按值) ⇒ **析构路径上不再有任何对 conn_info 的解引用**。
+- 其余四个仍收 `conn_info_head*` 的调用点(`acquire_storage` / `find_storage` / `release_storage` /
+  `discard_storage`)一律改成"判空 + 传 `inf->prefix_`", 行为不变(它们只在活着的句柄上被调用)。
+
+为什么不加锁/不加引用计数: 这条路只需要一个**值的拷贝**(前缀), 把裸指针换成值拷贝是零成本且无死锁
+风险的修法; 引用计数要改句柄的生命周期模型(connect/destroy 的所有权), 风险与收益不成比例。
+
+**验证**。
+
+- **回归用例带牙**: `test/test_chunk_hold.cpp` 新增 `ChunkHold.HeldLargeMessageSurvivesItsReceiver`
+  (同顺序 + 用同尺寸类分配把释放块毒化, 不依赖 ASAN)。**变异验证**: 只把 `src/libipc/ipc.cpp` 换回
+  HEAD(修复前)重建, 该用例让整个测试二进制当场中止(栈落在 `ipc::buffer::~buffer()`); 换回修复版即 `3/3` 通过。
+- **真机复现脚本**: 修复后 40 轮 `test/test_dzflat_python.py`(带守门人)+ 修复前 30 轮 2 次 / 4 轮 1 次对比。
+- **全量**: gtest **55/55 二进制通过**(含 `test_chunk_hold` 3/3、`test_ipc`、`test_lap_safety`、`test_loan`、
+  `test_dzflat_*` 全族)。
+
+**同一族的就地加固**(与本条同时做的, 都很小): `mem::alloc<T>` 在就地构造**之前**判空(否则构造
+函数往地址 0 写)、`make_cache` 判空后**按丢包处理并打一次性告警**、`cache_t::append` 连
+`buff_.data()` 一起判、`ipc::buffer` 的 `empty/data/size` 容忍空 impl(它们自己也可能分配失败)。
+这几处都只是"把崩溃降级为丢一条消息 + 一句日志", 不改协议、不改行为。
+
+**附带发现(未修)**: 这三条本轮**没有**修, 已单独收口到
+[unfixed_defects.md](unfixed_defects.md)(登记表 + 修法选项 + 复现手段), 此处只留摘要与出处,
+避免两处各自漂移。
+
+1. **崩溃会在共享段里留永久垃圾**(该文档 §3)。chunk 池(`/dev/shm/__IPC_SHM__CHUNK_INFO__<size>`)是
+   **跨进程共享**的, 池里"仍被持有"的位只在持有者归还时清 —— 进程被段错误杀死 = 那些 chunk 永久卡住,
+   之后**每个**进程看到的都是残池。实测: 上面那次中止之后, `ChunkHold.OverwrittenChunksAreReclaimed`
+   在同尺寸类上稳定失败(20 条只有 10 条能进环, 大消息退化成 128 槽/条分片); 清掉这些段后恢复 3/3 通过。
+   **换回修复前代码也是同样的 10/20**, 所以它**不是**本次改动引入的(清理前已确认没有任何活进程映射这些段)。
+   这条值得单独记: 一次崩溃会**污染后续所有进程**的行为, 排查时容易误判成"新引入的回归"。
+2. **同一族(分配失败 → 读/写地址 0)还有两处未修**(该文档 §1、§2): ① `ipc::shm::handle` 的
+   `pimpl<handle_>` 分配失败后全线 `impl(p_)->...` 解引用空指针(定向注入 malloc 失败可稳定复现, 崩在
+   `handle::release`), 同族还有 `UDPNode` / `mutex` / `condition` / `semaphore`(`buffer` 已加固);
+   ② `allocator_wrapper::allocate` 的 noexcept-nullptr 语义仍在。两者都需要**真实 OOM** 才触发(与本次 UAF
+   只需要"析构顺序"不同), 所以这一轮只就地加固了 `mem::alloc<T>` / `make_cache` / `cache_t::append`
+   (判空后降级为丢弃 + 一次性告警), 其余登记在 [unfixed_defects.md](unfixed_defects.md)。
+3. **`dzIPC::StartShutdownMonitor` 让库接管进程退出**(该文档 §4): 覆盖应用的 `SIGINT`/`SIGTERM`
+   处理器、在 detached 线程里 `std::exit(0)`、退出码恒 0。本轮排查中它是首要嫌疑, 后由 ASAN 排除
+   因果关系 —— 风险本身未证伪, 且**全部属于推理**, 第一项工作是实验。
+
+**回归**: 本条不动端口、不动 wire、不动队列, 只把"析构路径要用的数据"从裸指针改成值拷贝;
+`test_chunk_hold` 3/3 + 全量 55/55。
+
+---
+
 ## 附: 当前状态
 
-**第 1–4、6 条已闭环**, 每条都有**行为判据 + 变异验证**(第 3 条另有实测实验数据);全量
-gtest **41/41** 通过(见 §修复记录各条的"回归"行 —— 该数取自第 1–4 条的复跑;第 6 条另加
-8 例, 未重跑全量)。
+**第 1–4、6、7 条已闭环**, 每条都有**行为判据 + 变异验证**(第 3 条另有实测实验数据);全量
+gtest **55/55** 通过(第 1–4 条的"回归"行取自当时复跑 —— 41/41; 本次(第 7 条)完整重跑构建与全部
+测试二进制, 55/55)。
+
+**第 7 条的额外价值**: 它把"偶发/不可复现"这一类问题的定位手段固化了 —— 守门人处理器(拿栈)→
+符号化(拿函数)→ ASAN + 确定性探针(拿因果)→ 带牙回归用例(卡住不复发)。同时暴露了一个排查陷阱:
+崩溃残留在共享段里的垃圾会影响后续所有进程, 很容易被误读成新引入的回归。
 
 **第 5 条已实测、修法已定、待决策** —— 它比第 3 条更值得优先处理: 第 3 条影响的是
 "同机不同 topic 的默认配置", 而第 5 条在 **8192 topic 的规模下 60% 的 topic 落在共组

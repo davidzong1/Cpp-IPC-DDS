@@ -25,6 +25,24 @@ public:
     virtual bool publish_best_effort(std::shared_ptr<IpcMsgBase> msg) { return publish(std::move(msg)); }
     virtual bool publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t) { return publish(std::move(msg)); }
     virtual bool publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg) { return publish_best_effort(std::move(msg)); }
+
+    /* ------------------------------------------------------------------ 预构造段发布
+     *
+     * 供"schema 在调用方"的进程使用 —— 今天的唯一使用者是 Python: 生成的 schema 只以
+     * **数据**形式发到 Python 侧(`gen_msgs/_dzflat_schema.py`), C++ 这边没有任何 TU 会
+     * 编译生成头文件, 所以 GenericMessage 自己永远写不出平坦段(见 generic_message.hpp)。
+     * 于是段由 Python 按 schema 写好, 原样交过来, 由传输层负责送出去。
+     *
+     * seg/len = **完整的** DZFlat 段(含 32B 段头), 不做任何解析或转换。
+     *
+     * 返回 false = "本次没走平坦段", 调用方**必须**回退普通 publish()(TLV)。false 是常态
+     * 而不是错误: 开关未开 / 段头不合法(截断、layout_ver 不认识)/ 段头 msg_id 与本话题
+     * 模板不符 / 无接收方 / chunk 池耗尽 / nodelet 拓扑 / 该传输没有平坦腿, 都会走到这里。
+     *
+     * 默认实现返回 false: 新传输不实现它就自动获得"回退 TLV"的行为, 不必逐个补门。
+     */
+    virtual bool publish_prebuilt_segment(const void* /*seg*/, std::size_t /*len*/) { return false; }
+
     virtual bool has_subscribed() const = 0;
     std::atomic<bool> exit_flag{false};
 };

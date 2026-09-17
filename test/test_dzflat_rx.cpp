@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <thread>
@@ -22,6 +23,7 @@
 
 #include "dzIPC/common/nodelet_config.h"
 #include "dzIPC/shm_pub_sub_ipc.h"
+#include "ipc_msg/ipc_msg_base/dzflat.h"
 #include "ipc_msg/std_msgs/std_image.hpp"
 
 namespace {
@@ -307,4 +309,109 @@ TEST(DzFlatRx, TimedGetDoesNotDisturbTheClonePath)
         std::this_thread::sleep_for(5ms);
     }
     EXPECT_TRUE(cloned) << "超时返回后物化路径应当照常工作";
+}
+
+/* ⑥ 预构造段发布: 段由调用方写好交来, 发布端只负责借 chunk 送出去。
+ *
+ * 这条路径是给"schema 在调用方"的进程用的(今天唯一使用者是 Python 的
+ * dzipc.publish_dzflat), 所以 C++ 侧必须单独钉住两件事:
+ *   ① 段真的借样送达, 且**逐字节**与发出去的段相同 —— 这条路径不做任何转换;
+ *   ② 三道门各自都会返回 false, 好让调用方回退 TLV: 开关关 / 段头不合法 /
+ *      段头 msg_id 与本话题模板不符(后者对端是**静默丢弃**, 不本地拦住就等于白丢一条)。 */
+TEST(DzFlatRx, PrebuiltSegmentPublishReachesTheViewPath)
+{
+    DzFlatSwitch on{true};
+    const std::string topic = unique_topic("prebuilt");
+    auto pub_td = std::make_shared<dzIPC::TopicData>(
+        std::make_shared<dzIPC::Msg::StdImage>(), kMsgId);
+    auto sub_td = std::make_shared<dzIPC::TopicData>(
+        std::make_shared<dzIPC::Msg::StdImage>(), kMsgId);
+    dzIPC::shm::shm_pub_ipc pub{pub_td, topic, 0};
+    dzIPC::shm::shm_sub_ipc sub{sub_td, topic, 0, 8};
+    pub.InitChannel();
+    sub.InitChannel();
+
+    auto src = make_image(96, 64, 0x5C);
+    src.set_msg_id(kMsgId);   /* 段头 msg_id 必须与话题模板一致(否则会被门拦下) */
+    /* 段由"调用方"写 —— 这里用 C++ 写端, 与 Python 编码器产出的是同一种东西。 */
+    std::vector<std::uint8_t> seg(src.dzflat_size());
+    ASSERT_TRUE(src.dzflat_write(seg.data(), static_cast<std::uint32_t>(seg.size())));
+    dzflat::SegHeader h{};
+    std::memcpy(&h, seg.data(), sizeof(h));
+    ASSERT_EQ(h.msg_id, kMsgId) << "段头 msg_id 来自 set_msg_id";
+    const std::uint32_t seg_len = h.total_size;
+    ASSERT_LE(seg_len, seg.size());
+
+    /* ---- 负例先跑: 三道门都不许把段发出去 ---- */
+    {
+        auto bad = seg;   /* (a) 段头 magic 坏掉 */
+        bad[0] = 0x00;
+        EXPECT_FALSE(pub.publish_prebuilt_segment(bad.data(), bad.size()))
+            << "magic 不合法的段不得发出";
+    }
+    {
+        auto bad = seg;   /* (b) 段头 msg_id 与话题模板不符 */
+        bad[24] = 0xEE;   /* SegHeader.msg_id 在第 24 字节 */
+        EXPECT_FALSE(pub.publish_prebuilt_segment(bad.data(), bad.size()))
+            << "msg_id 不符的段不得发出 —— 对端只会静默丢掉它";
+    }
+    {
+        dzIPC::EnableDzFlat(false);   /* (c) 全局开关 */
+        EXPECT_FALSE(pub.publish_prebuilt_segment(seg.data(), seg.size()));
+        dzIPC::EnableDzFlat(true);
+    }
+    {
+        dzIPC::Sample none;   /* 负例不得在两条队列里留下任何东西 */
+        EXPECT_FALSE(sub.try_get(none));
+        EXPECT_FALSE(sub.try_get_clone(sub_td));
+    }
+
+    /* ---- 正例: 借样送达, 内容的每个字节都要对上 ---- */
+    const auto deadline = std::chrono::steady_clock::now() + 4000ms;
+    dzIPC::Sample sample;
+    while (!sample.valid() && std::chrono::steady_clock::now() < deadline)
+    {
+        pub.publish_prebuilt_segment(seg.data(), seg.size());
+        sub.try_get(sample);
+        std::this_thread::sleep_for(5ms);
+    }
+    ASSERT_TRUE(sample.valid()) << "预构造段没有通过借样路径送达";
+    EXPECT_EQ(sample.msg_id(), kMsgId);
+    EXPECT_EQ(sample.schema_hash(), src.dzflat_schema_hash());
+    /* Sample::size() 是**借到的 chunk 容量**(sample_message.h 的契约), SHM 上通常大于
+     * 段长; 段内有效长度由段头的 total_size 决定。所以这里判"够装"而不是"相等"。 */
+    EXPECT_GE(sample.size(), seg_len) << "借来的 chunk 装不下声明的段长";
+    EXPECT_EQ(std::memcmp(sample.data(), seg.data(), seg_len), 0)
+        << "收到的段与发出去的段必须逐字节相同";
+
+    auto v = sample.view<dzIPC::Msg::StdImageFlat>();
+    ASSERT_TRUE(v.valid()) << "bind 应通过";
+    EXPECT_EQ(v.width(), src.width);
+    EXPECT_EQ(v.height(), src.height);
+    EXPECT_EQ(v.encoding(), "rgb8");
+    auto px = v.data();
+    ASSERT_EQ(px.size(), src.data.size());
+    EXPECT_EQ(std::memcmp(px.data(), src.data.data(), px.size()), 0)
+        << "大数组内容与源不一致";
+    EXPECT_GT(dzIPC::DzFlatPublishCount(), 0u) << "走平坦段发出的条数必须记上";
+}
+
+/* ⑦ 无接收方时必须返回 false, 而不是"发进空通道后返回 true" —— 前者才能让调用方回退 TLV。 */
+TEST(DzFlatRx, PrebuiltSegmentWithoutReceiversReturnsFalse)
+{
+    DzFlatSwitch on{true};
+    const std::string topic = unique_topic("prebuilt_nosub");
+    auto pub_td = std::make_shared<dzIPC::TopicData>(
+        std::make_shared<dzIPC::Msg::StdImage>(), kMsgId);
+    dzIPC::shm::shm_pub_ipc pub{pub_td, topic, 0};
+    pub.InitChannel();
+    std::this_thread::sleep_for(300ms);
+
+    auto src = make_image(32, 16, 0x09);
+    src.set_msg_id(kMsgId);   /* 先过掉 msg_id 那道门, 保证本条测的是"无接收方"而不是别的 */
+    std::vector<std::uint8_t> seg(src.dzflat_size());
+    ASSERT_TRUE(src.dzflat_write(seg.data(), static_cast<std::uint32_t>(seg.size())));
+
+    EXPECT_FALSE(pub.publish_prebuilt_segment(seg.data(), seg.size()))
+        << "没有接收方时 chunk 借不到 ⇒ 必须回退, 不能假装成功";
 }

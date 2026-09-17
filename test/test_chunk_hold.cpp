@@ -194,3 +194,67 @@ TEST(ChunkHold, OverwrittenChunksAreReclaimed)
         << ") —— 覆写路径漏掉了没人 pop 过的大消息的 chunk, "
            "大消息已退化为 " << kSlotsPerFragmented << " 槽位/条的分片";
 }
+
+/* ③ 大消息 buff_t 活过它的接收方: 析构时不得解引用一个已释放的 conn_info。
+ *
+ * 接收方析构(chan_impl::destroy)会 mem::free(conn_info), 而大消息(storage 路径)
+ * 的 buff_t 析构器旧实现里握着 conn_info_t*: 于是"先析构接收方、后析构消息"这个
+ * 完全合法的顺序就是 use-after-free —— 析构器要用前缀去查 CHUNK_INFO 段名, 读到
+ * 已释放内存里的字节, "字符串长度"变成指针值(实测 ~1.35e14) → allocate() 因 huge
+ * count 返回空(noexcept, 不抛) → libstdc++ 在 nullptr 上 memmove → SIGSEGV at 0
+ * (error 6, in libc.so.6)。内核日志只剩一个 ip, 现场完全看不出是哪一行。
+ *
+ * 这就是本次观察到的那次"一次性段错误": 它的偶发只是因为"释放内存是否已被复用"
+ * 取决于堆运气(ASAN 下必报 heap-use-after-free, 见 docs/shm_defect_fixes.md 第 7 条)。
+ *
+ * 为了让本用例**每次都真的踩到**(而不是等运气): 接收方析构后立即用一串同尺寸类的
+ * 分配把刚释放的 conn_info 块拿到手中并填 0xAB。旧实现在下一步必然在毒化后的
+ * 内存上算出一个巨大长度, 整个用例二进制当场挂掉; 修复后这里没有任何解引用。
+ */
+TEST(ChunkHold, HeldLargeMessageSurvivesItsReceiver)
+{
+    constexpr std::size_t kPayload = 12288;   // 独立尺寸类: 与上面两条用例(4096/8192)不共享池子
+    const std::string name = "dzflat_uaf_hold";
+    ipc::route::clear_storage(name.c_str());
+
+    ipc::route tx{name.c_str(), ipc::sender};
+    ipc::buff_t held;
+
+    {
+        ipc::route rx{name.c_str(), ipc::receiver};
+        ASSERT_TRUE(tx.wait_for_recv(1, 2000)) << "接收方未在超时内连上";
+
+        const auto payload = make_payload(kPayload, 0xC7);
+        ASSERT_TRUE(blast(tx, payload));
+
+        held = rx.recv(2000);
+        ASSERT_FALSE(held.empty()) << "未收到大消息(应走 chunk 路径)";
+        ASSERT_TRUE(all_bytes_are(held, kPayload, 0xC7));
+    }   // rx 析构 → conn_info 被 mem::free; held 仍持有那条消息
+
+    /* 毒化: conn_info_t 在这套策略下是 224 字节(尺寸类 240), 它在 tcache 里是
+     * "最近释放的那块", 所以同尺寸类的第一次分配就会把它交出来。扫一段区间是为了
+     * 不把尺寸类写死在用例里(策略/编译器变化时仍能命中)。 */
+    std::vector<std::vector<std::uint8_t>> poison;
+    for (std::size_t n = 128; n <= 512; n += 8)
+    {
+        poison.emplace_back(n, 0xAB);
+    }
+
+    /* 崩点(修复前) / 正常归还 chunk(修复后)。 */
+    held = ipc::buff_t{};
+
+    /* 归还后 chunk 必须仍可正常复用: 同一尺寸类再走一轮收发, 内容逐字节一致。 */
+    {
+        ipc::route rx{name.c_str(), ipc::receiver};
+        ASSERT_TRUE(tx.wait_for_recv(1, 2000)) << "第二轮接收方未连上";
+        const auto payload = make_payload(kPayload, 0x5D);
+        ASSERT_TRUE(blast(tx, payload));
+        ipc::buff_t got = rx.recv(2000);
+        ASSERT_FALSE(got.empty()) << "chunk 未能复用: 第二轮大消息没收到";
+        EXPECT_TRUE(all_bytes_are(got, kPayload, 0x5D)) << "复用后的 chunk 内容不对";
+    }
+
+    /* poison 必须活到 held 析构之后, 毒化才有意义(否则它自己先被释放回收)。 */
+    EXPECT_EQ(poison.size(), 49u) << "毒化块数量变了, 检查上面的扫描区间";
+}

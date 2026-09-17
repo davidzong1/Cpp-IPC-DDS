@@ -26,7 +26,8 @@ from unittest import mock
 TEST_DIR = Path(__file__).resolve().parent
 VISUALIZER_DIR = TEST_DIR.parent
 ROOT_DIR = VISUALIZER_DIR.parents[1]
-BRIDGE_PATH = VISUALIZER_DIR / "dzipc_web_bridge.py"
+# 9d91212 把 dzviz.py 重命名为 main.py 后这里未同步 —— 修正为现名。
+BRIDGE_PATH = VISUALIZER_DIR / "main.py"
 WEB_DIR = VISUALIZER_DIR / "web"
 DEMO_DIR = VISUALIZER_DIR / "demo"
 DEFAULT_VISUALIZER_CONFIG = VISUALIZER_DIR / "config.json"
@@ -338,6 +339,103 @@ class BackendComponentTests(unittest.TestCase):
         self.assertEqual(robot_models[0]["fixed_frame"], "world")
         with self.assertRaisesRegex(ValueError, "robot_models"):
             bridge.normalize_robot_models({"name": "arm"})
+
+    def test_dzflat_defaults_on_and_cli_config_precedence(self) -> None:
+        """dzflat 默认开; 显式 false/字符串假值关; CLI/文件优先级正确。"""
+        # 缺省 → 开(SHM 默认尝试借样)
+        self.assertIs(bridge.normalize_defaults({}, {})["dzflat"], True)
+        # 配置文件显式关闭
+        self.assertIs(
+            bridge.normalize_defaults({"dzflat": False}, {"dzflat": True})["dzflat"],
+            False,
+        )
+        # 字符串形态的假值
+        for falsey in ("0", "false", "no", "off", ""):
+            self.assertIs(
+                bridge.normalize_defaults({"dzflat": falsey}, {})["dzflat"],
+                False,
+                msg=f"dzflat={falsey!r} should normalize to False",
+            )
+        # fallback(旧配置文件)里没有 dzflat 也默认开
+        self.assertIs(bridge.normalize_defaults({}, {})["dzflat"], True)
+        self.assertIs(
+            bridge.normalize_defaults({}, {"transport": "socket"})["dzflat"],
+            True,
+        )
+
+    def test_subscriber_robot_state_dzflat_sample_goes_through_from_generic(self) -> None:
+        """RobotState 不再被排除在 from_generic 之外 —— DZFlat 段(fields_ 为空)
+        必须按 schema 解码, 否则是静默空数据。"""
+        subscriber_mod = importlib.util.spec_from_file_location(
+            "dzipc_subscriber_under_test",
+            VISUALIZER_DIR / "component" / "subscriber.py",
+        )
+        assert subscriber_mod is not None and subscriber_mod.loader is not None
+        subscriber = importlib.util.module_from_spec(subscriber_mod)
+        sys.modules[subscriber_mod.name] = subscriber
+        try:
+            # subscriber.py 使用相对导入(from .point_clouds ...) —— 直接 exec
+            # 会 ImportError。component 已是可导入包(测试文件顶部已 sys.path),
+            # 这里刷新它以拿到 subscriber.py 的当前实现。
+            import component.subscriber as _sub_pkg
+            importlib.reload(_sub_pkg)
+            DzipcSubscriber = _sub_pkg.DzipcSubscriber
+        except ImportError:
+            subscriber_mod.loader.exec_module(subscriber)
+            DzipcSubscriber = subscriber.DzipcSubscriber
+
+        events: list = []
+
+        class FakeHub:
+            def publish(self, event):
+                events.append(event)
+
+        class FakeSpec:
+            topic = "/test/dzflat_rs"
+            msg_type = "RobotState"
+            transport = "shm"
+            domain = 0
+            queue = 10
+            extra = ""
+            poll = 0.03
+            verbose = False
+
+        # 仿 DZFlat 借样样本: GenericMessage 直通体, fields_ 为空, 但仍暴露
+        # field_count()(订阅端判据)。from_generic 必须被调用。
+        class FakeGeneric:
+            def field_count(self) -> int:
+                return 0
+
+            def has_dzflat(self) -> bool:
+                return True
+
+            def dzflat_is_borrowed(self) -> bool:
+                return True
+
+        from_generic_calls: list = []
+
+        class FakeRobotStateCls:
+            @staticmethod
+            def from_generic(g):
+                from_generic_calls.append(g)
+                return {"name": "demo_robot", "note": "{}"}
+
+        worker = DzipcSubscriber(
+            FakeHub(), FakeSpec(), dzflat_enabled=True,
+            data_serializer=lambda obj, _ts: obj,
+        )
+        worker._process_sample(
+            sub=None,
+            topic_data=types.SimpleNamespace(topic=lambda: FakeGeneric()),
+            out=None,
+            msg_cls=FakeRobotStateCls,
+            resolved_msg_type="RobotState",
+        )
+
+        self.assertEqual(len(from_generic_calls), 1, "RobotState must route through from_generic (DZFlat or TLV)")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["data"], {"name": "demo_robot", "note": "{}"})
+        self.assertEqual(worker.sample_seq, 1)
 
     def test_robot_display_collects_embedded_mesh_assets(self) -> None:
         with tempfile.TemporaryDirectory(prefix="robot_mesh_assets_") as temp_dir:
@@ -850,6 +948,7 @@ class BackendComponentTests(unittest.TestCase):
             poll=None,
             extra=None,
             verbose=False,
+            dzflat=None,
             demo=False,
             demo_period=0.1,
             load_config=False,

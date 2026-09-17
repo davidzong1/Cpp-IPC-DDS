@@ -1078,8 +1078,182 @@ class TestDecodePayload:
 
 
 # ---------------------------------------------------------------------------
-# Per-client sender-task isolation (PlotHub)
+# DZFlat 段解码(嗅探腿): 裸 SHM 字节里发布端开了平坦布局时不能静默掉 base64
 # ---------------------------------------------------------------------------
+
+class TestDecodePayloadDzFlat:
+    """_decode_payload 对 DZFlat 段的识别与解码(纯 Python L1, 不带 pybind)。
+
+    场景: SHM 嗅探腿的 result["data"] 是**裸段字节**。发布端开 DZFlat 后段首是
+    平坦布局 magic 而非 TLV —— 通用 create_message().deserialize() 解不了, 修复前
+    会静默回退 base64, 前端只见一团乱码。修复后按 magic 识别交给 dzipc.dzflat
+    (纯 Python)解码, 解不了再回退 —— 行为链路见 main.py 的 _decode_dzflat_payload。
+    """
+
+    @staticmethod
+    def _fake_dzflat():
+        """独立加载 dzipc.dzflat(纯 Python), 并注入一个合成 schema。
+
+        test_dzplot 是纯 Python L1(宿主解释器可能没有可用的 pybind .so), 而
+        dzflat.py 只依赖 struct/typing —— 以独立模块名加载, 与 dzipc 包解耦。
+        不用生成的注册表: 它经由 ``from dzipc.dzflat import register`` 落到真实
+        包的注册表里, 对独立副本不可见 —— 所以直接注册一个单标量 schema。
+        """
+        import importlib.util
+        src = REPO_ROOT / "python" / "dzipc" / "dzflat.py"
+        if not src.is_file():
+            raise SkipTest(f"缺 {src} —— 无 DZFlat 解码器可测")
+        s1 = importlib.util.spec_from_file_location("_dzflat_l1", str(src))
+        mod1 = importlib.util.module_from_spec(s1)
+        sys.modules[s1.name] = mod1
+        s1.loader.exec_module(mod1)
+        mod1.register(mod1.Schema(
+            name="PoseL1",
+            schema_hash=0x5EED0001,
+            root_size=8,
+            fields=(mod1.Field(name="x", kind="scalar", base="float64",
+                               ftype=11, offset=0, count=None, nested=None),),
+        ))
+        return mod1
+
+    @classmethod
+    def _build_segment(cls, mod, schema):
+        """按 schema 构一条最小 DZFlat 段(值全 0): 只需头/根/变长区自洽。"""
+        import struct as _s
+        varlen = sum((f.count or 0) for f in schema.fields
+                     if f.kind in ("string", "var_scalar_array", "string_array",
+                                   "nested_array"))
+        varlen = (varlen + 7) & ~7 or 8          # 留一点且按 8 对齐
+        total = 32 + schema.root_size + varlen
+        seg = bytearray(total)
+        _s.pack_into("<IIIIIHHII", seg, 0, mod.MAGIC, schema.schema_hash,
+                     32, schema.root_size, total, mod.LAYOUT_VER, 0, 0, 0)
+        return bytes(seg)
+
+    def _install_fake(self):
+        """重置探测状态 + 注入独立加载的 dzflat 模块; 返回 restore 函数。
+
+        本文件的 runner 只调 test_* 方法(没有 setUp/tearDown 钩子),
+        所以装/卸必须在用例内显式配对。
+        """
+        saved = (dzplot._DZFLAT_DECODE_OK, dzplot._DZFLAT_WARNED,
+                 dzplot._load_dzflat_module)
+        dzplot._DZFLAT_DECODE_OK = None
+        dzplot._DZFLAT_WARNED = set()
+        dzflat = self._fake_dzflat()
+        dzplot._load_dzflat_module = lambda: dzflat
+
+        def _restore():
+            (dzplot._DZFLAT_DECODE_OK, dzplot._DZFLAT_WARNED,
+             dzplot._load_dzflat_module) = saved
+
+        return dzflat, _restore
+
+    def test_dzflat_segment_decodes_to_fields(self):
+        """合法 DZFlat 段: 解出字段 dict(而非 base64 兜底), 字段名来自 schema。"""
+        dzflat, restore = self._install_fake()
+        try:
+            schema = dzflat.SCHEMA_BY_NAME["PoseL1"]
+            seg = self._build_segment(dzflat, schema)
+            fields = dzplot._decode_payload("StdPose", seg)
+        finally:
+            restore()
+        assert "data" not in fields, f"掉进了 base64 兜底: {fields}"
+        assert set(fields) == {f.name for f in schema.fields}, (
+            f"字段名应与 schema 同源: {sorted(fields)}")
+        assert isinstance(fields["x"], float) and fields["x"] == 0.0, fields
+
+    def test_tlv_payload_not_intercepted(self):
+        """TLV 字节(非 DZFlat magic)必须原样走 create_message 路径, 不被截胡。"""
+        _, restore = self._install_fake()
+        called = {}
+
+        class _Msg:
+            def deserialize(self, buf):
+                called["len"] = len(buf)
+
+            def field_count(self):
+                return 1
+
+            def field_name(self, i):
+                return "x"
+
+            def field_type(self, i):
+                return 11  # float64
+
+            def get_float64(self, name):
+                return 1.25
+
+        import types
+        fake_ipc = types.ModuleType("dzipc")
+        fake_ipc.create_message = lambda name: _Msg()
+        saved_ipc = sys.modules.get("dzipc")
+        sys.modules["dzipc"] = fake_ipc        # 钉死 legacy 路径, 不依赖宿主环境
+        try:
+            fields = dzplot._decode_payload("StdPose", b"TLVmagic-not-dzflat-000")
+        finally:
+            if saved_ipc is None:
+                sys.modules.pop("dzipc", None)
+            else:
+                sys.modules["dzipc"] = saved_ipc
+            restore()
+        assert called.get("len") == len(b"TLVmagic-not-dzflat-000"), "TLV 字节未被走查"
+        assert fields.get("x") == 1.25, fields
+
+    def test_dzflat_unknown_schema_falls_back_to_base64(self):
+        """magic 对但指纹不在注册表(对端改了 msg 没重跑 generator)→ base64 兜底,
+        且按 type_name 去重告警 —— 修复前这是完全静默的。"""
+        dzflat, restore = self._install_fake()
+        import types
+        fake_ipc = types.ModuleType("dzipc")     # 无 create_message → legacy 必抛 → base64
+        saved_ipc = sys.modules.get("dzipc")
+        sys.modules["dzipc"] = fake_ipc
+        try:
+            import struct as _s
+            seg = bytearray(48)
+            _s.pack_into("<IIIIIHHII", seg, 0, dzflat.MAGIC, 0xDEADBEEF,
+                         32, 8, 48, dzflat.LAYOUT_VER, 0, 0, 0)
+            fields = dzplot._decode_payload("StdPose", bytes(seg))
+            warned = "StdPose" in dzplot._DZFLAT_WARNED
+        finally:
+            if saved_ipc is None:
+                sys.modules.pop("dzipc", None)
+            else:
+                sys.modules["dzipc"] = saved_ipc
+            restore()
+        import base64
+        assert base64.b64decode(fields["data"]) == bytes(seg), fields
+        assert warned, "schema 缺失应当告警一次"
+
+    def test_decode_unavailable_keeps_legacy_path(self):
+        """dzipc.dzflat 加载失败(缺 schema 环境)→ 与修复前完全等价的旧路径。"""
+        saved = (dzplot._DZFLAT_DECODE_OK, dzplot._DZFLAT_WARNED,
+                 dzplot._load_dzflat_module)
+        dzplot._DZFLAT_DECODE_OK = None
+        dzplot._DZFLAT_WARNED = set()
+        dzplot._load_dzflat_module = lambda: None
+        try:
+            fields = dzplot._decode_payload("NonexistentType", b"test data")
+            cached = dzplot._DZFLAT_DECODE_OK
+        finally:
+            dzplot._DZFLAT_DECODE_OK, dzplot._DZFLAT_WARNED, dzplot._load_dzflat_module = saved
+        import base64
+        assert base64.b64decode(fields["data"]) == b"test data"
+        assert cached is False, "不可用状态应被缓存, 不逐样本重试"
+
+    def test_bad_magic_but_dzflat_sized_header_still_falls_back(self):
+        """非 DZFlat magic(哪怕长度凑够 32)→ 不拦截, 回退 TLV/base64。"""
+        _, restore = self._install_fake()
+        try:
+            import struct as _s
+            seg = bytearray(48)
+            _s.pack_into("<I", seg, 0, 0x12345678)   # 非 MAGIC
+            fields = dzplot._decode_payload("NonexistentType", bytes(seg))
+        finally:
+            restore()
+        import base64
+        assert base64.b64decode(fields["data"]) == bytes(seg)
+
 
 class TestClientIsolation:
     """Verify that a slow client never blocks the broadcast loop or
@@ -2005,6 +2179,7 @@ def run_tests():
         TestTransportPacket,
         TestSnifferPollScheduling,
         TestDecodePayload,
+        TestDecodePayloadDzFlat,
         TestClientIsolation,
         TestBagFlowControl,
         TestSysPathPriority,

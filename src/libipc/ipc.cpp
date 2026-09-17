@@ -72,10 +72,35 @@ namespace
     }
   };
 
+  /* 分配失败只报一次 —— 真的 OOM 时每个分片都会失败, 逐条打印会把日志淹掉,
+   * 而这里要的是"看得见"而不是"看全"(消息本身已经按丢弃处理)。 */
+  void report_cache_alloc_failure(std::size_t size)
+  {
+    static std::atomic<bool> reported{false};
+    if (reported.exchange(true))
+    {
+      return;
+    }
+    ipc::error(
+        "fail: make_cache, ipc::mem::alloc(%zu) returned nullptr. "
+        "分片重组的缓冲区拿不到 —— 该条消息按丢包处理(不会再崩在写地址 0 上)。\n",
+        size);
+  }
+
   template <typename T>
   ipc::buff_t make_cache(T &data, std::size_t size)
   {
     auto ptr = ipc::mem::alloc(size);
+    /* ⛔ 这次 memcpy 的目的地就是它: 传 nullptr 进去就是"往地址 0 写 64 字节"。
+     * 实测崩点在 libc 的 `__memcpy_avx_unaligned_erms`(两次 32B 存储到 %rdi=0),
+     * 而且发生在**订阅线程**里 —— 内核日志只留一个 ip, 从现场几乎无法反查到这一行。
+     * 返回空 buff_t 与 recv() 其余失败出口一致: 调用方按"没收到"丢弃该消息
+     * (见 docs/shm_defect_fixes.md 第 7 条)。 */
+    if (ptr == nullptr)
+    {
+      report_cache_alloc_failure(size);
+      return {};
+    }
     std::memcpy(ptr, &data, (ipc::detail::min)(sizeof(data), size));
     return {ptr, size, ipc::mem::free};
   }
@@ -109,7 +134,10 @@ namespace
 
     void append(void const *data, std::size_t size)
     {
-      if (fill_ >= buff_.size() || data == nullptr || size == 0)
+      /* buff_.data() 必须一起判: ipc::buffer 允许"size > 0 而 data() == nullptr"
+       * (见 buffer::empty() 的判据), 而 make_cache 在分配失败时会给回一个空 buff_t。
+       * 只看 size 的话, 这里就是又一个往地址 0 写的入口。 */
+      if (buff_.data() == nullptr || fill_ >= buff_.size() || data == nullptr || size == 0)
         return;
       auto new_fill = (ipc::detail::min)(fill_ + size, buff_.size());
       std::memcpy(static_cast<ipc::byte_t *>(buff_.data()) + fill_, data,
@@ -291,9 +319,16 @@ namespace
       }
 
     public:
-      chunk_info_t *get_info(conn_info_head *inf, std::size_t chunk_size)
+      /* 前缀**按值**传进来, 不传 conn_info_head*。
+       *
+       * 本函数会被"最后一条大消息的 buff_t 析构"调用(recycle_storage), 而那时
+       * 接收方的 conn_info 可能早已 mem::free —— 传指针就是 use-after-free:
+       * inf->prefix_ 读到被 tcache fd/key 覆盖的字节, "字符串长度"变成一个指针
+       * 值(实测 ~1.35e14) → allocate() 因 huge count 返回空(noexcept, 不抛) →
+       * libstdc++ 在 nullptr 上 memmove → SIGSEGV at 0 (error 6, in libc.so.6),
+       * 内核日志只留一个 ip。详见 docs/shm_defect_fixes.md 第 7 条。 */
+      chunk_info_t *get_info(ipc::string const &pref, std::size_t chunk_size)
       {
-        ipc::string pref{(inf == nullptr) ? ipc::string{} : inf->prefix_};
         ipc::string shm_name{
             ipc::make_prefix(pref, {"CHUNK_INFO__", ipc::to_string(chunk_size)})};
         ipc::shm::handle *h;
@@ -323,7 +358,10 @@ namespace
     return chunk_hs;
   }
 
-  chunk_info_t *chunk_storage_info(conn_info_head *inf, std::size_t chunk_size)
+  /* 只收前缀(按值) —— 调用方有的持有活的 conn_info, 有的(大消息 buff_t 的析构
+   * 器)只持有一份拷贝, 见 recycle_storage 的注释。 */
+  chunk_info_t *chunk_storage_info(ipc::string const &pref,
+                                   std::size_t chunk_size)
   {
     auto &storages = chunk_storages();
     std::decay_t<decltype(storages)>::iterator it;
@@ -346,7 +384,7 @@ namespace
                  .first;
       }
     }
-    return it->second->get_info(inf, chunk_size);
+    return it->second->get_info(pref, chunk_size);
   }
 
   /* 借样(loan)的容量档位。
@@ -382,8 +420,10 @@ namespace
   std::pair<ipc::storage_id_t, void *> acquire_storage(conn_info_head *inf,
                                                        std::size_t size,
                                                        ipc::circ::cc_t conns)  {
+    if (inf == nullptr)
+      return {};
     std::size_t chunk_size = calc_chunk_size(size);
-    auto info = chunk_storage_info(inf, chunk_size);
+    auto info = chunk_storage_info(inf->prefix_, chunk_size);
     if (info == nullptr)
       return {};
 
@@ -409,8 +449,10 @@ namespace
                  size);
       return nullptr;
     }
+    if (inf == nullptr)
+      return nullptr;
     std::size_t chunk_size = calc_chunk_size(size);
-    auto info = chunk_storage_info(inf, chunk_size);
+    auto info = chunk_storage_info(inf->prefix_, chunk_size);
     if (info == nullptr)
       return nullptr;
     return info->at(chunk_size, id)->data();
@@ -425,8 +467,10 @@ namespace
                  (long)id, size);
       return;
     }
+    if (inf == nullptr)
+      return;
     std::size_t chunk_size = calc_chunk_size(size);
-    auto info = chunk_storage_info(inf, chunk_size);
+    auto info = chunk_storage_info(inf->prefix_, chunk_size);
     if (info == nullptr)
       return;
     info->lock_.lock();
@@ -462,7 +506,11 @@ namespace
   }
 
   template <typename Flag>
-  void recycle_storage(ipc::storage_id_t id, conn_info_head *inf,
+  /* ⛔ 只收前缀(按值), 不收 conn_info_head*: 本函数由"大消息 buff_t 的析构器"
+   * 调用, 而调用点上接收方的 conn_info 可能早已 mem::free —— 那就是
+   * use-after-free(实测见 docs/shm_defect_fixes.md 第 7 条)。前缀是这条路径唯一
+   * 需要的信息, 而且必须是值的拷贝(接收时拷好, 见 recv 里的 recycle_t)。 */
+  void recycle_storage(ipc::string const &pref, ipc::storage_id_t id,
                        std::size_t size, ipc::circ::cc_t curr_conns,
                        ipc::circ::cc_t conn_id)
   {
@@ -473,7 +521,7 @@ namespace
       return;
     }
     std::size_t chunk_size = calc_chunk_size(size);
-    auto info = chunk_storage_info(inf, chunk_size);
+    auto info = chunk_storage_info(pref, chunk_size);
     if (info == nullptr)
       return;
 
@@ -538,8 +586,10 @@ namespace
     if (rem_cc == 0)
       return;
 
+    if (inf == nullptr)
+      return;
     std::size_t chunk_size = calc_chunk_size(size);
-    auto info = chunk_storage_info(inf, chunk_size);
+    auto info = chunk_storage_info(inf->prefix_, chunk_size);
     if (info == nullptr)
       return;
 
@@ -1249,14 +1299,20 @@ namespace
           void *buf = find_storage(buf_id, inf, msg_size);
           if (buf != nullptr)
           {
+            /* ⛔ 这里**必须拷前缀**, 不能拷 conn_info_t*: 这个 buff_t 会活过接收方
+             * 本身(它由上层的 Sample / 消息对象持有), 而 conn_info 在接收方析构
+             * (chan_impl::destroy)时就 mem::free 了 —— 旧实现下这种顺序就是
+             * use-after-free, 现象是析构时 SIGSEGV at 0(内核日志只有一个 ip)。
+             * 详见 docs/shm_defect_fixes.md 第 7 条。 */
             struct recycle_t
             {
               ipc::storage_id_t storage_id;
-              conn_info_t *inf;
+              ipc::string pref;
               ipc::circ::cc_t curr_conns;
               ipc::circ::cc_t conn_id;
             } *r_info = ipc::mem::alloc<recycle_t>(recycle_t{
-                buf_id, inf, que->elems()->connections(std::memory_order_relaxed),
+                buf_id, inf->prefix_,
+                que->elems()->connections(std::memory_order_relaxed),
                 que->connected_id()});
             if (r_info == nullptr)
             {
@@ -1273,7 +1329,7 @@ namespace
                     IPC_UNUSED_ auto finally =
                         ipc::guard([r_info]
                                    { ipc::mem::free(r_info); });
-                    recycle_storage<flag_t>(r_info->storage_id, r_info->inf, size,
+                    recycle_storage<flag_t>(r_info->pref, r_info->storage_id, size,
                                             r_info->curr_conns, r_info->conn_id);
                   },
                   r_info};

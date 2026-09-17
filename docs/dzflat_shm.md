@@ -401,7 +401,7 @@ StdImage owned; s->copy_to(owned);        // 兼容桥, 老代码一行接上
 - 订阅侧把 `buff_t` 移进 `Sample<T>`(落点: [shm_pub_sub_ipc.cc:543-568](../src/dzIPC/shm_pub_sub_ipc.cc#L543-L568) 那个每轮销毁 `raw_data` 的循环);
 - 顺带去掉每帧的 `topic_msg_->clone()`(View 不需要克隆模板)。
 
-### 5.6 Python — 已实现, 见 §9.6
+### 5.6 Python — 已实现, 读见 §9.6、写见 §9.7
 
 不能在 C++ 侧给 `GenericMessage` 加解码: 它没有 schema, 而 schema 只在 generator 产出的物件里, **且没有任何 TU 会编译那些生成头文件**。所以落地形态是: C++ 侧段**原样直通**, generator 另发射一份 Python schema, 由 `python/dzipc/dzflat.py` 解码。大数组用 `memoryview.cast()` 零拷贝直读。
 
@@ -452,6 +452,7 @@ StdImage owned; s->copy_to(owned);        // 兼容桥, 老代码一行接上
 | **2** | libipc `loan/publish_loan` + dzIPC 双 wire 分支 | 跨**进程** DZFlat 往返值一致; 同一订阅者交替收下两种 wire; 四种回退路径均不丢消息 | ✅ 见 §9.4 |
 | **3** | B 级 builder(`alloc_data` 就地直写) | `alloc_*` 返回的 span 必须落在 chunk 内(零拷贝的实质); 未投递的借样析构即归还; 超预算不得写出坏段 | ✅ 见 §9.5 |
 | **4** | Python DZFlat 读路径 | `topic_echo` 对 DZFlat 消息字段完整; TLV 路径不受影响; 段不可信 | ✅ 见 §9.6 |
+| **5** | Python DZFlat **写**路径(`publish_prebuilt_segment` + `dzflat.pack()`) | Python 编码器与 C++ `dzflat::Writer` **逐字节一致**; Python 自发自收两条传输都借样; 回退矩阵不丢消息 | ✅ 见 §9.7 |
 
 Step 1 先离线做(不碰传输), 是为了在承诺传输改造之前先把 §1.3 那个数量级坐实。
 
@@ -613,10 +614,12 @@ Python 侧的通用消费者是 `GenericMessage` —— 一个**自描述 TLV** 
 
 | 侧 | 做什么 |
 |---|---|
-| C++ `GenericMessage::dzflat_read` | 段**原样直通** —— 留存字节 + schema 指纹, 不解析。`has_dzflat()` / `dzflat_schema_hash_rx()` / `dzflat_memoryview()` 三个绑定暴露给 Python |
+| C++ `GenericMessage::dzflat_read` / `dzflat_adopt` | 段**原样直通** —— 留存字节 + schema 指纹, 不解析。前者拷贝(legacy/AcceptWire), 后者**借样**(移进接收层已拥有的连续块, 不拷)。`has_dzflat()` / `dzflat_is_borrowed()` / `dzflat_schema_hash_rx()` / `dzflat_memoryview()` / `dzflat_bytes()` 五个绑定暴露给 Python |
 | generator | 除 C++ 物件外, 另发射 `python/dzipc/gen_msgs/_dzflat_schema.py`(字段名/形态/wire 类型/Root 偏移/嵌套引用), 由 `gen_msgs/__init__.py` import 时登记进注册表 |
 | `python/dzipc/dzflat.py`(新, 手写) | 按 schema 解码段 → dict; 外加 `dump()` 通用渲染 |
 | `dzipc_topic_echo.py` | 改用 `GenericMessage` 模板 + `dzflat.dump()`, 一份代码覆盖两种 wire |
+
+**两条传输都是借样**: Python 的话题模板恒为 schema-less 的 `GenericMessage`(`dzflat_schema_hash() == 0`), 于是段不会进 C++ 的视图队列, 而是进物化队列并 `dzflat_adopt` 收下 —— **字节是借的, 没有拷贝**。SHM 借的是发布方写好的共享 chunk; UDP 借的是接收层去帧出来的独立块(那一次去帧拷贝是分帧格式的固有成本, 见 `udp_shm_alignment_task_list.md`)。Python 因此直接用 `dzflat_memoryview()` 零拷贝读, 判别用 `dzflat_is_borrowed()`; 需要跨消息留存时用 `dzflat_bytes()` 自己拷一份。生命周期与 C++ 的 `Sample` 契约一致: 视图随消息对象存活, 持有期间 chunk 被钉住。
 
 **Python 侧反而更好**: 没有页尾交错要剥, 而变长标量数组用 `memoryview.cast()` **零拷贝**直读 —— TLV 路径的 `get_uint8_array()` 会把一张 1 MB 的图变成一个百万元素的 Python list。变长区每块按 8 对齐(`dzflat.h` 的 `kAlign`)恰好满足 `cast()` 的对齐要求。
 
@@ -658,3 +661,53 @@ Python 侧的通用消费者是 `GenericMessage` —— 一个**自描述 TLV** 
 
 1. **用错解释器 → 静默用到陈旧 pybind 模块**。构建目标是 CMake 找到的那个解释器(当前 `python3.10`), 而 `python/dzipc/` 下另有陈旧的 311/312 模块(其中 312 还是指向另一棵构建树 `build_py/` 的符号链接), 不含新绑定。误导性极强: `import dzipc` 成功、schema 注册表照常加载 21 条, 只有 `decode_generic` 静默返回 `None` —— 与"这是条 TLV 消息"同一个返回值。已在 `dzflat.py` 加 `_check_binding()` 把两种情况分开并发一次 `RuntimeWarning`; 根因(那几个 `.so` 靠手工维持)未除。
 2. **`getattr` 取 C++ 侧对象的字段会静默拿到默认值**。`out.topic()` 返回的是 C++ 对象, 字段不是 Python 属性。`topic_echo` 原先正因此对**所有**类型都只打印 `N/A`(本步已修), 但这个模式没被消除。
+
+### 9.7 Python 侧发布平坦段
+
+§9.6 解决的是"Python 能**读**"; 这一节解决"Python 能**写**"。在此之前 Python 进程只能收 DZFlat —— 发出去的每条消息恒 TLV。
+
+**为什么原来写不出, 现在为什么能**
+
+写平坦段需要 Root 字段偏移与各字段的 wire 类型, 那是 schema 的知识; Python 进程里没有任何 TU 编译生成头文件(§9.6 同样的理由), 所以 C++ 写端(`dzflat::Writer`)在 Python 进程里不可达。解法与读路径同构且对称: **用同一份以数据形式发射到 Python 的 schema 来写** —— 读用 `decode()`, 写用 `pack()`。
+
+**接口**
+
+| 层 | 新增 | 说明 |
+|---|---|---|
+| `dzIPC::pub_ipc_base` | `virtual bool publish_prebuilt_segment(const void* seg, size_t len)` | **默认返回 false** —— 新传输不实现它就自动获得"回退 TLV"语义, 不必逐个补门 |
+| `dzIPC::shm::shm_pub_ipc` / `dzIPC::socket::socket_pub_ipc` | 各自的实现 | 见下方"门"与"成本" |
+| `pimpl::publisher_ipc_impl` + pybind | 同名转发 + `publish_prebuilt_segment(segment)` | 参数用 `py::buffer` 而非 `py::bytes`: 后者会在边界上**再拷一次整段**(`bytearray → bytes`), 而 memcpy 进 chunk 那一次才是真省不掉的 |
+| `python/dzipc/dzflat.py` | `pack(obj_or_dict, schema=None, msg_id=0)` | 按 schema 写出完整段(含 32B 段头)。返回 `None` = 该类型没有 schema, 这是**回退信号**而不是错误 |
+| `python/dzipc/__init__.py` | `publish_dzflat(pub, msg, msg_id=0) -> bool` | 优先平坦段, 不可用则普通 TLV 发布。**永不抛"没有 schema"** |
+
+**段要过哪些门**(任何一条不满足都返回 false, 由调用方回退 TLV 走慢路径)
+
+| 门 | 为什么 |
+|---|---|
+| `IsDzFlatEnabled()` | 与既有发布路径同一个开关(§5.4) |
+| `dzflat::looks_like_dzflat(seg, len)` —— 段头自证 | 坏段(magic / layout_ver / `total_size <= len` / `root_off`)送出去只会被对端按 `kDzFlatHeaderBad` 丢掉, 还白占一块 chunk |
+| 段头 `msg_id` == 本话题模板的 `msg_id` | 订阅端判"这条是不是我的话题"用的就是这个值。不符 ⇒ 对端**静默丢弃** —— 宁可本地拦下回退慢路径, 也不发一条注定被丢的段 |
+| SHM: 有接收方 + `loan()` 成功 | 池耗尽(32 块/尺寸档, §5.3)是背压而非错误 |
+| UDP: 非 nodelet 拓扑 | nodelet 下同进程订阅者从**对象队列**取消息, 段路径无对象可投 → 回退, 让 `publish()` 那条路去做本地 fanout |
+| UDP: 分帧流总长 ≤ 接收端上界 | 超出必被 `valid_chunk_meta` 丢弃 |
+
+**成本(照实说)**
+
+- **发布端仍有一次整段 memcpy**: 段在 Python 地址空间里生成(`bytearray`), 送进共享 chunk / 发送缓冲时必须拷一次。真正的零拷贝写需要 Python 侧拿到可写视图, 那是另一个里程碑(§4.2 的 `loan<Flat>()` 就地利构造在 C++ 侧才有)。
+- **省下来的是**: TLV 的逐字段组装与序列化、以及**接收端的一次反序列化**(接收侧照旧借样, §9.6)。
+- **UDP 上还多一次铺帧拷贝**: 段在 wire 上不连续(每 1460 字节后跟 12B 页尾), 而 `chunk_send_ex` 要求载荷自带页尾 ⇒ 必须先铺帧, `total_size` 那项要写**分帧流总长**(不是段长) —— 写错这一项的症状是整条消息静默进不来。TLV 路径的那一份拷贝由 `serialize()` 付。
+- 段路径**不记** publish 事件日志(`topic_ipc.cc` 的取舍): 记日志需要 owning 对象去 clone + serialize, 而这条路径手里只有一个段; 要看量用 `DzFlatPublishCount`。
+- 计数只在**成功**时记 `DzFlatPublish(true)`, 失败不在这里记 —— 调用方随后那次 TLV `publish()` 会记一次回退。两边各记一次会把 `fallback/(dzflat+fallback)` 这个"收益有没有生效"的唯一指标算歪。
+
+**验收(`test/test_dzflat_python.py` [9]-[12])**
+
+- **[9] 编码器与 C++ 写端逐字节一致** —— 这是发布路径上最关键的一条门: 差一个字节, 对端要么按 `kDzFlatSchemaDrop` 拒收, 要么指纹对上却读出错位数据。判据不是"解出来差不多", 而是把同一份内容重新写成段, 与 C++ `dzflat_py_publisher` 产出的段做**逐字节**比对(含段头 `total_size` / `msg_id` / 对齐填充): `StdImage` 208 字节、`StdPointCloud` 296 字节, dict 入参与封装对象入参两种都过, `msg_id` 取**非零**(7)以免全零段头让"根本没写 msg_id"也通过。
+  **有牙**: 把 `_ALIGN` 从 8 改成 4 后用例立刻失败并指出 `首个不符字节 @16`(正是段头的 `total_size`), 恢复后通过。
+- **[10] Python 发布 → Python 订阅借样, SHM 与 UDP 各一遍**: `has_dzflat` + `dzflat_is_borrowed` + `DzFlatPublishCount` 增长 + 字段逐项一致(含 96 字节数组)。**UDP 平坦段由此有了第一个生产者**(§T1 的"能力就绪、无生产者"至此不成立于 Python 路径)。
+- **[11] 回退矩阵三种成因**(开关关 / 类型无 schema / 段头 `msg_id` 不符): 每种同时断言两件事 —— `publish_dzflat` 返回 false, **且消息仍以 TLV 到达且字段可读**。只断言返回值会漏掉"返回了 false 但其实没发"这种形态。
+- **[12] 混跑**: 同一话题上平坦段与 TLV 交替。Python 侧两种 wire 都从**物化队列**出(话题模板恒 schema-less), 靠 `has_dzflat()` 判别 —— 与 C++ typed 话题不同, **不存在**漏 drain 的问题, 这条钉住这个差异。
+
+**灰度顺序(重要)**
+
+平坦段的发布端一旦上线, 未升级的订阅方会**静默丢消息**(§6.1)。所以顺序是硬的: **先升级所有订阅方, 再开发布端**, 且按话题分批 (`publish_dzflat` 只在逐话题处调用, 不像 `EnableDzFlat` 那样是进程级), 同时盯 `DzFlatFallbackCount` 与对端的 `dzflat_id_skipped`。
+
