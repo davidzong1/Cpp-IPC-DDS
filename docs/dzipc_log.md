@@ -99,6 +99,18 @@ TransportPacket 的 payload 是 dzIPC `IpcMsgBase::serialize()` 得到的 opaque
 
 `StartShutdownMonitor()` 的监控线程在清理 IPC 实例前调用 `StopDzipcLog()`。信号处理器只设置退出标志，不执行文件 I/O；这样避免在异步信号上下文中获取 mutex 或写文件。建议在程序正常结束前显式调用 `StopDzipcLog()`，以便获得确定的 flush 时机。
 
+⚠️ **例外：opt-out 后上述保证不再成立（2026-09-18，`UF-004`）**。若应用在创建**第一个** IPC 对象**之前**调用
+`dzIPC::DisableShutdownMonitor()`（声明见 `include/dzIPC/dzipc.h`），则该监控线程**根本不会启动**——
+库既不接管 `SIGINT`/`SIGTERM`，也**不会**在退出时替应用调用 `StopDzipcLog()`。因此应用**必须自己**在退出前
+显式调用 `StopDzipcLog()`（并自行决定何时退出），否则 bag 不会 finalize、队列中尚未落盘的记录可能留在内存中。
+同时 `RequestShutdown()` / `IsShutdownRequested()` **只剩置位语义**（没有监控线程去消费该标志）⇒
+**opt-out 之后应用自负退出**。
+
+三点限定：（1）⛔ 默认（**不**调用 opt-out）行为**逐位不变**，本段只描述显式 opt-out 的情形；
+（2）该开关**没有 Python 绑定**，`dzviz` / `dzplot` 与 python 示例**无法 opt-out**，仍走默认路径；
+（3）opt-out 的返回值只承诺"**此后不再隐式安装**处理器"，⛔ 不承诺"库当前不在控制"——先显式调用
+`StartShutdownMonitor()` 再调用它仍会返回 `true`，而库**已接管**。台账见 `unfixed_defects.md` 0.3.12 与
+`shm_defect_fixes.md` § 修复记录 15。
 `StopDzipcLog()` 始终会 join writer 线程并尝试 finalize 当前 bag。轮转中新文件打开失败时设置 `running_=false` 并排空剩余队列——不会引发 `std::terminate`。
 
 ## 测试

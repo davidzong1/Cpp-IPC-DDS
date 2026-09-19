@@ -137,6 +137,130 @@ void copy_truncate(char* dst, std::size_t dst_cap, const std::string& src) noexc
     dst[n] = '\0';
 }
 
+/* ---------------------------------------------------------------------------
+ * UF-006: 表满路径的回收 + 节流 + 最小诊断
+ * ---------------------------------------------------------------------------
+ * 改动前: register_entry 扫完 512 槽仍无空位时**只返回 -1**, 与「池未就绪」
+ * 「抢锁失败」三种原因同值 ⇒ 调用方分不清; 且死进程留下的 in_use=1 条目只有
+ * 别人显式调 gc_dead()/snapshot(true) 时才回收 ⇒ 满载后注册永久失败。
+ * 本次为**最小行为修复**(零布局/零 ABI/零返回码改动):
+ *   ① 表满时在**同一把锁内**按现有 pid_alive 谓词回收死条目, 扫一次 + 重试一次;
+ *   ② 对**空扫**节流, 避免满载稳态下每次注册都付出 O(512) 次 kill(2);
+ *   ③ 三条失败原因各给一行**限流**诊断。
+ * ⛔ 未改 snapshot(false) 判定路径、gc_dead=false 语义、返回码、
+ *    PoolEntry/kRegionSize/kMaxEntries/kShmName。
+ */
+
+/* 把一条 entry 复位成“空闲”。清零动作与 unregister_entry / gc_dead /
+ * snapshot(gc=true) 三处逐字一致 —— 此处独立成 helper 只为不再抄第四份。 */
+void clear_entry_raw(PoolEntry& e) noexcept
+{
+    e.pid = 0;
+    e.kind = 0;
+    e.register_ts_ns = 0;
+    e.heartbeat_ns.store(0, std::memory_order_relaxed);
+    e.topic_name[0] = '\0';
+    e.type_name[0] = '\0';
+    e.domain_id = 0;
+    e.extra[0] = '\0';
+    e.in_use.store(0, std::memory_order_release);
+}
+
+/* 扫描并认领第一个空闲槽; 找不到返回 -1。填槽动作与改动前逐字一致。 */
+int32_t claim_free_slot(PoolEntry* entries, const RegisterInfo& info) noexcept
+{
+    for (std::size_t i = 0; i < kMaxEntries; ++i)
+    {
+        PoolEntry& e = entries[i];
+        if (e.in_use.load(std::memory_order_relaxed) != 0)
+            continue;
+
+        e.pid = current_pid();
+        e.kind = static_cast<uint32_t>(info.kind);
+        e.register_ts_ns = now_ns();
+        e.heartbeat_ns.store(e.register_ts_ns, std::memory_order_relaxed);
+        copy_truncate(e.topic_name, kMaxTopicName, info.topic_name);
+        copy_truncate(e.type_name, kMaxTypeName, info.type_name);
+        e.domain_id = info.domain_id;
+        copy_truncate(e.extra, kMaxExtra, info.extra);
+        e.in_use.store(1, std::memory_order_release);
+        return static_cast<int32_t>(i);
+    }
+    return -1;
+}
+
+/* 已持锁前提下的死条目回收, 返回回收条数。判据与 gc_dead() 完全一致
+ * (只看 pid_alive, 不看 heartbeat)。
+ * ⛔ 不能在这里直接调 gc_dead(): 它会再抢同一把 robust mutex(非递归) ⇒ 同线程自死锁。 */
+std::size_t reap_dead_locked(PoolEntry* entries) noexcept
+{
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < kMaxEntries; ++i)
+    {
+        PoolEntry& e = entries[i];
+        if (e.in_use.load(std::memory_order_acquire) == 0)
+            continue;
+        if (pid_alive(e.pid))
+            continue;
+        clear_entry_raw(e);
+        ++n;
+    }
+    return n;
+}
+
+/* 空扫节流: 一次整表回收 = 至多 512 次 kill(2)(量级 ~0.5ms)。若每次注册失败都扫,
+ * 满载稳态下即 O(512) syscall/次注册 —— 正是本项要避免的。
+ * 只对**空扫**计时: 空扫后 kFruitlessReapMinIntervalNs 内不再扫; 一旦扫到东西
+ * 立即解除节流(有收益就不该省) ⇒ 单进程空扫频率上限 ≈ 1/250ms(≈0.2% CPU)。
+ * ⛔ 代价是“回收最多被推迟一个窗口, 且需要再来一次注册”: 但改动前该场景成功率
+ *    为 0(永不回收), 故这是单调改善, 不是回归。 */
+constexpr int64_t kFruitlessReapMinIntervalNs = 250'000'000;
+std::atomic<int64_t> g_last_fruitless_reap_ns{};   /* 0 = 从未空扫过 */
+
+/* 诊断限流: 同一原因最多 1 行/秒, 并报告其间被抑制的条数。 */
+constexpr int64_t kDiagMinIntervalNs = 1'000'000'000;
+enum DiagReason : int
+{
+    kDiagPoolNotReady = 0,
+    kDiagLockFailed = 1,
+    kDiagFullNoDead = 2,
+    kDiagFullThrottled = 3,
+    kDiagFullAfterReap = 4,
+    kDiagCount = 5,
+};
+const char* const kDiagText[kDiagCount] = {
+    "池未就绪(共享段不可用或 header 未 ready)",
+    "抢共享段锁失败",
+    "表满且本轮整表回收未找到死条目",
+    "表满且本轮整表回收被空扫节流跳过",
+    "表满且回收出空槽后仍认领失败(持锁内理论上不可达)",
+};
+std::atomic<int64_t> g_diag_last_ns[kDiagCount]{};   /* 0 = 从未输出过 */
+std::atomic<uint64_t> g_diag_suppressed[kDiagCount]{};
+
+/* 为何不用 dzIPC::logger: 它是 bag 事件记录器(只有 publish/request/response/
+ * endpoint-meta 四类事件, 没有 warn/error 级别), 且其 endpoint-meta 路径本身要调
+ * IpcInfoPool::snapshot(false) ⇒ 从池内(尤其持锁时)回调它会再抢同一把非递归锁。
+ * 这里改用 std::cerr —— 与 src/dzIPC 其余模块(如 shm_pub_sub_ipc.cc)的诊断同一口径。
+ * 三条失败原因(池未就绪/锁失败/表满)据此可区分, 且各自限流。 */
+void diag_register_failure(int reason) noexcept
+{
+    const int64_t now = now_ns();
+    std::atomic<int64_t>& last = g_diag_last_ns[reason];
+    const int64_t prev = last.load(std::memory_order_relaxed);
+    if (prev != 0 && (now - prev) < kDiagMinIntervalNs)
+    {
+        g_diag_suppressed[reason].fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    const uint64_t suppressed = g_diag_suppressed[reason].exchange(0, std::memory_order_relaxed);
+    last.store(now, std::memory_order_relaxed);
+    std::cerr << "\033[33m[dzIPC][info_pool] register_entry 失败: " << kDiagText[reason];
+    if (suppressed != 0)
+        std::cerr << " (上一条同类诊断以来另有 " << suppressed << " 次被抑制)";
+    std::cerr << "\033[0m" << std::endl;
+}
+
 #if defined(_WIN32)
 /* Windows 跨进程互斥量句柄（每进程独立打开，指向同一具名内核对象） */
 HANDLE g_named_mutex = nullptr;
@@ -381,30 +505,56 @@ IpcInfoPool::~IpcInfoPool() = default;
 int32_t IpcInfoPool::register_entry(const RegisterInfo& info)
 {
     if (!impl_ || !impl_->ok())
-        return -1;
-
-    ScopedShmLock lock(impl_->header);
-    if (!lock.locked)
-        return -1;
-
-    for (std::size_t i = 0; i < kMaxEntries; ++i)
     {
-        PoolEntry& e = impl_->entries[i];
-        if (e.in_use.load(std::memory_order_relaxed) != 0)
-            continue;
-
-        e.pid = current_pid();
-        e.kind = static_cast<uint32_t>(info.kind);
-        e.register_ts_ns = now_ns();
-        e.heartbeat_ns.store(e.register_ts_ns, std::memory_order_relaxed);
-        copy_truncate(e.topic_name, kMaxTopicName, info.topic_name);
-        copy_truncate(e.type_name, kMaxTypeName, info.type_name);
-        e.domain_id = info.domain_id;
-        copy_truncate(e.extra, kMaxExtra, info.extra);
-        e.in_use.store(1, std::memory_order_release);
-        return static_cast<int32_t>(i);
+        diag_register_failure(kDiagPoolNotReady);   /* 此处未持锁, 可直接输出 */
+        return -1;
     }
-    return -1;
+
+    int diag = -1;   /* -1 = 本轮无诊断 */
+    int32_t slot = -1;
+    {
+        ScopedShmLock lock(impl_->header);
+        if (!lock.locked)
+        {
+            diag_register_failure(kDiagLockFailed);   /* 没抢到锁, 同样未持锁 */
+            return -1;
+        }
+
+        slot = claim_free_slot(impl_->entries, info);
+        if (slot < 0)
+        {
+            /* ---- 表满路径(UF-006 新增): 同一把锁内回收死条目, 最多一次扫 + 一次重试 ---- */
+            const int64_t now = now_ns();
+            const int64_t last_fruitless = g_last_fruitless_reap_ns.load(std::memory_order_relaxed);
+            const bool throttled = (last_fruitless != 0) && ((now - last_fruitless) < kFruitlessReapMinIntervalNs);
+            bool reaped_any = false;
+            if (!throttled)
+            {
+                reaped_any = (reap_dead_locked(impl_->entries) != 0);
+                /* 空扫 ⇒ 起节流; 有回收 ⇒ 解除节流(下轮表满可立即再扫) */
+                g_last_fruitless_reap_ns.store(reaped_any ? 0 : now, std::memory_order_relaxed);
+                if (reaped_any)
+                {
+                    /* 刚回收的空槽在持锁期间不会被别的进程抢走 ⇒ 这次重试应当成功 */
+                    slot = claim_free_slot(impl_->entries, info);
+                }
+            }
+            if (slot < 0)
+            {
+                if (throttled)
+                    diag = kDiagFullThrottled;
+                else if (reaped_any)
+                    diag = kDiagFullAfterReap;
+                else
+                    diag = kDiagFullNoDead;
+            }
+        }
+    }
+    /* ⛔ 诊断输出必须在**解锁之后**: std::cerr 无缓冲, 若终端/管道阻塞, 持锁输出会
+     * 在**跨进程锁内**阻塞 ⇒ 拖住全机所有进程的池操作(限流只管频率, 不管单次时长)。 */
+    if (diag >= 0)
+        diag_register_failure(diag);
+    return slot;
 }
 
 void IpcInfoPool::unregister_entry(int32_t slot)

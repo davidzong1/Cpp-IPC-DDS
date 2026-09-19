@@ -14,7 +14,7 @@ class CircularQueue
 public:
   using MsgPtr = std::shared_ptr<msgType>;
   explicit CircularQueue(size_t capacity)
-      : capacity_(capacity == 0 ? 1 : capacity), cells_(new Cell[capacity_])
+      : capacity_(capacity <= 2 ? 2 : capacity), cells_(new Cell[capacity_])
   {
     for (size_t i = 0; i < capacity_; ++i)
     {

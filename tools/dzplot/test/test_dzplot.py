@@ -1255,6 +1255,306 @@ class TestDecodePayloadDzFlat:
         assert base64.b64decode(fields["data"]) == bytes(seg)
 
 
+# ---------------------------------------------------------------------------
+# DZFlat / 旁路借样(订阅腿): 借样段不得静默变成空字段
+# ---------------------------------------------------------------------------
+
+class _FakeDzflatMsg:
+    """模拟持有 DZFlat 借样段的 GenericMessage。
+
+    关键点: **fields_ 是空的** —— 这正是真实情况(订阅腿对 schema-less 话题走
+    dzflat_adopt, 只收段字节)。判据里必须带上 field_count()==0, 否则用例测不出
+    "TLV 字段 getter 面为空"这个前提。
+    """
+
+    def __init__(self, seg: bytes, borrowed: bool = True) -> None:
+        self._seg = seg
+        self._borrowed = borrowed
+
+    def has_dzflat(self) -> bool:
+        return True
+
+    def dzflat_is_borrowed(self) -> bool:
+        return self._borrowed
+
+    def dzflat_schema_hash_rx(self) -> int:
+        return 0x5EED0001
+
+    def dzflat_bytes(self) -> bytes:
+        return self._seg
+
+    def dzflat_memoryview(self):
+        return memoryview(self._seg)
+
+    def field_count(self) -> int:
+        return 0
+
+
+class _FakeHeaderWrapper:
+    """生成的 Python 封装的形状: __slots__ + 私有 _g。"""
+
+    __slots__ = ("_g", "frame_id", "stamp")
+
+    def __init__(self, frame_id: str, stamp: float) -> None:
+        self._g = None
+        self.frame_id = frame_id
+        self.stamp = stamp
+
+
+class _FakeImageWrapper:
+    """模拟 StdImage 封装: 标量 + 嵌套消息 + 数组。"""
+
+    __slots__ = ("_g", "header", "height", "width", "encoding", "step", "data")
+
+    def __init__(self) -> None:
+        self._g = None
+        self.header = _FakeHeaderWrapper("cam0", 12.5)
+        self.height = 4
+        self.width = 8
+        self.encoding = "rgb8"
+        self.step = 24
+        self.data = [1, 2, 3]
+
+
+class _FakeTlvMsg:
+    """模拟 TLV 消息: 字段在 GenericMessage 里, 走 field_count/get_* 路。"""
+
+    def field_count(self) -> int:
+        return 2
+
+    def field_name(self, i: int) -> str:
+        return ("width", "height")[i]
+
+    def field_type(self, i: int) -> int:
+        return 7  # uint32
+
+    def get_uint32(self, name: str) -> int:
+        return {"width": 8, "height": 4}[name]
+
+
+class TestSubscriberDzFlatBorrow:
+    """订阅腿的 DZFlat / 旁路借样支持(纯 Python L1, 不带 pybind)。
+
+    缺陷形态(修复前): 订阅腿对 schema-less 话题(本工具的模板恒为 GenericMessage)
+    走 dzflat_adopt —— 段是**借样**收下的, 但 GenericMessage 没有 schema, fields_
+    为空, 于是 field_count()==0, _serialize_message_fields() **静默**返回 {}:
+    发布端一开 DZFlat, 观测工具就"通道看着通、数据是空的", 也不报错。
+
+    本类断言两件事: ①同一条段要么解出与 TLV 路径**同形**的字段, 要么给 base64 +
+    一次性告警 —— 绝不静默空字段; ②借样状态可观测(wire / dzflat_borrowed)。
+    """
+
+    @staticmethod
+    def _install(msg_cls=None, dzflat_mod=None, dzflat_loader=None):
+        """注入假的消息类/dzflat 模块; 返回 restore()。
+
+        与本文件其他类一致: runner 没有 setUp/tearDown, 装/卸必须显式配对。
+        """
+        saved = (
+            dzplot._load_message_class,
+            dzplot._load_dzflat_module,
+            dzplot._DZFLAT_WARNED,
+            dzplot._DZFLAT_WIRE_LOGGED,
+            dzplot._DZFLAT_DECODE_OK,
+        )
+        # 两个 loader **总是**被钉死: 否则用例结果会随宿主环境变化
+        # (本机装有 dzipc 时 _load_message_class 会返回**真**封装类)。
+        dzplot._load_message_class = (lambda type_name: msg_cls)
+        dzplot._load_dzflat_module = (
+            dzflat_loader if dzflat_loader is not None else (lambda: dzflat_mod)
+        )
+        dzplot._DZFLAT_WARNED = set()
+        dzplot._DZFLAT_WIRE_LOGGED = set()
+        dzplot._DZFLAT_DECODE_OK = None
+
+        def _restore():
+            (dzplot._load_message_class, dzplot._load_dzflat_module,
+             dzplot._DZFLAT_WARNED, dzplot._DZFLAT_WIRE_LOGGED,
+             dzplot._DZFLAT_DECODE_OK) = saved
+
+        return _restore
+
+    def test_borrowed_segment_decodes_instead_of_empty_fields(self):
+        """核心回归: 借样段 + 空 fields_ ⇒ 必须是**解出的字段**, 不是 {}。"""
+        class _Cls:
+            @staticmethod
+            def from_generic(g):
+                return _FakeImageWrapper()
+
+        restore = self._install(msg_cls=_Cls, dzflat_mod=None)
+        try:
+            msg = _FakeDzflatMsg(b"segment-bytes")
+            assert msg.field_count() == 0, "前提: 借样消息的 TLV 字段面是空的"
+            fields, wire, borrowed = dzplot._extract_fields(
+                msg, "StdImage", "/live/img")
+            logged = "/live/img" in dzplot._DZFLAT_WIRE_LOGGED
+        finally:
+            restore()
+        assert fields, f"借样段不得静默变成空字段: {fields}"
+        assert fields["width"] == 8 and fields["height"] == 4, fields
+        assert (wire, borrowed) == ("dzflat", True), (wire, borrowed)
+        assert logged, "借样形态应当被记录一次, 否则排障时无从判断"
+
+    def test_tlv_message_path_unchanged(self):
+        """非 DZFlat 消息仍走 field_count/get_* 老路, 且不标 wire=dzflat。"""
+        restore = self._install(msg_cls=None, dzflat_mod=None)
+        try:
+            fields, wire, borrowed = dzplot._extract_fields(
+                _FakeTlvMsg(), "StdImage", "/live/tlv")
+        finally:
+            restore()
+        assert fields == {"width": 8, "height": 4}, fields
+        assert (wire, borrowed) == ("tlv", False), (wire, borrowed)
+
+    def test_nested_wrapper_becomes_dict_not_repr(self):
+        """嵌套封装必须展开成 dict —— TLV 路的 get_nested 就是这个形状。
+
+        修复前 _to_jsonable 对"没有 field_count 也不是 list"的对象一律
+        str(value)[:256], 于是 DZFlat 路的 header 变成
+        "StdHeader(frame_id='cam0', stamp=12.5)" 字符串, 与 TLV 路不同形。
+        """
+        assert dzplot._to_jsonable(_FakeHeaderWrapper("cam0", 12.5)) == {
+            "frame_id": "cam0", "stamp": 12.5}
+        expanded = dzplot._to_jsonable(_FakeImageWrapper())
+        assert expanded["header"] == {"frame_id": "cam0", "stamp": 12.5}, expanded
+        assert "_g" not in expanded, "私有槽位不得外泄到 JSON"
+
+    def test_memoryview_becomes_list_and_is_json_safe(self):
+        """借样视图必须就地落成 list: 带 memoryview 的样本是 use-after-free 隐患。"""
+        import json
+        out = dzplot._to_jsonable({"data": memoryview(b"\x01\x02\x03")})
+        assert out == {"data": [1, 2, 3]}, out
+        assert json.dumps(out) is not None
+
+    def test_missing_wrapper_falls_back_to_raw_dzflat_module(self):
+        """拿不到生成封装时退到 dzipc.dzflat.decode_generic(零拷贝视图直读)。"""
+        seen = {}
+
+        class _Mod:
+            @staticmethod
+            def decode_generic(msg, zero_copy=False):
+                seen["zero_copy"] = zero_copy
+                return {"header": {"frame_id": "cam0", "stamp": 1.0},
+                        "width": 8,
+                        "data": memoryview(b"\x09\x08")}
+
+        restore = self._install(msg_cls=None, dzflat_mod=_Mod())
+        try:
+            fields, wire, _ = dzplot._extract_fields(
+                _FakeDzflatMsg(b"seg"), "StdImage", "/live/raw")
+        finally:
+            restore()
+        assert fields["width"] == 8, fields
+        assert fields["data"] == [9, 8], fields
+        assert fields["header"] == {"frame_id": "cam0", "stamp": 1.0}, fields
+        assert seen.get("zero_copy") is True, \
+            "直读借样段应当用零拷贝视图(落成 list 的那次拷贝发生在 _to_jsonable)"
+        assert wire == "dzflat"
+
+    def test_unknown_schema_falls_back_to_base64_not_empty(self):
+        """段在但 schema 不在本进程 ⇒ base64(可诊断) + 告警, 不是空 dict。"""
+        import base64
+        restore = self._install(msg_cls=None, dzflat_mod=None)
+        try:
+            fields, wire, borrowed = dzplot._extract_fields(
+                _FakeDzflatMsg(b"raw-segment"), "StdImage", "/live/noschema")
+            warned = "/live/noschema" in dzplot._DZFLAT_WARNED
+        finally:
+            restore()
+        assert base64.b64decode(fields["data"]) == b"raw-segment", fields
+        assert warned, "schema 缺失必须告警一次(否则又是静默失败)"
+        assert (wire, borrowed) == ("dzflat", True)
+
+    def test_serialize_message_marks_wire_and_borrow(self):
+        """样本里带上 wire / dzflat_borrowed —— "借样到底有没有生效"要可观测。"""
+        import json
+
+        class _Cls:
+            @staticmethod
+            def from_generic(g):
+                return _FakeImageWrapper()
+
+        restore = self._install(msg_cls=_Cls, dzflat_mod=None)
+        try:
+            sample = dzplot.LiveSniffSource._serialize_message(
+                _FakeDzflatMsg(b"seg"), "/live/img", "StdImage")
+        finally:
+            restore()
+        assert sample["wire"] == "dzflat", sample
+        assert sample["dzflat_borrowed"] is True, sample
+        assert sample["fields"]["width"] == 8, sample
+        assert json.dumps(sample) is not None
+
+    def test_serialize_message_does_not_bypass_dzflat_decoder(self):
+        """源码级门: 订阅腿的样本构造不得直接调 _serialize_message_fields。
+
+        直接调它就是缺陷本身(field_count()==0 ⇒ 空字段), 所以这里退化成一条
+        可读的断言, 而不是只能靠跑真库才能发现的静默行为。
+        """
+        import inspect
+        source = inspect.getsource(dzplot.LiveSniffSource._serialize_message)
+        assert "_extract_fields" in source, \
+            "_serialize_message 必须经 _extract_fields 分派两种 wire"
+        assert "_serialize_message_fields(" not in source, \
+            "_serialize_message 不得绕过 DZFlat 解码(借样消息的字段面是空的)"
+
+    def test_wire_logged_once_per_topic(self):
+        """借样形态按 topic 去重记录, 不逐样本刷屏。"""
+        class _Cls:
+            @staticmethod
+            def from_generic(g):
+                return _FakeImageWrapper()
+
+        restore = self._install(msg_cls=_Cls, dzflat_mod=None)
+        try:
+            for _ in range(5):
+                dzplot._extract_fields(_FakeDzflatMsg(b"s"), "StdImage", "/live/x")
+            logged = dict.fromkeys(dzplot._DZFLAT_WIRE_LOGGED)
+        finally:
+            restore()
+        assert list(logged) == ["/live/x"], logged
+
+    def test_message_wire_tolerates_objects_without_binding(self):
+        """旧绑定/假消息(没有 has_dzflat)一律当 TLV; 抛异常也不得把循环带崩。"""
+        assert dzplot._message_wire(object()) == ("tlv", False)
+
+        class _Boom:
+            def has_dzflat(self):
+                raise RuntimeError("stale binding")
+
+        assert dzplot._message_wire(_Boom()) == ("tlv", False)
+
+        class _NoBorrowFlag:
+            def has_dzflat(self):
+                return True
+
+        assert dzplot._message_wire(_NoBorrowFlag()) == ("dzflat", False)
+
+    def test_payload_wire_marks_both_wires(self):
+        """嗅探腿的样本也要标 wire(裸段字节 → magic 判定, 不解码)。"""
+        class _Mod:
+            @staticmethod
+            def looks_like_dzflat(buf):
+                return bytes(buf)[:4] == b"DZFL"
+
+        restore = self._install(msg_cls=None, dzflat_mod=_Mod())
+        try:
+            flat = dzplot._payload_wire(b"DZFL\x00\x00")
+            tlv = dzplot._payload_wire(b"TLV-ish-bytes")
+            empty = dzplot._payload_wire(b"")
+        finally:
+            restore()
+        assert (flat, tlv, empty) == ("dzflat", "tlv", "tlv"), (flat, tlv, empty)
+
+    def test_payload_wire_tolerates_missing_dzflat_module(self):
+        """没有 dzipc.dzflat 时不能把嗅探循环弄挂 —— 退回 "tlv"。"""
+        restore = self._install(msg_cls=None, dzflat_loader=lambda: None)
+        try:
+            assert dzplot._payload_wire(b"DZFL\x00\x00") == "tlv"
+        finally:
+            restore()
+
+
 class TestClientIsolation:
     """Verify that a slow client never blocks the broadcast loop or
     other clients."""
@@ -2180,6 +2480,7 @@ def run_tests():
         TestSnifferPollScheduling,
         TestDecodePayload,
         TestDecodePayloadDzFlat,
+        TestSubscriberDzFlatBorrow,
         TestClientIsolation,
         TestBagFlowControl,
         TestSysPathPriority,

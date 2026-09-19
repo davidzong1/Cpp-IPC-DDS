@@ -90,10 +90,28 @@ inline TopicDataPtr TopicDataPtrMake(int msg_id = 0)
 /***********************************************************************************/
 /***********************************************************************************/
 // 启动退出监控线程，捕获 Ctrl+C 后释放全局实例容器并退出进程
+// UF-009 链式接管(2026-09-18): 安装前保存应用既有处置; 信号到来时回放既有处理器
+// (SIG_DFL/SIG_IGN 跳过)、复权(应用处置装回), 并给应用 500ms 宽限自行退出——
+// 优雅路径上栈正常展开, IPC 实例析构、SHM 段 unlink、应用收尾恢复执行;
+// 超时才走库收尾 std::exit(0)(该路径残留语义与改前一致)。RequestShutdown()
+// 的库内部退出路径不回放不宽限, 行为不变。
 IPC_EXPORT void StartShutdownMonitor();
 // 允许外部主动触发退出流程
 IPC_EXPORT void RequestShutdown();
 // 查询是否已经请求退出
 IPC_EXPORT bool IsShutdownRequested();
+// 让**库不要**隐式接管进程退出(UF-004 opt-out): 必须在创建第一个 IPC 对象**之前**调用。
+//   true  = 此后库**不再隐式安装**: 四个 *IPCPtrMake 这条路不再装 SIGINT/SIGTERM 处理器、
+//           不起监控线程, 信号交给应用自己的处置(SIG_DFL 即硬杀), 应用自负退出。
+//           注意: 它只承诺"此后不再隐式安装", **不**代表"库当前没接管", 更**不能**撤销
+//           已经装上的处理器 / 已经在跑的监控线程。顺序反例: 先**显式**调过
+//           StartShutdownMonitor()(它直接走 std::call_once, 不置内部"已启动"标志)再调本
+//           函数, 这里同样返回 true, 而处理器与监控线程**已经在跑**, 行为保持"已启动"——
+//           这条顺序上返回值与"库是否已接管"无关。要判当前是否已接管, 请自行
+//           sigaction(SIGINT, nullptr, &old) 自查, 不要读返回值。
+//   false = 确定"太晚": 库已由隐式路径接管且不可撤销; 本次调用**不改变任何行为**
+//           (默认路径逐位不变)。
+// 只关"四个 *IPCPtrMake 隐式安装"这一条路: 显式 StartShutdownMonitor() 仍然照装。
+IPC_EXPORT bool DisableShutdownMonitor() noexcept;
 
 }

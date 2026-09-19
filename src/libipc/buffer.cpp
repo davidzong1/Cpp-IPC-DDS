@@ -56,7 +56,17 @@ buffer::buffer(buffer&& rhs)
 }
 
 buffer::~buffer() {
-    p_->clear();
+    /* 析构里的第二处解引用 —— 与上面四个访问器同一口径。
+     * ❗ 实测订正(2026-09-18): 这一句不是可复现崩溃点 —— `pimpl::clear()` 的整个函数体只是
+     * `clear_impl(static_cast<T*>(this))`, 而「不舒服」分支的 `clear_impl(T* p)` 就是 `mem::free(p)`
+     * (`utility/pimpl.h:41-45`), 传 nullptr 即提前返回 ⇒ **从不读取 `this` 指向的内存**。
+     * 注入实验证实: 把 buffer_ 的 32B 分配注成失败(p_ == nullptr)后, 旧代码仍 rc=0;
+     * 反汇编可见 gcc 自己就生成了 `test rbp,rbp; je <ret>`。
+     * 所以本行修的是**形式 UB**(无诊断), **不是缺陷** —— 真正对地址 0 的读在访问器的
+     * `impl(p_)->p_` 那几行(它们才是 HEAD 前已实测碰到的崩点)。
+     * 仍按同一口径挡上: 取消形式 UB, 且免得日后 `clear()` 改成真解引 `this`。 */
+    auto ip = impl(p_);
+    if (ip != nullptr) ip->clear();
 }
 
 void buffer::swap(buffer& rhs) {

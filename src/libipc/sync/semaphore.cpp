@@ -38,22 +38,32 @@ namespace ipc
         semaphore::~semaphore()
         {
             close();
-            p_->clear();
+            /* 析构的第二处解引用: `close()` 里已挡了失效态, 这一句同样要挡 ——
+             * `p_->clear()` 在 `p_ == nullptr` 时是成员访问式的形式 UB。 */
+            auto ip = impl(p_);
+            if (ip != nullptr) ip->clear();
         }
 
+        /* ⛔ UF-002: `p_ == nullptr` 是失效态(`pimpl<semaphore_>` 走"不舒服"分支 ⇒ impl
+         * 在堆上, `mem::alloc<semaphore_>` 失败时返回 nullptr 而不抛, 构造函数不检查)。
+         * 旧实现在 `~semaphore()` 的第一句 `close()` 就解引用空指针。收口见
+         * docs/unfixed_defects.md §2「修法选项 1」: 入口判空 + 失效态空转。 */
         void const *semaphore::native() const noexcept
         {
-            return impl(p_)->sem_.native();
+            auto ip = impl(p_);
+            return (ip == nullptr) ? nullptr : ip->sem_.native();
         }
 
         void *semaphore::native() noexcept
         {
-            return impl(p_)->sem_.native();
+            auto ip = impl(p_);
+            return (ip == nullptr) ? nullptr : ip->sem_.native();
         }
 
         bool semaphore::valid() const noexcept
         {
-            return impl(p_)->sem_.valid();
+            auto ip = impl(p_);
+            return (ip != nullptr) && ip->sem_.valid();
         }
 
         bool semaphore::open(char const *name, std::uint32_t count) noexcept
@@ -63,17 +73,27 @@ namespace ipc
                 ipc::error("fail semaphore open: name is empty\n");
                 return false;
             }
-            return impl(p_)->sem_.open(name, count);
+            auto ip = impl(p_);
+            if (ip == nullptr)
+            {
+                ipc::error("fail semaphore open: semaphore is in invalid state (pimpl alloc failed)\n");
+                return false;
+            }
+            return ip->sem_.open(name, count);
         }
 
         void semaphore::close() noexcept
         {
-            impl(p_)->sem_.close();
+            auto ip = impl(p_);
+            if (ip == nullptr) return;
+            ip->sem_.close();
         }
 
         void semaphore::clear() noexcept
         {
-            impl(p_)->sem_.clear();
+            auto ip = impl(p_);
+            if (ip == nullptr) return;
+            ip->sem_.clear();
         }
 
         void semaphore::clear_storage(char const *name) noexcept
@@ -83,17 +103,20 @@ namespace ipc
 
         bool semaphore::try_wait() noexcept
         {
-            return impl(p_)->sem_.try_wait();
+            auto ip = impl(p_);
+            return (ip == nullptr) ? false : ip->sem_.try_wait();
         }
 
         bool semaphore::wait(std::uint64_t tm) noexcept
         {
-            return impl(p_)->sem_.wait(tm);
+            auto ip = impl(p_);
+            return (ip == nullptr) ? false : ip->sem_.wait(tm);
         }
 
         bool semaphore::post(std::uint32_t count) noexcept
         {
-            return impl(p_)->sem_.post(count);
+            auto ip = impl(p_);
+            return (ip == nullptr) ? false : ip->sem_.post(count);
         }
 
     } // namespace sync

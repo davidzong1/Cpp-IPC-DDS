@@ -119,6 +119,10 @@ struct Args
     bool force_no_evidence{false};
     bool verbose{false};
     std::string via{"direct"};
+    /* UF-004: 让库**不要**接管退出(SIGINT/SIGTERM 走应用自己的处置,
+     * 见 dzipc.h 的 DisableShutdownMonitor())。裸布尔: 只写开关名, 没有取值形式
+     * ⇒ 不会吞掉下一个 token; 写成 --no-shutdown-monitor=... 会按"未知参数"报错。 */
+    bool no_shutdown_monitor{false};
 };
 
 bool take_value(int argc, char** argv, int& i, const char* name, std::string& out)
@@ -156,11 +160,14 @@ Args parse_args(int argc, char** argv)
         else if (std::strcmp(argv[i], "--auto") == 0) a.auto_mode = true;
         else if (std::strcmp(argv[i], "--force-no-evidence") == 0) a.force_no_evidence = true;
         else if (std::strcmp(argv[i], "--verbose") == 0) a.verbose = true;
+        /* ⛔ 裸布尔: 用 strcmp 单判, 不走 take_value(那会吞掉下一个 token) */
+        else if (std::strcmp(argv[i], "--no-shutdown-monitor") == 0) a.no_shutdown_monitor = true;
         else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0)
         {
             std::printf(
                 "sercli_live_driver --role server|client --topic T --domain D --auto [--count N] [--period-ms M]\n"
-                "                  [--hold-ms H] [--timeout-ms X] [--via direct|factory] [--force-no-evidence]\n");
+                "                  [--hold-ms H] [--timeout-ms X] [--via direct|factory] [--force-no-evidence]\n"
+                "                  [--no-shutdown-monitor]\n");
             std::exit(0);
         }
         else
@@ -406,5 +413,18 @@ int main(int argc, char** argv)
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
     const Args a = parse_args(argc, argv);
+    /* UF-004 opt-out: 必须在**任何 IPC 构造之前**(run_server/run_client 里才有构造,
+     * 见 :268/:313 一带), 也就是在应用装好自己的处理器(:406-407)之后 —— 这正是
+     * "应用自带优雅退出、不想被库接管"的场景。
+     * ⛔ 返回值必须**打出来**: false = 太晚(监控已在跑), 那一轮走的其实是默认退出语义,
+     *    静默下去会让外部脚本把默认路径当成 opt-out 生效(队内纪律: 静默失效即缺陷)。 */
+    if (a.no_shutdown_monitor)
+    {
+        const bool ok = dzIPC::DisableShutdownMonitor();
+        std::printf("OPTOUT no_shutdown_monitor=1 ret=%d\n", ok ? 1 : 0);
+        std::fflush(stdout);
+        if (!ok)
+            std::fprintf(stderr, "WARN --no-shutdown-monitor 太晚: 退出监控已启动, 本次仍走默认退出语义\n");
+    }
     return a.role == "server" ? run_server(a) : run_client(a);
 }

@@ -34,19 +34,30 @@ mutex::mutex(char const * name)
 
 mutex::~mutex() {
     close();
-    p_->clear();
+    /* 析构的第二处解引用: `close()` 里已挡了失效态, 这一句同样要挡 ——
+     * `p_->clear()` 在 `p_ == nullptr` 时是成员访问式的形式 UB。 */
+    auto ip = impl(p_);
+    if (ip != nullptr) ip->clear();
 }
 
+/* ⛔ UF-002: `p_ == nullptr` 是失效态(`pimpl<mutex_>` 走"不舒服"分支 ⇒ impl 在堆上,
+ * `mem::alloc<mutex_>` 失败时返回 nullptr 而不抛`include/libipc/pool_alloc.h:87-97`,
+ * 构造函数不检查)。旧实现每一处都直接解引用, `~mutex()` 第一句 `close()` 就是崩点。
+ * 收口方式: docs/unfixed_defects.md §2「修法选项 1」—— 入口判空 + 失效态空转
+ * (`valid()` false / 取原生句柄得 nullptr / 加解锁返回 false), 不动全局错误模型。 */
 void const *mutex::native() const noexcept {
-    return impl(p_)->lock_.native();
+    auto ip = impl(p_);
+    return (ip == nullptr) ? nullptr : ip->lock_.native();
 }
 
 void *mutex::native() noexcept {
-    return impl(p_)->lock_.native();
+    auto ip = impl(p_);
+    return (ip == nullptr) ? nullptr : ip->lock_.native();
 }
 
 bool mutex::valid() const noexcept {
-    return impl(p_)->lock_.valid();
+    auto ip = impl(p_);
+    return (ip != nullptr) && ip->lock_.valid();
 }
 
 bool mutex::open(char const *name) noexcept {
@@ -54,15 +65,25 @@ bool mutex::open(char const *name) noexcept {
         ipc::error("fail mutex open: name is empty\n");
         return false;
     }
-    return impl(p_)->lock_.open(name);
+    auto ip = impl(p_);
+    if (ip == nullptr) {
+        /* 要报出来: "分配失败 ⇒ 永久失效"与"参数不对"在调用方看都是 false */
+        ipc::error("fail mutex open: mutex is in invalid state (pimpl alloc failed)\n");
+        return false;
+    }
+    return ip->lock_.open(name);
 }
 
 void mutex::close() noexcept {
-    impl(p_)->lock_.close();
+    auto ip = impl(p_);
+    if (ip == nullptr) return;
+    ip->lock_.close();
 }
 
 void mutex::clear() noexcept {
-    impl(p_)->lock_.clear();
+    auto ip = impl(p_);
+    if (ip == nullptr) return;
+    ip->lock_.clear();
 }
 
 void mutex::clear_storage(char const * name) noexcept {
@@ -70,15 +91,18 @@ void mutex::clear_storage(char const * name) noexcept {
 }
 
 bool mutex::lock(std::uint64_t tm) noexcept {
-    return impl(p_)->lock_.lock(tm);
+    auto ip = impl(p_);
+    return (ip == nullptr) ? false : ip->lock_.lock(tm);
 }
 
 bool mutex::try_lock() noexcept(false) {
-    return impl(p_)->lock_.try_lock();
+    auto ip = impl(p_);
+    return (ip == nullptr) ? false : ip->lock_.try_lock();
 }
 
 bool mutex::unlock() noexcept {
-    return impl(p_)->lock_.unlock();
+    auto ip = impl(p_);
+    return (ip == nullptr) ? false : ip->lock_.unlock();
 }
 
 } // namespace sync

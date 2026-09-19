@@ -396,7 +396,20 @@ def _to_jsonable(value: Any, depth: int = 0) -> Any:
         if isinstance(value, float) and not math.isfinite(value):
             return None
         return value
+    if isinstance(value, dict):
+        # DZFlat 段的 schema 解码走的是"字段名 → 值"的 dict(与 TLV 路的 field_count
+        # 遍历等价), 所以这里必须能递归 dict 本身 —— 否则整棵子树会掉到末尾的
+        # str(value) 分支, 前端拿到一段 repr 字符串。
+        return {str(k): _to_jsonable(v, depth + 1)
+                for k, v in list(value.items())[:100]}
     if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v, depth + 1) for v in value[:100]]
+    if isinstance(value, memoryview):
+        # 借样段上的零拷贝视图(GenericMessage.dzflat_memoryview → dzipc.dzflat 的
+        # zero_copy 解码)。**必须在这里就地落成普通列表**: 视图指向共享 chunk /
+        # 去帧块, 生命周期只跟那条消息走, 而样本要进队列、过 WebSocket、被前端长期
+        # 持有 —— 一旦把 memoryview 带出去就是 use-after-free。落成 list 的代价是
+        # 一次拷贝, 与 TLV 路径的 list(get_*_array()) 完全一致。
         return [_to_jsonable(v, depth + 1) for v in value[:100]]
     if isinstance(value, bytes):
         return base64.b64encode(value).decode("ascii")
@@ -439,6 +452,14 @@ def _to_jsonable(value: Any, depth: int = 0) -> Any:
             except Exception:
                 result[fname] = None
         return result
+    # 生成的 Python 封装(gen_msgs/*.py)是 __slots__ 类: DZFlat 段经
+    # msg_cls.from_generic() 解出的**嵌套消息**就是这种对象。展开成 dict 才能与
+    # TLV 路径的 get_nested() 同形 —— 否则嵌套字段会掉到末尾的 str(value),
+    # 前端拿到 "StdHeader(frame_id=..., stamp=...)" 这样的 repr 字符串。
+    slots = getattr(type(value), "__slots__", None)
+    if slots:
+        return {str(name): _to_jsonable(getattr(value, name, None), depth + 1)
+                for name in slots if not str(name).startswith("_")}
     return str(value)[:256]
 
 
@@ -555,6 +576,149 @@ def _decode_dzflat_payload(type_name: str, raw_buf: bytes) -> Optional[Dict[str,
                   f"Publisher msgs changed without regenerating schemas?", flush=True)
         return None
     return decoded
+
+
+# ---------------------------------------------------------------------------
+# DZFlat / 旁路借样(订阅腿): 借样段必须走 schema 解码, 不能靠 TLV 字段 getter
+# ---------------------------------------------------------------------------
+
+_DZFLAT_WIRE_LOGGED: Set[str] = set()   # 按 topic 去重: 每种 wire 形态只报到一次
+
+
+def _load_message_class(type_name: str):
+    """取 dzipc 包里该类型的 Python 封装类(带 from_generic); 拿不到返回 None。
+
+    生成的封装(python/dzipc/gen_msgs/*.py)是纯 Python, 但它们在包内, 且 from_generic
+    内部要调 dzipc.dzflat —— 所以这条路要整个包可用(含 pybind .so)。拿不到就不算错误:
+    下面还有一条只用 dzipc.dzflat 的路。
+    """
+    if not type_name:
+        return None
+    try:
+        import dzipc as ipc_mod
+        cls = getattr(ipc_mod, type_name, None)
+    except Exception:
+        return None
+    if cls is None or not hasattr(cls, "from_generic"):
+        return None
+    return cls
+
+
+def _message_wire(msg_obj: Any) -> Tuple[str, bool]:
+    """这条消息承载的是哪种 wire, 以及 DZFlat 段是不是借样。
+
+    返回 ``("dzflat" | "tlv", borrowed)``。泛型对象(没有 has_dzflat 的假消息/
+    旧绑定)一律当 TLV —— 与修复前的行为完全一致。
+
+    关于借样: 订阅腿对 **schema-less 话题**走 dzflat_adopt(段字节收进
+    GenericMessage, 不拷贝), 本工具的模板恒为 GenericMessage(见 _sniff_loop 里
+    ``make_topic_data(wrapper)`` → ``to_generic()``), 所以 SHM 腿恒为真借样;
+    UDP 腿借的是去帧块(de_frame_dzflat 的独立分配), 段内仍有一次格式固有拷贝。
+    """
+    try:
+        if hasattr(msg_obj, "has_dzflat") and msg_obj.has_dzflat():
+            borrowed = False
+            if hasattr(msg_obj, "dzflat_is_borrowed"):
+                borrowed = bool(msg_obj.dzflat_is_borrowed())
+            return "dzflat", borrowed
+    except Exception:
+        pass
+    return "tlv", False
+
+
+def _warn_once(key: str, message: str) -> None:
+    """按 key 去重的告警(模块级 _DZFLAT_WARNED 共用于两条解码路)。"""
+    if key and key not in _DZFLAT_WARNED:
+        _DZFLAT_WARNED.add(key)
+        print(f"[dzplot] {message}", flush=True)
+
+
+def _decode_dzflat_message(msg_obj: Any, type_name: str,
+                           topic: str = "") -> Optional[Dict[str, Any]]:
+    """持有 DZFlat 段的消息 → 字段 dict; 解不了返回 None(调用方回退, 不抛)。
+
+    为什么必须有这条路: 订阅腿对 schema-less 话题(本工具的模板恒为 GenericMessage)
+    走 dzflat_adopt 把段**借样**收下 —— 但 GenericMessage 没有 schema, 它的 fields_
+    是空的。此时 ``field_count() == 0``, 通用的 _serialize_message_fields 会**静默**
+    返回空 dict: 前端画不出任何东西、也不报错, 这就是 docs/dzflat_known_issues.md
+    §9.6 记的那个坑(发布端一开 DZFlat, 观测工具就"通道看着通、数据是空的")。
+
+    两条解码路, 按"字段形状与 TLV 路径一致"排序:
+      1) 生成的 Python 封装 ``msg_cls.from_generic()``: 嵌套消息 → 嵌套封装、数组 →
+         list, 与 TLV 路径逐字同形, 前端无感;
+      2) ``dzipc.dzflat.decode_generic()``: 直读借样视图(zero_copy=True), 不依赖
+         pybind; 值里的 memoryview 由 _to_jsonable 就地落成 list。
+    都失败 ⇒ None, 由调用方给出 base64 + 一次性告警 —— 解不了比静默空字段好。
+    """
+    key = topic or type_name
+    wire, borrowed = _message_wire(msg_obj)
+    if key and key not in _DZFLAT_WIRE_LOGGED:
+        _DZFLAT_WIRE_LOGGED.add(key)
+        print(f"[dzplot] DZFlat wire on {key} (type={type_name}, "
+              f"borrowed={borrowed}); decoding via dzipc schema "
+              f"(TLV field getters would report an empty message)", flush=True)
+
+    msg_cls = _load_message_class(type_name)
+    if msg_cls is not None:
+        try:
+            return _serialize_message_fields(msg_cls.from_generic(msg_obj))
+        except Exception as exc:
+            _warn_once(key, f"DZFlat from_generic failed for type={type_name} "
+                            f"({exc}); trying dzipc.dzflat directly")
+
+    dzflat_mod = _load_dzflat_module()
+    if dzflat_mod is not None:
+        try:
+            decoded = dzflat_mod.decode_generic(msg_obj, zero_copy=True)
+        except Exception as exc:
+            _warn_once(key, f"DZFlat decode failed for type={type_name} "
+                            f"({exc}); falling back to base64")
+            return None
+        if decoded is not None:
+            return _to_jsonable(decoded)
+
+    _warn_once(key, f"DZFlat segment on type={type_name} has no matching schema "
+                    f"in this process; falling back to base64. Publisher msgs "
+                    f"changed without regenerating schemas?")
+    return None
+
+
+def _extract_fields(msg_obj: Any, type_name: str,
+                    topic: str = "") -> Tuple[Dict[str, Any], str, bool]:
+    """消息对象 → ``(fields, wire, borrowed)`` —— 两种 wire 的唯一分派点。
+
+    TLV 走原有 _serialize_message_fields; DZFlat 走 schema 解码。段在但 schema 不在
+    本进程时, 退成 ``{"data": base64(段字节)}`` —— 与嗅探腿同哲学(解不了总比错解好),
+    且**不静默**: warning 已在 _decode_dzflat_message 里打过一次。
+    """
+    wire, borrowed = _message_wire(msg_obj)
+    if wire != "dzflat":
+        return _serialize_message_fields(msg_obj), "tlv", False
+    fields = _decode_dzflat_message(msg_obj, type_name, topic)
+    if fields is not None:
+        return fields, "dzflat", borrowed
+    raw = b""
+    try:
+        raw = bytes(msg_obj.dzflat_bytes())
+    except Exception:
+        raw = b""
+    if not raw:
+        return {}, "dzflat", borrowed
+    return {"data": base64.b64encode(raw).decode("ascii")}, "dzflat", borrowed
+
+
+def _payload_wire(raw: Any) -> str:
+    """嗅探腿的裸字节是不是 DZFlat 段(只看 magic, 不解码) —— 给样本打 wire 标。"""
+    if not raw:
+        return "tlv"
+    try:
+        dzflat_mod = _load_dzflat_module()
+        if dzflat_mod is None:
+            return "tlv"
+        buf = raw if isinstance(raw, (bytes, bytearray, memoryview)) else bytes(raw)
+        return "dzflat" if dzflat_mod.looks_like_dzflat(buf) else "tlv"
+    except Exception:
+        return "tlv"
 
 
 def _decode_payload(type_name: str, raw: bytes,
@@ -715,6 +879,10 @@ class BagReplaySource:
                         "timestamp_ns": real_ts,
                         "data_length": len(inner_payload),
                         "fields": _decode_payload(real_type, inner_payload),
+                        # 与实时通路同名同义: 这段 payload 是 TLV 还是 DZFlat 平坦段。
+                        # 日志器记的是 TLV(它需要 owning 对象去 serialize), 但自造 bag /
+                        # 别的来源可能是平坦段 —— 标出来省得对着一团 base64 猜。
+                        "wire": _payload_wire(inner_payload),
                         "bag_meta": {
                             "domain_id": tp["domain_id"],
                             "msg_id": tp["msg_id"],
@@ -733,6 +901,7 @@ class BagReplaySource:
                         "timestamp_ns": ts_ns,
                         "data_length": len(data),
                         "fields": {"data": base64.b64encode(data).decode("ascii")},
+                        "wire": _payload_wire(data),
                     }
 
                 # Flow control: bag data prioritises completeness —
@@ -1135,6 +1304,9 @@ class LiveSniffSource:
                         "timestamp_ns": now_ns(),
                         "fields": _decode_payload(msg_type, raw_data),
                         "sniffer_dropped": dropped_total,
+                        # 嗅探腿拿到的是裸段字节, 没有借样可言(段已从环里拷出来了) ——
+                        # 这里只标出 wire 形态, 与订阅腿的字段含义区分开。
+                        "wire": _payload_wire(raw_data),
                     }
                 else:
                     msg_obj = out.topic() if out else topic_data.topic()
@@ -1159,15 +1331,26 @@ class LiveSniffSource:
 
     @staticmethod
     def _serialize_message(msg_obj: Any, topic: str, msg_type: str) -> Dict[str, Any]:
-        """Extract fields from a dzIPC message object into a sample dict."""
-        fields = _serialize_message_fields(msg_obj)
-        return {
+        """Extract fields from a dzIPC message object into a sample dict.
+
+        TLV 与 DZFlat 两种 wire 都在这里收敛: DZFlat 段(SHM 腿借样 / UDP 腿去帧块)
+        必须走 _extract_fields 的 schema 解码 —— 直接调 _serialize_message_fields 会
+        因为 GenericMessage 的 fields_ 为空而**静默**给出空 dict(见
+        _decode_dzflat_message 的注释)。wire / dzflat_borrowed 两个字段是给前端与
+        排障看的: "借样到底有没有生效"不该只能靠猜。
+        """
+        fields, wire, borrowed = _extract_fields(msg_obj, msg_type, topic)
+        sample = {
             "source": "live",
             "topic": topic,
             "msg_type": msg_type,
             "timestamp_ns": now_ns(),
             "fields": fields,
+            "wire": wire,
         }
+        if wire == "dzflat":
+            sample["dzflat_borrowed"] = borrowed
+        return sample
 
 
 # ---------------------------------------------------------------------------

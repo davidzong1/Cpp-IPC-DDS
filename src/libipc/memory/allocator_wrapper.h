@@ -1,8 +1,10 @@
 #pragma once
 
-#include <limits>   // std::numeric_limits
-#include <utility>  // std::forward
+#include <limits>    // std::numeric_limits
+#include <utility>   // std::forward
 #include <cstddef>
+#include <new>       // std::bad_alloc
+#include <stdexcept> // std::length_error
 
 #include "libipc/pool_alloc.h"
 
@@ -55,7 +57,7 @@ public:
     // construct by copying (do nothing)
     allocator_wrapper           (const allocator_wrapper<T, AllocP>&) noexcept {}
     allocator_wrapper& operator=(const allocator_wrapper<T, AllocP>&) noexcept { return *this; }
-	
+
     // construct from a related allocator (do nothing)
     template <typename U, typename AllocU> allocator_wrapper           (const allocator_wrapper<U, AllocU>&) noexcept {}
     template <typename U, typename AllocU> allocator_wrapper& operator=(const allocator_wrapper<U, AllocU>&) noexcept { return *this; }
@@ -66,7 +68,7 @@ public:
 public:
     // the other type of std_allocator
     template <typename U>
-    struct rebind { 
+    struct rebind {
         using other = allocator_wrapper< U, typename detail::rebind<T, AllocP>::template alloc_t<U> >;
     };
 
@@ -75,10 +77,12 @@ public:
     }
 
 public:
-    pointer allocate(size_type count) noexcept {
+    pointer allocate(size_type count) {
         if (count == 0) return nullptr;
-        if (count > this->max_size()) return nullptr;
-        return static_cast<pointer>(alloc_.alloc(count * sizeof(value_type)));
+        if (count > this->max_size()) throw std::length_error("ipc::mem::allocator_wrapper: count exceeds max_size");
+        auto p = static_cast<pointer>(alloc_.alloc(count * sizeof(value_type)));
+        if (p == nullptr) throw std::bad_alloc();
+        return p;
     }
 
     void deallocate(pointer p, size_type count) noexcept {

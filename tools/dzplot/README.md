@@ -25,6 +25,7 @@ python3 tools/dzplot/main.py --sniff --topic /test:StdRawMessage --transport shm
 | **Batch frames** | Multiple samples aggregated into single WebSocket frame |
 | **Adaptive backpressure** | Bounded queue with multi-zone watermark (>50% warn, >75% heavy, >90% emergency); progressive subsampling with hysteresis recovery |
 | **Dynamic rendering** | Charts render on-demand; only active fields consume resources |
+| **DZFlat / 旁路借样** | 订阅腿与嗅探腿都识别 DZFlat 平坦段(含 SHM 借样段), 按生成的 schema 解码; 样本带 `wire` / `dzflat_borrowed` 便于确认借样是否生效 |
 
 ## Architecture
 
@@ -111,8 +112,45 @@ TransportPacket roundtrip, sniffer poll scheduling, decode_payload fallback, inp
 dzplot can extract structured fields from dzIPC messages for both bag replay and live sniffer:
 
 - **Bag replay**: Each bag message is a `dzipc_log/TransportPacket` envelope (timestamp + topic + type + domain + msg_id + transport + role + event + payload). dzplot parses this envelope, then calls `create_message(type_name).deserialize(inner_payload)` to produce typed fields (scalars, arrays, nested messages).
-- **Live sniffer**: Uses `_decode_payload(msg_type, raw_data)` with the user-configured `msg_type`.
+- **Live sniffer (嗅探腿)**: Uses `_decode_payload(msg_type, raw_data)` with the user-configured `msg_type`; DZFlat段按 magic 识别后交给 `dzipc.dzflat`(纯 Python)解码。
+- **Live subscriber (订阅腿)**: `_extract_fields()` 是两种 wire 的**唯一分派点** —— TLV 走 `field_count()/get_*`, DZFlat 走 schema 解码(见下一节)。
 - **Fallback**: Unknown types or missing dzIPC bindings degrade gracefully to base64-encoded `data` field — the frontend always gets something.
+
+## DZFlat 与旁路借样(dzflat)
+
+发布端开启 DZFlat(`EnableDzFlat(true)` + 生成的 schema)后, SHM 通道上传的是**平坦段**
+而不是 TLV; 订阅腿对 schema-less 话题(本工具的模板恒为 `GenericMessage`)会把段**借样**
+收下(dzflat_adopt, 不拷整段), 此时消息对象里 `field_count() == 0`。
+
+⚠️ **不能直接调 `_serialize_message_fields()`** —— 它靠 `field_count()` 枚举字段, 对借样
+消息会**静默返回空 dict**: 图上看不到任何东西、也不报错。这正是
+[dzflat_known_issues.md §9.6](../../docs/dzflat_known_issues.md) 记的那个坑(症状是"通道
+看着通、数据是空的")。dzplot 现在的处理:
+
+```
+msg_obj.has_dzflat()?
+  ├── 是 → msg_cls.from_generic()            # 与 TLV 路径同形(嵌套 → dict、数组 → list)
+  │        └─ 失败 → dzipc.dzflat.decode_generic(zero_copy=True)   # 直读借样视图
+  │                 └─ 再失败(对端 schema 不在本进程) → base64 + 一次性告警
+  └── 否 → _serialize_message_fields()       # TLV, 行为与修复前完全一致
+```
+
+样本里因此多两个字段: `wire`(`"tlv"`/`"dzflat"`)与 `dzflat_borrowed`(仅 DZFlat 时出现)。
+借样是否生效、走的是哪种 wire, 不必再靠猜; 首次见到 DZFlat 时也会在 stdout 打一行说明。
+
+几条边界(都是有意为之, 不是缺陷):
+
+1. **dzplot 不需要打开任何开关**: 接收侧恒双 wire(按段首 magic 判别), 是否发平坦段由
+   **发布端进程**的 `EnableDzFlat` 决定(库级默认关)。
+2. **schema 必须在本进程**: 解码靠生成器产出的 schema(`python/dzipc/gen_msgs/_dzflat_schema.py`)。
+   对端改了 `.msg` 而本机没重跑 generator ⇒ 段解不出, dzplot 回退 base64 并告警一次。
+3. **嗅探腿有前提**: 嗅探器不是接收方, 而发布端在"无接收方"时必须送 TLV(否则按旧 TLV
+   解析的 sniffer 会读错), 所以**只被嗅探、无人订阅**的话题看到的是 TLV。有真订阅者时,
+   嗅探腿照样能读到平坦段(已实测)。
+4. **借样只在 SHM 上是真零拷贝**: UDP 腿借的是去帧后的独立块(分帧格式固有的一次拷贝)。
+   语义两边一致, 别拿 UDP 侧论证零拷贝收益。
+5. **数组字段每个样本最多 100 个元素**(两条 wire 相同, 给 WebSocket 帧留预算) —— 图像类
+   话题请用 width/height/step/encoding 判断通道是否正常, 不要数 `data` 长度。
 
 ## Sniffer Binding (python/src/interface.cc)
 
@@ -124,3 +162,4 @@ Passive `ipc::sniffer` pybind11 binding is available as `dzipc.Sniffer`. It atta
 2. **No field auto-discovery for bag mode**: Bag connection records carry `dzipc_log/TransportPacket`; the real type is inside each message envelope. Users manually enter field names or use the quick-field buttons.
 3. **Single-process server**: The asyncio server runs in one process. For production multi-client use, deploy behind a reverse proxy.
 4. **Chart memory**: Each chart holds up to 600 data points (~10s at 60fps). Long sessions may need periodic page refresh.
+5. **DZFlat 依赖本进程的 schema**: 段能收到、但 schema 指纹在本进程注册表里找不到时, 该样本退化成 base64 `data`(并打一次告警) —— 不会静默空字段, 也不会错解。详见上面「DZFlat 与旁路借样」节。
