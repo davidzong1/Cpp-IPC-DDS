@@ -89,6 +89,6 @@ srv/external_paths.json
 .agents/**
 
 brainstorm/**
-
+.reasonix/**
 reasonix.toml
 AGENTS.md

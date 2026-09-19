@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <map>
 #include <string>
+#include <string_view>
 #include <cstdio>
 
 #include "libipc/def.h"
@@ -66,15 +67,24 @@ using basic_string = std::basic_string<
 using string  = basic_string<char>;
 using wstring = basic_string<wchar_t>;
 
+/* 字符串哈希特化必须与 std::equal_to(按内容)语义一致: 旧实现哈希 c_str() 指针 ⇒
+ * 内容相同、地址不同的 key 落进不同桶, ipc::unordered_map 永不命中已存在条目,
+ * 同一逻辑键被反复插入(chunk 池句柄缓存反复 emplace ⇒ 同一 shm 段反复 mmap,
+ * 多接收者零拷贝广播地址分裂; 见 docs/uf010_evidence_registration.md)。
+ * 这里按内容哈希: string_view 覆盖 [data(), data()+size()), 不拷贝、不看终止符。
+ * ⛔ 不得改回指针哈希; 回归器 test/test_uf010_hash_semantics.cpp +
+ * test/test_loan.cpp 的 Loan.BroadcastToMultipleReceivers。 */
 template <> struct hash<string> {
     std::size_t operator()(string const &val) const noexcept {
-        return std::hash<char const *>{}(val.c_str());
+        std::string_view sv{val.data(), val.size()};
+        return std::hash<std::string_view>{}(sv);
     }
 };
 
 template <> struct hash<wstring> {
     std::size_t operator()(wstring const &val) const noexcept {
-        return std::hash<wchar_t const *>{}(val.c_str());
+        std::wstring_view sv{val.data(), val.size()};
+        return std::hash<std::wstring_view>{}(sv);
     }
 };
 
