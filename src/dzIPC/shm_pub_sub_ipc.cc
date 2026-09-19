@@ -1,9 +1,12 @@
 #include <dzIPC/shm_pub_sub_ipc.h>
 #include <fcntl.h>
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <typeinfo>
+#include <vector>
 #include "dzIPC/common/local_pub_sub_registry.h"
 #include "dzIPC/common/name_operator.h"
 #include "dzIPC/common/nodelet_config.h"
@@ -435,6 +438,40 @@ bool shm_pub_ipc::publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg)
     return false;
 }
 
+namespace {
+
+/* 步骤③ 的钉生效时的**一次性**诊断。
+ *
+ * 为什么必须有: view 队列容量是对调用方**显式传入**的 queue_size 的覆盖(该参数在
+ * SubscriberIPCPtrMake 里必填、无默认值)。覆盖而不说 = 又一次"静默改变行为",
+ * 与本仓反复踩过的那一类(ArgParser 的 BOOL 吞 token、create|open 造空壳段)同族。
+ *
+ * 去重口径: 按"被请求的 queue_size"去重 —— 同一个值只报一次, 不同值各报一次,
+ * 这样一个应用建了多档订阅者时不会漏掉后一档。输出口径照 ipc_info_pool.cc 的
+ * 说明: src/dzIPC 侧统一用 std::cerr(黄色)。 */
+void warn_view_queue_pinned(std::size_t requested, std::size_t applied)
+{
+    static std::mutex lock;
+    static std::vector<std::size_t> seen;
+    {
+        std::lock_guard<std::mutex> guard{lock};
+        if (std::find(seen.begin(), seen.end(), requested) != seen.end())
+        {
+            return;
+        }
+        seen.push_back(requested);
+    }
+    std::cerr << "\033[33m[dzIPC][view_queue] queue_size = " << requested << " 被钉到 " << applied
+              << ": chunk 池每尺寸档只有 " << static_cast<std::size_t>(ipc::large_msg_cache)
+              << " 块且全机共享(建 route 不带 prefix), 队列配得比池大就会把池吃干 —— "
+                 "之后发布侧借不到块而回退 TLV。见 "
+                 "docs/shm_chunk_pool_occupancy_plan.md §3 步骤③; "
+                 "EnableViewQueuePin(false) 可恢复原值。\033[0m"
+              << std::endl;
+}
+
+}   // namespace
+
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
@@ -451,7 +488,22 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
     topic_msg_.reset(msg->clone());
     msg_id_ = topic_msg_->topic()->msg_id();
     msg_queue_ = std::make_shared<CircularQueue<IpcMsgBase>>(queue_size);
-    view_queue_ = std::make_shared<CircularQueue<Sample>>(queue_size);
+    /* 步骤③: view 队列是**唯一**钉 chunk 的队列(借样 Sample 持有 buff_t, 见本文件
+     * 订阅循环里 :773 处的注释), 而池每尺寸档只有 ipc::large_msg_cache 块且全机共享
+     * (建 route 不带 prefix) ⇒ 容量配得比池大就会把池吃干, 之后发布侧 loan 拿不到块
+     * 而回退整包 TLV。钉到池容量以下(默认 1/4)给环内在飞、同进程其他话题、同机其他
+     * 进程留头寸。设计与实测见 docs/shm_chunk_pool_occupancy_plan.md §3 步骤③。
+     *
+     * ⚠️ msg 队列(物化, 不钉 chunk)**刻意不钉** —— 缩它只是白减应用缓冲。
+     * ⚠️ socket/UDP 侧不钉: 那边的 Sample 持有的是接收层去帧出来的独立堆块, 不占池。 */
+    const std::size_t view_cap =
+        dzIPC::IsViewQueuePinEnabled() ? dzIPC::ViewQueueCap() : queue_size;
+    if (view_cap < queue_size)
+    {
+        warn_view_queue_pinned(queue_size, view_cap);
+    }
+    view_queue_ = std::make_shared<CircularQueue<Sample>>(
+        (view_cap < queue_size) ? view_cap : queue_size);
 }
 
 /******************************************************************************************************/

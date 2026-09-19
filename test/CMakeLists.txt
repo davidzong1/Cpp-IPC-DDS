@@ -30,6 +30,7 @@ list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/dzipc_perf_benchmark.cpp"
 list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/dzflat_benchmark.cpp")
 list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/dzflat_tx_benchmark.cpp")
 list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/dzflat_py_publisher.cpp")
+list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/pool_attribution_benchmark.cpp")
 file(GLOB HEAD_FILES ${LIBIPC_PROJECT_DIR}/test/*.h)
 
 # 查找 pthread 库
@@ -163,6 +164,25 @@ if(UNIX AND NOT APPLE)
 endif()
 set_target_properties(dzipc_perf_benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 message(STATUS "Created benchmark executable: dzipc_perf_benchmark")
+# ================================================================
+# 步骤② chunk 池占用归因基准 (docs/shm_chunk_pool_occupancy_plan.md §3 步骤②)
+# 自带 main(), 不是 gtest。必须同时加进上面的 list(REMOVE_ITEM), 否则 GLOB 会
+# 把它收成 gtest 目标并与自带的 main() 冲突。
+# ================================================================
+add_executable(pool_attribution_benchmark ${LIBIPC_PROJECT_DIR}/test/pool_attribution_benchmark.cpp)
+target_compile_options(pool_attribution_benchmark PRIVATE
+    $<$<CONFIG:Release>:-O2>
+    $<$<CONFIG:RelWithDebInfo>:-O2>
+    $<$<CONFIG:MinSizeRel>:-O2>
+)
+target_compile_definitions(pool_attribution_benchmark PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+target_link_libraries(pool_attribution_benchmark ipc Threads::Threads)
+if(UNIX AND NOT APPLE)
+    # shm_open/shm_unlink 在旧 glibc 上位于 librt
+    target_link_libraries(pool_attribution_benchmark rt)
+endif()
+set_target_properties(pool_attribution_benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+message(STATUS "Created benchmark executable: pool_attribution_benchmark")
 # ================================================================
 # DZFlat 离线基准 (docs/dzflat_shm.md Step 1 验收门)
 # 自带 main(), 不是 gtest; 覆写 global operator new 以统计堆分配次数。

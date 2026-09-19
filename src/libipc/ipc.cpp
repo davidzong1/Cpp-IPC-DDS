@@ -417,9 +417,95 @@ namespace
     return c;
   }
 
+  /* ── chunk 池耗尽的观测点 ───────────────────────────────────────────────────
+   *
+   * 本函数是**全仓唯一的取块点**, 三条调用路径(send / no_member_send / loan)都
+   * 汇合到这里, 所以"池空"只需要在这一处收口。
+   *
+   * 为什么必须做: 每档 chunk 池只有 ipc::large_msg_cache(=32) 块, 而环有 256 槽
+   * ⇒ 池是硬瓶颈。池一旦取空, 三条路径**全都静默降级** —— send / no_member_send
+   * 退化成 64 字节分片(那两处原有的 log 是被注释掉的), loan 直接返回空。于是
+   * "池是不是被钉干了"这个问题在现场无法回答。详见
+   * docs/shm_chunk_pool_occupancy_plan.md §1。
+   *
+   * 报法照 report_cache_alloc_failure 的先例: **首报一次全文, 之后按计数节流** ——
+   * 真耗尽时每一条大消息都会命中, 逐条打印会把日志淹掉, 而这里要的是"看得见"
+   * 而不是"看全"。节流后日志里的 count 就是累计量级(误差 < 节流间隔)。
+   *
+   * ⛔ 计数必须**按 (kind, chunk_size) 各自一份**, 不能全局共用一个:
+   *   - 池是按 calc_chunk_size 的 1KB 台阶**分档**的独立资源。全局单计数时, 只要
+   *     A 档先饿过一次, B 档再饿就是"第 2 次"而被节流吞掉 —— 恰好把"哪一档在饿"
+   *     这个最需要看见的信息抹掉。实测构造: 在一个进程里先饿干 7168 档, 再饿 3072
+   *     档, 旧写法第二条完全不报。
+   *   - kind 同理: 池被 send 饿和被 loan 饿, 处置不同。
+   *
+   * 这里上锁是安全的: 本函数**只在池取空时**被调用(id_pool::acquire() 返回 -1),
+   * 是病态路径而非热路径。
+   *
+   * kind 按指针保存: 三个调用点传的都是字符串字面量, 生存期覆盖整个进程。
+   *
+   * ── 报错里必须带 prefix ─────────────────────────────────────────────────────
+   *
+   * 池段名 = make_prefix(prefix, {"CHUNK_INFO__", chunk_size})(get_info,
+   * ipc.cpp:332-333), 所以 **prefix 就是这一档池的归属判别键**。而默认 prefix
+   * 是空串(connect(ph, {nullptr}, …) ⇒ 名字里没有话题/进程区分), 于是默认部署下
+   * **同一尺寸档全机只有一档池**, 谁也不区分谁。
+   *
+   * 后果: "某话题大消息异常"的元凶可能在**另一个进程**里。这种情形下最要紧的一句
+   * 不是"谁在饿" —— 报错本来就是受害者自己打的, 打上自己的 pid 对定位元凶没有
+   * 帮助 —— 而是"这一档池根本没有归属区分"。所以空前缀要**显式打出来并点明**,
+   * 不能让日志里留一个空字段: 空字段读起来像"没信息", 而它本身就是那条信息。
+   * 非空前缀则直接就是归属证据。
+   *
+   * 同理, count 也必须标明是**本进程**的: 池是全机共享的, 一个光秃秃的 count
+   * 会被读成"全机饿了多少次"。读数能被读错, 与读数错了是同一类问题。
+   *
+   * 见 docs/shm_chunk_pool_occupancy_plan.md §1 结论 3。 */
+  void note_pool_exhausted(char const *kind, std::size_t chunk_size,
+                           std::size_t size, ipc::string const &prefix) {
+    struct key_t {
+      std::size_t chunk_size;
+      char const *kind;
+    };
+    struct stat_t {
+      key_t key;
+      std::uint64_t count;
+    };
+    static std::mutex lock;
+    static std::vector<stat_t> stats;
+
+    std::uint64_t n;
+    {
+      std::lock_guard<std::mutex> guard{lock};
+      auto it = std::find_if(stats.begin(), stats.end(),
+                             [&](stat_t const &s)
+                             {
+                               return (s.key.chunk_size == chunk_size) &&
+                                      (std::strcmp(s.key.kind, kind) == 0);
+                             });
+      if (it == stats.end()) {
+        stats.push_back(stat_t{key_t{chunk_size, kind}, 0});
+        it = stats.end() - 1;
+      }
+      n = ++(it->count);
+    }
+
+    if ((n == 1) || ((n % 1024) == 0)) {
+      ipc::error("chunk pool exhausted: kind = %s, chunk_size = %zu, size = %zu, "
+                 "pool capacity = %zu, count = %llu (本进程), prefix = '%s'%s\n",
+                 kind, chunk_size, size,
+                 static_cast<std::size_t>(ipc::id_pool<>::max_count),
+                 static_cast<unsigned long long>(n), prefix.c_str(),
+                 prefix.empty()
+                     ? "  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程"
+                     : "");
+    }
+  }
+
   std::pair<ipc::storage_id_t, void *> acquire_storage(conn_info_head *inf,
                                                        std::size_t size,
-                                                       ipc::circ::cc_t conns)  {
+                                                       ipc::circ::cc_t conns,
+                                                       char const *kind)  {
     if (inf == nullptr)
       return {};
     std::size_t chunk_size = calc_chunk_size(size);
@@ -432,6 +518,17 @@ namespace
     // got an unique id
     auto id = info->pool_.acquire();
     info->lock_.unlock();
+
+    /* 池空。**不能**和下面那个 chunk == nullptr 合并成一个分支: 那个还覆盖了
+     * "段建不出来"和 id 越界, 混在一起报会把两种完全不同的故障源说成一个。
+     * 这里的 id < 0 是 id_pool::acquire() 对空池的唯一返回值, 语义精确。 */
+    if (id < 0) {
+      /* prefix 按 const& 传、且只在本次调用内同步使用 —— 这里没有 get_info 上面
+       * 那条"buff_t 析构时 conn_info 可能已 mem::free"的生存期问题: 本函数在
+       * acquire 路径上, inf 是调用方自己活着的 conn_info。 */
+      note_pool_exhausted(kind, chunk_size, size, inf->prefix_);
+      return {};
+    }
 
     auto chunk = info->at(chunk_size, id);
     if (chunk == nullptr)
@@ -950,7 +1047,7 @@ namespace
       auto try_push = std::forward<F>(gen_push)(inf, que, msg_id);
       if (size > ipc::large_msg_limit)
       {
-        auto dat = acquire_storage(inf, size, conns);
+        auto dat = acquire_storage(inf, size, conns, "send");
         void *buf = dat.second;
         if (buf != nullptr)
         {
@@ -960,8 +1057,9 @@ namespace
                           &(dat.first), 0);
         }
         // try using message fragment
-        // ipc::log("fail: shm::handle for big message. msg_id: %zd, size: %zd\n",
-        // msg_id, size);
+        /* ⛔ 不要在这里重新打开逐条 log: 池空时每一条大消息都会走到这里, 打出来就是
+         * 刷屏。池空已由 acquire_storage 的 note_pool_exhausted 统一收口
+         * (首报 + 计数节流, kind = "send")。 */
       }
       // push message fragment
       std::int32_t offset = 0;
@@ -1089,7 +1187,7 @@ namespace
       auto try_push = std::forward<F>(gen_push)(inf, que, msg_id);
       if (!sniffer_only && size > ipc::large_msg_limit)
       {
-        auto dat = acquire_storage(inf, size, conns);
+        auto dat = acquire_storage(inf, size, conns, "no_member_send");
         void *buf = dat.second;
         if (buf != nullptr)
         {
@@ -1099,8 +1197,9 @@ namespace
                           &(dat.first), 0);
         }
         // try using message fragment
-        // ipc::log("fail: shm::handle for big message. msg_id: %zd, size: %zd\n",
-        // msg_id, size);
+        /* ⛔ 不要在这里重新打开逐条 log: 池空时每一条大消息都会走到这里, 打出来就是
+         * 刷屏。池空已由 acquire_storage 的 note_pool_exhausted 统一收口
+         * (首报 + 计数节流, kind = "no_member_send")。 */
       }
       // push message fragment
       std::int32_t offset = 0;
@@ -1430,10 +1529,11 @@ namespace
       }
       const std::size_t cap = loan_size_class(size);
       conn_info_t *inf = info_of(h);
-      auto dat = acquire_storage(inf, cap, conns);
+      auto dat = acquire_storage(inf, cap, conns, "loan");
       if (dat.second == nullptr)
       {
-        /* chunk 池耗尽(每档位 32 块)。不是错误, 是背压信号 —— 调用方回退整包路径。 */
+        /* chunk 池耗尽(每档位 32 块)。不是错误, 是背压信号 —— 调用方回退整包路径。
+         * 计数与首报在 acquire_storage 的 note_pool_exhausted 里, 见该处注释。 */
         return {};
       }
       ipc::loan_t lo;
