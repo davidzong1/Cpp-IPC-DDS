@@ -1081,7 +1081,7 @@ namespace
         return ipc::make_prefix(
             ipc::make_string(prefix),
             {"QU_CONN__", ipc::make_string(name), "__", ipc::to_string(DataSize),
-             "__", ipc::to_string(AlignSize), "__V2"});
+             "__", ipc::to_string(AlignSize), "__V3"});
       }
 
       void init()

@@ -224,7 +224,7 @@ public:
             prefix_, {"QU_CONN__", name_, "__",
                       ipc::to_string(static_cast<std::size_t>(ipc::data_length)),
                       "__",
-                      ipc::to_string(kAlignSize), "__V2"});
+                      ipc::to_string(kAlignSize), "__V3"});
 
         switch (t) {
         case sniffer::topology::server: {

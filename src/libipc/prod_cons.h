@@ -221,6 +221,12 @@ struct prod_cons_impl<wr<relat::single, relat::multi, trans::broadcast>> {
     struct elem_t {
         std::aligned_storage_t<DataSize, AlignSize> data_ {};
         std::atomic<rc_t> rc_ { 0 }; // read-counter
+        /* 每格写序号(seqlock)。**为什么不能复用 rc_ 的高 32 位**:
+         * 那 32 位同时是"这一代是谁写的"(②③ 比它)与"这个持有者是否已被套圈"
+         * (push 的满判据拿它与 epoch_ 比相等)。若让每次 push 都推进它, 满判据就
+         * 永远匹配不上 —— 背压全丢, 写方会覆写活收方正持有的格子。
+         * 所以另起一个字段。写方 奇数=正在落笔, 偶数=已完成。 */
+        std::atomic<std::uint32_t> seq_ { 0 };
     };
 
     alignas(cache_line_size) std::atomic<circ::u2_t> wt_;   // write index
@@ -270,7 +276,10 @@ struct prod_cons_impl<wr<relat::single, relat::multi, trans::broadcast>> {
             }
             ipc::yield(k);
         }
+        const std::uint32_t s0 = el->seq_.load(std::memory_order_relaxed);
+        el->seq_.store(s0 + 1, std::memory_order_release);   // 奇 = 正在落笔
         std::forward<F>(f)(&(el->data_), rem_cc);
+        el->seq_.store(s0 + 2, std::memory_order_release);   // 偶 = 完成
         wt_.fetch_add(1, std::memory_order_release);
         return true;
     }
@@ -321,7 +330,10 @@ struct prod_cons_impl<wr<relat::single, relat::multi, trans::broadcast>> {
         // 这些位必须从 chunk 的 conns 里清掉(否则位图永不归零 → chunk 泄漏),
         // 而已经 pop 过、可能仍持有 buff_t 的接收方的位必须保留(否则 chunk id
         // 会在持有者手里被回池复用)。详见 ipc.cpp: discard_storage。
+        const std::uint32_t fs0 = el->seq_.load(std::memory_order_relaxed);
+        el->seq_.store(fs0 + 1, std::memory_order_release);
         std::forward<F>(f)(&(el->data_), rem_cc);
+        el->seq_.store(fs0 + 2, std::memory_order_release);
         wt_.fetch_add(1, std::memory_order_release);
         return true;
     }
@@ -331,7 +343,10 @@ struct prod_cons_impl<wr<relat::single, relat::multi, trans::broadcast>> {
         E* el = elems + circ::index_of(wt_.load(std::memory_order_relaxed));
         epoch_ += ep_incr;
         el->rc_.store(epoch_, std::memory_order_release);
+        const std::uint32_t ps0 = el->seq_.load(std::memory_order_relaxed);
+        el->seq_.store(ps0 + 1, std::memory_order_release);
         std::forward<F>(f)(&(el->data_));
+        el->seq_.store(ps0 + 2, std::memory_order_release);
         wt_.fetch_add(1, std::memory_order_release);
         return true;
     }
@@ -382,11 +397,25 @@ struct prod_cons_impl<wr<relat::single, relat::multi, trans::broadcast>> {
         for (;;) {
             if (cur == cursor()) return false; // acquire
             auto* el = elems + circ::index_of(cur++);
+            /* ④ seqlock: 槽位被逐字节改写时, ②③ 那两道 epoch 比对是**盲的** ——
+             * push 先声明后落笔(rc_ 的 CAS 在 f() 之前), 若本读方读到的是 CAS
+             * **之后**的值, epoch 在它拷贝**之前**就已经变了, 于是 rc1==rc0。
+             * 实测(2026-09-21 插桩): 重同步把游标放到写头那一格时, 拷贝与写方落笔
+             * 重叠 1360 次中有 **1096 次** ②③ 全程沉默 ⇒ 会收下撕裂的 storage_id
+             * ⇒ 下游把 buff_t 建在别人的 chunk 上(池块卡死, 见证据档 §9.5)。
+             * seq_ 每次落笔都变(奇数=落笔中), 拷贝前后比一次即可。 */
+            const std::uint32_t s0 = el->seq_.load(std::memory_order_acquire);
+            if ((s0 & 1u) != 0u) {
+                continue;   // ④a 本格正在被落笔
+            }
             const rc_t rc0 = el->rc_.load(std::memory_order_acquire);
             if ((my != 0) && ((rc0 & my) == 0)) {
                 continue;   // ① 本格内容已消费过 → 套圈重读
             }
             std::forward<F>(f)(&(el->data_));
+            if (el->seq_.load(std::memory_order_acquire) != s0) {
+                continue;   // ④b 拷贝期间被落笔 → 可能撕裂
+            }
             const rc_t rc1 = el->rc_.load(std::memory_order_acquire);
             if ((rc1 & ~static_cast<rc_t>(ep_mask)) != (rc0 & ~static_cast<rc_t>(ep_mask))) {
                 continue;   // ② 拷贝期间被 force_push 覆写 → 可能撕裂
