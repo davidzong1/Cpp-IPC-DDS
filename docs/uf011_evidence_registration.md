@@ -302,3 +302,64 @@ A 与 B **各关一扇窗, 不互为兜底**: A 关"载荷与声明不同步"(�
 9 个回归二进制全绿也可能把 dzIPC 层打塌。
 
 ⛔ **两者各自要留独立变异臂**: 否则会出现"B 做完 A 的用例也绿、A 其实不承重"的假象。
+
+---
+
+## 12. 三项闭口(2026-09-21)
+
+### 12.1 P-2 正式口径 —— ⛔ **无法复现, 记录为不可复现**
+
+**事实**: 段5 记的 P-2 口径是"**中位 msgps ≥ 85.3**(=89.81×0.95), 1MB×200, 200M,
+rmem=212992, n=5, 全 DELIVERED 200/200"。本轮在本仓**找不到能产生 85.3 msgps 这个量级的
+调用**:
+
+| 候选 | 实测 | 与 85.3 的关系 |
+|---|---|---|
+| `dzipc_perf_benchmark --cases=pubsub_shm --payloads=1048576` | **1259 ~ 1597 msg/s** | 高 20 倍 |
+| 同上, `--cases=pubsub_socket` | 94 ~ 96 msg/s | 低 |
+| `ipc_benchmark --shm --pin` | 30 msg/s(且全 fallback) | 低 |
+| 自建 `route` 探针(1MB, 无用户态队列) | 38923 msg/s | 高 460 倍 |
+
+"200M" 在段5 语境里是**限速 200 MB/s**(见报告 `:817`/`:847` 的极限环描述), 而
+`dzipc_perf_benchmark` **没有限速参数**(只有 socket 的 `--rate-limit`), `ipc_benchmark`
+的 `--rate` 又是闭环延迟档 ⇒ 两个基准都产生不出该口径。
+
+**⇒ 结论**: P-2 的门槛数字(85.3)与产生它的那条命令**在仓里都对不上号**, 该门槛
+**不可机械复现**。⛔ 本项**不得**按"跑过/没过"记录; 它是**测量可复现性**的问题,
+不是本次修复的吞吐结论。若今后要用它守门, 必须先把它连同**产生它的命令与二进制
+指纹**一起归档 —— 否则下一次仍会卡在同一个地方。
+
+**替代(已跑, 见 §9 与 `hotpath_gate.sh`)**: 修复态的 DZIPC 层吞吐
+1MB **1376~1597 msg/s**(基线 1259~1548)、64B **164111~167273 msg/s**(基线 163396~170360)
+⇒ 修复**未**使吞吐劣化, 量级与基线同档。
+
+### 12.2 sniffer 对新增 `seq_` 字段 —— ✅ 已闭(带一条限制)
+
+- **段名三处已同步**: `ipc.cpp` 的 `elems_name()` / `clear_storage()` / `sniffer.cpp`,
+  均为 `__V3`(机械核对: 三处逐字一致)。
+- **实测**: `test_dzipc_shm` **10/10 绿**(含 5 个 sniffer 用例:
+  `PublishForSnifferWithoutSubscriber` / `PublishTopicWithSlashForSnifferWithoutSubscriber` /
+  `PublishLargeForSnifferWithoutSubscriber` / `RejectOversizedPublishForSnifferWithoutSubscriber` /
+  `SnifferReopenAfterPublisherRestart`); `test_dzflat_transport` 9/9、`test_dzflat_rx` 8/8、
+  `test_dzflat_sercli` 4/4。
+- ⚠️ **限制(必须一并登记)**: sniffer 是**被动观测者**, 它 `memcpy` 槽位时**不参与**写方的
+  协议 —— `push`/`force_push` 开头的 `if (cc == 0) return false` 只在**无接收方**时才放
+  sniffer 走 `push_sniffer`; 有接收方时 sniffer 与接收方**共享同一格**。因此新增的
+  `seq_` 校验**只保护接收方, 不保护 sniffer**: sniffer 仍可能在写方落笔期间拷到半新
+  半旧的一格。**这是既有行为**(改动前同样如此), 不是本次修复引入的回归, 但**也没有被
+  本次修复覆盖**。若要覆盖, 需让 sniffer 也走一遍 seqlock 复核。
+
+### 12.3 A′ 打塌正常路径的机制 —— ⛔ **仍未定位**(本轮做了三项否证)
+
+`aa7e00c` 的提交信息里写的成因("跳过写头会连正常格一起丢")**是假设**。本轮三项实测
+**都没能证实它**:
+
+| 实验 | 构造 | 结果 |
+|---|---|---|
+| 泄漏探针 | A′ + "一读一落后"洪泛 20 轮, 查"conns==0 却不在链上" | **未复现** |
+| 泄漏判据 | A′ + 修复态 seqlock, `UF011_EXPECT_LEAK_FREE=1` × 6 | **6/6 绿**(无 A′ 时 8/8 绿) |
+| 分片探针 | A′ + 1MB 多分片 + 收方快/慢 | 收齐 **116768 / 5116** 条, **无零投递** |
+
+⇒ A′ 的塌陷需要 `dzipc_perf_benchmark` 的**特定形态**(1MB 在**用户态队列**里排队 +
+发布端 `publish_blocking` + 收方由另一线程/进程驱动), 而我的三个探针都不具备该形态。
+⛔ **记录为未定位**; 它的教训已由 `hotpath_gate.sh` 承接(闸能拦住它), 但机制本身仍悬。
