@@ -18,16 +18,18 @@
 
 | 键 | 值 |
 |---|---|
-| `tree_head` | `90510a5` (dev; 工作树脏) |
-| `src/libipc/ipc.cpp` | `fb37a18834d0eb23c27918a0344b8f1c` (refine) |
-| `src/libipc/prod_cons.h` | `fbb5f001ec549cd5231d8490e06f1c31` (refine + 方案 A) |
+| `tree_head` | `5377207` (dev; 工作树干净) |
+| `src/libipc/ipc.cpp` | `fb37a18834d0eb23c27918a0344b8f1c` (**C 的形态, 已在 HEAD**) |
+| `src/libipc/prod_cons.h` | `7e90f14c847ff62b69c655863ff3b831` (**A′ 已撤, 此为该改法引入前的原状**) |
 | `test/test_uf011_chunk_return.cpp` | `fce1e8e4261076d73d67d6aab16a5ea2` |
 | `include/libipc/def.h` | `4801d04d251cca491f3de89994bbc25f` (`large_msg_cache = 40`) |
-| `build/lib/libipc.so.1.3.0` | `38d8c63d5fca1992d50cde322eb48726` |
-| `build/bin/test_uf011_chunk_return` | `6dcd0038f4f9891eb1c83bb1531cd45e` |
 
-⚠️ 以上取自**隔离沙箱** `/tmp/uf011_base`(工作树 rsync 副本), 因主树 `build/` 正被另一
-Agent 占用重建。⛔ 沙箱构建物**不等于**主树构建物, 主树合入后须重取一次。
+⚠️ **历史读数**(§2/§4/§8 里那些)取自隔离沙箱 `/tmp/uf011_base`, 且当时的 `prod_cons.h`
+是带 A′ 的 `fbb5f001…`。⛔ 引用它们时必须连同该 md5 一起引; 判新树请按上表重取。
+
+⚠️ 本节所有读数都来自**并发编辑期**的库(另一 Agent 同时在改 `ipc.cpp`/`elem_def.h`)。
+该 Agent 的任务已于 2026-09-21 结束, 其工作由 `54479e8` 提交 —— 此后 `ipc.cpp` 的
+内容比本节记录时又变了(叠加了 UF-003), ⛔ 复跑前先确认树上没有别的未提交改动。
 
 ⚠️ **`ipc.cpp` / `prod_cons.h` 所在的库正被并发编辑**(另一 Agent 在做"池段名编码容量
 `__C<cap>`")。本文件的 md5 是**快照**, 不是稳定指纹 —— 引用读数时必须连同 md5 一起引。
