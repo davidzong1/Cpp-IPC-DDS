@@ -248,9 +248,18 @@ TEST(UF011ChunkReturn, PoolChainMustNotSelfLoop)
         stop.store(true, std::memory_order_relaxed);
         eater.join();
 
-        /* 收尾: 断开全部收方 + 用不占 chunk 的小消息覆写两圈, 把在飞的全部收回。 */
+        /* 收尾: 断开旧收方, **再挂一个新收方**, 然后用不占 chunk 的小消息覆写两圈。
+         *
+         * ⛔ 新收方不是保险, 是必需: `push`/`force_push` 开头就是 `if (cc == 0)
+         * return false;`(prod_cons.h) —— 一个收方都没有时它们**根本不落笔**, 覆写
+         * 不发生, 环里那些大消息的 chunk 自然收不回来。少了这一步, 下面量到的是
+         * "环里还剩多少在飞", 而不是"池漏了多少" —— 两者同形。
+         * (本用例初版就栽在这里: 收尾写成"断开后直接灌", 于是 33/40 轮报泄漏,
+         *  而同一构造改成先挂新收方后 **40 轮 0 次泄漏**。) */
         rx_eat.release();
         rx_lag.release();
+        ipc::route rx_sweep{name.c_str(), ipc::receiver};
+        ASSERT_TRUE(tx.wait_for_recv(1, 2000)) << "收尾用的收方未连上";
         for (int i = 0; i < kRingSlots * 2 + 16; ++i) blast(tx, tiny);
 
         std::size_t w = 0;
