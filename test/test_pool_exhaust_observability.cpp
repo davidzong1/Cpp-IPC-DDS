@@ -13,17 +13,18 @@
  *    "没观测"同形。所以阴性用例里带一个 stderr 捕获探针, 先证捕获面本身非退化。
  *
  * 池是按**尺寸类**分段、且**默认 prefix 为空**的:
- *   段名 = __IPC_SHM__CHUNK_INFO__<calc_chunk_size(size)>
- * (见 ipc.cpp 的 get_info / resource.h 的 make_prefix)。
+ *   段名 = __IPC_SHM__CHUNK_INFO__<calc_chunk_size(size)>__C<large_msg_cache>
+ * (见 ipc.cpp 的 get_info / resource.h 的 make_prefix; 容量分量 __C<cap> 隔离
+ *  不同池容量版本的段)。
  * ⇒ 同一个尺寸类的池**跨话题、跨进程共享**。因此本文件刻意避开其他用例已用的尺寸类
  *   (test_chunk_hold / test_lap_safety / test_uf007 用 5120 / 9216 / 13312), 本文件
  *   自己用 7168 / 5120 / 3072, 外加一档**带非空前缀**的 4096(前缀 poolobs_a ⇒ 段名
- *   独立, 不占用默认池的任何一档)。阳性用例会把一整池 32 块**永久钉死**(接收方从不
+ *   独立, 不占用默认池的任何一档)。阳性用例会把一整池 40 块**永久钉死**(接收方从不
  *   recv, 没有任何 buff_t 析构), 同池跑阴性必假红。
  *
  * 每个用例开头先 reset_chunk_pool() 清自己那一档: 正常退出时段会被 unlink(实测跑完
  * /dev/shm 里不剩 7168/3072), 但**异常终止**(kill -9 / 崩溃)会留下已钉干的残段 ——
- * 那时"第 33 条才耗尽"这个前提就没了, 用例会退化成恒真。
+ * 那时"第 41 条才耗尽"这个前提就没了, 用例会退化成恒真。
  *
  * 已知无关缺陷: 本文不走 force_push/套圈路径, 不触及 test_chunk_hold.cpp 头注释里
  * 登记的那个"套圈重读致 id 重复入池"的独立缺陷。
@@ -40,8 +41,9 @@
 
 namespace {
 
-/* ipc::id_pool<>::max_count == ipc::large_msg_cache == 32。每个尺寸类一个池。 */
-constexpr int kChunkPoolSize = 32;
+/* ipc::id_pool<>::max_count == ipc::large_msg_cache(当前 40)。每个尺寸类一个池。
+ * ⛔ 由常量导出而非写死: 容量一变(改 large_msg_cache), 写死魔数会让判据失真。 */
+constexpr int kChunkPoolSize = static_cast<int>(ipc::large_msg_cache);
 
 /* 大于 ipc::large_msg_limit(=64) 才走 chunk 路径。
  *
@@ -63,19 +65,22 @@ std::vector<std::uint8_t> make_payload(std::size_t n, std::uint8_t fill)
 }
 
 /* 段名规则同 src/libipc/memory/resource.h 的 make_prefix:
- *   <prefix> + "__IPC_SHM__" + "CHUNK_INFO__" + <chunk_size>
- * make_prefix 不在公开头里, 这里照抄一遍。默认 prefix 是空串 ⇒ 名字以 __IPC_SHM__ 开头。 */
+ *   <prefix> + "__IPC_SHM__" + "CHUNK_INFO__" + <chunk_size> + "__C" + <池容量>
+ * make_prefix 不在公开头里, 这里照抄一遍。默认 prefix 是空串 ⇒ 名字以 __IPC_SHM__ 开头。
+ * ⛔ 容量分量 __C<cap> 必须与 ipc.cpp get_info / sniffer.cpp 的构造逐字同步,
+ *    否则这里删的是不存在的段, 重置失效, 阳性用例假红。 */
 std::string chunk_pool_segment(char const *prefix, std::size_t chunk_size)
 {
-    return std::string(prefix) + "__IPC_SHM__CHUNK_INFO__" + std::to_string(chunk_size);
+    return std::string(prefix) + "__IPC_SHM__CHUNK_INFO__" + std::to_string(chunk_size) +
+           "__C" + std::to_string(static_cast<std::size_t>(ipc::large_msg_cache));
 }
 
-/* 删掉某档池段, 让本用例每次从"32 块全新可用"开始。
+/* 删掉某档池段, 让本用例每次从"40 块全新可用"开始。
  *
  * 为什么必须做: 池段**不随进程退出而消失**(实测 /dev/shm 里留着 1024/2048/132096/
- * 929792 四个无主段), 而阳性用例会故意把整池 32 块永久钉死(接收方从不 recv ⇒ 没有
+ * 929792 四个无主段), 而阳性用例会故意把整池 40 块永久钉死(接收方从不 recv ⇒ 没有
  * 任何 buff_t 析构 ⇒ 没有 recycle_storage)。不重置的话第二次跑用例时池一开始就是空
- * 的, "第 33 条才耗尽"这个前提消失, 用例退化成恒真。
+ * 的, "第 41 条才耗尽"这个前提消失, 用例退化成恒真。
  *
  * ⛔ 前置条件(与 unfixed_defects.md §4 的残池清理同一条): 段名 = 公开 API
  *    ipc::shm::handle::clear_storage ⇒ shm_unlink, 会打断**任何**正在用该段的进程。
@@ -163,7 +168,9 @@ TEST(PoolExhaustObservability, ExhaustionIsReported)
      * 必须连 "(本进程)" 一起断言: 池是全机共享的, 一个光秃秃的 count 会被读成
      * "全机饿了多少次" —— 读数能被读错与读数错了是同一类问题。 */
     EXPECT_TRUE(contains(err, "count = 1 (本进程)")) << err;
-    EXPECT_TRUE(contains(err, "pool capacity = 32")) << err;
+    EXPECT_TRUE(contains(err, ("pool capacity = " +
+                               std::to_string(ipc::large_msg_cache)).c_str()))
+        << err;
     EXPECT_TRUE(contains(err, "chunk_size = 7168")) << err;
     /* ── 归因字段 ────────────────────────────────────────────────────────────
      * 默认部署下 prefix 是空串, 于是**同一尺寸档全机只有一档池**。所以这里断言的
@@ -212,7 +219,9 @@ TEST(PoolExhaustObservability, ExhaustionIsReported)
                "捕获到的 stderr:\n" << err2;
         EXPECT_TRUE(contains(err2, "count = 1 (本进程)"))
             << "第二档的计数不是 1 —— 说明计数仍在跨档共用(旧缺陷)。stderr:\n" << err2;
-        EXPECT_TRUE(contains(err2, "pool capacity = 32")) << err2;
+        EXPECT_TRUE(contains(err2, ("pool capacity = " +
+                                    std::to_string(ipc::large_msg_cache)).c_str()))
+            << err2;
         /* 第二档是**另一个话题**, 但报出来的 prefix 与第一档同样是空的 —— 池段名只由
          * make_prefix(prefix, {"CHUNK_INFO__", chunk_size}) 决定, 话题名根本不进去。
          * 这就是"跨话题共享同一档池"在报错面上的可见形式(现场据此判断元凶可能在

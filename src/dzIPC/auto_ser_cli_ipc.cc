@@ -748,10 +748,8 @@ void auto_cli_ipc::supervise()
                         std::lock_guard<std::mutex> lock(route_mtx_);
                         shm_leg_ = std::move(leg);
                     }
-                    /* ⛔ 有界等待。旧路径在这里是**无限期**等控制面 Ready
-                     * (control_plane.cc:53 的 create|open 会让客户端自建一个永远不
-                     * Ready 的段), 实测表现为"2 s 不完成、进程存活、无异常/日志/计数"
-                     * 的静默挂起。切换必须把它变成一个有界、有终态、有计数的失败。 */
+                    /* 有界等待: 切换必须是**有界、有终态、有计数**的失败 ——
+                     * 无限期等控制面 Ready 会表现为静默挂起。 */
                     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(opts_.est_timeout_ms);
                     while (running_.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
                     {
@@ -795,11 +793,8 @@ void auto_cli_ipc::supervise()
             }
             else if (peer_rejected)
             {
-                /* 对端明确说不切: 照**它给出的原因**记账, 而不是本端猜一个。
-                 * ⛔ 这一支是 F2 的落点。此前无论对端为什么撤销, 客户端都写死
-                 * ChannelOccupied / ShmChannelOccupied —— 于是"建腿失败"和"运行期断链"
-                 * 也被记成"通道被占用"(活体样本 build/live_runs/20260915_232219_2580718
-                 * client.log:22-23), 监控按这个标签定性就指错了方向。
+                /* 对端明确说不切: 照**它给出的原因**记账, 而不是本端猜一个 ——
+                 * "建腿失败"和"运行期断链"不得记成"通道被占用"(F2 的错误归因)。
                  * 注意力放在**这一支的位置**: 它必须在 `if (peer_ready)` 外面 ——
                  * 收到撤销时 peer_ready 是 false, 放在里面就永远不会被执行。 */
                 status_.set_decision(peer_withdraw_decision);

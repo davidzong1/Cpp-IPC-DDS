@@ -21,8 +21,9 @@
 
 namespace {
 
-/* ipc::id_pool<>::max_count = ipc::large_msg_cache */
-constexpr int kChunkPoolSize = 32;
+/* ipc::id_pool<>::max_count = ipc::large_msg_cache。
+ * ⛔ 由常量导出而非写死: 容量一变, 写死魔数会让“借空”判据失真。 */
+constexpr int kChunkPoolSize = static_cast<int>(ipc::large_msg_cache);
 
 void fill(void* p, std::size_t n, std::uint8_t v)
 {

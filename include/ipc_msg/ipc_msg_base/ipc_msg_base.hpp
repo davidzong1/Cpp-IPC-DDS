@@ -96,6 +96,10 @@ public:
     /// 因为该类型收到 DZFlat 段本身意味着类型不匹配。
     virtual bool dzflat_adopt(ipc::buffer /*buf*/, uint32_t /*schema_hash*/) { return false; }
 
+    /// 所持 DZFlat 段是否为"借样"(指向共享 chunk, 钉池)。GenericMessage 覆写;
+    /// 基类恒 false(TLV 物化消息不借样)。供接收侧借样配额(UF-012)分类用。
+    virtual bool dzflat_is_borrowed() const { return false; }
+
     /// DZFlat 段头里的 msg_id 是否与本消息类型一致(对应 TLV 的 check_id)。
     bool check_dzflat_id(const ipc::buffer& data) const
     {

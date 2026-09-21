@@ -15,26 +15,26 @@
 
 | 量 | 值 | 锚点 |
 |---|---|---|
-| 每档 chunk 池容量 | **32** | `large_msg_cache = 32` → `id_pool::max_count = min(32, 255)` |
+| 每档 chunk 池容量 | **40**(2026-09-20 自 32 扩容, 对齐 ROS 2 默认 QoS depth=10) | `large_msg_cache = 40` → `id_pool::max_count = min(40, 255)`; view/adopt 钉上限 = 40/4 = **10**(UF-012) |
 | 环槽位数 | **256** | `kRingSlots` |
 | 池分档粒度 | 1KB 台阶(`large_msg_align`) | `calc_chunk_size` |
-| 段名 | `CHUNK_INFO__<chunk_size>` | `get_info` |
+| 段名 | `CHUNK_INFO__<chunk_size>__C<容量>`(2026-09-20 加容量分量, 防跨容量版本混挂) | `get_info` + sniffer 同款构造 |
 | 默认前缀 | **空** ⇒ 段名无话题/进程区分 | `connect(ph, {nullptr}, …)` + `make_prefix("", …)` |
 
 锚点:
 
-- `include/libipc/def.h:44` — `large_msg_cache = 32`
+- `include/libipc/def.h:44` — `large_msg_cache = 40`(2026-09-20, 见 adopt_loan_quota_fix.md)
 - `src/libipc/utility/id_pool.h:40-47` — `max_count = limited_max_count()`
 - `src/libipc/prod_cons.h:25-26` — `kRingSlots = 256`
 - `src/libipc/ipc.cpp:234-241` — `calc_chunk_size` 按 `large_msg_align` 取整
-- `src/libipc/ipc.cpp:330-333` — `CHUNK_INFO__<chunk_size>`
+- `src/libipc/ipc.cpp:330-333` — `CHUNK_INFO__<chunk_size>__C<容量>`(⛔ 与 sniffer.cpp 同款构造逐字同步)
 - `src/libipc/ipc.cpp:363-380` — `chunk_storage_info(pref, chunk_size)`:按 `chunk_size`
   取 `chunk_handle_t`,再按 `pref` 取 handle ⇒ **同一档位一个段**
 
 **三个承重结论:**
 
-1. **池是硬瓶颈, 环不是。** 池 32 块 vs 环 256 槽 —— 生产者最多只能同时持有 32 条大消息,
-   第 33 条就到不了环里(会走降级路径)。环的深度**永远不会**成为大消息的第一约束。
+1. **池是硬瓶颈, 环不是。** 池 40 块 vs 环 256 槽 —— 生产者最多只能同时持有 40 条大消息,
+   第 41 条就到不了环里(会走降级路径)。环的深度**永远不会**成为大消息的第一约束。
 2. **池空是静默的。** 三条路径全都不报:
 
    | 路径 | 池空后的行为 | 锚点 | 是否报 |
@@ -53,7 +53,7 @@
 
    这与 UF-003 的形态相同(`chunk id 经环传递 ⇒ id 空间是跨进程契约`), 也意味着
    步骤① 的报错必须带上"哪一档"与**池的归属键**, 否则跨话题归因无从下手。
-   归属键就是 `prefix`(段名 = `make_prefix(prefix, {"CHUNK_INFO__", chunk_size})`),
+   归属键就是 `prefix`(段名 = `make_prefix(prefix, {"CHUNK_INFO__", chunk_size, "__C", 容量})`),
    而默认它是空串 —— 所以报错里要**把空前缀显式打出来并点明含义**。已落码, 见 §3。
 
 
@@ -116,7 +116,7 @@ chunk 从池里被取走到归还, 中间经过了谁:
 一份计数**。锁是安全的: 本函数**只在池取空时**才被调用。
 
 **报错必须自带归因字段**(§1 结论 3 的要求): 光有"哪一档"还不够 —— 池段名
-= `make_prefix(prefix, {"CHUNK_INFO__", chunk_size})`(`get_info`, `ipc.cpp:332-333`),
+= `make_prefix(prefix, {"CHUNK_INFO__", chunk_size, "__C", 容量})`(`get_info`, `ipc.cpp:330-`),
 所以 **`prefix` 才是这一档池的归属判别键**, 而默认部署下它是**空串**。于是:
 
 - `prefix = '...'` 原样打出。**空前缀不是"没信息", 它本身就是那条信息** ——
@@ -144,7 +144,7 @@ chunk 从池里被取走到归还, 中间经过了谁:
 
 | 用例 | 方向 | 构造 |
 |---|---|---|
-| `ExhaustionIsReported` | 阳性 | 接收方连上但**从不 `recv`** ⇒ 无 `buff_t` 构造 ⇒ 无 `recycle_storage`。前 32 条各取一块, 第 33 条必中 `-1`。**三档池各跑一次**: 7168 / 5120(锁住节流粒度缺陷) / **带非空前缀 `poolobs_a` 的 4096** |
+| `ExhaustionIsReported` | 阳性 | 接收方连上但**从不 `recv`** ⇒ 无 `buff_t` 构造 ⇒ 无 `recycle_storage`。各取一块直到池空, 耗尽后第一条必中 `-1`(容量现为 40, 用例常量已改为由 `large_msg_cache` 导出)。**三档池各跑一次**: 7168 / 5120(锁住节流粒度缺陷) / **带非空前缀 `poolobs_a` 的 4096** |
 | `NoReportWhenPoolCycles` | 阴性 | 8 轮 send→recv→`buff_t` 析构归还, 池内最多 1 块在外 |
 
 阴性用例带一个 `fprintf(stderr, kProbe)` 探针并先断言"探针必须被捕获" —— 否则
@@ -288,21 +288,26 @@ free = 走的步数(必须步数受限, 自环否则死循环);   L = 32 − fre
 | 项 | 落点 |
 |---|---|
 | 开关 | `dzIPC::EnableViewQueuePin(bool)` / `IsViewQueuePinEnabled()`(默认 **ON**) |
-| 容量 | `dzIPC::ViewQueueCap()` = `ipc::large_msg_cache / 4` = **8** |
+| 容量 | `dzIPC::ViewQueueCap()` = `ipc::large_msg_cache / 4` = **10**(2026-09-20 随池扩容 40/4; 落码时为 8) |
 | 生效 | `min(queue_size, ViewQueueCap())`, 订阅者**构造时**读一次 ⇒ 只影响之后新建的订阅者 |
 | 诊断 | 生效时打一条**一次性** stderr(按被请求的 queue_size 去重), 明写"被钉到 N"与如何恢复 |
 | 头文件 | `include/dzIPC/common/nodelet_config.h`(与 `EnableDzFlat` 同一体例) |
 
-**为什么钉到 8(= 池容量/4)**: 32 块里留 24 块头寸给环内在飞、同进程其他话题、同机其他进程
-—— 池按尺寸档**全机共享**(建 route 不带 prefix, 见 §5 环境事实 1), 钉满 32 等于把别的使用者挤死。
+**为什么钉到 10(= 池容量/4)**: 10×4 = 40, 留 30 块头寸给环内在飞、同进程其他话题、同机其他进程
+—— 池按尺寸档**全机共享**(建 route 不带 prefix, 见 §5 环境事实 1), 钉满 40 等于把别的使用者挤死。
+(初落为 8/32; 2026-09-20 随 UF-012 拍板"钉上限对齐 ROS 2 默认 depth"同步升至 10/40。)
 
 **射程**(为什么只钉 SHM 的 view 队列):
 - `view_queue_` 只在"DZFlat + typed"的借样路径被 push(§2), TLV/schema-less 走**物化**的
-  `msg_queue_` ⇒ 钉它对非 DZFlat 话题零影响; `msg_queue_` 刻意**不**钉(缩它只是白减应用缓冲)。
+  `msg_queue_` ⇒ 钉它对非 DZFlat 话题零影响。⚠️(2026-09-20 订正) "`msg_queue_` 刻意**不**钉"
+  仅对 TLV 物化成立 —— schema-less DZFlat 的 **adopt 借样分支照样钉 chunk**(借进 msg_queue_,
+  深度 = 用户 queue_size, 无界), 已登记为 UF-012 并修复: adopt 借样配额 = 与 view 同一上限,
+  配额满即物化 + spilled 计数, 修法/判据/指纹见 docs/adopt_loan_quota_fix.md。
+  TLV 物化消息本身不钉 chunk 的结论不变。
 - socket/UDP 侧也有 view 队列, 但其 Sample 持有的是接收层去帧出来的**独立堆块**
   (`socket_pub_sub_ipc.cc:758-797`), 不占 chunk 池 ⇒ 无需钉。
 
-⚠️ **单订阅者钉住 ≠ 全机不耗尽**: 4 个同尺寸档订阅者各钉 8 块仍会用满 32。跨进程隔离要靠
+⚠️ **单订阅者钉住 ≠ 全机不耗尽**: 4 个同尺寸档订阅者各钉 10 块仍会用满 40。跨进程隔离要靠
 prefix(见 `docs/unfixed_defects.md` UF-003), 不在本开关射程内。
 
 #### 实测落点: 判据成立

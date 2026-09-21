@@ -179,6 +179,12 @@ private:
     std::mutex topic_msg_mtx_;
     std::shared_ptr<CircularQueue<IpcMsgBase>> msg_queue_;  // 物化队列; shared_ptr for fast-path fanout
     std::shared_ptr<CircularQueue<Sample>> view_queue_;  // 视图队列: 借样的 DZFlat 段
+    /* UF-012 adopt 借样配额(见 .cc 构造函数与订阅循环 adopt 分支):
+     * adopt_cap_      构造期定死的配额(= view_cap, 同一开关同一上限);
+     * adopt_borrowed_ msg_queue_ 中持活 chunk 的借样消息数
+     *                 (adopt 入队 +1 / pop 与满队驱逐 -1)。 */
+    std::size_t adopt_cap_{0};
+    std::atomic<int> adopt_borrowed_{0};
     std::thread* subscribe_thread_{nullptr};
     std::thread* sub_handshake_thread_{nullptr};
     //

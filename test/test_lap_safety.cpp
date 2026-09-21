@@ -33,7 +33,7 @@ namespace {
 
 using namespace std::chrono_literals;
 
-constexpr int kChunkPoolSize = 32;
+constexpr int kChunkPoolSize = static_cast<int>(ipc::large_msg_cache);
 constexpr int kRingSlots = 256;
 
 std::string uniq(const char* tag)

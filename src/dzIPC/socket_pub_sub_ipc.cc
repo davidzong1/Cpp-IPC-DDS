@@ -744,7 +744,9 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
                                  * 丢弃, 与 AcceptWire 对这类话题的处置一致(它读不了 DZFlat 段)。
                                  *
                                  * 这一条与 SHM 腿逐行同构(shm_pub_sub_ipc.cc 的 dzflat_adopt
-                                 * 分支), 差别只在 UDP 已先付过一次固有去帧拷贝。 */
+                                 * 分支), 差别只在 UDP 已先付过一次固有去帧拷贝。
+                                 * ⛔ 不设借样配额(UF-012 只管 SHM 腿): 这里的 wire 是去帧
+                                 * 独立堆块, 借样不占 chunk 池, 无界无害。 */
                                 std::uint32_t seg_id = 0, seg_hash = 0;
                                 {
                                     dzflat::SegHeader h{};

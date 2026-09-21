@@ -1,6 +1,6 @@
 # UF-010 修复: 字符串哈希与容器相等性一致性
 
-> 状态: 已落码(工作树未提交) · 判据全绿 · 变更面仅 `src/libipc/memory/resource.h`
+> 状态: ✅已提交(`90510a5`, 2026-09-19)· 判据全绿 · 变更面仅 `src/libipc/memory/resource.h`
 > 关联: `docs/uf010_evidence_registration.md`(证据登记) · `test/test_loan.cpp:203`
 > (端到端判据) · `test/test_uf010_hash_semantics.cpp`(语义层聚焦判据)
 
@@ -55,7 +55,7 @@ shm 段在 `loan()`/`recv()`/`~buffer()` 各建一次映射, 从不 `munmap`; �
 
 | 键 | 缺陷态 | 修复态(本次) |
 |---|---|---|
-| `tree_head` | `8700215` | `8700215` + 工作树未提交改动 |
+| `tree_head` | `8700215` | `90510a5`(修复已提交) |
 | 源 `resource.h` | `50130d80785786439d8d4ab20122efe6` | `44815addce998b596ba4455625baa026` (注释精简/行尾收口定稿; 哈希实现代码逐字节不变, 编译产物与前一落码版相同) |
 | `libipc_md5` | `88fb143b56f4ee9c4074fd07ad6b1999` | `fe0a983f85ba1b954261556b1d8c062a` |
 | `driver_md5` `test_loan` | `4fd2882dfe441ed507d98f93902fb42f` | 同左(源未变) |
@@ -80,6 +80,14 @@ shm 段在 `loan()`/`recv()`/`~buffer()` 各建一次映射, 从不 `munmap`; �
   `test_dzipc_larger_data_shm` 1、`test_shm` 8、`test_shm_nodelet` 13、`test_complex_msg` ✔。
 - 探针佐证: `docs/probe_hash_semantics.cpp` 在修复态输出 `hash相等? 1` 与
   `map.size()=1`(登记文档 §4.2 的缺陷态读数 `hash相等? 0` / `size()=2` 由此订正)。
+
+**提交态复跑对账(2026-09-19 收尾闭环, `90510a5`)**: 三方指纹与登记值逐位一致
+(源 `resource.h` = `44815add…`, `libipc_md5` = `fe0a983f…`, 两驱动 md5 同上表)。
+上表"回归面"18 个驱动全量复跑, 通过数逐个与登记值相同, 全绿;
+`Loan.BroadcastToMultipleReceivers` **单跑 10/10 绿**(缺陷态曾红 20/20)。
+台账已落笔: `unfixed_defects.md` 任务总表新增 UF-010 行(✅已修)与新登记 UF-011
+(池空闲链二次入池 —— 与本修复无关的既有回收竞态, 见 shm_chunk_pool_occupancy_plan.md
+§3 步骤③ 副产品);UF-007 行已补 UF-011 交叉注记。
 
 ## 6. 回归器(防回退)
 

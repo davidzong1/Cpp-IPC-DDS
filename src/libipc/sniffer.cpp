@@ -280,9 +280,13 @@ public:
         auto it = chunk_handles_.find(chunk_size);
         if (it == chunk_handles_.end()) {
             ipc::shm::handle h;
+            /* ⛔ 与 ipc.cpp get_info 的段名构造逐字同步(含容量分量 __C<cap>):
+             * sniffer 挂的就是发布/订阅用的同一档池段, 名字不一致 = 另建一段,
+             * sniffer 看到的池与真实池完全脱节。容量变更时两处一起改。 */
             ipc::string shm_name = ipc::make_prefix(
                 prefix_,
-                {"CHUNK_INFO__", ipc::to_string(chunk_size)});
+                {"CHUNK_INFO__", ipc::to_string(chunk_size), "__C",
+                 ipc::to_string(static_cast<std::size_t>(ipc::large_msg_cache))});
             if (!h.acquire(shm_name.c_str(),
                            sizeof(chunk_info_t) +
                                chunk_info_t::chunks_mem_size(chunk_size))) {

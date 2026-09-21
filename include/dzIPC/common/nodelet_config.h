@@ -133,6 +133,9 @@ struct DzFlatRxStats
     std::uint64_t tlv_accepted = 0;
     std::uint64_t tlv_id_skipped = 0;
     std::uint64_t tlv_corrupt_drop = 0;
+    /// adopt 借样配额溢出(UF-012): 借样满 ViewQueueCap() 后改物化拷贝的次数。
+    /// 非零不是错 —— 是"消费者慢到借样配额不够用"的可见信号。
+    std::uint64_t dzflat_adopt_spilled = 0;
 
     /// 真实缺陷的合计(不含正常的 msg_id 过滤)。非 0 就该去查。
     std::uint64_t defects() const noexcept
@@ -155,6 +158,7 @@ enum class DzFlatRxEvent
     kTlvAccepted,
     kTlvIdSkipped,
     kTlvCorruptDrop,
+    kDzFlatAdoptSpilled,   /* UF-012: 借样配额满, 改物化 */
     kCount,   /* 哨兵: 计数数组的长度由它推出, 增删事件不会漏改 */
 };
 

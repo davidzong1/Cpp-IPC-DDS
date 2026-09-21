@@ -37,7 +37,7 @@ void print_help(const char* prog)
               << "  -h, --help             本帮助\n";
 }
 
-bool parse_args(int argc, char** argv, Options& opt)
+int parse_args(int argc, char** argv, Options& opt)
 {
     for (int i = 1; i < argc; ++i)
     {
@@ -45,11 +45,11 @@ bool parse_args(int argc, char** argv, Options& opt)
         if (a == "-h" || a == "--help")
         {
             print_help(argv[0]);
-            return false;
+            return 1;
         }
         else if (a == "-w" || a == "--watch")
         {
-            opt.one_shot = false;
+            opt.one_shot = 0;
         }
         else if ((a == "-i" || a == "--interval") && i + 1 < argc)
         {
@@ -76,10 +76,10 @@ bool parse_args(int argc, char** argv, Options& opt)
         {
             std::cerr << "unknown arg: " << a << "\n";
             print_help(argv[0]);
-            return false;
+            return 0;
         }
     }
-    return true;
+    return 2;
 }
 
 std::string format_age(int64_t register_ts_ns)
@@ -148,9 +148,13 @@ void print_snapshot(const std::vector<dzIPC::info_pool::EntrySnapshot>& entries,
 int main(int argc, char** argv)
 {
     Options opt;
-    if (!parse_args(argc, argv, opt))
+    int parse_result = parse_args(argc, argv, opt);
+    if (parse_result != 2)
     {
-        return 1;
+        if (parse_result == 1)
+            return 0;
+        else
+            return 1;
     }
 
     if (opt.clear_pool)

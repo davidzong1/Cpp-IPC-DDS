@@ -188,7 +188,7 @@ public:
     bool has_dzflat() const noexcept { return !dzflat_seg_.empty() || (dzflat_borrow_ != nullptr); }
 
     /// 所持段是否为"借样"(未拷贝, 指向共享 chunk)。Python 侧据此确认零拷贝已生效。
-    bool dzflat_is_borrowed() const noexcept { return dzflat_borrow_ != nullptr; }
+    bool dzflat_is_borrowed() const noexcept override { return dzflat_borrow_ != nullptr; }
 
     /// 所持段的 schema 指纹; 未持有时为 0。用于在 Python 侧查 schema 注册表。
     uint32_t dzflat_seg_schema_hash() const noexcept { return dzflat_seg_hash_; }

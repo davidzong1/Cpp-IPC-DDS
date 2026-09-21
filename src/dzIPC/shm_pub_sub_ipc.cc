@@ -11,6 +11,7 @@
 #include "dzIPC/common/name_operator.h"
 #include "dzIPC/common/nodelet_config.h"
 #include "dzIPC/common/wire_accept.h"
+#include "ipc_msg/ipc_msg_base/generic_message.hpp"   /* fast-path 借样物化(UF-012) */
 
 namespace dzIPC {
 namespace shm {
@@ -248,6 +249,17 @@ bool shm_pub_ipc::publish_best_effort(std::shared_ptr<IpcMsgBase> msg)
     {
         // Clone once, fanout to all local queues.
         std::shared_ptr<IpcMsgBase> cloned(msg->clone());
+        /* ⛔ 队列里的借样只允许来自接收侧 adopt 配额(UF-012)。发布侧消息若自身持
+         * 借样(订阅后转发的 GenericMessage), clone 拷的是 shared_ptr<buffer> ——
+         * 借样随克隆进各订阅者队列, 绕开配额钉池。物化掉: clone 自持堆块。 */
+        if (cloned->dzflat_is_borrowed())
+        {
+            auto* gm = dynamic_cast<GenericMessage*>(cloned.get());
+            if (gm != nullptr)
+            {
+                gm->dzflat_read(gm->dzflat_data(), gm->dzflat_len());
+            }
+        }
         for (auto& q : snapshot)
         {
             q->push(cloned);   // const& overload: copies shared_ptr
@@ -461,11 +473,13 @@ void warn_view_queue_pinned(std::size_t requested, std::size_t applied)
         }
         seen.push_back(requested);
     }
-    std::cerr << "\033[33m[dzIPC][view_queue] queue_size = " << requested << " 被钉到 " << applied
+    std::cerr << "\033[33m[dzIPC][view_queue] queue_size = " << requested << " 超过钉上限, 被钉到 " << applied
               << ": chunk 池每尺寸档只有 " << static_cast<std::size_t>(ipc::large_msg_cache)
-              << " 块且全机共享(建 route 不带 prefix), 队列配得比池大就会把池吃干 —— "
-                 "之后发布侧借不到块而回退 TLV。见 "
-                 "docs/shm_chunk_pool_occupancy_plan.md §3 步骤③; "
+              << " 块且全机共享(建 route 不带 prefix), 队列配得比池大就会把池吃干。"
+                 "两个钉面同用此上限: view 队列钉到 " << applied
+              << "; adopt 借样(schema-less 话题的 DZFlat 经 msg_queue_)配额同为 " << applied
+              << ", 配额满即自动物化拷贝 —— 零拷贝只在配额内生效, 超额每消息多一次拷贝。"
+                 "见 docs/shm_chunk_pool_occupancy_plan.md §3 步骤③与 UF-012; "
                  "EnableViewQueuePin(false) 可恢复原值。\033[0m"
               << std::endl;
 }
@@ -488,14 +502,17 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
     topic_msg_.reset(msg->clone());
     msg_id_ = topic_msg_->topic()->msg_id();
     msg_queue_ = std::make_shared<CircularQueue<IpcMsgBase>>(queue_size);
-    /* 步骤③: view 队列是**唯一**钉 chunk 的队列(借样 Sample 持有 buff_t, 见本文件
-     * 订阅循环里 :773 处的注释), 而池每尺寸档只有 ipc::large_msg_cache 块且全机共享
-     * (建 route 不带 prefix) ⇒ 容量配得比池大就会把池吃干, 之后发布侧 loan 拿不到块
-     * 而回退整包 TLV。钉到池容量以下(默认 1/4)给环内在飞、同进程其他话题、同机其他
-     * 进程留头寸。设计与实测见 docs/shm_chunk_pool_occupancy_plan.md §3 步骤③。
+    /* 步骤③: view 队列钉 chunk(借样 Sample 持有 buff_t, 见本文件订阅循环 :773 处
+     * 注释), adopt 借样(GenericMessage 收 schema-less DZFlat)经 msg_queue_ 也钉
+     * chunk —— 两者的配额同源: ViewQueueCap() = large_msg_cache/4 = 10(对齐 ROS 2
+     * 默认 QoS depth), 保持 "4 个订阅者满钉" 的池余量(10×4 = 40 = 池容量)。池每
+     * 尺寸档 large_msg_cache 块且全机共享(建 route 不带 prefix) ⇒ 不设上限的队列
+     * 配置就能把池吃干, 之后发布侧 loan 拿不到块而回退整包 TLV。设计与实测见
+     * docs/shm_chunk_pool_occupancy_plan.md §3 步骤③。
      *
-     * ⚠️ msg 队列(物化, 不钉 chunk)**刻意不钉** —— 缩它只是白减应用缓冲。
-     * ⚠️ socket/UDP 侧不钉: 那边的 Sample 持有的是接收层去帧出来的独立堆块, 不占池。 */
+     * ⚠️ msg 队列的 TLV 物化消息不钉 chunk —— 钉的只是 adopt 借样, 由 adopt_cap_
+     *    配额封顶(见订阅循环 adopt 分支与 UF-012); 缩 msg_queue_ 本体只是白减缓冲。
+     * ⚠️ socket/UDP 侧不钉: 那边的 Sample/借样持有的是去帧独立堆块, 不占池。 */
     const std::size_t view_cap =
         dzIPC::IsViewQueuePinEnabled() ? dzIPC::ViewQueueCap() : queue_size;
     if (view_cap < queue_size)
@@ -504,6 +521,19 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
     }
     view_queue_ = std::make_shared<CircularQueue<Sample>>(
         (view_cap < queue_size) ? view_cap : queue_size);
+    /* UF-012 adopt 借样配额: 与 view 队列同一上限、同一开关。借样进 msg_queue_
+     * 的消息每条钉一块 chunk, 而队列深度是用户配置的 queue_size(可能远大于池),
+     * 不设配额一个慢消费者就能把整档池钉干。计数三条路径: adopt 入队 +1,
+     * pop(get_clone/try_get_clone) -1, 满队挤最老(evict 回调) -1。 */
+    adopt_cap_ = view_cap;
+    msg_queue_->set_evict_cb(
+        [this](const std::shared_ptr<IpcMsgBase> &dropped)
+        {
+            if (dropped && dropped->dzflat_is_borrowed())
+            {
+                adopt_borrowed_.fetch_sub(1, std::memory_order_relaxed);
+            }
+        });
 }
 
 /******************************************************************************************************/
@@ -830,7 +860,13 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
                          * 字节), Python 按段头 schema_hash 查表解码 —— 这是 Python 侧零拷贝
                          * 的落点。msg_id 需对上; schema 无从在 C++ 校验(GenericMessage 无
                          * schema)。话题不是 GenericMessage(手写类型)收到 DZFlat = 类型不匹配,
-                         * 丢弃。 */
+                         * 丢弃。
+                         *
+                         * UF-012 借样配额: 借进 msg_queue_ 的消息每条钉一块 chunk, 而队列
+                         * 深度是用户配置的 queue_size(可能远大于池容量)。配额内照旧借样
+                         * (零拷贝); 配额满即物化(dzflat_read 拷进堆) —— raw_data 是循环体
+                         * 作用域的 buff_t, 迭代末尾析构即还池。降级是每消息一次拷贝,
+                         * 不降级成系统级池饿死。 */
                         std::uint32_t seg_id = 0, seg_hash = 0;
                         {
                             dzflat::SegHeader h{};
@@ -854,8 +890,29 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
                             }
                             local_msg.reset(topic_msg_->clone());
                         }
-                        if (local_msg->topic()->dzflat_adopt(std::move(raw_data), seg_hash))
+                        /* ⛔ 短路顺序即正确性: 配额满时**不调** adopt —— adopt 按值收
+                         * buffer, 即便返回 false, raw_data 也已被 move 掏空, 之后的
+                         * 物化分支就拿不到段字节了。配额满 ⇒ raw_data 完好 ⇒ 走物化。 */
+                        const bool quota_ok =
+                            adopt_borrowed_.load(std::memory_order_relaxed) <
+                            static_cast<int>(adopt_cap_);
+                        if (quota_ok &&
+                            local_msg->topic()->dzflat_adopt(std::move(raw_data), seg_hash))
                         {
+                            adopt_borrowed_.fetch_add(1, std::memory_order_relaxed);
+                            std::shared_ptr<IpcMsgBase> ptr_cache;
+                            local_msg->swap(ptr_cache);
+                            msg_queue_->push(std::move(ptr_cache));
+                            continue;
+                        }
+                        /* 配额满(GenericMessage)→ 物化拷贝 + 溢出计数; 非 GenericMessage
+                         * (手写类型)→ adopt 已把 raw_data 掏空且 dzflat_read 基类返回
+                         * false, 落到下面的类型不匹配丢弃 —— 与旧行为一致。 */
+                        if (!raw_data.empty() &&
+                            local_msg->topic()->dzflat_read(raw_data.data(), raw_data.size()))
+                        {
+                            detail::NoteDzFlatRx(
+                                detail::DzFlatRxEvent::kDzFlatAdoptSpilled);
                             std::shared_ptr<IpcMsgBase> ptr_cache;
                             local_msg->swap(ptr_cache);
                             msg_queue_->push(std::move(ptr_cache));
@@ -959,6 +1016,12 @@ void shm_sub_ipc::get_clone(std::shared_ptr<TopicData>& msg)
 {
     std::shared_ptr<IpcMsgBase> ipc_msg;
     msg_queue_->pop(ipc_msg);
+    /* 出队即离开配额账面(消息可能带着借样移交给用户 —— 与 view 路径同一契约:
+     * 队列驻留有上限, 用户手持期是用户的约定)。 */
+    if (ipc_msg && ipc_msg->dzflat_is_borrowed())
+    {
+        adopt_borrowed_.fetch_sub(1, std::memory_order_relaxed);
+    }
     msg->update(ipc_msg);
 }
 
@@ -970,6 +1033,10 @@ bool shm_sub_ipc::try_get_clone(std::shared_ptr<TopicData>& msg)
     std::shared_ptr<IpcMsgBase> ipc_msg;
     if (msg_queue_->try_pop(ipc_msg))
     {
+        if (ipc_msg && ipc_msg->dzflat_is_borrowed())
+        {
+            adopt_borrowed_.fetch_sub(1, std::memory_order_relaxed);
+        }
         msg->update(ipc_msg);
         return true;
     }

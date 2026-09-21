@@ -73,6 +73,7 @@
 #include "dzIPC/common/sample_message.h"
 #include "dzIPC/shm_pub_sub_ipc.h"
 #include "ipc_msg/std_msgs/std_image.hpp"
+#include "libipc/def.h"
 #include "libipc/shm.h"
 
 /* ── 通道 B 的插桩符号 ──────────────────────────────────────────────────────
@@ -92,9 +93,10 @@ namespace {
 
 using namespace std::chrono_literals;
 
-/* 每档 chunk 池容量 = ipc::large_msg_cache = 32(include/libipc/def.h:44)。
+/* 每档 chunk 池容量 = ipc::large_msg_cache(当前 40, include/libipc/def.h)。
+ * ⛔ 由常量导出而非写死: 容量一变, 写死魔数会让判据失真(同 test_uf007 的教训)。
  * 池空即 cursor_ 走到底 —— 见 id_pool::empty()。 */
-constexpr int kPoolCap = 32;
+constexpr int kPoolCap = static_cast<int>(ipc::large_msg_cache);
 constexpr std::size_t kLargeMsgAlign = 1024;
 constexpr std::uint32_t kMsgId = 31;
 
@@ -131,13 +133,15 @@ constexpr std::size_t borrowed_chunk_class(std::size_t dzflat_size) noexcept
 
 std::string pool_segment_path(std::size_t chunk_class)
 {
-    return "/dev/shm/__IPC_SHM__CHUNK_INFO__" + std::to_string(chunk_class);
+    /* ⛔ 与 ipc.cpp get_info 的段名构造同步(含容量分量 __C<cap>)。 */
+    return "/dev/shm/__IPC_SHM__CHUNK_INFO__" + std::to_string(chunk_class) +
+           "__C" + std::to_string(static_cast<std::size_t>(ipc::large_msg_cache));
 }
 
 /* ── 通道 A: 直读池段, 走一遍空闲链 ──────────────────────────────────────────
  * 段是 tmpfs 文件, 进程 mmap 的同时可按文件读同一份内存(步骤① 已实测)。
- * 段内布局: chunk_info_t 首成员 id_pool<>, 其 next_[32] 占偏移 0..31(每项 1 字节,
- * 见 id_type<0,AlignSize>), cursor_ 在偏移 32 ⇒ 读 [0,33) 就是读整条空闲链。
+ * 段内布局: chunk_info_t 首成员 id_pool<>, 其 next_[40] 占偏移 0..39(每项 1 字节,
+ * 见 id_type<0,AlignSize>), cursor_ 在偏移 40 ⇒ 读 [0,41) 就是读整条空闲链。
  *
  * 段不存在 ⇒ 从未取过块 ⇒ 全空闲(libipc 的段是首次 acquire 时懒创建的, 建 route
  * 本身不建段 —— 步骤① §5 环境事实 1)。 */
@@ -157,7 +161,7 @@ struct PoolSnap
 
 PoolSnap read_pool_snapshot(const std::string& path)
 {
-    /* ⛔ 33 字节的 fread 不是原子读, 而读写方在并发改这条链。为了把两种完全不同的
+    /* ⛔ (容量+1) 字节的 fread 不是原子读, 而读写方在并发改这条链。为了把两种完全不同的
      * 情况分开, 这里重试并要求**连续两次结果一致**才采信:
      *   - 瞬时撕裂: 下一轮就一致了 ⇒ 正常采到数;
      *   - 持续性自环: 每一轮都失败 ⇒ 那不是读法问题, 是链本身坏了
@@ -166,7 +170,7 @@ PoolSnap read_pool_snapshot(const std::string& path)
      * 不加重试的话这两种会被混成一个 badsnap 计数, 谁也说不清读数为什么没了。 */
     /* 尝试次数从 16 提到 64: churn 重时"两次连续一致"本身就要多试几次, 16 次不够
      * 会把"链在动"误判成失败(实测 queue=8/pub-extra=2 那几组 badsnap=60 里混着这种)。
-     * 33 字节的读极便宜, 64 次的开销可忽略。 */
+     * (容量+1) 字节的读极便宜, 64 次的开销可忽略。 */
     constexpr int kAttempts = 64;
     PoolSnap last;
     bool have_last = false;
@@ -175,14 +179,14 @@ PoolSnap read_pool_snapshot(const std::string& path)
         PoolSnap s;
         std::FILE* f = std::fopen(path.c_str(), "rb");
         if (f == nullptr) return s;   // 段不存在 ⇒ fresh, 全空闲
-        unsigned char b[33];
+        unsigned char b[kPoolCap + 1];
         const std::size_t got = std::fread(b, 1, sizeof(b), f);
         std::fclose(f);
         if (got < sizeof(b)) { s.ok = false; s.bad = PoolSnap::Bad::kShort; }
         else {
-            /* 沿链走。⛔ 必须限步: 自环时 cursor_ 永远 < 32, 不限步就是死循环 ——
+            /* 沿链走。⛔ 必须限步: 自环时 cursor_ 永远 < 容量, 不限步就是死循环 ——
              * 量具把被测进程挂住比读错更糟。步数超过容量即判本次读作废。 */
-            unsigned cursor = b[32];
+            unsigned cursor = b[kPoolCap];
             int n = 0;
             while (cursor < static_cast<unsigned>(kPoolCap) && n <= kPoolCap) {
                 cursor = b[cursor];
@@ -382,7 +386,8 @@ int main(int argc, char** argv)
         }
     }
     const std::string segpath = pool_segment_path(cls);
-    const std::string segname = "__IPC_SHM__CHUNK_INFO__" + std::to_string(cls);
+    const std::string segname = "__IPC_SHM__CHUNK_INFO__" + std::to_string(cls) +
+                                "__C" + std::to_string(static_cast<std::size_t>(ipc::large_msg_cache));
 
     /* ── 起始 fresh 检查(硬失败, 不许静默降级)──────────────────────────────
      * 残池会让"容量 32"这个前提消失, 之后所有读数都退化成恒真。

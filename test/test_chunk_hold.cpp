@@ -37,8 +37,9 @@
 
 namespace {
 
-/* ipc::id_pool<>::max_count = ipc::large_msg_cache = 32, 每个尺寸类全进程共享。 */
-constexpr int kChunkPoolSize = 32;
+/* ipc::id_pool<>::max_count = ipc::large_msg_cache, 每个尺寸类全进程共享。
+ * ⛔ 由常量导出: 写死魔数在容量变更时会让洪泛校准与 static_assert 全部失真。 */
+constexpr int kChunkPoolSize = static_cast<int>(ipc::large_msg_cache);
 
 /* 环的槽位数: circ::elem_array::elem_max = numeric_limits<uint8>::max() + 1。 */
 constexpr int kRingSlots = 256;
@@ -171,7 +172,7 @@ TEST(ChunkHold, OverwrittenChunksAreReclaimed)
         ipc::route rx1{name.c_str(), ipc::receiver};
         ASSERT_TRUE(tx.wait_for_recv(1, 2000)) << "rx1 未在超时内连上";
 
-        /* 吃干池子: 32 条大消息全部无人 pop, 各占 1 个槽位。 */
+        /* 吃干池子: 全部大消息无人 pop, 各占 1 个槽位。 */
         for (int i = 0; i < kChunkPoolSize; ++i) ASSERT_TRUE(blast(tx, payload));
 
         /* 池已空 → 后续消息分片, 每条 kSlotsPerFragmented 个槽位, 绕环覆写掉上面

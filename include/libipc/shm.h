@@ -21,6 +21,10 @@ IPC_EXPORT std::int32_t release(id_t id) noexcept;
 IPC_EXPORT std::int32_t release_no_unlink(id_t id) noexcept;
 IPC_EXPORT void         remove (id_t id) noexcept;
 IPC_EXPORT void         remove (char const * name) noexcept;
+/* UF-004 保留面收口: 名字级 unlink 本进程以 create 模式创建(已登记)的段。
+ * 供不展开栈的退出路径(如 dzipc 超时收尾)使用 —— 不触碰映射/实例;
+ * 已被 release/remove unlink 过的名字不会再扫; fork 继承的登记项(pid 不符)不误扫。 */
+IPC_EXPORT std::size_t unlink_created_segments() noexcept;
 
 IPC_EXPORT std::int32_t get_ref(id_t id);
 IPC_EXPORT void sub_ref(id_t id);

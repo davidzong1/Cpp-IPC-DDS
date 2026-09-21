@@ -1,4 +1,5 @@
 #include "dzIPC/dzipc.h"
+#include "libipc/shm.h"
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -129,6 +130,33 @@ static void CleanupIpcInstances()
     }
 }
 
+/* ---- UF-004 收尾回调钩子(2026-09-20) ----
+ * 注册的回调在库收尾路径(两条 std::exit 前)最早时机各跑一轮: 超时路径 signo=实际
+ * 信号, RequestShutdown 内部路径 signo=0。swap 快照语义 ⇒ 回调内再注册不保证本轮
+ * 被调; 异常吞掉 —— 收尾路径不得被回调打断。 */
+static std::mutex shutdown_callback_mutex;
+static std::vector<dzIPC::ShutdownCallBackFun> shutdown_callbacks;
+
+static void RunShutdownCallBacks(int signo)
+{
+    std::vector<dzIPC::ShutdownCallBackFun> cbs;
+    {
+        std::lock_guard<std::mutex> lock(shutdown_callback_mutex);
+        cbs.swap(shutdown_callbacks);
+    }
+    for (auto & cb : cbs)
+    {
+        try { cb(signo); } catch (...) {}
+    }
+}
+
+void RegisterShutdownCallBack(ShutdownCallBackFun cb)
+{
+    if (!cb) return;
+    std::lock_guard<std::mutex> lock(shutdown_callback_mutex);
+    shutdown_callbacks.push_back(std::move(cb));
+}
+
 static void ShutdownMonitorThreadBody();
 
 void StartShutdownMonitor()
@@ -162,6 +190,10 @@ void ShutdownMonitorThreadBody()
     if (!uf009_signal_dispatched.load(std::memory_order_relaxed))
     {
         /* 库内部请求的退出(RequestShutdown): 不回放不宽限, 行为与改前一致。 */
+        /* 库内部请求的退出(RequestShutdown): 不回放不宽限, 行为与改前一致。
+         * 保留面同样在此收口(UF-004, 2026-09-20): 退出前扫除本进程 create 模式创建的段名。 */
+        RunShutdownCallBacks(0);   /* signo=0: 库内部退出, 非信号死亡 */
+        ipc::shm::unlink_created_segments();
         dzIPC::logger::StopDzipcLog();
         CleanupIpcInstances();
         std::exit(0);
@@ -205,11 +237,17 @@ void ShutdownMonitorThreadBody()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    /* 超时: 原库收尾。⛔ 栈不展开 ⇒ main 里的实例不析构 ⇒ 段不 unlink ——
-     * 残留语义与改前一致, 这是"有条件修复"的保留面, 不在此处强拆实例。 */
+    /* 超时: 原库收尾。栈不展开 ⇒ main 里的实例不析构 ⇒ 段不经析构 unlink 回收 ——
+     * 这是 UF-009"有条件修复"的保留面, 不在此处强拆实例。保留面已收口(UF-004, 2026-09-20):
+     * 退出前对本进程 create 模式创建的段名做扫除(shm::unlink_created_segments ——
+     * 只删名字, 不触碰映射/实例; fork 继承的登记条目 pid 不符不误扫)。 */
+    RunShutdownCallBacks(signo);
+    ipc::shm::unlink_created_segments();
     dzIPC::logger::StopDzipcLog();
     CleanupIpcInstances();
-    std::exit(0);
+    /* 退出码 128+sig(UF-004 子项收口, 2026-09-20): 超时即"应用未在宽限内自行退出",
+     * 对监督者等价于死于信号 —— 退出码如实上报(此前恒 0 掩盖信号事实)。 */
+    std::exit(128 + signo);
 }
 
 void RequestShutdown()

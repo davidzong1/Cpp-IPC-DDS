@@ -41,7 +41,12 @@ enum : std::size_t {
     sniffer_payload_limit = data_length * sniffer_ring_slots,
     large_msg_limit = data_length,
     large_msg_align = 1024,
-    large_msg_cache = 32,
+    /* 每尺寸档 chunk 池容量。40 = 10(钉上限, 对齐 ROS 2 默认 QoS depth=10)
+     * × 4(满钉订阅者余量) —— dzIPC::ViewQueueCap() 即取本值 / 4。
+     * 调整时同步检查: id_pool::max_count = min(本值, uint8 上限 255);
+     * 段名编码了本值(ipc.cpp get_info), 容量不同的段天然隔离不混挂;
+     * UF-007/UF-011 判据的 4×kCap 魔数由本值导出, 不得写死。 */
+    large_msg_cache = 40,
 };
 
 enum class relat { // multiplicity of the relationship

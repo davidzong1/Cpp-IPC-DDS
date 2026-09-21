@@ -3,6 +3,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -36,6 +37,15 @@ public:
   {
     return try_dequeue(out);
   }
+
+  /* 满队挤最老时的驱逐通知(可选)。
+   *
+   * 丢弃发生在 push 内部、不经过 try_pop —— 任何"队列内对象计数"(如
+   * shm_sub_ipc 的 adopt 借样配额)若只钩 pop 不钩这里, 只会只涨不跌、永久退化。
+   * 回调拿到的是**析构前**的 MsgPtr, 观察者可识别类别后自行递减。
+   * ⛔ 必须在首次 push 之前设置一次; 之后只读, 无需同步。 */
+  using EvictCb = std::function<void(MsgPtr &)>;
+  void set_evict_cb(EvictCb cb) { evict_cb_ = std::move(cb); }
 
   bool pop(MsgPtr &out, uint64_t tm = std::numeric_limits<uint64_t>::max())
   {
@@ -104,7 +114,14 @@ private:
     while (!try_enqueue(msg))
     {
       MsgPtr dropped;
-      if (!try_dequeue(dropped))
+      if (try_dequeue(dropped))
+      {
+        if (evict_cb_)
+        {
+          evict_cb_(dropped);
+        }
+      }
+      else
       {
         std::this_thread::yield();
       }
@@ -179,6 +196,7 @@ private:
   std::unique_ptr<Cell[]> cells_;
   alignas(64) std::atomic<size_t> enqueue_pos_{0};
   alignas(64) std::atomic<size_t> dequeue_pos_{0};
+  EvictCb evict_cb_;   /* 见 set_evict_cb; 构造后只读 */
   mutable std::mutex wait_mtx_;
   std::condition_variable cv_;
 };

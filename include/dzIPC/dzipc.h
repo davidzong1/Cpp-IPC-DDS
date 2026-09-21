@@ -93,13 +93,26 @@ inline TopicDataPtr TopicDataPtrMake(int msg_id = 0)
 // UF-009 链式接管(2026-09-18): 安装前保存应用既有处置; 信号到来时回放既有处理器
 // (SIG_DFL/SIG_IGN 跳过)、复权(应用处置装回), 并给应用 500ms 宽限自行退出——
 // 优雅路径上栈正常展开, IPC 实例析构、SHM 段 unlink、应用收尾恢复执行;
-// 超时才走库收尾 std::exit(0)(该路径残留语义与改前一致)。RequestShutdown()
-// 的库内部退出路径不回放不宽限, 行为不变。
+// 超时才走库收尾: 先按注册顺序调用 RegisterShutdownCallBack 回调(signo=实际信号)、
+// 扫除本进程 create 建出的段名, 再 std::exit(128+signo) —— 退出码如实上报信号
+// (UF-004 子项收口 2026-09-20, 不再恒 0 掩盖)。RequestShutdown() 的库内部退出
+// 路径不回放不宽限, 回调照跑(signo=0)、段名照扫, 退出码保持 0(非信号死亡)。
 IPC_EXPORT void StartShutdownMonitor();
 // 允许外部主动触发退出流程
 IPC_EXPORT void RequestShutdown();
 // 查询是否已经请求退出
 IPC_EXPORT bool IsShutdownRequested();
+
+// UF-004 收尾回调钩子(2026-09-20): 注册库收尾路径(std::exit 前)最早时机调用的回调。
+//   · 超时收尾: signo = 实际信号(SIGINT=2/SIGTERM=15); RequestShutdown 内部收尾: signo = 0。
+//   · 多回调按注册顺序执行; 每轮按注册时刻的快照跑一遍(回调内再注册不保证本轮被调);
+//     回调异常被吞掉 —— 收尾路径不得被打断。
+//   · 契约: 回调必须快速返回(阻塞会拖住整个收尾); 监控线程未启动(未创建任何 IPC 对象
+//     且未显式 StartShutdownMonitor)时永不触发 —— 此时库不参与退出。
+//   · 优雅路径(应用在宽限内自行退出)不经过库收尾, 回调不触发 —— 应用自己的收尾
+//     本来就在 main 栈展开里。
+using ShutdownCallBackFun = std::function<void(int)>;
+IPC_EXPORT void RegisterShutdownCallBack(ShutdownCallBackFun cb);
 // 让**库不要**隐式接管进程退出(UF-004 opt-out): 必须在创建第一个 IPC 对象**之前**调用。
 //   true  = 此后库**不再隐式安装**: 四个 *IPCPtrMake 这条路不再装 SIGINT/SIGTERM 处理器、
 //           不起监控线程, 信号交给应用自己的处置(SIG_DFL 即硬杀), 应用自负退出。

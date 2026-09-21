@@ -301,7 +301,7 @@ TEST(DzIpcShutdownMonitorOptOut, DefaultPathLibraryTakesOverExitZero)
     EXPECT_NE(r.log.find("sigint=not_dfl"), std::string::npos)
         << "默认路径必须由库接管(SIGINT 处置被库覆盖); " << describe(r);
     EXPECT_TRUE(r.exited) << "默认路径必须由监控线程 std::exit(0) 结束; " << describe(r);
-    EXPECT_EQ(r.code, 0) << describe(r);
+    EXPECT_EQ(r.code, 130) << "退出码 128+SIGINT=130(UF-004 子项收口: 库收尾如实上报信号); " << describe(r);
     cleanup_own_shm_residue(tag);
 }
 
@@ -366,7 +366,7 @@ TEST(DzIpcShutdownMonitorOptOut, LateCallReturnsFalseAndBehaviorUnchanged)
     EXPECT_NE(r.log.find("optout=0"), std::string::npos)
         << "监控已启动后调用必须返回 false(调用方要能区分\"生效\"与\"太晚\"); " << describe(r);
     EXPECT_TRUE(r.exited) << "晚调用不得改变行为: 仍须由库接管退出; " << describe(r);
-    EXPECT_EQ(r.code, 0) << describe(r);
+    EXPECT_EQ(r.code, 130) << "退出码 128+SIGINT=130(UF-004 子项收口: 库收尾如实上报信号); " << describe(r);
     cleanup_own_shm_residue(tag);
 }
 
@@ -439,7 +439,7 @@ TEST(DzIpcShutdownMonitorOptOut, ExplicitStartStillInstallsAfterOptOut)
     EXPECT_NE(r.log.find("sigint=not_dfl"), std::string::npos)
         << "opt-out 只能关隐式路径: 显式 StartShutdownMonitor() 必须仍然安装处理器; " << describe(r);
     EXPECT_TRUE(r.exited) << describe(r);
-    EXPECT_EQ(r.code, 0) << "显式 StartShutdownMonitor() 后 SIGINT 仍须由库接管退出; " << describe(r);
+    EXPECT_EQ(r.code, 130) << "显式 StartShutdownMonitor() 后 SIGINT 仍须由库接管退出(退出码 128+SIGINT); " << describe(r);
     cleanup_own_shm_residue(tag);
 }
 
@@ -450,7 +450,7 @@ TEST(DzIpcShutdownMonitorOptOut, ExplicitStartStillInstallsAfterOptOut)
  *     (started 只由 EnsureShutdownMonitorStarted() 维护) ⇒ 随后调用 DisableShutdownMonitor()
  *     时 started 仍为 false ⇒ **返回 true**;
  *   · 但处理器已由 call_once 装上、监控线程已经在跑, 本调用**不可能**撤销它们 ⇒ 行为保持
- *     "已启动"(SIGINT 仍由库接管并 exit(0))。
+ *     "已启动"(SIGINT 仍由库接管并 exit(128+SIGINT))。
  * 所以 true 只承诺"此后不再**隐式**安装", **不**承诺"库当前没接管"。头文件注释与本臂必须
  * 说的是同一件事 —— 这正是 reviewer seq157 指出的 A3b 缺口。
  * 变异: 让 StartShutdownMonitor() 也置 started(把"显式启动"也算已启动) ⇒ 本臂 "optout=1"
@@ -479,7 +479,7 @@ TEST(DzIpcShutdownMonitorOptOut, ExplicitStartThenDisableReturnsTrueButHandlerSt
     EXPECT_NE(r.log.find("sigint_after_optout=not_dfl"), std::string::npos)
         << "本调用不得(也不可能)撤销已装的处理器: 行为保持\"已启动\"; " << describe(r);
     EXPECT_TRUE(r.exited) << "已在跑的监控必须仍然接管退出(不是 SIG_DFL 硬杀); " << describe(r);
-    EXPECT_EQ(r.code, 0) << describe(r);
+    EXPECT_EQ(r.code, 130) << "退出码 128+SIGINT=130(UF-004 子项收口: 库收尾如实上报信号); " << describe(r);
     cleanup_own_shm_residue(tag);
 }
 

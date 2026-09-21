@@ -399,15 +399,10 @@ void socket_ser_ipc::server_handshake()
         }
         else
         {
-            /* ⛔ 旧实现在 StopHS **从不发送**(只在 RunHS 发 host_flag)。这在只有
-             * 一个布尔"是否已握手"的世界里没问题, 但路径裁定状态要靠这条通道传给
-             * 对端 (T2 §3 D2), 不发送就等于信号永远到不了 —— 实测表现是双方各自
-             * 判定、客户端永远停在 socket、服务端白等一个 T_est 后回退。
-             *
-             * 因此 StopHS 也要周期性发帧。频率由下面的 receive 超时天然限制在
-             * ~10 帧/秒, 与 RunHS 同量级; 帧内容里的 run_status 保持不变(true),
-             * 所以对端在 StopHS 里读到它仍走"continue"分支, 既有的断连检测语义
-             * (靠 run_status=false)完全不受影响。 */
+            /* StopHS 也周期性发帧(频率由 receive 超时天然限制在 ~10 帧/秒, 与
+             * RunHS 同量级): 路径裁定状态靠这条通道传给对端 (T2 §3 D2), 不发送
+             * 就等于信号永远到不了。帧内 run_status 保持不变(true), 对端在 StopHS
+             * 里读到它仍走 "continue" 分支, 既有的断连检测语义不受影响。 */
             refresh_out_frame();
             if (!ser_hs.send(hs_buf))
             {
@@ -520,16 +515,9 @@ socket_cli_ipc::socket_cli_ipc(const std::string& topic_name, const std::shared_
     : cli_ipc_base(topic_name, msg, domain_id, verbose)
     , topic_name_(topic_name)
     , verbose_(verbose)
-    /* ⛔ domain_id_ 以前**从未被赋值**: 初始化列表里没有它, 构造函数体只把
-     * 形参 domain_id 交给了 port_hash_, 于是成员一直是默认值 0。后果不是立刻
-     * 可见的 —— 端口/组地址走的是形参那条路, 通信照常; 但 IpcInfoPool 的注册
-     * 用的是成员(:440 的 rebind), 所以**客户端条目里的 domain 恒为 0**, 而服务端
-     * 写的是真值。实测(t3_dump): 同一条连接上 server 条目 domain=7、client 条目
-     * domain=0。
-     *
-     * T3 的同机判定读的就是池里的对端条目 (T2 §3 D1), 且要求 topic+domain 都匹配
-     * ⇒ 服务端永远看不到客户端 —— 判定必然落到 NoEvidence, 切换永远不触发。
-     * 修法就是把它接上; 对齐服务端 socket_ser_ipc 的写法(:34 domain_id_(domain_id))。 */
+    /* domain_id_ 必须接到形参: IpcInfoPool 注册(rebind)读成员, T3 同机判定要求
+     * topic+domain 双匹配 —— 漏接则客户端条目 domain 恒 0, 服务端永远看不到
+     * 客户端, 切换永不触发。对齐 socket_ser_ipc 的写法。 */
     , domain_id_(domain_id)
     , thread_options_(dzIPC::ThreadDispatch::make_realtime_options(enable_thread_qos, cpu_id, thread_priority))
 {
@@ -751,14 +739,10 @@ void socket_cli_ipc::client_handshake()
             }
             else
             {
-                /* ⛔ 旧实现在这里先把 send 重试 10 次, 每次失败后 `continue` 留在 RunHS,
-                 * 但重试耗尽时是 `break` 出来 —— 然后**无条件**置 handshake_completed_=true。
-                 * 结果是 10 次全失败也被记为"握手完成", send_request() 随即往一个
-                 * 无人接收的 SendOnly socket 上发请求并静默失败(每条都超时返回 false,
-                 * 而对端从未收到过任何请求)。这是本仓反复出现的"静默失败"族。
-                 *
-                 * 修法: 只有**确实发出去**才置完成; 发送失败就留在 RunHS 等下一轮
-                 * 服务端的 host_flag, 不宣称连接可用。 */
+                /* 只有**确实发出去**才置握手完成; 发送失败就留在 RunHS 等下一轮
+                 * 服务端的 host_flag, 不宣称连接可用 —— 否则 send_request() 会往
+                 * 无人接收的 SendOnly socket 上发请求并静默失败(本仓反复出现的
+                 * "静默失败"族)。 */
                 bool sent = false;
                 while (!(sent = cli_hs.send(hs_buf)))
                 {

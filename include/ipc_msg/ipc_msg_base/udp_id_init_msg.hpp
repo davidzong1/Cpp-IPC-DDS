@@ -1,9 +1,4 @@
 #pragma once
-/* ⛔ 本行是 2026-09 补上的: 本文件是本目录里**唯一**没有 include guard 的头
- * (其它三个都是 #pragma once)。它过去只被"每个 TU 恰好包含一次"侥幸掩盖 ——
- * 直到 exec/dzipc_topic_cat/include/handshake_probe.h 与测试同时包含它, 同一个
- * TU 里出现两次定义, 立刻报 redefinition of class IpcPubSubIdInitMsg。
- * 加 guard 是纯修复: 不改任何字段/布局/ABI。 */
 #include <cstddef>
 #include <cstdint>
 #include <cstring>

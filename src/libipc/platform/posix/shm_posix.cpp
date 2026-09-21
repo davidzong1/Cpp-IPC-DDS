@@ -6,10 +6,13 @@
 #include <fcntl.h>
 #include <errno.h>
 
+#include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <cstring>
+#include <vector>
 
 #include "libipc/shm.h"
 #include "libipc/def.h"
@@ -39,6 +42,43 @@ inline auto& acc_of(void* mem, std::size_t size) {
     return reinterpret_cast<info_t*>(static_cast<ipc::byte_t*>(mem) + size - sizeof(info_t))->acc_;
 }
 
+/* ---- UF-004 保留面收口(2026-09-20): 本进程创建的段名名单 ----
+ * acquire() 以 create 模式(O_CREAT|O_EXCL)成功即登记段名;
+ * unlink_created_segments() 对本进程条目做名字级扫除 —— 供不展开栈的退出路径
+ * (dzipc 超时/RequestShutdown 收尾)回收段名, 不触碰映射与实例。
+ * 条目记录创建时的 pid, fork 继承的条目(pid 不符)不会被误扫;
+ * release/remove unlink 段名时摘除条目, 避免易主后对同名再扫。 */
+std::mutex& created_registry_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+std::vector<std::pair<::pid_t, ipc::string>>& created_registry() {
+    static std::vector<std::pair<::pid_t, ipc::string>> v;
+    return v;
+}
+
+void record_created(ipc::string const & name) {
+    ::pid_t const self = ::getpid();
+    std::lock_guard<std::mutex> guard(created_registry_mutex());
+    auto & v = created_registry();
+    for (auto const & e : v) {
+        if ((e.first == self) && (e.second == name)) return;
+    }
+    v.emplace_back(self, name);
+}
+
+void unrecord_created(ipc::string const & name) noexcept {
+    ::pid_t const self = ::getpid();
+    std::lock_guard<std::mutex> guard(created_registry_mutex());
+    auto & v = created_registry();
+    v.erase(std::remove_if(v.begin(), v.end(),
+                [&](std::pair<::pid_t, ipc::string> const & e) {
+                    return (e.first == self) && (e.second == name);
+                }),
+            v.end());
+}
+
 } // internal-linkage
 
 namespace ipc {
@@ -57,24 +97,33 @@ id_t acquire(char const * name, std::size_t size, unsigned mode) {
     // see: https://man7.org/linux/man-pages/man3/shm_open.3.html
     ipc::string op_name = object_name(name);
     // Open the object for read-write access.
-    int flag = O_RDWR;
-    switch (mode) {
-    case open:
+    // Open the object for read-write access.
+    int fd = -1;
+    bool created_here = false;
+    if (mode == open) {
         size = 0;
-        break;
-    // The check for the existence of the object, 
-    // and its creation if it does not exist, are performed atomically.
-    case create:
-        flag |= O_CREAT | O_EXCL;
-        break;
-    // Create the shared memory object if it does not exist.
-    default:
-        flag |= O_CREAT;
-        break;
+        fd = ::shm_open(op_name.c_str(), O_RDWR, 0);
     }
-    int fd = ::shm_open(op_name.c_str(), flag, S_IRUSR | S_IWUSR | 
-                                               S_IRGRP | S_IWGRP | 
-                                               S_IROTH | S_IWOTH);
+    else {
+        // 创建者判定必须原子: O_CREAT|O_EXCL 只有创建者成功;
+        // create 模式保持"存在即失败"; default(create|open) 对 EEXIST 回落 attach。
+        int const excl_flag = O_RDWR | O_CREAT | O_EXCL;
+        fd = ::shm_open(op_name.c_str(), excl_flag,
+                        S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+        if (fd != -1) {
+            created_here = true;
+        }
+        else if ((mode != create) && (errno == EEXIST)) {
+            // default: 已存在 -> attach(本进程非创建者)。
+            fd = ::shm_open(op_name.c_str(), O_RDWR, 0);
+            if ((fd == -1) && (errno == ENOENT)) {
+                // 探测与 attach 之间被 unlink 的竞态: 按原 O_CREAT 语义重试。
+                fd = ::shm_open(op_name.c_str(), O_RDWR | O_CREAT,
+                                S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+                if (fd != -1) created_here = true;
+            }
+        }
+    }
     if (fd == -1) {
         // only open shm not log error when file not exist
         if (open != mode || ENOENT != errno) {
@@ -89,6 +138,9 @@ id_t acquire(char const * name, std::size_t size, unsigned mode) {
     ii->fd_   = fd;
     ii->size_ = size;
     ii->name_ = std::move(op_name);
+    if (created_here) {
+        record_created(ii->name_);
+    }
     return ii;
 }
 
@@ -179,6 +231,7 @@ std::int32_t release(id_t id) noexcept {
         if (!ii->name_.empty()) {
             ::shm_unlink(ii->name_.c_str());
         }
+            unrecord_created(ii->name_);
     }
     else ::munmap(ii->mem_, ii->size_);
     mem::free(ii);
@@ -214,6 +267,7 @@ void remove(id_t id) noexcept {
     if (!name.empty()) {
         ::shm_unlink(name.c_str());
     }
+    unrecord_created(name);
 }
 
 void remove(char const * name) noexcept {
@@ -223,6 +277,37 @@ void remove(char const * name) noexcept {
     }
     const ipc::string op_name = object_name(name);
     ::shm_unlink(op_name.c_str());
+    unrecord_created(op_name);
+}
+
+std::size_t unlink_created_segments() noexcept {
+    std::vector<std::pair<::pid_t, ipc::string>> taken;
+    {
+        std::lock_guard<std::mutex> guard(created_registry_mutex());
+        taken.swap(created_registry());
+    }
+    std::vector<std::pair<::pid_t, ipc::string>> keep;
+    std::size_t n = 0;
+    ::pid_t const self = ::getpid();
+    for (auto & e : taken) {
+        if (e.first != self) {
+            // fork 继承的父进程条目: 不属于本进程, 退回注册表。
+            keep.push_back(std::move(e));
+            continue;
+        }
+        if (::shm_unlink(e.second.c_str()) == 0) {
+            ++n;
+        }
+        else if (errno != ENOENT) {
+            ipc::error("fail unlink_created_segments[%d]: %s\n", errno, e.second.c_str());
+        }
+    }
+    if (!keep.empty()) {
+        std::lock_guard<std::mutex> guard(created_registry_mutex());
+        auto & v = created_registry();
+        v.insert(v.end(), keep.begin(), keep.end());
+    }
+    return n;
 }
 
 } // namespace shm

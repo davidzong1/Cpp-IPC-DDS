@@ -5,8 +5,9 @@
 ///   ② 回放后**复权**: 应用处置装回、库处理器退出;
 ///   ③ **宽限窗口(500ms)内库不夺走进程**: 应用 main 正常 return / 析构实例 ⇒
 ///      栈展开 ⇒ 话题控制面段被 unlink —— factory 路径的"残留 17 段"从优雅路径上消除;
-///   ④ SIG_DFL(应用从未装处理器)**不回放** ⇒ 默认路径仍由库收尾 exit(0)
-///      (UF-004"默认路径逐位不变"由 test_uf004 套件与本臂共同把守);
+///   ④ SIG_DFL(应用从未装处理器)**不回放** ⇒ 默认路径仍由库收尾
+///      (exit(128+SIGINT)=130, UF-004 子项收口 2026-09-20; "不得信号硬杀"由
+///      test_uf004 套件与本臂共同把守);
 ///   ⑤ RequestShutdown() 的库内部退出路径: 不回放不宽限, 行为与改前一致。
 ///
 /// ⚠️ 每臂照 UF-004 的纪律在**子进程**里跑: 监控是进程级一次性的, 且默认路径
@@ -361,11 +362,11 @@ TEST(DzIpcUf009GracefulExit, GracefulPathReplaysHandlerAndUnlinksSegments)
 }
 
 /* ===================================================================== *
- * 臂 2: 应用从未装处理器(SIG_DFL)⇒ 不得回放 SIG_DFL, 仍由库收尾 exit(0)。
- * 把守 UF-004 的"默认路径逐位不变": 若实现错把 SIG_DFL 也回放/复权, 信号会
- * 硬杀进程(被信号终止)而非库 exit(0)。
+ * 臂 2: 应用从未装处理器(SIG_DFL)⇒ 不得回放 SIG_DFL, 仍由库收尾退出。
+ * 把守 UF-004 的"默认路径不得信号硬杀": 若实现错把 SIG_DFL 也回放/复权, 信号会
+ * 硬杀进程(被信号终止)而非库收尾; 库收尾退出码 128+SIGINT=130(UF-004 子项, 2026-09-20)。
  * ===================================================================== */
-TEST(DzIpcUf009GracefulExit, SigDflPathStillLibraryExitZero)
+TEST(DzIpcUf009GracefulExit, SigDflPathStillLibraryManagedExit)
 {
     const std::string tag = run_tag();
     const ChildResult r = run_in_child(
@@ -384,8 +385,8 @@ TEST(DzIpcUf009GracefulExit, SigDflPathStillLibraryExitZero)
             wait_monitor_or_report(fd);
         });
     ASSERT_NE(r.log.find("ipc=1"), std::string::npos) << describe(r);
-    EXPECT_TRUE(r.exited) << "SIG_DFL 场景不得回放: 必须仍由库收尾 exit(0), 而非信号硬杀; " << describe(r);
-    EXPECT_EQ(r.code, 0) << describe(r);
+    EXPECT_TRUE(r.exited) << "SIG_DFL 场景不得回放: 必须仍由库收尾, 而非信号硬杀; " << describe(r);
+    EXPECT_EQ(r.code, 130) << "退出码 128+SIGINT=130(UF-004 子项收口: 超时收尾如实上报信号); " << describe(r);
     cleanup_own_shm_residue(tag);
 }
 

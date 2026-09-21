@@ -142,5 +142,10 @@ void remove(char const * name) noexcept {
     // Do Nothing.
 }
 
+std::size_t unlink_created_segments() noexcept {
+    // On Windows, named kernel objects disappear with the last handle; nothing to sweep.
+    return 0;
+}
+
 } // namespace shm
 } // namespace ipc

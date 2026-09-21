@@ -30,7 +30,9 @@ REPS="${REPS:-3}"           # 每个点要攒够的**有效**次数
 MAXTRY="${MAXTRY:-9}"       # 最多尝试次数(坏链会吃掉尝试; 见下)
 MSGS="${MSGS:-40000}"
 CLS=12288                     # --payload=11000 对应的借样档位(见基准文件头)
-SEG="/dev/shm/__IPC_SHM__CHUNK_INFO__$CLS"
+# ⛔ 段名含容量分量 __C<cap>(ipc.cpp get_info), 容量 = ipc::large_msg_cache(def.h, 当前 40)。
+#   容量变更时这里要与 get_info/sniffer/test_pool_exhaust 同步改。
+SEG="/dev/shm/__IPC_SHM__CHUNK_INFO__${CLS}__C40"
 
 # ---- 前置: 清残池之前必须先确认无活持有者(unfixed_defects.md §4 的协议)。
 # 段名全机共享, 清掉正在被别的进程用的段会打断它。先查, 再清。

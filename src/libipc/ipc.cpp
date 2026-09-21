@@ -91,11 +91,8 @@ namespace
   ipc::buff_t make_cache(T &data, std::size_t size)
   {
     auto ptr = ipc::mem::alloc(size);
-    /* ⛔ 这次 memcpy 的目的地就是它: 传 nullptr 进去就是"往地址 0 写 64 字节"。
-     * 实测崩点在 libc 的 `__memcpy_avx_unaligned_erms`(两次 32B 存储到 %rdi=0),
-     * 而且发生在**订阅线程**里 —— 内核日志只留一个 ip, 从现场几乎无法反查到这一行。
-     * 返回空 buff_t 与 recv() 其余失败出口一致: 调用方按"没收到"丢弃该消息
-     * (见 docs/shm_defect_fixes.md 第 7 条)。 */
+    /* 分配失败 ⇒ 返回空 buff_t: 与 recv() 其余失败出口一致, 调用方按"没收到"
+     * 丢弃该消息(见 docs/shm_defect_fixes.md 第 7 条)。 */
     if (ptr == nullptr)
     {
       report_cache_alloc_failure(size);
@@ -329,8 +326,15 @@ namespace
        * 内核日志只留一个 ip。详见 docs/shm_defect_fixes.md 第 7 条。 */
       chunk_info_t *get_info(ipc::string const &pref, std::size_t chunk_size)
       {
-        ipc::string shm_name{
-            ipc::make_prefix(pref, {"CHUNK_INFO__", ipc::to_string(chunk_size)})};
+        /* 段名编码池容量(__C<cap>): 容量决定段内布局(sizeof(chunk_info_t) 与
+         * chunks_mem_size 都随 max_count 伸缩), 名字带上它, 新旧容量版本的段
+         * 天然隔离 —— 旧容量(32)的残段不会被新容量(40)的代码挂上越界读,
+         * 反之亦然。这也是 UF-003 登记过的 "CHUNK_INFO 无版本标记" 缺口
+         * (unfixed_defects_full_v1.md:607)的收口。改容量时本名自动跟随;
+         * ⛔ sniffer.cpp 的同款构造必须同步修改(两处 chunk_info_t 定义同源)。 */
+        ipc::string shm_name{ipc::make_prefix(
+            pref, {"CHUNK_INFO__", ipc::to_string(chunk_size), "__C",
+                   ipc::to_string(static_cast<std::size_t>(ipc::large_msg_cache))})};
         ipc::shm::handle *h;
         {
           std::lock_guard<std::mutex> guard{lock_};
@@ -575,28 +579,113 @@ namespace
     info->lock_.unlock();
   }
 
+  /* 归还幂等的**唯一依据**: 本次 CAS 到底有没有真的清掉"我自己那一位"。
+   *
+   * 为什么需要它 —— chunk->conns() 是发送时刻一次性置好的收方**位图**, 不是引用
+   * 计数。清除它的地方有三处, 由不同线程/进程驱动同一张位图, 而位图本身没有仲裁者:
+   *   ① 收方 buff_t 析构 → recycle_storage → sub_rc(正常路径);
+   *   ② 写方覆写槽位 → discard_storage(被套圈的收方永远不会来取);
+   *   ③ 缓冲被借走时的归还(adopt / loan 路径)。
+   * 于是"同一个 conn 把同一块 chunk 归还两次"在协议上从未被排除 —— 而
+   * id_pool::release 是 next_[id] = cursor_ 的**头插且不幂等**(id_pool.h:76-81):
+   * 第二次 release 时 cursor_ 已经等于 id, 于是 next_[id] = id, 空闲链表接成自环,
+   * 此后 acquire() 永远返回同一个 id、池里其余 id 永久不可达。实测指纹
+   * next_[23] == 23 且 cursor_ == 23, 见 docs/shm_chunk_pool_occupancy_plan.md
+   * §3 步骤③ 的副产品小节。
+   *
+   * 判据本身极便宜 —— CAS 的 expected 参数在**成功**那一轮被写回"内存里真正躺着
+   * 的旧值", 所以:
+   *     (旧值 & 我的位) == 0  ⇒ 本轮之前那一位**已经是 0** ⇒ 位不是我清的
+   *                           ⇒ 这次归还不是我该做的 ⇒ 一律不还池。
+   * 这把"谁有权还池"从**位置判据**(位图现在空不空)换成**动作判据**(这一位是不是
+   * 我清掉的): 前者不幂等 —— 别人清完再轮到我就成了"位图空着, 那我清, 我该还";
+   * 后者幂等, 与谁先谁后无关。
+   *
+   * ⛔ 它**不**证明载荷没被覆写, 也**不**让"归还早了"变得安全。位已清也可能是
+   * "本格已被 force_push 覆写、旧内容已被 discard_storage 收回" —— 那条路径上
+   * 读方仍可能持有一个已被回池复用的 id(ABA), 本守卫对它的射程是**零**。
+   * 覆写那一侧的防护在 prod_cons.h 的 pop() 里(拷贝前后与进 clear 前各比一次
+   * epoch), 与本判据各管一头, 不可互相替代。 */
+  void note_double_return(char const *site, ipc::storage_id_t id,
+                          ipc::circ::cc_t conn_mask) noexcept
+  {
+    static std::mutex lock;
+    static std::uint64_t count = 0;
+    std::uint64_t n;
+    {
+      std::lock_guard<std::mutex> guard{lock};
+      n = ++count;
+    }
+    if ((n == 1) || ((n % 1024) == 0)) {
+      ipc::error("chunk returned twice: site = %s, id = %ld, conn_mask = %u, "
+                 "count = %llu (本进程); 已拦下, 未二次入池\n",
+                 site, (long)id, static_cast<unsigned>(conn_mask),
+                 static_cast<unsigned long long>(n));
+    }
+  }
+
   template <ipc::relat Rp, ipc::relat Rc>
   bool sub_rc(ipc::wr<Rp, Rc, ipc::trans::unicast>,
               std::atomic<ipc::circ::cc_t> & /*conns*/,
               ipc::circ::cc_t /*curr_conns*/,
-              ipc::circ::cc_t /*conn_id*/) noexcept
+              ipc::circ::cc_t /*conn_id*/,
+              bool *out_dup = nullptr) noexcept
   {
+    if (out_dup != nullptr)
+      *out_dup = false;
+    /* 无条件放行是**有意的**: unicast 的收方上限是 1, 而
+     *   - push 只取"读方已放行"的格子(其 rem_cc 恒为 0) ⇒ 写方永远不会替它清位;
+     *   - force_push 压根不调用归还回调。
+     * 于是它的 conns 位图只有一个驱动者(收方自己), 同一块 chunk 不可能被归还两次
+     * ⇒ 幂等守卫在这条路径上没有可拦的东西。若哪天 unicast 也接入了覆写/借样归还,
+     * 这里必须补上与 broadcast 同款的判据, 而不是继续返回 true。 */
     return true;
   }
 
   template <ipc::relat Rp, ipc::relat Rc>
   bool sub_rc(ipc::wr<Rp, Rc, ipc::trans::broadcast>,
-              std::atomic<ipc::circ::cc_t> &conns, ipc::circ::cc_t curr_conns,
-              ipc::circ::cc_t conn_id) noexcept
+              std::atomic<ipc::circ::cc_t> &conns,
+              ipc::circ::cc_t /*curr_conns*/, ipc::circ::cc_t conn_id,
+              bool *out_dup = nullptr) noexcept
   {
-    auto last_conns = curr_conns & ~conn_id;
+    /* ── 归还的单一权威判据 ───────────────────────────────────────────────────
+     * **谁把位图清空, 谁还池 —— 且每人只清自己那一位。**
+     *
+     * 旧实现清的是 `curr_conns & ~conn_id`(接收时在连的**所有**人), 于是"谁是最后
+     * 一个归还者"有两个互斥的结局, 而两个都错:
+     *   - 我先跑: 我顺手把别人(还在持有着的)的位也清了, 看到"有人没清完"就返回
+     *     false —— 可那些位已经被我清掉, 对方后来再跑时 `mine == false`, 于是**谁也
+     *     不还** ⇒ 那块 chunk 永久漏在池外;
+     *   - 我不清: 双方都以为自己不是最后一个 ⇒ 同一块被还两次 ⇒ `next_[id] == id`
+     *     自环, 池塌成一块且永久退化(实测: 40 轮 8/8 次复现)。
+     *
+     * 正解是让"清空"这件事**只可能被一个人观测到**: 每人只清自己那一位, 清完读到的
+     * 结果就是权威 —— 为 0 说明自己是最后一个持有者, 由自己还; 不为 0 说明还有人,
+     * 由那个人还。CAS 保证"清空"只有一个赢家, 于是"还池"也只有一个赢家。
+     *
+     * `mine == false`(自己那一位已经是 0)是**重复归还**: 本次调用没有清掉任何东西,
+     * 无权还池, 并且说明上游把同一块 chunk 交付了两次(套圈重读等) —— 经 out_dup 报给
+     * 调用方记一次诊断, 见 note_double_return。
+     *
+     * ⛔ 本判据**不**处理"归还得太早"(写方按 rem_cc 清掉了一个其实已 pop 的收方的位)。
+     * 那一侧的防护在 prod_cons.h 的 pop() 里(拷贝前后与进 clear 前各比一次 epoch)。 */
     for (unsigned k = 0;;)
     {
       auto chunk_conns = conns.load(std::memory_order_acquire);
-      if (conns.compare_exchange_weak(chunk_conns, chunk_conns & last_conns,
+      if ((chunk_conns & conn_id) == 0)
+      {
+        if (out_dup != nullptr)
+          *out_dup = true;   /* 我这一位已被清过 ⇒ 这次归还是重复的 */
+        return false;
+      }
+      auto nxt_conns = static_cast<ipc::circ::cc_t>(chunk_conns & ~conn_id);
+      if (conns.compare_exchange_weak(chunk_conns, nxt_conns,
                                       std::memory_order_release))
       {
-        return (chunk_conns & last_conns) == 0;
+        if (out_dup != nullptr)
+          *out_dup = false;
+        /* 清完为空 ⇒ 我是最后一个持有者 ⇒ 由我还池。非空 ⇒ 交给最后那个。 */
+        return nxt_conns == 0;
       }
       ipc::yield(k);
     }
@@ -626,8 +715,19 @@ namespace
     if (chunk == nullptr)
       return;
 
-    if (!sub_rc(Flag{}, chunk->conns(), curr_conns, conn_id))
+    bool dup = false;
+    if (!sub_rc(Flag{}, chunk->conns(), curr_conns, conn_id, &dup))
     {
+      /* 两种 false 都不还池, 但只有一种是异常:
+       *   - dup = 我这一位本来就已是 0 ⇒ 之前已被别人清掉过(写方覆写归还, 或同一
+       *     conn 归还了两次) ⇒ **这次归还是重复的** —— 旧实现照样落进
+       *     id_pool::release, 于是 next_[id] == id 自环, 池里其余 id 永久不可达;
+       *   - !dup = 我这一位刚被我清掉、但位图仍非空 ⇒ 仍有别的持有者, 由最后一个
+       *     归还者还(正常并发路径, 广播下是常态, 报它就是刷屏)。 */
+      if (dup)
+      {
+        note_double_return("recycle_storage", id, conn_id);
+      }
       return;
     }
     info->lock_.lock();
@@ -647,8 +747,13 @@ namespace
    *
    * 为什么必须清 rem_cc 的位: chunk 的 conns 位图在发送时被初始化为当时的接收方
    * 集合, 只有"pop 到该消息并释放 buff_t"才会清位。被覆写的消息那些接收方永远
-   * 读不到, 其位若不在此清掉, 位图永不归零 → chunk 永久泄漏(32 槽/尺寸类, 见
-   * id_pool::max_count)。旧实现正是为此才无条件 release_storage。
+   * 读不到, 其位若不在此清掉, 位图永不归零 → chunk 永久泄漏(每尺寸档 id_pool::
+   * max_count 块, 见该常量)。旧实现正是为此才无条件 release_storage。
+   *
+   * 本函数**自己也要幂等**(见 note_double_return): rem_cc 是一个位图快照, 从捕获
+   * 到清位之间这些位可能已被别人清掉(收方 buff_t 析构, 或另一次覆写) —— 若只看
+   * "清完还剩几个"就还池, 那就是拿一个早已回池的 id 再还一次, 空闲链接成自环。
+   * 判据是**这一位是不是我清掉的**, 不是"位图现在空不空"。
    *
    * 为什么不能无条件 release: 无条件归还会把"正被接收方持有的 chunk id"直接放回
    * 池子, 下一帧 acquire 到同一 id 就会覆写持有者正在读的内存, 且持有者析构时会
@@ -656,11 +761,13 @@ namespace
    * 就丢, 窗口是微秒级; 一旦让接收方长期持有 chunk(DZFlat 的 Sample), 该窗口会
    * 被拉成秒级并必现。
    *
-   * 残余窗口(本函数未关闭): pop() 先把槽位数据拷出、之后才清自己的 rc 位, 所以
-   * 一个"已读到 storage id 但尚未清位"的接收方仍会被算进 rem_cc。这与 prod_cons.h
-   * force_push 注释里已登记的"覆写与 pop 无互斥 → 数据撕裂"同源, 需在 pop() 侧
-   * 增加覆写检测才能根除。
-   */
+   * 残余窗口(本函数**只关了一半**): 上面那条幂等守卫拦的是"同一收方把同一块归还
+   * 两次"。它拦不住的是**归还得太早**: pop() 先把槽位数据拷出、之后才清自己的 rc
+   * 位, 所以一个"已读到 storage id 但尚未清位"的接收方仍会被算进 rem_cc, 被当成
+   * "永远看不到这格"的收方而在此处把 chunk 收回 —— 那个读方随后仍会拿这个已回池
+   * (可能已复用)的 id 去建 buff_t(ABA)。这一侧的正解在 prod_cons.h 的 pop() 里
+   * (拷贝前后与进 clear 前各比一次 epoch, 见该处 ②③), ⛔ 不在这里, 也不要以为
+   * 本守卫把它一并解决了。 */
   void discard_storage(ipc::storage_id_t id, conn_info_head *inf,
                        std::size_t size, ipc::circ::cc_t rem_cc)
   {
@@ -702,6 +809,15 @@ namespace
       if (conns.compare_exchange_weak(cur_conns, nxt_conns,
                                       std::memory_order_release))
       {
+        /* 幂等守卫, 与 sub_rc(broadcast) 同款: rem_cc 捕获的是一个**位图**而非计数,
+         * 所以"这些位是我清掉的吗"必须看 CAS 成功那一轮的旧值。一个位都不剩说明
+         * 这些收方已经各自归还过了(或已被另一次覆写清掉)—— 那块 chunk 早已回池,
+         * 再还一次就是自环。见 note_double_return。 */
+        if ((cur_conns & rem_cc) == 0)
+        {
+          note_double_return("discard_storage", id, rem_cc);
+          return;
+        }
         if (nxt_conns != 0)
         {
           return; // 仍有持有者, 由其 buff_t 析构归还
