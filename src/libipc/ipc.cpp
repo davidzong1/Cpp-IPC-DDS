@@ -1,6 +1,7 @@
 
 #include <type_traits>
 #include <cstring>
+#include <cstdint>
 #include <algorithm>
 #include <utility> // std::pair, std::move, std::forward
 #include <atomic>
@@ -151,6 +152,11 @@ namespace
     ipc::detail::waiter cc_waiter_, wt_waiter_, rd_waiter_;
     ipc::shm::handle acc_h_;
 
+    /* UF-003: 本路由的 owner 表(指向 elems 尾部内嵌表, 队列打开后有效)与
+     * 路由标签(conn 段名的散列)。两者都是进程本地缓存, 不随段共享。 */
+    ipc::circ::owner_table *owners_ = nullptr;
+    std::uint32_t route_tag_ = 0;
+
     conn_info_head(char const *prefix, char const *name)
         : prefix_{ipc::make_string(prefix)},
           name_{ipc::make_string(name)},
@@ -244,6 +250,24 @@ namespace
       return *reinterpret_cast<std::atomic<ipc::circ::cc_t> *>(this);
     }
 
+    /* UF-003: 借出后是否已发布(=1)。落在 conns 与 data 之间的对齐空洞里
+     * (偏移 4), 不改 chunk_size 与负载偏移契约(见下方静态断言)。 */
+    std::atomic<std::uint8_t> &published() noexcept
+    {
+      return *reinterpret_cast<std::atomic<std::uint8_t> *>(
+          reinterpret_cast<ipc::byte_t *>(this) +
+          sizeof(std::atomic<ipc::circ::cc_t>));
+    }
+
+    /* UF-003: 借出者路由标签(0 = 未标记), 同样落在空洞内(偏移 8)。共享池里
+     * 位号只在同路由 owner 表里有意义, 清扫方据此只处置本路由的块。 */
+    std::atomic<std::uint32_t> &route_tag() noexcept
+    {
+      return *reinterpret_cast<std::atomic<std::uint32_t> *>(
+          reinterpret_cast<ipc::byte_t *>(this) +
+          sizeof(std::atomic<ipc::circ::cc_t>) + 4);
+    }
+
     void *data() noexcept
     {
       return reinterpret_cast<ipc::byte_t *>(this) +
@@ -251,6 +275,14 @@ namespace
                              sizeof(std::atomic<ipc::circ::cc_t>));
     }
   };
+
+  /* UF-003: published/route_tag 必须放得进 conns 之后的头部空洞, 否则下一个
+   * 字段就会踩到负载区。头部长度 = make_align(alignof(max_align_t), sizeof(cc_t))。 */
+  static_assert(sizeof(std::atomic<ipc::circ::cc_t>) + 4 +
+                        sizeof(std::uint32_t) <=
+                    ipc::make_align(alignof(std::max_align_t),
+                                    sizeof(std::atomic<ipc::circ::cc_t>)),
+                "UF-003: chunk header padding too small for published/route_tag");
 
   struct chunk_info_t
   {
@@ -506,10 +538,128 @@ namespace
     }
   }
 
+  void note_reclaimed(char const *kind, std::size_t chunk_size,
+                      std::size_t count, ipc::string const &prefix);
+
+  /* UF-003: 池穷尽时的"死持有者清扫"。
+   *
+   * 回收一块 chunk 需要三个条件同时成立:
+   *   ① 该块是**本路由**借出的(chunk->route_tag() == 本路由标签)—— 位号只在
+   *      同路由 owner 表里有意义, 跨路由解释位图是错的;
+   *   ② 该块**已发布**(published != 0)—— 借出但未发布的块由发布者自己处置
+   *      (见 send 的 push 失败归还路径), 清扫方让路;
+   *   ③ 位图里每一位的 owner 都"确定已死"—— 有活/不确定持有者就整块放弃。
+   *
+   * 动作: CAS 位图 → 0, 成功后持锁归还原 id。这与 discard_storage / recycle_storage
+   * 共享同一条不变量: **位图归零是还池的唯一授权**, 于是并发双方只有一方能还。
+   * 只收 broadcast: 单播的 cc 是计数语义, 位号无意义。 */
+  bool reclaim_dead_chunks(conn_info_head *inf, chunk_info_t *info,
+                           std::size_t chunk_size, bool bitmap_semantics,
+                           char const *kind) {
+    if (inf == nullptr || info == nullptr) return false;
+    if (!bitmap_semantics) return false;
+    if (inf->owners_ == nullptr || inf->route_tag_ == 0) return false;
+
+    /* 先对本路由的全部位做一次薄判(每块都探会让 /proc 读放大到 40×). */
+    ipc::circ::cc_t const all =
+        static_cast<ipc::circ::cc_t>(~static_cast<ipc::circ::cc_t>(0u));
+    ipc::circ::cc_t const dead = inf->owners_->proven_dead_bits(all);
+    if (dead == 0) return false;
+
+    std::size_t reclaimed = 0;
+    for (ipc::storage_id_t id = 0; id < ipc::id_pool<>::max_count; ++id) {
+      auto *chunk = info->at(chunk_size, id);
+      if (chunk == nullptr) continue;
+      auto cur = chunk->conns().load(std::memory_order_acquire);
+      if (cur == 0) continue; // 在池中或从未借出
+      if (chunk->route_tag().load(std::memory_order_acquire) != inf->route_tag_)
+        continue;
+      if (chunk->published().load(std::memory_order_acquire) == 0) continue;
+      if ((cur & ~dead) != 0) continue; // 有活/不确定持有者 ⇒ 不夺
+      auto expect = cur;
+      if (!chunk->conns().compare_exchange_strong(expect, 0,
+                                                  std::memory_order_acq_rel))
+        continue; // 有人并发动了位图: 让给它
+      info->lock_.lock();
+      info->pool_.release(id);
+      info->lock_.unlock();
+      ++reclaimed;
+    }
+    if (reclaimed != 0) note_reclaimed(kind, chunk_size, reclaimed, inf->prefix_);
+    return reclaimed != 0;
+  }
+
+  /* UF-003: 清扫归还计数(与 note_pool_exhausted 同款: 本进程计数 + 首报/节流). */
+  void note_reclaimed(char const *kind, std::size_t chunk_size,
+                      std::size_t count, ipc::string const &prefix) {
+    struct key_t {
+      std::size_t chunk_size;
+      char const *kind;
+    };
+    struct stat_t {
+      key_t key;
+      std::uint64_t count;
+    };
+    static std::mutex lock;
+    static std::vector<stat_t> stats;
+
+    std::uint64_t n;
+    {
+      std::lock_guard<std::mutex> guard{lock};
+      auto it = std::find_if(stats.begin(), stats.end(),
+                             [&](stat_t const &s)
+                             {
+                               return (s.key.chunk_size == chunk_size) &&
+                                      (std::strcmp(s.key.kind, kind) == 0);
+                             });
+      if (it == stats.end()) {
+        stats.push_back(stat_t{key_t{chunk_size, kind}, 0});
+        it = stats.end() - 1;
+      }
+      n = ++(it->count);
+    }
+    if ((n == 1) || ((n % 1024) == 0)) {
+      ipc::log("chunk pool reclaim: kind = %s, chunk_size = %zu, reclaimed = %zu, "
+               "count = %llu (本进程), prefix = '%s'\n",
+               kind, chunk_size, count, (unsigned long long)n, prefix.c_str());
+    }
+  }
+
+  /* UF-003: 发布成功"接管"标记 —— 置位后清扫方才有权对该块做验尸回收。 */
+  void mark_published(conn_info_head *inf, std::size_t size,
+                      ipc::storage_id_t id) {
+    if (inf == nullptr || id < 0) return;
+    std::size_t const chunk_size = calc_chunk_size(size);
+    auto info = chunk_storage_info(inf->prefix_, chunk_size);
+    if (info == nullptr) return;
+    auto *chunk = info->at(chunk_size, id);
+    if (chunk == nullptr) return;
+    chunk->published().store(1, std::memory_order_release);
+  }
+
+  /* UF-003: 未发布的借出块归还。push 失败 ⇒ 消息没进队列 ⇒ 没有任何接收方
+   * 可能持有它 ⇒ 直接归零位图并还池(与 discard_storage 不同, 那里必须先按
+   * 位图判断持有者)。这是既有漏点的顺带收口: 旧实现 push 失败即永久漏一块。 */
+  void return_unpublished(conn_info_head *inf, std::size_t size,
+                          ipc::storage_id_t id) {
+    if (inf == nullptr || id < 0) return;
+    std::size_t const chunk_size = calc_chunk_size(size);
+    auto info = chunk_storage_info(inf->prefix_, chunk_size);
+    if (info == nullptr) return;
+    auto *chunk = info->at(chunk_size, id);
+    if (chunk == nullptr) return;
+    chunk->published().store(0, std::memory_order_relaxed);
+    chunk->conns().store(0, std::memory_order_release);
+    info->lock_.lock();
+    info->pool_.release(id);
+    info->lock_.unlock();
+  }
+
   std::pair<ipc::storage_id_t, void *> acquire_storage(conn_info_head *inf,
                                                        std::size_t size,
                                                        ipc::circ::cc_t conns,
-                                                       char const *kind)  {
+                                                       char const *kind,
+                                                       bool bitmap_semantics)  {
     if (inf == nullptr)
       return {};
     std::size_t chunk_size = calc_chunk_size(size);
@@ -527,17 +677,33 @@ namespace
      * "段建不出来"和 id 越界, 混在一起报会把两种完全不同的故障源说成一个。
      * 这里的 id < 0 是 id_pool::acquire() 对空池的唯一返回值, 语义精确。 */
     if (id < 0) {
-      /* prefix 按 const& 传、且只在本次调用内同步使用 —— 这里没有 get_info 上面
-       * 那条"buff_t 析构时 conn_info 可能已 mem::free"的生存期问题: 本函数在
-       * acquire 路径上, inf 是调用方自己活着的 conn_info。 */
-      note_pool_exhausted(kind, chunk_size, size, inf->prefix_);
-      return {};
+      /* UF-003: 池穷尽 ⇒ 先做一次"死持有者清扫", 再重试一次 acquire。
+       * 清扫只回收"本路由借出、已发布、且全部持有者确定已死"的悬挂 chunk;
+       * 任何不确定一律放弃(保守, 退化为原有背压路径)。 */
+      if (reclaim_dead_chunks(inf, info, chunk_size, bitmap_semantics, kind)) {
+        info->lock_.lock();
+        info->pool_.prepare();
+        id = info->pool_.acquire();
+        info->lock_.unlock();
+      }
+      if (id < 0) {
+        /* prefix 按 const& 传、且只在本次调用内同步使用 —— 这里没有 get_info 上面
+         * 那条"buff_t 析构时 conn_info 可能已 mem::free"的生存期问题: 本函数在
+         * acquire 路径上, inf 是调用方自己活着的 conn_info。 */
+        note_pool_exhausted(kind, chunk_size, size, inf->prefix_);
+        return {};
+      }
     }
 
     auto chunk = info->at(chunk_size, id);
     if (chunk == nullptr)
       return {};
-    chunk->conns().store(conns, std::memory_order_relaxed);
+    /* UF-003: 借出即标"未发布"并打上本路由标签。两处都必须在 conns.store 之前
+     * 完成, 且 conns.store 用 release: 清扫方读到新位图时, 必然也已经看到
+     * published == 0(在飞, 让路)与正确的路由标签。 */
+    chunk->published().store(0, std::memory_order_relaxed);
+    chunk->route_tag().store(inf->route_tag_, std::memory_order_relaxed);
+    chunk->conns().store(conns, std::memory_order_release);
     return {id, chunk->data()};
   }
 
@@ -907,16 +1073,28 @@ namespace
         init();
       }
 
+      /* ⛔ 段名同步点(必须逐字一致): 本函数 + clear_storage + sniffer.cpp 的
+       * QU_CONN__ 构造。UF-003 在 elems 尾部追加了 owner 表, 布局变了 ⇒ 段名
+       * 带 __V2 版本分量: 新旧二进制各建各段, 绝不混挂同一段(拍板文档 §1)。 */
+      static ipc::string elems_name(char const *prefix, char const *name)
+      {
+        return ipc::make_prefix(
+            ipc::make_string(prefix),
+            {"QU_CONN__", ipc::make_string(name), "__", ipc::to_string(DataSize),
+             "__", ipc::to_string(AlignSize), "__V2"});
+      }
+
       void init()
       {
         conn_info_head::init();
+        ipc::string const ename = elems_name(prefix_.c_str(), this->name_.c_str());
         if (!que_.valid())
         {
-          que_.open(ipc::make_prefix(prefix_, {"QU_CONN__", this->name_, "__",
-                                               ipc::to_string(DataSize), "__",
-                                               ipc::to_string(AlignSize)})
-                        .c_str());
+          que_.open(ename.c_str());
         }
+        /* UF-003: 绑定本路由的 owner 表与路由标签(清扫方只处置本路由的块)。 */
+        route_tag_ = ipc::circ::route_tag_of(ename.c_str());
+        owners_ = que_.valid() ? &que_.elems()->owners() : nullptr;
       }
 
       void clear() noexcept
@@ -927,12 +1105,7 @@ namespace
 
       static void clear_storage(char const *prefix, char const *name) noexcept
       {
-        queue_t::clear_storage(
-            ipc::make_prefix(
-                ipc::make_string(prefix),
-                {"QU_CONN__", ipc::make_string(name), "__",
-                 ipc::to_string(DataSize), "__", ipc::to_string(AlignSize)})
-                .c_str());
+        queue_t::clear_storage(elems_name(prefix, name).c_str());
         conn_info_head::clear_storage(prefix, name);
       }
 
@@ -1163,14 +1336,23 @@ namespace
       auto try_push = std::forward<F>(gen_push)(inf, que, msg_id);
       if (size > ipc::large_msg_limit)
       {
-        auto dat = acquire_storage(inf, size, conns, "send");
+        auto dat = acquire_storage(inf, size, conns, "send",
+                                   ipc::relat_trait<flag_t>::is_broadcast);
         void *buf = dat.second;
         if (buf != nullptr)
         {
           std::memcpy(buf, data, size);
-          return try_push(static_cast<std::int32_t>(size) -
-                              static_cast<std::int32_t>(ipc::data_length),
-                          &(dat.first), 0);
+          if (try_push(static_cast<std::int32_t>(size) -
+                           static_cast<std::int32_t>(ipc::data_length),
+                       &(dat.first), 0))
+          {
+            /* UF-003: 已发布 ⇒ 清扫方自此才可接手处置该块。 */
+            mark_published(inf, size, dat.first);
+            return true;
+          }
+          /* 没进队列 ⇒ 没有任何接收方会持有它 ⇒ 立即归还(否则永久悬挂)。 */
+          return_unpublished(inf, size, dat.first);
+          return false;
         }
         // try using message fragment
         /* ⛔ 不要在这里重新打开逐条 log: 池空时每一条大消息都会走到这里, 打出来就是
@@ -1303,14 +1485,21 @@ namespace
       auto try_push = std::forward<F>(gen_push)(inf, que, msg_id);
       if (!sniffer_only && size > ipc::large_msg_limit)
       {
-        auto dat = acquire_storage(inf, size, conns, "no_member_send");
+        auto dat = acquire_storage(inf, size, conns, "no_member_send",
+                                   ipc::relat_trait<flag_t>::is_broadcast);
         void *buf = dat.second;
         if (buf != nullptr)
         {
           std::memcpy(buf, data, size);
-          return try_push(static_cast<std::int32_t>(size) -
-                              static_cast<std::int32_t>(ipc::data_length),
-                          &(dat.first), 0);
+          if (try_push(static_cast<std::int32_t>(size) -
+                           static_cast<std::int32_t>(ipc::data_length),
+                       &(dat.first), 0))
+          {
+            mark_published(inf, size, dat.first);
+            return 1;
+          }
+          return_unpublished(inf, size, dat.first);
+          return 0;
         }
         // try using message fragment
         /* ⛔ 不要在这里重新打开逐条 log: 池空时每一条大消息都会走到这里, 打出来就是
@@ -1645,7 +1834,8 @@ namespace
       }
       const std::size_t cap = loan_size_class(size);
       conn_info_t *inf = info_of(h);
-      auto dat = acquire_storage(inf, cap, conns, "loan");
+      auto dat = acquire_storage(inf, cap, conns, "loan",
+                                 ipc::relat_trait<flag_t>::is_broadcast);
       if (dat.second == nullptr)
       {
         /* chunk 池耗尽(每档位 32 块)。不是错误, 是背压信号 —— 调用方回退整包路径。
@@ -1725,6 +1915,8 @@ namespace
         discard_loan(h, lo);
         return false;
       }
+      /* UF-003: 借样已进队列 ⇒ 置"已发布", 清扫方自此刻才可接手处置。 */
+      mark_published(inf, lo.size, lo.id);
       notify_readers(inf);
       return true;
     }

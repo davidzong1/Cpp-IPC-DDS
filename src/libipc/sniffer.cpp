@@ -215,11 +215,16 @@ public:
         // The shm name uses the queue_generator's template parameters
         // (data_length, kAlignSize), NOT sizeof(msg_t)/alignof(msg_t).
         // See ipc.cpp::queue_generator<...,DataSize,AlignSize>::conn_info_t::init().
+        //
+        // ⛔ 段名同步点(三处必须逐字一致): 本处 + ipc.cpp 的
+        // conn_info_t::elems_name() + conn_info_t::clear_storage()。UF-003 在
+        // elems 尾部追加了 owner 表(布局变更) ⇒ 段名带 __V2 版本分量; 新旧
+        // 二进制各建各段, 不自行为旧版段做布局解释(拍板文档 §1)。
         ipc::string shm_name = ipc::make_prefix(
             prefix_, {"QU_CONN__", name_, "__",
                       ipc::to_string(static_cast<std::size_t>(ipc::data_length)),
                       "__",
-                      ipc::to_string(kAlignSize)});
+                      ipc::to_string(kAlignSize), "__V2"});
 
         switch (t) {
         case sniffer::topology::server: {

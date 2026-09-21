@@ -32,6 +32,10 @@ public:
         block_size = elem_size * elem_max
     };
 
+    /// UF-003: 广播策略的 cc 是收方位图(chunk 位图与之同构); 单播是计数。
+    /// owner 表的位号语义只对广播成立, 故单播不参与登记/清扫。
+    constexpr static bool broadcast_policy = relat_trait<policy_t>::is_broadcast;
+
 private:
     policy_t head_;
     elem_t   block_[elem_max] {};
@@ -95,6 +99,12 @@ private:
     sender_checker  <policy_t, relat_trait<policy_t>::is_multi_producer> s_ckr_;
     receiver_checker<policy_t, relat_trait<policy_t>::is_multi_consumer> r_ckr_;
 
+    /* UF-003: 位→持有者身份侧车表。追加在既有成员之后 —— 不改动任何既有
+     * 偏移(head_/block_/checkers); 但会让 elems 段变长, 故段名带 __V2 版本
+     * 分量隔离新旧二进制(见 ipc.cpp::queue_generator::conn_info_t 与
+     * sniffer.cpp 的 QU_CONN__ 名同步点)。 */
+    owner_table owners_;
+
     // make these be private
     using base_t::connect;
     using base_t::disconnect;
@@ -109,11 +119,30 @@ public:
     }
 
     cc_t connect_receiver() noexcept {
-        return r_ckr_.connect(*this);
+        cc_t const id = r_ckr_.connect(*this);
+        if (!broadcast_policy || id == 0) return id;
+        /* UF-003: 位分配器发位后立刻声明 owner 槽("先位后槽", 见 elem_def.h
+         * 的线序说明)。声明失败 = 槽被"活"持有者占着(位分配器已发同一位的
+         * 畸形态) ⇒ 回滚位, 不允许两个活持有者共用一位。 */
+        if (!owners_.claim(bit_slot_of(id))) {
+            r_ckr_.disconnect(*this, id);
+            return 0;
+        }
+        return id;
     }
 
     cc_t disconnect_receiver(cc_t cc_id) noexcept {
-        return r_ckr_.disconnect(*this, cc_id);
+        /* UF-003: 先清位、后清槽 —— 于是"位悬挂 + 槽记录属于死进程"只在
+         * 崩溃时出现(稳定指纹); 干净断连不会留下可被误判为死的记录。 */
+        cc_t const left = r_ckr_.disconnect(*this, cc_id);
+        if (broadcast_policy && cc_id != 0) {
+            if (cc_id == static_cast<cc_t>(~static_cast<cc_t>(0u))) {
+                owners_.release_all();
+            } else {
+                owners_.release(bit_slot_of(cc_id));
+            }
+        }
+        return left;
     }
 
     cursor_t cursor() const noexcept {
@@ -131,6 +160,11 @@ public:
     /// Writers/readers should keep going through push/pop instead.
     elem_t const* block() const noexcept { return block_; }
     elem_t      * block()       noexcept { return block_; }
+
+    /// UF-003: owner 表(位→持有者身份)。清扫方在池穷尽时用它做"验尸"。
+    /// 只有广播策略在连接/断连时维护它; 单播的 cc 是计数语义, 不参与。
+    owner_table       & owners()       noexcept { return owners_; }
+    owner_table const & owners() const noexcept { return owners_; }
 
     template <typename Q, typename F>
     bool push(Q* que, F&& f) {
