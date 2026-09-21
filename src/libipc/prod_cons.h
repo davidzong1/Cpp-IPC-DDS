@@ -381,33 +381,6 @@ struct prod_cons_impl<wr<relat::single, relat::multi, trans::broadcast>> {
         }
         for (;;) {
             if (cur == cursor()) return false; // acquire
-            /* 方案 A: **不读写头那一格**。
-             *
-             * index_of(cur) == index_of(cursor()) 而 cur != cursor(), 即收方恰好落后
-             * 整整一圈 —— 重同步(下面的 `cur = cursor() - kRingSlots`)正是把游标放在
-             * 这里。这一格是"环里还留着的最旧一格", 内容本身是该读的, **但它同时是
-             * 写方下一次落笔的目标**。
-             *
-             * 为什么不靠 ②③ 兜: push 是**先声明、后落笔** —— rc_ 的 CAS 在
-             * `f(&el->data_, rem_cc)` **之前**(见本文件 push 的末尾), 而 ②③ 比的都是
-             * rc_ 的 epoch。若收方读到的是 CAS **之后**的值, 那么 epoch 在它拷贝**之前**
-             * 就已经变了 ⇒ ②③ 全程沉默, 而载荷可能正被逐字节改写 ⇒ 收下一个撕裂的
-             * storage_id(指向池里另一条消息的 chunk)。
-             *
-             * 实测(2026-09-21, 沙箱插桩构建, 5.9M 条/3s 的"一读一发"负载):
-             *   不跳过: 读到写头 3148 次, 其中**拷贝与落笔重叠 1360 次, ②③ 看不见的
-             *           1096 次**;
-             *   跳过:   写头命中降到 5~134 次(只剩"判断与读之间写头自己动了"的残余),
-             *           **②③ 看不见的重叠恒为 0**(四次全 0)。
-             * ⇒ 这一格是那扇窗的唯一入口, 跳过即关窗。
-             *
-             * 代价(**必须随修法一起登记**): 被套圈的收方每绕一圈会**多丢一条**(原先
-             * 丢 256 条里的前面那些, 现在连最旧那条也不读)。符合 force_push 注释里早已
-             * 声明的契约"慢订阅者保持连接、只丢失被套圈的消息", ⛔ 不是新语义。 */
-            if (circ::index_of(cur) == circ::index_of(cursor())) {
-                ++cur;
-                continue;
-            }
             auto* el = elems + circ::index_of(cur++);
             const rc_t rc0 = el->rc_.load(std::memory_order_acquire);
             if ((my != 0) && ((rc0 & my) == 0)) {
