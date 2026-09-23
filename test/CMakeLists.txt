@@ -125,6 +125,19 @@ endforeach()
 #         && ctest --test-dir build -R test_udp_port_boundary --output-on-failure
 add_test(NAME test_udp_port_boundary COMMAND test_udp_port_boundary)
 
+# 阶段 1 控制面调度器聚焦用例 (16 条, 见 test/test_shm_control_scheduler.cpp 抬头注释)。
+# 它**必须**进 CTest: 该用例是并发注销协议(I1-I4)的回归闸, 靠手工跑
+# build/bin/test_shm_control_scheduler 无法进入任何自动回路; 而调度器一旦回归,
+# 症状是"已析构宿主被回调"(UAF) 或"注销后计数悄悄多跑", 都是静默失效 —— 只有
+# 常驻的自动化判据才能守住。target 由上面 file(GLOB) 自动生成, 无需 add_executable。
+# 命名规范同前: 与 target 名一致, 不另起别名。
+add_test(NAME test_shm_control_scheduler COMMAND test_shm_control_scheduler)
+
+# 用例内含 4 线程 churn 与 250ms 慢回调, 实测全套约 3s; 给 120s 只为在死锁
+# (本用例要抓的失败模式之一: 注销等待在途回调时自锁) 时让 ctest 报超时而非永久
+# 阻塞构建机, 不是性能判据。
+set_tests_properties(test_shm_control_scheduler PROPERTIES TIMEOUT 120)
+
 # 第 7 个用例 PreviouslyFatalTopicNowConnectsEndToEnd 起真 pub/sub: 1.5s 等握手 + 2.5s
 # 发布, 正常约 5s; 组播不可用时它 GTEST_SKIP 而不是挂住。给 120s 只为卡死时 ctest 报
 # 超时而非永久阻塞, 不是性能判据。

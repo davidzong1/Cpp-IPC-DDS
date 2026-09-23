@@ -14,6 +14,10 @@ aux_source_directory(${LIBIPC_PROJECT_DIR}/src/libipc/socket SRC_FILES)
 aux_source_directory(${LIBIPC_PROJECT_DIR}/src/dzIPC SRC_FILES)
 aux_source_directory(${LIBIPC_PROJECT_DIR}/src/dzIPC/common SRC_FILES)
 aux_source_directory(${LIBIPC_PROJECT_DIR}/src/dzIPC/logger SRC_FILES)
+# 阶段 1 控制面调度器 (docs/消息接收架构改造/阶段1_控制面调度器实现说明.md §2.2 A1)。
+# ⚠️ aux_source_directory 是**配置期**展开: 新增 .cc 后必须重跑 `cmake -S . -B build`,
+#    否则新源文件静默不进 libipc.so (不报错, 只是不参与链接)。
+aux_source_directory(${LIBIPC_PROJECT_DIR}/src/dzIPC/threepools SRC_FILES)
 
 file(GLOB HEAD_FILES
   ${LIBIPC_PROJECT_DIR}/include/libipc/*.h
