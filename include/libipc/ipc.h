@@ -4,6 +4,7 @@
 
 #include "libipc/export.h"
 #include "libipc/def.h"
+#include "libipc/recv_wait_set.h"
 #include "libipc/buffer.h"
 #include "libipc/shm.h"
 #include "libipc/sniffer.h"
@@ -79,6 +80,7 @@ namespace ipc
      * specific dead reader.
      */
     static std::uint32_t connected_id(ipc::handle_t h);
+    static recv_wait_token read_wait_token(ipc::handle_t h) noexcept;
 
     /**
      * \brief Forcibly clear specific receiver connection bits.
@@ -240,6 +242,9 @@ namespace ipc
 
     /// This handle's bit in the receiver connection bitmap; 0 if not a receiver.
     std::uint32_t connected_id() const { return detail_t::connected_id(h_); }
+
+    recv_wait_token read_wait_token() const noexcept
+    { return detail_t::read_wait_token(h_); }
 
     /// Reap specific dead receivers. See chan_impl::disconnect_receivers —
     /// liveness is the caller's responsibility.

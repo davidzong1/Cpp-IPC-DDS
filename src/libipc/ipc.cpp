@@ -1255,6 +1255,12 @@ namespace
       return static_cast<std::uint32_t>(que->connected_id());
     }
 
+    static ipc::recv_wait_token read_wait_token(ipc::handle_t h) noexcept
+    {
+      auto* info = info_of(h);
+      return (info == nullptr) ? ipc::recv_wait_token{} : info->rd_waiter_.read_wait_token();
+    }
+
     static void disconnect_receivers(ipc::handle_t h,
                                      std::uint32_t cc_ids) noexcept
     {
@@ -2031,6 +2037,12 @@ namespace ipc
   std::uint32_t chan_impl<Flag>::connected_id(ipc::handle_t h)
   {
     return detail_impl<policy_t<Flag>>::connected_id(h);
+  }
+
+  template <typename Flag>
+  ipc::recv_wait_token chan_impl<Flag>::read_wait_token(ipc::handle_t h) noexcept
+  {
+    return detail_impl<policy_t<Flag>>::read_wait_token(h);
   }
 
   template <typename Flag>

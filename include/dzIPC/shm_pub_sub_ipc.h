@@ -1,5 +1,7 @@
 #pragma once
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -24,6 +26,20 @@ namespace dzIPC {
 namespace shm {
 class shm_pub_ipc;
 class shm_sub_ipc;
+
+struct SubState
+{
+    /* 收包分流所需的完整状态；阶段 5 worker 只需持有这份 shared_ptr。 */
+    std::shared_ptr<TopicData> topic_msg;
+    std::mutex topic_msg_mtx;
+    std::shared_ptr<CircularQueue<IpcMsgBase>> msg_queue;
+    std::shared_ptr<CircularQueue<Sample>> view_queue;
+    std::size_t adopt_cap{0};
+    std::atomic<int> adopt_borrowed{0};
+    std::uint32_t msg_id{0};
+};
+
+IPC_EXPORT void process_received_buffer(const std::shared_ptr<SubState>& state, ipc::buff_t&& raw_data);
 
 class IPC_EXPORT shm_pub_ipc : public pub_ipc_base
 {
@@ -180,16 +196,7 @@ private:
      * 收包路径也不必再持有互斥量。
      * 见 docs/消息接收架构改造/阶段2_RouteSession实现说明.md §1-§6。 */
     RouteSession route_session_;
-    std::shared_ptr<TopicData> topic_msg_;
-    std::mutex topic_msg_mtx_;
-    std::shared_ptr<CircularQueue<IpcMsgBase>> msg_queue_;  // 物化队列; shared_ptr for fast-path fanout
-    std::shared_ptr<CircularQueue<Sample>> view_queue_;  // 视图队列: 借样的 DZFlat 段
-    /* UF-012 adopt 借样配额(见 .cc 构造函数与订阅循环 adopt 分支):
-     * adopt_cap_      构造期定死的配额(= view_cap, 同一开关同一上限);
-     * adopt_borrowed_ msg_queue_ 中持活 chunk 的借样消息数
-     *                 (adopt 入队 +1 / pop 与满队驱逐 -1)。 */
-    std::size_t adopt_cap_{0};
-    std::atomic<int> adopt_borrowed_{0};
+    std::shared_ptr<SubState> sub_state_;
     std::thread* subscribe_thread_{nullptr};
     std::thread* sub_handshake_thread_{nullptr};
     //
@@ -198,7 +205,7 @@ private:
     dzIPC::control_plane_shm::TopicControlPlane control_plane_;
     dzIPC::ThreadDispatch::ThreadOptions thread_options_;
     uint32_t msg_id_{0};  // current registration key msg_id; updated on reset_message
-    bool local_registered_{false};  // guarded by topic_msg_mtx_; true after InitChannel registers
+    bool local_registered_{false};  // guarded by sub_state_->topic_msg_mtx
     /* 本订阅者在控制面 PeerSlot 表中的槽位下标, -1 表示未登记。
      * 由 sub_handshake() 线程独占访问。 */
     int peer_slot_{-1};

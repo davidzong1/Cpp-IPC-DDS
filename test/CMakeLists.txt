@@ -198,6 +198,11 @@ set_tests_properties(test_shm_sub_dtor_gate PROPERTIES TIMEOUT 120)
 add_test(NAME test_shm_ready_transition COMMAND test_shm_ready_transition)
 set_tests_properties(test_shm_ready_transition PROPERTIES TIMEOUT 120)
 
+# 阶段 4 recv_wait_set：只验证 token、sequence、动态注销/停止和 disconnect 唤醒；
+# 不接入阶段 5 worker，也不改变现有 shm_sub_ipc 收包线程。
+add_test(NAME test_recv_wait_set COMMAND test_recv_wait_set)
+set_tests_properties(test_recv_wait_set PROPERTIES TIMEOUT 120)
+
 #target_link_libraries(${PROJECT_NAME} tcmalloc_minimal)
 
 # ================================================================

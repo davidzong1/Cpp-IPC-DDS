@@ -58,6 +58,121 @@ void wait_for_peer_drain(dzIPC::control_plane_shm::TopicControlPlane& control_pl
 
 }   // namespace
 
+void process_received_buffer(const std::shared_ptr<SubState>& state, ipc::buff_t&& raw_data)
+{
+    if (!state || raw_data.empty())
+    {
+        return;
+    }
+    if (IsWakeupArtifact(raw_data))
+    {
+        NoteWakeupArtifact();
+        return;
+    }
+
+    std::uint32_t exp_id = 0, exp_hash = 0;
+    bool viewable = false;
+    {
+        std::lock_guard<std::mutex> lock(state->topic_msg_mtx);
+        if (!state->topic_msg)
+        {
+            return;
+        }
+        exp_id = state->msg_id;
+        exp_hash = state->topic_msg->topic()->dzflat_schema_hash();
+        viewable = (exp_hash != 0);
+    }
+
+    const bool is_dzflat = dzflat::looks_like_dzflat(raw_data.data(), raw_data.size());
+    if (is_dzflat)
+    {
+        if (viewable)
+        {
+            std::uint32_t seg_id = 0;
+            if (!IpcMsgBase::dzflat_peek_msg_id(raw_data.data(), raw_data.size(), seg_id)
+                || seg_id != exp_id)
+            {
+                detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatIdSkipped);
+                return;
+            }
+            dzflat::SegHeader h{};
+            std::memcpy(&h, raw_data.data(), sizeof(h));
+            if (h.schema_hash != exp_hash)
+            {
+                detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatSchemaDrop);
+                return;
+            }
+            detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatAccepted);
+            state->view_queue->push(std::make_shared<Sample>(std::move(raw_data), seg_id, exp_hash));
+            return;
+        }
+
+        std::uint32_t seg_id = 0, seg_hash = 0;
+        {
+            dzflat::SegHeader h{};
+            std::memcpy(&h, raw_data.data(), sizeof(h));
+            seg_hash = h.schema_hash;
+        }
+        if (!IpcMsgBase::dzflat_peek_msg_id(raw_data.data(), raw_data.size(), seg_id)
+            || seg_id != exp_id)
+        {
+            detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatIdSkipped);
+            return;
+        }
+        detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatAccepted);
+        std::shared_ptr<TopicData> local_msg;
+        {
+            std::lock_guard<std::mutex> lock(state->topic_msg_mtx);
+            if (!state->topic_msg)
+            {
+                return;
+            }
+            local_msg.reset(state->topic_msg->clone());
+        }
+        const bool quota_ok = state->adopt_borrowed.load(std::memory_order_relaxed)
+                              < static_cast<int>(state->adopt_cap);
+        if (quota_ok && local_msg->topic()->dzflat_adopt(std::move(raw_data), seg_hash))
+        {
+            state->adopt_borrowed.fetch_add(1, std::memory_order_relaxed);
+            std::shared_ptr<IpcMsgBase> ptr_cache;
+            local_msg->swap(ptr_cache);
+            state->msg_queue->push(std::move(ptr_cache));
+            return;
+        }
+        if (!raw_data.empty() && local_msg->topic()->dzflat_read(raw_data.data(), raw_data.size()))
+        {
+            detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatAdoptSpilled);
+            std::shared_ptr<IpcMsgBase> ptr_cache;
+            local_msg->swap(ptr_cache);
+            state->msg_queue->push(std::move(ptr_cache));
+            return;
+        }
+        return;
+    }
+    if (dzflat::has_dzflat_magic(raw_data.data(), raw_data.size()))
+    {
+        detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatHeaderBad);
+        return;
+    }
+
+    std::shared_ptr<TopicData> local_msg;
+    {
+        std::lock_guard<std::mutex> lock(state->topic_msg_mtx);
+        if (!state->topic_msg)
+        {
+            return;
+        }
+        local_msg.reset(state->topic_msg->clone());
+    }
+    if (!AcceptWire(raw_data, local_msg->msg_id(), *local_msg->topic()))
+    {
+        return;
+    }
+    std::shared_ptr<IpcMsgBase> ptr_cache;
+    local_msg->swap(ptr_cache);
+    state->msg_queue->push(std::move(ptr_cache));
+}
+
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
@@ -500,9 +615,11 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
     , verbose_(verbose)
     , thread_options_(dzIPC::ThreadDispatch::make_realtime_options(enable_thread_qos, cpu_id, thread_priority))
 {
-    topic_msg_.reset(msg->clone());
-    msg_id_ = topic_msg_->topic()->msg_id();
-    msg_queue_ = std::make_shared<CircularQueue<IpcMsgBase>>(queue_size);
+    sub_state_ = std::make_shared<SubState>();
+    sub_state_->topic_msg.reset(msg->clone());
+    msg_id_ = sub_state_->topic_msg->topic()->msg_id();
+    sub_state_->msg_id = msg_id_;
+    sub_state_->msg_queue = std::make_shared<CircularQueue<IpcMsgBase>>(queue_size);
     /* 步骤③: view 队列钉 chunk(借样 Sample 持有 buff_t, 见本文件订阅循环 :773 处
      * 注释), adopt 借样(GenericMessage 收 schema-less DZFlat)经 msg_queue_ 也钉
      * chunk —— 两者的配额同源: ViewQueueCap() = large_msg_cache/4 = 10(对齐 ROS 2
@@ -520,19 +637,20 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
     {
         warn_view_queue_pinned(queue_size, view_cap);
     }
-    view_queue_ = std::make_shared<CircularQueue<Sample>>(
+    sub_state_->view_queue = std::make_shared<CircularQueue<Sample>>(
         (view_cap < queue_size) ? view_cap : queue_size);
     /* UF-012 adopt 借样配额: 与 view 队列同一上限、同一开关。借样进 msg_queue_
      * 的消息每条钉一块 chunk, 而队列深度是用户配置的 queue_size(可能远大于池),
      * 不设配额一个慢消费者就能把整档池钉干。计数三条路径: adopt 入队 +1,
      * pop(get_clone/try_get_clone) -1, 满队挤最老(evict 回调) -1。 */
-    adopt_cap_ = view_cap;
-    msg_queue_->set_evict_cb(
-        [this](const std::shared_ptr<IpcMsgBase> &dropped)
+    sub_state_->adopt_cap = view_cap;
+    const auto state = sub_state_;
+    sub_state_->msg_queue->set_evict_cb(
+        [state](const std::shared_ptr<IpcMsgBase> &dropped)
         {
             if (dropped && dropped->dzflat_is_borrowed())
             {
-                adopt_borrowed_.fetch_sub(1, std::memory_order_relaxed);
+                state->adopt_borrowed.fetch_sub(1, std::memory_order_relaxed);
             }
         });
 }
@@ -545,11 +663,11 @@ shm_sub_ipc::~shm_sub_ipc()
     // Deregister BEFORE stopping threads so fast-path publisher snapshots
     // can no longer include this queue while we shut down.
     {
-        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+        std::lock_guard<std::mutex> lock(sub_state_->topic_msg_mtx);
         if (local_registered_)
         {
             ChannelKey key{raw_topic_name_, domain_id_, msg_id_};
-            LocalPubSubRegistry::instance().unregister_subscriber(key, msg_queue_);
+            LocalPubSubRegistry::instance().unregister_subscriber(key, sub_state_->msg_queue);
             local_registered_ = false;
         }
     }
@@ -619,8 +737,8 @@ void shm_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
     const uint32_t new_msg_id = new_msg->topic()->msg_id();
 
     {
-        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
-        topic_msg_ = std::move(new_msg);
+        std::lock_guard<std::mutex> lock(sub_state_->topic_msg_mtx);
+        sub_state_->topic_msg = std::move(new_msg);
 
         // If already registered (InitChannel completed) and msg_id changed,
         // re-register under the new key so publishers using the new msg_id
@@ -630,10 +748,11 @@ void shm_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
             auto& reg = LocalPubSubRegistry::instance();
             ChannelKey old_key{raw_topic_name_, domain_id_, msg_id_};
             ChannelKey new_key{raw_topic_name_, domain_id_, new_msg_id};
-            reg.unregister_subscriber(old_key, msg_queue_);
-            reg.register_subscriber(new_key, msg_queue_);
+            reg.unregister_subscriber(old_key, sub_state_->msg_queue);
+            reg.register_subscriber(new_key, sub_state_->msg_queue);
         }
         msg_id_ = new_msg_id;
+        sub_state_->msg_id = new_msg_id;
     }
 }
 
@@ -808,8 +927,8 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
 {
     std::shared_ptr<TopicData> topic_template;
     {
-        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
-        topic_template = topic_msg_;
+        std::lock_guard<std::mutex> lock(sub_state_->topic_msg_mtx);
+        topic_template = sub_state_->topic_msg;
     }
     std::string topic_type_name =
         (topic_template && topic_template->topic())
@@ -875,175 +994,7 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
                     {
                         continue;
                     }
-                    /* ⛔ 叫醒伪影门 —— 阶段 2 §5 第 4 步(stop_and_wake 用 disconnect
-                     * 叫醒卡住的 recv)的必然副产物, 见 docs/消息接收架构改造/
-                     * 阶段2_RouteSession实现说明.md §10。
-                     *
-                     * 被 disconnect()/quit_waiting() 叫醒的那次 recv 返回的**不是**空
-                     * buffer, 而是 ipc::data_length 字节的**全零**缓冲(empty() 为 false);
-                     * 机理与充要判据见 dzIPC/common/wire_accept.h 的 IsWakeupArtifact。
-                     * 不放它进来, 话题 msg_id == 0 时 AcceptWire 的 check_id 恰好通过
-                     * (尾 4 字节全零 == 0)且 deserialize_ok 为真 ⇒ 一条全零假消息被 push
-                     * 进 msg_queue_, 用户侧 try_get_clone 无发送方也能取到; msg_id != 0
-                     * 时虽被挡下, 但计数器被污染成 kTlvIdSkipped。
-                     *
-                     * ⚠️ 这道门必须与判空**同层、留在分流之前**: 阶段 3 提取
-                     * process_received_buffer 时它属于「raw_data 非空之后」的函数体,
-                     * 必须随之一并搬走, 不得只留在调用点 —— 否则阶段 5 的 worker 会各自
-                     * 漏掉一处。
-                     * ⚠️ 判据是**内容**(整段全零), 不是 generation: 后者会违反 RouteSession
-                     * 的 I5(真消息可能已在 disconnect 前弹出), 把真 buffer 丢掉。 */
-                    if (IsWakeupArtifact(raw_data))
-                    {
-                        /* 计数与丢弃分开: IsWakeupArtifact 是纯判别(单测会大量调它),
-                         * 诊断计数只在这里涨 —— 见 wire_accept.h 的调用约定。 */
-                        NoteWakeupArtifact();
-                        continue;
-                    }
-                    /* 双 wire 分流 + 拒收计数 (docs/dzflat_shm.md §3.8 / wire_accept.h)
-                     *
-                     * 段首 4 字节: DZFlat 是 magic 'DZFL', TLV 是首字段名的长度(小整数),
-                     * 结构上不可能碰撞, 故可无条件判别。分两条投递队列:
-                     *
-                     *   view 队列(借样 Sample)  ←  DZFlat 段 + 话题类型支持 DZFlat(typed/
-                     *       由 get()/try_get() 服务, 零拷贝         generator 生成, schema_hash≠0)
-                     *   clone 队列(物化对象)    ←  TLV 段, 以及发给 schema-less 话题
-                     *       由 get_clone()/try_get_clone() 服务   (GenericMessage / 手写类型)
-                     *       的 DZFlat 段 —— GenericMessage 无 C++ schema, 只能把段字节
-                     *       拷进 dzflat_seg_ 留待 Python 解码, 见 generic_message.hpp。
-                     *
-                     * 严格分流: TLV 消息永远不会被 get()/try_get() 物化; 混合 wire(灰度期)
-                     * 需要调用方两条都 drain。 */
-                    std::uint32_t exp_id = 0, exp_hash = 0;
-                    bool viewable = false;
-                    {
-                        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
-                        if (!topic_msg_)
-                        {
-                            continue;
-                        }
-                        exp_id = msg_id_;   /* 注册键 = 话题模板的 msg_id */
-                        exp_hash = topic_msg_->topic()->dzflat_schema_hash();
-                        viewable = (exp_hash != 0);   /* 仅 generator 生成的 typed 话题 */
-                    }
-
-                    const bool is_dzflat =
-                        dzflat::looks_like_dzflat(raw_data.data(), raw_data.size());
-                    if (is_dzflat)
-                    {
-                        if (viewable)
-                        {
-                            std::uint32_t seg_id = 0;
-                            if (!IpcMsgBase::dzflat_peek_msg_id(raw_data.data(), raw_data.size(),
-                                                                seg_id)
-                                || seg_id != exp_id)
-                            {
-                                detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatIdSkipped);
-                                continue;
-                            }
-                            dzflat::SegHeader h{};
-                            std::memcpy(&h, raw_data.data(), sizeof(h));
-                            if (h.schema_hash != exp_hash)
-                            {
-                                detail::NoteDzFlatRx(
-                                    detail::DzFlatRxEvent::kDzFlatSchemaDrop);
-                                continue;
-                            }
-                            detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatAccepted);
-                            /* 借样: raw_data(buff_t) 让 chunk 的 conns 引用保持非零,
-                             * 原样移进 Sample —— chunk 在用户读完字段前不会归还池。 */
-                            view_queue_->push(std::make_shared<Sample>(
-                                std::move(raw_data), seg_id, exp_hash));
-                            continue;
-                        }
-                        /* schema-less 话题: 话题若是 GenericMessage, 把段**借**给它(不拷
-                         * 字节), Python 按段头 schema_hash 查表解码 —— 这是 Python 侧零拷贝
-                         * 的落点。msg_id 需对上; schema 无从在 C++ 校验(GenericMessage 无
-                         * schema)。话题不是 GenericMessage(手写类型)收到 DZFlat = 类型不匹配,
-                         * 丢弃。
-                         *
-                         * UF-012 借样配额: 借进 msg_queue_ 的消息每条钉一块 chunk, 而队列
-                         * 深度是用户配置的 queue_size(可能远大于池容量)。配额内照旧借样
-                         * (零拷贝); 配额满即物化(dzflat_read 拷进堆) —— raw_data 是循环体
-                         * 作用域的 buff_t, 迭代末尾析构即还池。降级是每消息一次拷贝,
-                         * 不降级成系统级池饿死。 */
-                        std::uint32_t seg_id = 0, seg_hash = 0;
-                        {
-                            dzflat::SegHeader h{};
-                            std::memcpy(&h, raw_data.data(), sizeof(h));
-                            seg_hash = h.schema_hash;
-                        }
-                        if (!IpcMsgBase::dzflat_peek_msg_id(raw_data.data(), raw_data.size(),
-                                                            seg_id)
-                            || seg_id != exp_id)
-                        {
-                            detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatIdSkipped);
-                            continue;
-                        }
-                        detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatAccepted);
-                        std::shared_ptr<TopicData> local_msg;
-                        {
-                            std::lock_guard<std::mutex> lock(topic_msg_mtx_);
-                            if (!topic_msg_)
-                            {
-                                continue;
-                            }
-                            local_msg.reset(topic_msg_->clone());
-                        }
-                        /* ⛔ 短路顺序即正确性: 配额满时**不调** adopt —— adopt 按值收
-                         * buffer, 即便返回 false, raw_data 也已被 move 掏空, 之后的
-                         * 物化分支就拿不到段字节了。配额满 ⇒ raw_data 完好 ⇒ 走物化。 */
-                        const bool quota_ok =
-                            adopt_borrowed_.load(std::memory_order_relaxed) <
-                            static_cast<int>(adopt_cap_);
-                        if (quota_ok &&
-                            local_msg->topic()->dzflat_adopt(std::move(raw_data), seg_hash))
-                        {
-                            adopt_borrowed_.fetch_add(1, std::memory_order_relaxed);
-                            std::shared_ptr<IpcMsgBase> ptr_cache;
-                            local_msg->swap(ptr_cache);
-                            msg_queue_->push(std::move(ptr_cache));
-                            continue;
-                        }
-                        /* 配额满(GenericMessage)→ 物化拷贝 + 溢出计数; 非 GenericMessage
-                         * (手写类型)→ adopt 已把 raw_data 掏空且 dzflat_read 基类返回
-                         * false, 落到下面的类型不匹配丢弃 —— 与旧行为一致。 */
-                        if (!raw_data.empty() &&
-                            local_msg->topic()->dzflat_read(raw_data.data(), raw_data.size()))
-                        {
-                            detail::NoteDzFlatRx(
-                                detail::DzFlatRxEvent::kDzFlatAdoptSpilled);
-                            std::shared_ptr<IpcMsgBase> ptr_cache;
-                            local_msg->swap(ptr_cache);
-                            msg_queue_->push(std::move(ptr_cache));
-                            continue;
-                        }
-                        continue;   /* 非 GenericMessage 的 schema-less 话题: 类型不匹配, 丢弃 */
-                    }
-                    else if (dzflat::has_dzflat_magic(raw_data.data(), raw_data.size()))
-                    {
-                        /* magic 在但 looks_like_dzflat 不过 ⇒ 段头自相矛盾 / layout_ver
-                         * 不认识 ⇒ 损坏段, 不是"不是 DZFlat"。 */
-                        detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatHeaderBad);
-                        continue;
-                    }
-
-                    /* TLV(或 schema-less 的 DZFlat)→ 物化, 与 ser/cli 共用 AcceptWire。 */
-                    std::shared_ptr<TopicData> local_msg;
-                    {
-                        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
-                        if (!topic_msg_)
-                        {
-                            continue;
-                        }
-                        local_msg.reset(topic_msg_->clone());
-                    }
-                    if (!AcceptWire(raw_data, local_msg->msg_id(), *local_msg->topic()))
-                    {
-                        continue;
-                    }
-                    std::shared_ptr<IpcMsgBase> ptr_cache;                    local_msg->swap(ptr_cache);
-                    msg_queue_->push(std::move(ptr_cache));
+                    process_received_buffer(sub_state_, std::move(raw_data));
                 }
                 else
                 {
@@ -1056,11 +1007,11 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
 
     // Register for intra-process fast-path delivery (once only).
     {
-        std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+        std::lock_guard<std::mutex> lock(sub_state_->topic_msg_mtx);
         if (!local_registered_)
         {
             ChannelKey key{raw_topic_name_, domain_id_, msg_id_};
-            LocalPubSubRegistry::instance().register_subscriber(key, msg_queue_);
+            LocalPubSubRegistry::instance().register_subscriber(key, sub_state_->msg_queue);
             local_registered_ = true;
         }
     }
@@ -1073,7 +1024,7 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
 void shm_sub_ipc::get(Sample& out)
 {
     std::shared_ptr<Sample> s;
-    view_queue_->pop(s);   /* 阻塞直到有 Sample; TLV-only 话题请用 get_clone, 见基类注释 */
+    sub_state_->view_queue->pop(s);   /* 阻塞直到有 Sample; TLV-only 话题请用 get_clone */
     if (s)
     {
         out = std::move(*s);
@@ -1085,7 +1036,7 @@ bool shm_sub_ipc::get(Sample& out, std::uint64_t tm_ms)
     /* CircularQueue::pop 本来就支持超时(见其 tm 参数), 之前只是没接线 —— 于是只发 TLV 的
      * 话题上调 get(Sample&) 会永久挂死。见 docs/shm_defect_fixes.md 第 4 条。 */
     std::shared_ptr<Sample> s;
-    if (!view_queue_->pop(s, tm_ms))
+    if (!sub_state_->view_queue->pop(s, tm_ms))
     {
         return false;   // 超时
     }
@@ -1100,7 +1051,7 @@ bool shm_sub_ipc::get(Sample& out, std::uint64_t tm_ms)
 bool shm_sub_ipc::try_get(Sample& out)
 {
     std::shared_ptr<Sample> s;
-    if (!view_queue_->try_pop(s))
+    if (!sub_state_->view_queue->try_pop(s))
     {
         return false;
     }
@@ -1115,12 +1066,12 @@ bool shm_sub_ipc::try_get(Sample& out)
 void shm_sub_ipc::get_clone(std::shared_ptr<TopicData>& msg)
 {
     std::shared_ptr<IpcMsgBase> ipc_msg;
-    msg_queue_->pop(ipc_msg);
+    sub_state_->msg_queue->pop(ipc_msg);
     /* 出队即离开配额账面(消息可能带着借样移交给用户 —— 与 view 路径同一契约:
      * 队列驻留有上限, 用户手持期是用户的约定)。 */
     if (ipc_msg && ipc_msg->dzflat_is_borrowed())
     {
-        adopt_borrowed_.fetch_sub(1, std::memory_order_relaxed);
+        sub_state_->adopt_borrowed.fetch_sub(1, std::memory_order_relaxed);
     }
     msg->update(ipc_msg);
 }
@@ -1131,11 +1082,11 @@ void shm_sub_ipc::get_clone(std::shared_ptr<TopicData>& msg)
 bool shm_sub_ipc::try_get_clone(std::shared_ptr<TopicData>& msg)
 {
     std::shared_ptr<IpcMsgBase> ipc_msg;
-    if (msg_queue_->try_pop(ipc_msg))
+    if (sub_state_->msg_queue->try_pop(ipc_msg))
     {
         if (ipc_msg && ipc_msg->dzflat_is_borrowed())
         {
-            adopt_borrowed_.fetch_sub(1, std::memory_order_relaxed);
+            sub_state_->adopt_borrowed.fetch_sub(1, std::memory_order_relaxed);
         }
         msg->update(ipc_msg);
         return true;

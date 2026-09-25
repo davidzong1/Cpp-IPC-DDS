@@ -11,9 +11,15 @@
 #include "libipc/condition.h"
 #include "libipc/shm.h"
 #include "libipc/platform/detail.h"
+#include "libipc/recv_wait_set.h"
+
+#if defined(_WIN32)
+#include <Windows.h>
+#endif
 
 namespace ipc {
 namespace detail {
+
 
 class waiter {
     struct state_t {
@@ -25,6 +31,9 @@ class waiter {
     ipc::sync::mutex     lock_;
     ipc::shm::handle     state_h_;
     std::atomic<bool>    quit_ {false};
+#if defined(_WIN32)
+    HANDLE wake_event_{nullptr};
+#endif
 
     state_t* state() const noexcept {
         return static_cast<state_t*>(state_h_.get());
@@ -34,6 +43,13 @@ class waiter {
         auto st = state();
         if (st != nullptr) {
             st->seq.fetch_add(1, std::memory_order_release);
+            ::ipc::recv_wait_set_wake(&st->seq,
+#if defined(_WIN32)
+                                      wake_event_
+#else
+                                      nullptr
+#endif
+            );
         }
         {
             IPC_UNUSED_ std::lock_guard<ipc::sync::mutex> barrier{lock_};
@@ -77,6 +93,16 @@ public:
             cond_.close();
             return false;
         }
+#if defined(_WIN32)
+        wake_event_ = ::CreateEventA(nullptr, TRUE, FALSE,
+                                      (std::string{name} + "_WAITER_EVT_").c_str());
+        if (wake_event_ == nullptr) {
+            state_h_.release();
+            lock_.close();
+            cond_.close();
+            return false;
+        }
+#endif
         if (state_h_.ref() <= 1) {
             new (state_h_.get()) state_t();
         }
@@ -84,6 +110,12 @@ public:
     }
 
     void close() noexcept {
+#if defined(_WIN32)
+        if (wake_event_ != nullptr) {
+            ::CloseHandle(wake_event_);
+            wake_event_ = nullptr;
+        }
+#endif
         state_h_.release();
         cond_.close();
         lock_.close();
@@ -136,6 +168,18 @@ public:
     bool quit_waiting() {
         quit_.store(true, std::memory_order_release);
         return broadcast();
+    }
+
+    recv_wait_token read_wait_token() const noexcept {
+        auto st = state();
+        return (st == nullptr) ? recv_wait_token{}
+                               : recv_wait_token{&st->seq,
+#if defined(_WIN32)
+                                                 wake_event_
+#else
+                                                 nullptr
+#endif
+        };
     }
 };
 
