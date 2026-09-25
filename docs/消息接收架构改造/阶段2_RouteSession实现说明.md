@@ -1,6 +1,6 @@
 # 阶段 2 · RouteSession 实现说明
 
-> 状态：实现说明，代码未改。供团队落地订阅 route 的生命周期，不包含线程池。
+> 状态：主线已落地。RouteSession、shm_sub_ipc 接入及本说明 §10 的叫醒伪影守门已实现并验证；不包含线程池。
 > 配套：`docs/消息接收架构改造/事件驱动线程池需求.md` §4、§8、§9；`docs/消息接收架构改造/shm_sub_thread_consolidation_plan.md` 阶段 2。
 > 前置：阶段 1 可以未接入。本阶段仍由现有 `subscribe_thread_` 收包。
 > 后置：阶段 4/5 才能把 `recv` 交给别的 worker。本阶段不引入 `recv_wait_set`。
@@ -174,3 +174,20 @@ A 先合入。B 与 C 一起合入，否则会出现一边已经不持锁、另�
 - 不把 `recv(50)` 改成无限等待。无限等待要等 `stop_and_wake` 的叫醒在目标平台上测过之后再改。
 - 不把用户 `get`/`get_clone` 挪进收包线程。
 - 不改发布端 `publish_thread_` / 阶段 1 调度器的心跳周期。
+
+## 10. 实现补充：disconnect 叫醒伪影
+
+`ipc::route::recv()` 在等待期间被 `disconnect()` 叫醒时，当前 libipc 实现可能返回
+`ipc::data_length` 字节的全零 buffer；该值 `empty() == false`。话题 `msg_id == 0` 时，
+全零 buffer 可通过 TLV 的消息 id 检查并被当作正常消息投递。此行为来自 libipc 的
+`waiter::quit_` 返回语义，本阶段不修改 libipc。
+
+订阅循环在判空之后、wire 分流之前调用 `IsWakeupArtifact()` 拦截这类 buffer，并单独
+记录 `WakeupArtifactCount()`。判定要求长度恰好为 `ipc::data_length` 且整段全零；不能只
+检查尾部字节（真实 DZFlat 段可能尾部全零），也不能按 lease generation 丢弃数据，因为
+旧 route 上已经弹出的真实消息仍须进入现有分流。该守门必须随收包路径迁移到阶段 3 的
+分流函数中。
+
+测试覆盖真实 route 的 rebuild/disconnect 唤醒、`msg_id == 0` 话题无伪消息、同长度真实
+TLV 与 DZFlat 不被误判，以及 generation 重建前后真实消息仍可投递。RouteSession 单测
+另直接验证 `begin_rebuild()` 的 disconnect 可唤醒阻塞中的 recv。

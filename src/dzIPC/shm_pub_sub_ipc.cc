@@ -11,6 +11,7 @@
 #include "dzIPC/common/name_operator.h"
 #include "dzIPC/common/nodelet_config.h"
 #include "dzIPC/common/wire_accept.h"
+#include "dzIPC/detail/shm_sub_seam.h"   /* 内部测试缝: 默认空指针 ⇒ 零行为变化 */
 #include "ipc_msg/ipc_msg_base/generic_message.hpp"   /* fast-path 借样物化(UF-012) */
 
 namespace dzIPC {
@@ -552,8 +553,21 @@ shm_sub_ipc::~shm_sub_ipc()
             local_registered_ = false;
         }
     }
+    /* 测试缝(阶段2_全量测试方案 §4.2): 记录"registry 注销发生在收包停止之前"这一条
+     * 因果序。默认钩子为空 ⇒ 只有一次 relaxed load。 */
+    detail::FireSeam({detail::SeamPoint::kDtorAfterUnregister, 0, nullptr, nullptr, 0});
 
+    /* 阶段 2 说明 §5: running = false 只能让循环在 recv 返回后退出; 卡在
+     * recv(50) 里时必须靠 stop_and_wake() 的 disconnect/quit_waiting 叫醒, 不能
+     * 只靠 50ms 超时。stop_and_wake 同时拒绝新 lease, 于是 inflight 只减不增。 */
     running.store(false, std::memory_order_release);
+    route_session_.stop_and_wake();
+    /* §4.2 的承重点: 析构必须**叫醒**在途 recv, 不能只靠 recv(50) 超时。 */
+    detail::FireSeam({detail::SeamPoint::kDtorAfterStopAndWake, 0, nullptr, nullptr, 0});
+
+    /* 先 join 收包线程: 它退出前会做完最后一次 release_receive, 使 inflight 归零;
+     * 握手线程若正卡在 begin_rebuild 的等待里, 也由此得以推进并看到 running==false。
+     * 析构线程不得持有 RouteSession 锁时 join —— 这里没有持锁。 */
     if (subscribe_thread_ != nullptr)
     {
         if (subscribe_thread_->joinable())
@@ -561,7 +575,9 @@ shm_sub_ipc::~shm_sub_ipc()
             subscribe_thread_->join();
         }
         delete subscribe_thread_;
+        subscribe_thread_ = nullptr;
     }
+    detail::FireSeam({detail::SeamPoint::kDtorAfterJoinSubscribe, 0, nullptr, nullptr, 0});
     if (sub_handshake_thread_ != nullptr)
     {
         if (sub_handshake_thread_->joinable())
@@ -569,12 +585,23 @@ shm_sub_ipc::~shm_sub_ipc()
             sub_handshake_thread_->join();
         }
         delete sub_handshake_thread_;
+        sub_handshake_thread_ = nullptr;
     }
-    if (subscriber_ && subscriber_->valid())
+    detail::FireSeam({detail::SeamPoint::kDtorAfterJoinHandshake, 0, nullptr, nullptr, 0});
+
+    /* 第 6-7 步: 两个线程都已退出 ⇒ 无在途 recv, 此刻对 current_route() 的拷贝调
+     * release() 与 recv 不并发(说明 §4 表格第 2 行)。disconnect 已由 stop_and_wake
+     * 做过, 这里只释放句柄; 对象本身的 shared_ptr 由 route_session_ 析构时放掉。 */
+    route_session_.wait_quiescent();
+    detail::FireSeam({detail::SeamPoint::kDtorAfterQuiescent, 0, nullptr, nullptr, 0});
     {
-        subscriber_->disconnect();
+        std::shared_ptr<ipc::route> cur = route_session_.current_route();
+        if (cur && cur->valid())
+        {
+            cur->release();
+        }
     }
-    subscriber_.reset();
+    detail::FireSeam({detail::SeamPoint::kDtorAfterRelease, 0, nullptr, nullptr, 0});
     exit_flag.store(true, std::memory_order_release);
 }
 
@@ -639,27 +666,35 @@ void shm_sub_ipc::sub_handshake()
                     peer_registered = false;
                 }
                 {
-                    std::lock_guard<std::mutex> lock(channel_mtx_);
-                    if (subscriber_ && subscriber_->valid())
-                    {
-                        // The publisher has already advanced to a new
-                        // generation when we reach this branch.  The old
-                        // route storage may have been cleared, so do not
-                        // operate on the old shared synchronization objects.
-                        subscriber_->release();
-                    }
-                    subscriber_.reset();
-                    subscriber_ = std::make_shared<ipc::route>(topic_name_.c_str(), ipc::receiver, verbose_);
+                    /* 换成新 generation 的 route(阶段 2 说明 §4 表格第 1 行)。
+                     * begin_rebuild 内部顺序: 锁内置 rebuilding_ → 锁外 disconnect
+                     * 旧 route(叫醒卡住的 recv) → 等 inflight 归零 → 锁内 release 旧
+                     * route → 锁外 create 新 route → 锁内发布。所以 release 旧 route
+                     * 与 recv 不再可能并发 —— 这正是原先 channel_mtx_ 想挡的事。
+                     * 发布端已推进到新 generation, 旧 route 的共享同步对象可能已被
+                     * clear, 故旧 route 一律不再被操作。 */
+                    route_session_.begin_rebuild(
+                        generation,
+                        [this]()
+                        {
+                            return std::make_shared<ipc::route>(topic_name_.c_str(), ipc::receiver, verbose_);
+                        });
                 }
                 attached_generation = generation;
                 if (!control_plane_.add_peer(attached_generation))
                 {
-                    std::lock_guard<std::mutex> lock(channel_mtx_);
-                    if (subscriber_ && subscriber_->valid())
+                    /* add_peer 失败: 清空 route 且**不**建新对象(阶段 2 说明 §4
+                     * 表格第 2 行)。stop_and_wake 拒绝新 lease 并叫醒在途 recv;
+                     * wait_quiescent 之后对 current_route() 的拷贝调 release() 才安全。
+                     * 下一轮循环会因 handshake_completed 仍为 false 而重新
+                     * begin_rebuild, 即「不置 handshake_completed、稍后重试」。 */
+                    route_session_.stop_and_wake();
+                    route_session_.wait_quiescent();
+                    std::shared_ptr<ipc::route> cur = route_session_.current_route();
+                    if (cur && cur->valid())
                     {
-                        subscriber_->disconnect();
+                        cur->release();
                     }
-                    subscriber_.reset();
                     continue;
                 }
                 peer_registered = true;
@@ -668,9 +703,11 @@ void shm_sub_ipc::sub_handshake()
                  * "没读完就算无效读者"的误伤逻辑。 */
                 uint32_t cc_id = 0u;
                 {
-                    std::lock_guard<std::mutex> lock(channel_mtx_);
-                    cc_id = (subscriber_ && subscriber_->valid()) ? subscriber_->connected_id()
-                                                                  : 0u;
+                    /* begin_rebuild 返回之后读 route: 此刻没有并发的 release
+                     * (阶段 2 说明 §4 表格第 3 行)。current_route() 的拷贝让 route
+                     * 在读取 connected_id() 期间保活。 */
+                    std::shared_ptr<ipc::route> cur = route_session_.current_route();
+                    cc_id = (cur && cur->valid()) ? cur->connected_id() : 0u;
                     peer_slot_ = control_plane_.acquire_peer_slot(attached_generation, cc_id);
                 }
 
@@ -732,12 +769,15 @@ void shm_sub_ipc::sub_handshake()
             if (handshake_completed.exchange(false, std::memory_order_acq_rel))
             {
                 {
-                    std::lock_guard<std::mutex> lock(channel_mtx_);
-                    if (subscriber_ && subscriber_->valid())
+                    /* 控制面离开 Ready: 与 add_peer 失败同处置(阶段 2 说明 §4
+                     * 表格第 4 行)—— 清空 route 且不建新对象。 */
+                    route_session_.stop_and_wake();
+                    route_session_.wait_quiescent();
+                    std::shared_ptr<ipc::route> cur = route_session_.current_route();
+                    if (cur && cur->valid())
                     {
-                        subscriber_->disconnect();
+                        cur->release();
                     }
-                    subscriber_.reset();
                 }
                 if (peer_registered)
                 {
@@ -787,17 +827,77 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
             {
                 if (handshake_completed.load(std::memory_order_acquire))
                 {
-                    buff_t raw_data;
+                    /* 阶段 2 说明 §3: 用 lease 取 route, 在**不持有 RouteSession 锁**
+                     * 的情况下 recv, recv 返回后立刻 release_receive(无论 buffer 是否
+                     * 为空)。lease 的 shared_ptr 在 recv 全程保活 route; release 旧 route
+                     * 只可能发生在 inflight 归零之后, 所以 recv 与 release 不再并发。
+                     * ⚠️ 不得因 lease.generation 落后于当前 generation 就丢掉已弹出的
+                     * buffer —— 字节已从旧 route 弹出, 丢掉就是丢消息(说明 §3)。 */
+                    auto lease = route_session_.acquire_receive();
+                    if (!lease.has_value())
                     {
-                        std::lock_guard<std::mutex> lock(channel_mtx_);
-                        if (!subscriber_)
-                        {
-                            continue;
-                        }
-                        raw_data = subscriber_->recv(50);
+                        /* stopping / rebuilding / 尚无 route: 与未握手时同样睡 50ms
+                         * (说明 §3), 不再忙等自旋。 */
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        continue;
                     }
+                    buff_t raw_data;
+                    try
+                    {
+                        raw_data = lease->route->recv(50);
+                    }
+                    catch (...)
+                    {
+                        /* 阶段 2 说明 §2/§3: 每个成功 lease 必须配对释放，包括 recv
+                         * 抛异常的出口。单次 route 错误不应让工作线程因未配对 lease
+                         * 卡死后续重建；释放后按未收到数据处理，继续循环。 */
+                        route_session_.release_receive();
+                        continue;
+                    }
+                    /* 测试缝(§4.2): 记录这次 recv 的返回形状。钩子读 route->connected_id()
+                     * 即可判定"是 disconnect 叫醒(0)还是真的收到消息(非 0)" —— 这是
+                     * 析构守门里"叫醒而非超时"那条判据的观测面。
+                     * ⚠️ 此刻 inflight 仍为 1 ⇒ 钩子在这里**不得阻塞**: 阻塞会让任何
+                     * 并发的 begin_rebuild 卡在第 4 步等归零。要暂停请用下面那个点。 */
+                    detail::FireSeam({detail::SeamPoint::kAfterRecv, lease->generation,
+                                      lease->route.get(), raw_data.data(), raw_data.size()});
+                    route_session_.release_receive();
+                    /* 测试缝(§4.1 的 I5 暂停点): recv 已返回、buffer 已在本线程手里, 而
+                     * inflight 已归零(所以重建方能推进到 §4 第 5 步 release 旧 route)。
+                     * 用例在这里把本线程停住, 去推进 generation, 再放行 —— 从而证明
+                     * "已弹出的字节不会因为 lease.generation 落后于当前 generation 而
+                     * 被丢弃"。**本点是唯一允许阻塞的收包点**(钩子内可阻塞, 见
+                     * shm_sub_seam.h 的设计约束)。⚠️ 必须留在**分流之前**: 阶段 3 提取
+                     * process_received_buffer 时本点随函数体一并迁移(见 shm_sub_seam.h)。 */
+                    detail::FireSeam({detail::SeamPoint::kAfterRecvRelease, lease->generation,
+                                      lease->route.get(), raw_data.data(), raw_data.size()});
                     if (raw_data.empty())
                     {
+                        continue;
+                    }
+                    /* ⛔ 叫醒伪影门 —— 阶段 2 §5 第 4 步(stop_and_wake 用 disconnect
+                     * 叫醒卡住的 recv)的必然副产物, 见 docs/消息接收架构改造/
+                     * 阶段2_RouteSession实现说明.md §10。
+                     *
+                     * 被 disconnect()/quit_waiting() 叫醒的那次 recv 返回的**不是**空
+                     * buffer, 而是 ipc::data_length 字节的**全零**缓冲(empty() 为 false);
+                     * 机理与充要判据见 dzIPC/common/wire_accept.h 的 IsWakeupArtifact。
+                     * 不放它进来, 话题 msg_id == 0 时 AcceptWire 的 check_id 恰好通过
+                     * (尾 4 字节全零 == 0)且 deserialize_ok 为真 ⇒ 一条全零假消息被 push
+                     * 进 msg_queue_, 用户侧 try_get_clone 无发送方也能取到; msg_id != 0
+                     * 时虽被挡下, 但计数器被污染成 kTlvIdSkipped。
+                     *
+                     * ⚠️ 这道门必须与判空**同层、留在分流之前**: 阶段 3 提取
+                     * process_received_buffer 时它属于「raw_data 非空之后」的函数体,
+                     * 必须随之一并搬走, 不得只留在调用点 —— 否则阶段 5 的 worker 会各自
+                     * 漏掉一处。
+                     * ⚠️ 判据是**内容**(整段全零), 不是 generation: 后者会违反 RouteSession
+                     * 的 I5(真消息可能已在 disconnect 前弹出), 把真 buffer 丢掉。 */
+                    if (IsWakeupArtifact(raw_data))
+                    {
+                        /* 计数与丢弃分开: IsWakeupArtifact 是纯判别(单测会大量调它),
+                         * 诊断计数只在这里涨 —— 见 wire_accept.h 的调用约定。 */
+                        NoteWakeupArtifact();
                         continue;
                     }
                     /* 双 wire 分流 + 拒收计数 (docs/dzflat_shm.md §3.8 / wire_accept.h)

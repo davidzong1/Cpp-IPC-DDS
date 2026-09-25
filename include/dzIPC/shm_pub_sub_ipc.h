@@ -15,6 +15,7 @@
 #include "dzIPC/common/sample_message.h"
 #include "dzIPC/common/topic_data.h"
 #include "dzIPC/ipc_info_pool.h"
+#include "dzIPC/shm_route_session.h"
 #include "dzIPC/pub_sub_base.h"
 #include "libipc/count_sem.h"
 #include "libipc/ipc.h"
@@ -173,8 +174,12 @@ private:
     bool verbose_{false};
     std::string topic_name_;
     std::string raw_topic_name_;
-    std::shared_ptr<ipc::route> subscriber_;
-    std::mutex channel_mtx_;
+    /* 收包 route 的生命周期协议(阶段 2)。取代原先的 subscriber_ + channel_mtx_:
+     * 收包线程只经 acquire_receive/release_receive 取用 route, 握手线程只经
+     * begin_rebuild/stop_and_wake 换 route —— release 与 recv 不再可能并发,
+     * 收包路径也不必再持有互斥量。
+     * 见 docs/消息接收架构改造/阶段2_RouteSession实现说明.md §1-§6。 */
+    RouteSession route_session_;
     std::shared_ptr<TopicData> topic_msg_;
     std::mutex topic_msg_mtx_;
     std::shared_ptr<CircularQueue<IpcMsgBase>> msg_queue_;  // 物化队列; shared_ptr for fast-path fanout

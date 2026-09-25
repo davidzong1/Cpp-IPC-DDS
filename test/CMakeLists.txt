@@ -138,10 +138,65 @@ add_test(NAME test_shm_control_scheduler COMMAND test_shm_control_scheduler)
 # 阻塞构建机, 不是性能判据。
 set_tests_properties(test_shm_control_scheduler PROPERTIES TIMEOUT 120)
 
+# 阶段 2 RouteSession 聚焦用例 (15 条, 见 test/test_shm_route_session.cpp 抬头注释)。
+# 必须进 CTest 的理由同上一项: 本用例守的是 lease 配对与「release 不得与 recv 并发」
+# 这两条**静默**失效 —— 漏配对 = wait_quiescent 永久挂死, 不等待在途 recv 就
+# release = 偶发 SIGSEGV(功能测「最终又能收到消息」永远抓不到)。手工跑
+# build/bin/test_shm_route_session 进不了任何自动回路。
+# target 由上面 file(GLOB) 自动生成, 无需 add_executable。命名规范同前。
+add_test(NAME test_shm_route_session COMMAND test_shm_route_session)
+
+# 用例内含 4 读者 churn + 一次真 recv(2000) 等 disconnect 叫醒 + 若干 200ms 有界等待,
+# 实测全套约 1.4s; 给 120s 只为在死锁(本用例要抓的失败模式: acquire/release 计数
+# 不配对使 wait_quiescent 永不返回)时让 ctest 报超时而非永久阻塞构建机, 不是性能判据。
+set_tests_properties(test_shm_route_session PROPERTIES TIMEOUT 120)
+
 # 第 7 个用例 PreviouslyFatalTopicNowConnectsEndToEnd 起真 pub/sub: 1.5s 等握手 + 2.5s
 # 发布, 正常约 5s; 组播不可用时它 GTEST_SKIP 而不是挂住。给 120s 只为卡死时 ctest 报
 # 超时而非永久阻塞, 不是性能判据。
 set_tests_properties(test_udp_port_boundary PROPERTIES TIMEOUT 120)
+
+# 阶段 2 叫醒伪影守门聚焦用例 (10 条, 见 test/test_wakeup_artifact.cpp 抬头注释)。
+# 必须进 CTest 的理由同前两项: 本用例守的是一条**只在叫醒那一瞬出现**的伪影
+# (recv 阻塞中被 disconnect 叫醒 ⇒ 返回 64 字节全零、empty() == false)。手工跑
+# build/bin/test_wakeup_artifact 进不了任何自动回路, 而它的两种失效都是静默的 ——
+# 守门漏了 = 用户侧凭空收到全零假消息; 守门过宽 = 真消息被静默吃掉。
+# target 由上面 file(GLOB) 自动生成, 无需 add_executable。命名规范同前。
+add_test(NAME test_wakeup_artifact COMMAND test_wakeup_artifact)
+
+# 层 1 有 2 条真 route 阻塞 + disconnect 叫醒(各 200ms), 层 2 有 3 轮起停 pub(3.6s)
+# 与两次重建各带 300-600ms 有界等待, 实测全套约 5s; 给 120s 只为卡死时 ctest 报超时
+# 而非永久阻塞构建机, 不是性能判据。
+set_tests_properties(test_wakeup_artifact PROPERTIES TIMEOUT 120)
+
+# 阶段 2 全量测试方案 §4.1 的 I5 确定性守门 (3 条, 见 test/test_shm_i5_pop_buffer.cpp
+# 抬头注释)。必须进 CTest 的理由: 它守的是「recv 已弹出但尚未分流的 buffer 不得因
+# generation 落后被丢」—— 这个窗口只有几条指令宽, 靠随机压力**不可能**命中, 是本套件
+# 用 include/dzIPC/detail/shm_sub_seam.h 的测试缝把收包线程停住才做到的。它一旦回归,
+# 症状是"重建期间偶发丢消息", 端到端功能测永远抓不到。
+# 用例内含真实 pub/sub + 两次 generation 推进, 实测全套约 4.3s; 给 120s 只为卡死时
+# ctest 报超时而非永久阻塞构建机, 不是性能判据。
+add_test(NAME test_shm_i5_pop_buffer COMMAND test_shm_i5_pop_buffer)
+set_tests_properties(test_shm_i5_pop_buffer PROPERTIES TIMEOUT 120)
+
+# 阶段 2 全量测试方案 §4.2 的析构唤醒集成守门 (2 条, 见 test/test_shm_sub_dtor_gate.cpp
+# 抬头注释)。必须进 CTest 的理由: 删掉 ~shm_sub_ipc 里的 route_session_.stop_and_wake()
+# 时, 既有 4 套件 79 条**全绿**(v4 只读验收实测) —— 因为收包线程本来就会在 recv(50)
+# 超时后自己返回, 功能上看不出区别。本套件用子进程 + 钩子记录析构各阶段的**因果顺序**
+# 与「connected_id()==0 的 recv 返回」把这一步钉死。
+# 两条用例各 fork 一个子进程(父进程 15s 硬超时), 实测全套约 1s; 给 120s 只为子进程
+# 卡死时 ctest 报超时而非永久阻塞构建机, 不是性能判据。
+add_test(NAME test_shm_sub_dtor_gate COMMAND test_shm_sub_dtor_gate)
+set_tests_properties(test_shm_sub_dtor_gate PROPERTIES TIMEOUT 120)
+
+# 阶段 2 全量测试方案 §4.3 的 Ready 状态转换集成覆盖 (3 条, 见
+# test/test_shm_ready_transition.cpp 抬头注释)。必须进 CTest 的理由: 它守的是
+# 「离开 Ready ⇒ 释放 route 并回收 peer 登记」与「新 generation Ready ⇒ 恰好恢复一条」
+# —— 前者回归就是「连不上的订阅者冒充在线」那个假成功态(docs/shm_defect_fixes.md 第 2 条),
+# 后者回归是重建期丢消息或重复投递, 两者都不崩不报错。
+# 三条用例各含真实 pub/sub 与 1.5-3s 的有界等待, 实测全套约 4.9s; 给 120s 同上。
+add_test(NAME test_shm_ready_transition COMMAND test_shm_ready_transition)
+set_tests_properties(test_shm_ready_transition PROPERTIES TIMEOUT 120)
 
 #target_link_libraries(${PROJECT_NAME} tcmalloc_minimal)
 
