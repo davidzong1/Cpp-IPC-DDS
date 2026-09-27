@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -13,9 +14,17 @@
 #include "libipc/udp.h"
 
 namespace dzIPC {
+namespace threepools {
+/* 阶段 5 共享层：socket 侧 route 抽象（include/dzIPC/threepools/socket_recv_worker.h）。
+ * 公开头只做前置声明，真正的 include 放在 .cc —— 只 include 本头的消费者不必为此
+ * 拉进等待层。 */
+class SocketRecvRouteSource;
+}   // namespace threepools
 namespace socket {
-class socket_ser_ipc;
 class socket_cli_ipc;
+/* socket_ser_ipc 服务端接收路径的 service shared state（定义在 .cc）。
+ * 收包 worker 只通过 SocketRecvRouteSource 适配器接触它，**不持**裸 socket_ser_ipc 指针。 */
+struct socket_ser_receive_state;
 
 class IPC_EXPORT socket_ser_ipc : public ser_ipc_base
 {
@@ -61,11 +70,19 @@ public:
 
 protected:
     void response_thread_func();
+    /* worker 模式的处理路径：只从有界队列取**完整请求** → 用户 callback → 响应序列化与发送。
+     * 与兼容 response_thread_func 的分工见 .cc 文件头：⛔ 用户 callback 与响应发送
+     * **不在**收包 worker 里（需求 §1.2）。 */
+    void process_thread_func();
     void server_handshake();
     /* 数据面的建/拆。InitChannel 与 restart/stop 共用同一份, 避免两条路径漂移。
      * open 返回 false 表示建链被 running=false 打断(不是失败重试耗尽)。 */
     bool open_data_plane();
     void close_data_plane();
+    /* 接收路径（共享层固定 socket worker 或兼容收包线程）的注册/注销。
+     * start_receive_path 返回 false 表示本进程/本后端必须走兼容 response thread。 */
+    bool start_receive_path();
+    void teardown_receive_path();
 
 private:
     size_t domain_id_{0};
@@ -94,6 +111,15 @@ private:
     std::vector<char> response_buf_;
     dzIPC::info_pool::ScopedRegistration pool_reg_;
     dzIPC::ThreadDispatch::ThreadOptions thread_options_;
+    /* ---- 阶段 5：固定 socket worker 接入面 ----
+     * worker 本体由共享层提供（captain 裁定 A），本类只持 route 适配器与 service state。
+     * worker 模式下只有 ipc_r_ptr_（请求数据通道）注册；ack_r_tx_ 是发送端点、握手
+     * socket 与数据面分离，都不入 worker。 */
+    std::shared_ptr<socket_ser_receive_state> receive_state_;
+    std::shared_ptr<threepools::SocketRecvRouteSource> receive_route_;
+    bool worker_mode_{false};
+    /* 数据面代际：每次注册新接收路径 +1（restart 必须先完全注销旧 generation）。 */
+    std::atomic<std::uint32_t> receive_generation_{0};
 };
 
 class IPC_EXPORT socket_cli_ipc : public cli_ipc_base

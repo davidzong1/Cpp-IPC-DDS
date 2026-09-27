@@ -1,10 +1,11 @@
 # 交叉 Review 准备：基准冲突清单 + 阶段 5 契约符合性检查表 + 三模块自检单
 
 > 状态：**t7 前置准备（不是 t7 结论）**。owner：ipc-review-security。
-> 为什么现在只做前置：t7 的依赖 t3/t4/t5 全部 `pending`（attempt=0），三个模块源文件与 HEAD 逐字节相同 ⇒ **无被审代码**；`claim_task(t7)` 被拒：`task t7 is blocked by unfinished dependencies: t3, t4, t5`。
+> 为什么现在只做前置：claim t7 时其依赖 t3/t4/t5 全部未完成（`claim_task` 被拒：`task t7 is blocked by unfinished dependencies: t3, t4, t5`），三模块源文件当时与 HEAD 逐字节相同 ⇒ **无被审代码**。
 > 本文只做「读 + 记录 + 给检查单」：**未修改任何产品源码、三份方案文档与共享层**。
-> 取证：2026-09-27 21:0x–21:2x CST；基线 `HEAD = 0d1b672`；引用统一用工作区 `docs/消息接收架构改造/` 路径（不引缓存路径）。
-> ⚠️ t1《基准对齐笔记》是本文口径来源，但它发布（21:01）之后 t2 在 21:01–21:12 落地了共享层。凡与本文「现状读数」冲突处，**以本文复测读数为准**（差异见 §1）。
+> 取证：2026-09-27 21:0x–21:5x CST；引用统一用工作区 `docs/消息接收架构改造/` 路径（不引缓存路径）。
+> ⚠️ 基线随时间前移：写作时 `HEAD = 0d1b672`（§0.1–§0.4 的读数），21:4x 后基线改为 `8c6dd08`（§0.6）。凡与本文「现状读数」冲突处，**以本文最新复测读数为准**（修正见 §1、§0.6）。
+> ⚠️ t1《基准对齐笔记》是本文口径来源，但它发布（21:01）之后 t2 在 21:01–21:12 落地了共享层。差异见 §1。
 
 ---
 
@@ -20,7 +21,7 @@
 
 复测：`python3 -c "import json;d=json.load(open('.agent-teams/cpp-ipc-threadpool-port/team.json'));print([(t['id'],t['status'],t['attempt']) for t in d['tasks'] if t['id'] in ('t3','t4','t5')])"` → 三项全 `pending, 0`。
 
-### 0.2 三个模块的现状锚点（仍与 HEAD 逐字节相同）
+### 0.2 三个模块的现状锚点（21:2x 时仍与 `0d1b672` 逐字节相同；21:4x 后 socket_ser_cli 已开始落地，见 §0.6）
 
 `git status --porcelain` 中**没有**这三个模块的 M 项；`git diff --stat HEAD -- src/dzIPC/{shm_ser_cli_ipc.cc,socket_pub_sub_ipc.cc,socket_ser_cli_ipc.cc}` 为空。
 
@@ -30,7 +31,7 @@
 | socket_pub_sub | `discovery_thread_` `:134`（50ms）；每订阅 `subscribe_thread_` `:690`；`chunk_rev_topic(subscriber_, local_msg, 50, ack_tx_, &wire)` `:721`；**无** `socket_sub_receive_state`（grep = 0） |
 | socket_ser_cli | `#define ServerRevTime 200` `:15`；`chunk_rev_server(ipc_r_ptr_, local_msg, ServerRevTime, true, ack_r_tx_)` `:481`；`response_thread_` + `handshake_thread_` 独立 |
 
-### 0.3 共享层（t2）已落地但**未入 git**
+### 0.3 共享层（t2）已落地但**未入 git**（⚠️ 21:4x 已由 `8c6dd08` 闭合，见 §0.6）
 
 | 文件 | 行数 | mtime | git |
 |---|---|---|---|
@@ -65,6 +66,37 @@
 | 21:3x | **t3 `claimed`、t4/t5 `in_progress`** | t7 依赖仍未完成 ⇒ 仍不可 claim；被审代码开始出现（`socket_ser_cli_ipc.{h,cc}` 已 M） |
 | 21:3x | **新增 t12「共享层追加：非阻塞可读判据 `readable()`/`udp_node_readable`（裁定C）+ 字节出口 `out_bytes`（裁定B）」owner=ipc-transport，in_progress** | 这是**契约冻结后按「新增一律追加」**加进共享层的第 7 项：`SocketWaitSet`/`UDPNode` 新增 `readable()` 类接口与 `out_bytes`。t7 必须把**新增接口**也纳入维度 A/C 核对（追加是否真的「只加不改」、既有签名是否被动过）；若 t4/t5 已按旧接口实现，需核对是否需要跟随 |
 | 21:3x | t6 出现 `.t6_probe/`、`Testing/` 工作区目录 | 属 t6 证据产物，t7 复核时不得把它们当源码改动 |
+
+### 0.6 追加时间戳（21:4x–21:5x 复测；队长裁决回填 + 保护性提交）
+
+**(1) A3/A7 已闭合：保护性提交 `8c6dd08`**
+
+| 项 | 读数 |
+|---|---|
+| `git log --oneline -1` | **`8c6dd08`**「wip(threadpool): 阶段5共享层 + 三模块移植进行中快照」 |
+| `git show --stat 8c6dd08` | **25 files changed, 7914 insertions(+), 37 deletions(-)** |
+| 纳入 | 阶段 5 共享层 6 文件（`recv_worker.{h,cc}` 391/985、`socket_wait_set.{h,cc}` 145/419、`socket_recv_worker.{h,cc}` 247/982 行）、UDPNode 可等待面（`include/libipc/udp.h` +56、`src/libipc/socket/udp.cpp` +45、`platform/posix/udp.h` +125、`platform/win/udp.h` +151）、`data_rev.{h,cc}`、三个测试（912/493/452 行）+ `test/CMakeLists.txt` +31、三份方案文档、契约与勘误、基准对齐笔记、本检查表、t6 准备记录、进行中的 `socket_ser_cli_ipc.cc` +567 |
+| 刻意排除的过程产物 | `.agent-teams/`、`.t12_make1.log`、`.t2_evidence_*.log`、`.t6_probe/`、`Testing/` |
+| 复核命令 | `git ls-files include/dzIPC/threepools src/dzIPC/threepools test` → 六个新增源/头文件全部**已被跟踪** |
+| 可逆性 | `git reset --soft HEAD~1`（WIP 提交，不推远端） |
+
+背景（队长给出，供 t7 报告引用）：该工作区 20:30 曾一次性清空 599 个文件（582 个在 `test/perf/`），而当时全部交付物都不在 git 里 —— 这是做该提交的直接原因。⇒ **t7 不再把 A3/A7 当未闭环项**；但每次验收前仍须 `cmake -S . -B build` + 重编（A8 纪律与提交无关）。
+
+**(2) 三条拉响项已由队长裁定（按「已裁定」而非「未决」处理）**
+
+| 项 | 裁定 | t7 的判定口径（改写后） |
+|---|---|---|
+| **D1** callback/响应发送不得进 `recv_once()` | **以需求 §1.2 + 冻结契约 `recv_worker.h:218-220` 为准**；t3 任务描述已内嵌该裁决（标题即「裁决D1：callback 不入 worker」），t3 的 `SerState`/`SerRequestRoute` 当时尚未落笔；方案 `shm_ser_cli线程池移植方案.md:34` 的回写属 **t10 既定动作**，不是 t3 的挡路石 | ⛔ **若 t3 把 callback 放进 `recv_once()` ⇒ 判 blocker 并退回**；**不得**以「方案这么写所以合规」为由放行 |
+| **C7** 池未转发 `wakeup()` | **已裁定**：nodelet 与固定 worker **二选一**，本波**不要求**共享层转发 `wakeup()`；nodelet 启用 ⇒ 保留兼容接收线程、worker 模式不注册进程内队列；t3/t5 已被告知「不得声称已支持 nodelet 走 worker」 | **不再列为 blocker**；只需核对「模块确实回退 + 无半吊子实现（既不注册又不回退 / 声称已支持）」 |
+| **D9** `posix/udp.h:346 FD_SET` / `:352 ::select` | **已证毕为既有缺陷、非本波引入**：t6 只读准备用 `build_baseline` 与当前 HEAD 两库同探针对照，两库**同 `exit=134`**、归一化 gdb 帧 **`FRAMES_IDENTICAL=yes`**、两库均含 `__fdelt_chk@GLIBC_2.15` 未定义引用；证据目录 `.t6_probe/d9/`（`base.log`/`head.log` + `base_gdb.frames`/`head_gdb.frames`，均 21:15） | 按「**既有代码、非本波移植缺陷**」登记为遗留项（归属 ipc-transport，本波不修）；**不计入三模块审查扣分** |
+
+**(3) t12 两个新增接口纳入 t7 核对（「只加不改」）**
+
+| 新增项 | 落点（21:4x 复测） | t7 核对点 |
+|---|---|---|
+| `UDPNode::readable()` | `include/libipc/udp.h:111`（注释 `100-110`：不阻塞、不改状态、**不做读操作**、幂等 O(1) 无分配；fd 无效 / SendOnly / 已 cancel 一律 false；Linux `poll(POLLIN,0)`、Windows 0 超时 select） | ① 既有 4 接口（`waitable/wait_handle/cancel_wait/clear_wait`）**签名语义未被改动**；② 平台宏仍只在允许的落点；③ 是否真非阻塞且不消费数据（可由 `test_socket_wait_set`/`test_socket_recv_worker` 复核） |
+| `udp_node_readable()` | `include/dzIPC/common/data_rev.h:327`（注释 `323-326`：语义同 `UDPNode::readable()`） | 追加是否 `nullptr` 安全、是否为纯转发 |
+| `chunk_rev_*` 的 `out_bytes` 重载 | `include/dzIPC/common/data_rev.h:150`（`..., ipc::buffer* out_payload, std::size_t* out_bytes`）、`:153`（`..., ack_node, std::size_t* out_bytes`）；`out_bytes` = 发送端交给分片器的**载荷字节数**（`meta.total_size`），**不是** wire 字节数 | ① 旧签名（无 `out_bytes`）是否**保留**（追加 ≠ 替换）；② `recv_once()` 的「正返回值 = 字节数」语义是否与 `RecvWorker::run_budget` 的 `bytes += n` 记账一致（`recv_worker.cc:285/290`）；③ t4/t5 是否已跟随新接口、还是仍按旧接口实现（须在 t7 逐模块确认） |
 
 ---
 
@@ -292,5 +324,11 @@ grep -c "kMaxFruitlessReadiness" src/dzIPC/threepools/socket_recv_worker.cc     
 ## 9. 本轮结论（不可当 t7 verdict 用）
 
 - **t7 未执行**：依赖 t3/t4/t5 全部 pending，无被审代码，claim 被拒；本文件是前置准备，等待依赖解锁后按 §7 执行并另出 `docs/消息接收架构改造/交叉Review报告.md`。
-- **共享层侧（契约符合性）已可判定**：9 纯虚签名逐字一致、平台宏边界 0、E1 阻塞语义已冻结、E2/E3 已落地、E1 读路径红线未触碰；**未闭环项**：C7（池无 wakeup 转发，影响 nodelet 路径）、A3/A7（入 git）、D9（`select()` 未换 `poll()`，归 ipc-transport）。
+- **共享层侧（契约符合性）已可判定**：9 纯虚签名逐字一致、平台宏边界 0、E1 阻塞语义已冻结、E2/E3 已落地、E1 读路径红线未触碰；**未闭环项**（21:4x 追补后修订）：~~C7~~（已裁定二选一，非 blocker）、~~A3/A7~~（已由 `8c6dd08` 闭合）、~~D9~~（已裁定为既有缺陷遗留项）—— 见 §0.6 与 §9.1。
 - **模块侧最需要提前拉响的一条**：D1（`shm_ser_cli线程池移植方案.md:34` 的 `recv_once` 含 callback/响应发送）与需求 §1.2 直接冲突，若 t3 照方案实现即为 blocker 级 finding。
+### 9.1 21:4x 追补（口径以本节为准，覆盖上文对应结论）
+
+1. **A3/A7 已闭合**：基线前移到保护性提交 `8c6dd08`（25 files / +7914 −37），共享层六文件全部已跟踪（详见 §0.6(1)）；`git log -1` 不再是 `0d1b672`。
+2. **D1 / C7 / D9 均已裁定**（详见 §0.6(2)）：D1 若 t3 把 callback 放进 `recv_once()` ⇒ **blocker 退回**；C7 **不再列 blocker**，只核「确实回退 + 无半吊子」；D9 **按既有缺陷登记遗留项、不计三模块扣分**。
+3. **t12 新接口纳入核对**：`UDPNode::readable()` / `udp_node_readable()` / `chunk_rev_*` 的 `out_bytes` 重载，按「只加不改」核对（详见 §0.6(3)）。
+4. 本文件由 284 行扩为 327 行，全部为**追加**：§0.1–§0.4 的历史读数未改写，仅在标题与状态块标注了「已被后续时间戳覆盖」的指向。
