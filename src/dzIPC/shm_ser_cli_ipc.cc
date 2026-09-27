@@ -3,6 +3,9 @@
 #include <sys/stat.h>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstring>
+#include <deque>
 #include <iostream>
 #include <memory>
 #include <thread>
@@ -11,9 +14,288 @@
 #include "dzIPC/common/name_operator.h"
 #include "dzIPC/common/nodelet_config.h"
 #include "dzIPC/common/wire_accept.h"
+/* 阶段 5 共享层：固定 route 收包 worker。**只消费，不复制**（本层 owner 是
+ * ipc-transport）；模块侧不出现任何平台宏，句柄/平台差异全在它后面。 */
+#include "dzIPC/threepools/recv_worker.h"
+#if defined(_WIN32)
+#include <windows.h>   // ::GetCurrentProcessId —— fork 防死锁闸的 pid 来源
+#else
+#include <unistd.h>   // ::getpid —— 与 src/dzIPC/common/control_plane.cc 同一取法
+#endif
+
+/* ==================== 阶段 5：服务端请求接收接入固定 SHM RecvWorker ====================
+ *
+ * 分工（t3 / captain 裁决 D1、C7）：通用收包 worker（RecvRouteSource / RecvWorker /
+ * RecvWorkerPool）由共享层交付并冻结（include/dzIPC/threepools/recv_worker.h）。
+ * 本模块**只写 route 适配器 + 注册/回退/停机协议**：⛔ 不复制 worker、不新增等待
+ * 原语、不出现平台宏、不 include 另一个待移植模块。
+ *
+ * 线程模型（worker 模式）：
+ *   共享层 worker 线程 ── recv_once() ──> recv(0)（libipc 内部完成多片重组）
+ *                                    └─ 唤醒伪影门（IsWakeupArtifact + 计数）
+ *                                    └─ 入本 server 的**有界** FIFO（完整请求边界）
+ *   本 server 处理线程（response_thread_）── 出队 ──> wire 分流（classify_received /
+ *                                    AcceptWire）──> 用户 callback
+ *                                    └─ response 序列化 + try_send / DZFlat 借样发送
+ * ⛔ 用户 callback 与响应发送**不得**进收包 worker（需求 §1.2；recv_worker.h:214-220）。
+ *
+ * 为什么 FIFO 是"字节"而不是"ServiceData"：recv_once() 里做的事恰好是"取一次 +
+ * 基础 wire 判断"，wire 分流（DZFlat 借样 vs TLV 物化）与 callback 在一起才有意义，
+ * 它们都在处理路径上。于是 FIFO 里放的是 ipc::buffer（完整的请求字节）：
+ *   · chunk 所有权：DZFlat 借样与 >64B 的 TLV 都由 libipc 的 chunk 池承担，buffer
+ *     析构即回收 —— **chunk 始终在既有池配额之下**（需求 §1.2 第二句 / §7），
+ *     本层没有、也不会引入第二套 chunk 记账；
+ *   · ≤64B 的短 TLV 走 libipc 的 cache（堆副本），同样随 buffer 析构释放。
+ * 转移点/归还点：recv(0) 返回即"字节所有权转移给 FIFO"，处理线程出队 → 分流后
+ * 交给 Sample（借样）或物化进 ServiceData；错误出口（伪影/停机作废）一律让 buffer
+ * 就地析构，归还发生在 buffer 析构处。
+ *
+ * 有界 FIFO 的**满载策略**（明确，不留隐式无界堆积）：容量 kMaxPendingRequests 条、
+ * kMaxPendingBytes 字节，两者任一达到即**不再收取**（recv_once 返回 0，**不丢任何
+ * 已到的请求**），并置 backpressured=true 让 has_pending() 返回 true ⇒ 共享 worker
+ * 的 level-triggered 重检会把该 route 放回 deferred FIFO，下一轮预算继续尝试。
+ * 为什么不用 t5(socket) 的"满载丢最旧"：SHM 侧有 recv_wait_token::sequence() 这个
+ * 廉价的重检字，返回 0 不会让请求搁死在通道里（has_pending() 保证同 route 下一轮
+ * 仍被选中），因此能选**零丢失**的背压；socket 侧没有这个字，只能丢最旧。
+ *
+ * 线程数与收益（如实登记，交 t11）：callback 与响应发送必须在处理路径上，而本波
+ * 共享层**不提供** ProcessingPool（t2 明确回复"不在 t2 交付面"）⇒ 采用每 server 一条
+ * **处理**线程（消费本 server 的 FIFO）。因此：
+ *   · per-server 线程数 = 2（处理线程 + ser_handshake 控制面线程），与改造前
+ *     （response 线程 + ser_handshake）**相同**；
+ *   · 变化的是"等待/组包"从 per-server 线程移到了进程级固定池（空闲时池线程归还
+ *     OS），per-server 处理线程不再阻塞在 recv(50) 上。
+ *   ⇒ **"收包线程数不随 server 数线性增长"这一收益本波未达成**（可观测的线程数
+ *     不降)，需 shared 层 ProcessingPool 或测试断言侧决策（见 §6 已知偏差）。
+ *
+ * generation：服务端**不做** route 重建（ipc_r_ptr_ 只在 InitChannel 赋值一次，
+ * 此后再不替换），因此 recv_once() 弹出的请求不会因任何 generation 变化被丢弃；
+ * receive_generation_ 只用于"每次接入新数据面 +1"的诊断与固定归属日志。控制面段
+ * 的 generation 由 TopicControlPlane 单调推进（与数据面无关）。
+ */
 
 namespace dzIPC {
 namespace shm {
+
+/* ==================== service shared state ====================
+ *
+ * worker 与处理路径的共同事实来源。收包 worker **只**通过 SerRequestRoute 适配器
+ * 接触本结构，因此 worker 不持裸 shm_ser_ipc 指针（注销后不再回调已析构对象的前提）。 */
+struct SerState
+{
+    /* 稳定 route key：<service_prefix>_ser_r，生命周期内不变（契约 §4.1 第 1 条）。
+     * 变了就等于换了一条 route，必须 remove_route + add_route。 */
+    std::string route_name;
+    std::uint32_t domain_id{0};
+    /* 诊断用代际（服务端无 route 重建；见文件头 generation 说明）。 */
+    std::uint32_t generation{0};
+
+    /* 请求数据通道（ipc::server, unicast）。仅在 InitChannel 里赋值一次，此后再不
+     * 替换；注销路径在 remove_route + join 之后才 reset ⇒ read_wait_token() 可以
+     * **无锁读**（契约 §4.1 要求它 noexcept 且可从任意线程调用）。ipc_w_ptr_（发送
+     * 端点）与控制面段不入 worker。 */
+    std::shared_ptr<ipc::server> req_ch;
+
+    /* 单 route 单消费者（契约 §4.6）：宿主用 atomic<RecvOwner> 三行实现。 */
+    std::atomic<threepools::RecvOwner> owner{threepools::RecvOwner::none};
+
+    /* route 生命周期：stopping 拒绝新的 recv_once；receive_inflight 供 wait_quiescent。 */
+    std::atomic<bool> stopping{false};
+    std::atomic<std::size_t> receive_inflight{0};
+    std::mutex quiesce_mtx;
+    std::condition_variable quiesce_cv;
+
+    /* ---- 有界请求 FIFO：worker 入队（完整请求字节）→ 处理线程出队 ---- */
+    static constexpr std::size_t kMaxPendingRequests = 64;
+    static constexpr std::size_t kMaxPendingBytes = 8u << 20;   // 8 MiB
+    std::mutex pending_mtx;
+    std::condition_variable pending_cv;
+    std::deque<ipc::buffer> pending;
+    /* pending 的**无锁读口**（has_pending 是 noexcept，不允许取锁）。计数在
+     * pending_mtx 内更新，读取方只做提示用判断。 */
+    std::atomic<std::size_t> pending_count{0};
+    std::atomic<std::size_t> pending_bytes{0};
+    /* 上一次 recv_once 因满载而**未收取**：has_pending() 据此让 worker 重检。 */
+    std::atomic<bool> backpressured{false};
+
+    /* ---- 诊断计数（可观测性是本次交付物的一部分）---- */
+    std::atomic<std::uint64_t> requests_received{0};
+    std::atomic<std::uint64_t> requests_dropped{0};      // 停机时作废的队列残余
+    std::atomic<std::uint64_t> recv_errors{0};           // recv_once 内被吞掉的异常
+    std::atomic<std::uint64_t> wakeup_artifacts{0};      // 被伪影门挡下的叫醒伪影
+    std::atomic<std::uint64_t> callback_count{0};
+    std::atomic<std::uint64_t> callback_ns_total{0};     // callback 耗时（时长不可控 ⇒ 必须可观测）
+    std::atomic<std::uint64_t> callback_ns_max{0};
+    std::atomic<std::uint64_t> callback_exceptions{0};   // callback 抛出（隔离：不让处理线程死）
+    std::atomic<std::uint64_t> responses_sent{0};
+    std::atomic<std::uint64_t> response_send_failures{0};
+};
+
+/* SerRequestRoute：shm_ser_ipc 服务端的**请求数据通道**在共享层里的适配器。
+ * recv_once() 只做"取一次到完整请求边界 + 基础 wire 判断 + 入有界 FIFO"，
+ * ⛔ 不含用户 callback、不含响应发送（裁决 D1）。 */
+class SerRequestRoute final : public threepools::RecvRouteSource
+{
+public:
+    explicit SerRequestRoute(std::shared_ptr<SerState> state)
+        : state_(std::move(state))
+    {}
+
+    const char* route_name() const noexcept override { return state_->route_name.c_str(); }
+    std::uint32_t domain_id() const noexcept override { return state_->domain_id; }
+    ipc::recv_wait_token read_wait_token() const noexcept override;
+    std::size_t recv_once() override;
+    bool has_pending() const noexcept override;
+    threepools::RecvOwner recv_owner() const noexcept override
+    {
+        return state_->owner.load(std::memory_order_acquire);
+    }
+    bool try_claim_recv(threepools::RecvOwner who) noexcept override
+    {
+        if (who == threepools::RecvOwner::none)
+        {
+            return false;   // 契约 §4.6：who == none 一律拒绝
+        }
+        threepools::RecvOwner expected = threepools::RecvOwner::none;
+        return state_->owner.compare_exchange_strong(expected, who, std::memory_order_acq_rel);
+    }
+    /* 归还收包独占（注销第 6 步，契约 §4.4）。worker 路径由 remove_route 内部调用，
+     * 兼容线程路径在 response_thread_func 退出前显式调用；两种 owner 都必须能回到
+     * none，漏一次就会让重新 add_route 永久返回 busy（静默丢包）。 */
+    void release_recv() noexcept override
+    {
+        threepools::RecvOwner expected = state_->owner.load(std::memory_order_acquire);
+        while (expected != threepools::RecvOwner::none)
+        {
+            if (state_->owner.compare_exchange_weak(expected, threepools::RecvOwner::none,
+                                                    std::memory_order_acq_rel))
+            {
+                return;
+            }
+        }
+    }
+    /* 注销第 3 步：置 stopping（拒绝新的 recv_once）+ 唤醒阻塞中的 recv。
+     * ipc::server::disconnect() 内部是 que_.disconnect() + quit_waiting()（唤醒
+     * rd_waiter_），正是"拒绝新 lease + 唤醒"的语义；幂等。 */
+    void stop_and_wake() noexcept override;
+    /* 注销第 5 步：等 in-flight 记账归零（有界；超时只打诊断，不阻塞注销）。 */
+    void wait_quiescent() noexcept override;
+
+private:
+    std::shared_ptr<SerState> state_;
+};
+
+/* 注销时"等在途 recv_once 归零"的上界（方案 §4 第 6 步 / §5）。 */
+constexpr int64_t kSerQuiesceTimeoutMs = 2000;
+
+/* ================= SerRequestRoute：5 个方法实现 =================
+ * 签名以 include/dzIPC/threepools/recv_worker.h:200-237 为准（⛔ 不照方案文档清单）。 */
+
+ipc::recv_wait_token SerRequestRoute::read_wait_token() const noexcept
+{
+    /* req_ch 只在 InitChannel 里赋值一次、注销路径在 remove_route + join 之后才 reset，
+     * 因此这里可以**无锁读**（契约 §4.1 要求它 noexcept 且可从任意线程调用）。
+     * 无效 token ⇒ worker 注册返回 invalid_token ⇒ 模块显式回退兼容接收线程。 */
+    return state_->req_ch ? state_->req_ch->read_wait_token() : ipc::recv_wait_token{};
+}
+
+std::size_t SerRequestRoute::recv_once()
+{
+    /* ⛔ 裁决 D1：这里**只**做 收取（libipc 已完成多片重组，返回的就是完整请求）
+     * + 基础 wire 判断（唤醒伪影门）+ 投递进本 server 的**有界** FIFO。
+     * 不含用户 callback、不含响应序列化/发送 —— 它们在处理线程的 process_request() 上。 */
+    if (state_->stopping.load(std::memory_order_acquire))
+    {
+        return 0;
+    }
+    /* 有界 FIFO 满载 ⇒ **不收取**（零丢失背压，而不是丢弃）：返回 0 并置 backpressured，
+     * has_pending() 据此返回 true ⇒ 共享 worker 的 level-triggered 重检会把本 route 放回
+     * deferred FIFO，下一轮预算继续尝试 —— 请求留在通道里，一个都不丢。 */
+    if (state_->pending_count.load(std::memory_order_acquire) >= SerState::kMaxPendingRequests
+        || state_->pending_bytes.load(std::memory_order_acquire) >= SerState::kMaxPendingBytes)
+    {
+        state_->backpressured.store(true, std::memory_order_release);
+        return 0;
+    }
+
+    state_->receive_inflight.fetch_add(1, std::memory_order_acq_rel);
+    std::size_t bytes = 0;
+    try
+    {
+        /* 真·非阻塞：try_recv()（契约 §4.1 的"非阻塞或短超时"）。
+         * 多片重组与 chunk 池所有权全在 libipc 内部 —— 本层不引入第二套 chunk 记账
+         * （需求 §1.2 第二句 / §7：不得让 SHM chunk 脱离现有 adopt 配额控制）。 */
+        ipc::buffer raw = state_->req_ch->try_recv();
+        if (!raw.empty())
+        {
+            /* 唤醒伪影门（基准对齐笔记 §1.5）：disconnect()/唤醒会让 recv 返回
+             * size()==data_length 的**整段全零** buffer 且 empty()==false；不挡掉就会被
+             * 当成真请求送进 callback（msg_id==0 的话题尤其危险）。判据必须整段全零。 */
+            if (dzIPC::IsWakeupArtifact(raw))
+            {
+                dzIPC::NoteWakeupArtifact();
+                state_->wakeup_artifacts.fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                bytes = raw.size();
+                {
+                    std::lock_guard<std::mutex> lock(state_->pending_mtx);
+                    state_->pending.push_back(std::move(raw));   // 完整请求字节：所有权转移给 FIFO
+                    state_->pending_count.fetch_add(1, std::memory_order_relaxed);
+                    state_->pending_bytes.fetch_add(bytes, std::memory_order_relaxed);
+                    state_->backpressured.store(false, std::memory_order_release);
+                }
+                state_->pending_cv.notify_one();
+            }
+        }
+    }
+    catch (...)
+    {
+        /* 绝不把异常抛给共享 worker 线程（它会 std::terminate）。 */
+        state_->recv_errors.fetch_add(1, std::memory_order_relaxed);
+    }
+    state_->receive_inflight.fetch_sub(1, std::memory_order_acq_rel);
+    state_->quiesce_cv.notify_all();
+
+    if (bytes == 0)
+    {
+        return 0;   // 无数据 / 伪影 / 异常
+    }
+    state_->requests_received.fetch_add(1, std::memory_order_relaxed);
+    return bytes;   // 契约：非 0 = 取到一次完整请求（字节数）
+}
+
+bool SerRequestRoute::has_pending() const noexcept
+{
+    /* level-triggered 重检：满载未收取（零丢失背压）或还有待处理请求时保持 true，
+     * 让共享 worker 下一轮预算继续选中本 route。 */
+    return state_->backpressured.load(std::memory_order_acquire)
+           || state_->pending_count.load(std::memory_order_acquire) > 0;
+}
+
+void SerRequestRoute::stop_and_wake() noexcept
+{
+    /* 注销第 3 步：置 stopping（拒绝新的 recv_once）+ 唤醒阻塞中的 recv。
+     * ipc::server::disconnect() 内部是 que_.disconnect() + quit_waiting()（唤醒 rd_waiter_），
+     * 正是"拒绝新 lease + 唤醒在途"的语义。 */
+    state_->stopping.store(true, std::memory_order_release);
+    if (state_->req_ch)
+    {
+        state_->req_ch->disconnect();
+    }
+    state_->pending_cv.notify_all();   // 让处理线程也立刻看到停机
+}
+
+void SerRequestRoute::wait_quiescent() noexcept
+{
+    /* 注销第 5 步：等本模块 in-flight 记账归零（有界；超时只打诊断、不阻塞注销）。 */
+    std::unique_lock<std::mutex> lock(state_->quiesce_mtx);
+    state_->quiesce_cv.wait_for(lock, std::chrono::milliseconds{kSerQuiesceTimeoutMs}, [this] {
+        return state_->receive_inflight.load(std::memory_order_acquire) == 0;
+    });
+}
+
 
 namespace {
 
@@ -236,15 +518,17 @@ shm_ser_ipc::~shm_ser_ipc()
         fp_registered_ = false;
     }
 
+    /* 方案 §4 的 8 步（先后不可颠倒）：
+     *  1) 上面的 LocalPubSubRegistry 注销（fp_queue_）
+     *  2/3) 数据面注销：remove_route（摘 wait 项 + 唤醒 + disconnect + 等 worker in-flight
+     *      + wait_quiescent + release_recv）+ 处理线程 join；控制面 ser_handshake 随后 join
+     *  4) 标记 stopping / 5) 唤醒在途 recv —— 都在 stop_data_plane() 内
+     *  6) 等 worker 不再使用 route（remove_route 第 4/5 步）
+     *  7) release/reset route（remove_route 第 6 步；兼容路径显式 release_recv）
+     *  8) 释放队列与通道 —— fd/句柄在 wait 项删除且 in-flight 清零**之后**才关。
+     * 注销返回后不得再回调已析构对象：worker 侧由 remove_route 同步保证，处理线程由 join 保证。 */
     running = false;
-    if (response_thread_ != nullptr)
-    {
-        if (response_thread_->joinable())
-        {
-            response_thread_->join();
-        }
-        delete response_thread_;
-    }
+    stop_data_plane();
     if (handshake_thread_ != nullptr)
     {
         if (handshake_thread_->joinable())
@@ -301,7 +585,13 @@ void shm_ser_ipc::InitChannel(std::string extra_info)
     // Register for intra-process fast-path delivery BEFORE starting
     // response_thread so the thread can process fast-path requests
     // immediately (no race on fp_registered_).
-    if (message_template)
+    /* 数据面接入：worker 优先；任何非 ok 状态 / nodelet(C7) / fork 闸 / 后端不可用
+     * ⇒ start_data_plane() 已打显式原因，这里退回兼容接收线程（⛔ 不忙轮询降级）。 */
+    const bool worker_mode = start_data_plane();
+
+    /* C7：nodelet 启用时保留兼容接收线程；worker 模式下**不注册** fp_queue
+     * （注册了会把进程内请求投进没有消费者的队列而静默挂起）。 */
+    if (!worker_mode && message_template)
     {
         fp_msg_id_ = message_template->request()->msg_id();
         ChannelKey key{topic_name_, domain_id_, fp_msg_id_, ChannelKind::ShmService};
@@ -309,7 +599,11 @@ void shm_ser_ipc::InitChannel(std::string extra_info)
         fp_registered_ = true;
     }
 
-    response_thread_ = new std::thread(&shm_ser_ipc::response_thread_func, this);
+    /* 处理线程（形态 b）：worker 模式消费本 server 的 FIFO（收包在共享 worker 上）；
+     * 兼容模式就是原来的 response_thread_func。两者共用 process_request/handle_fast_path。 */
+    response_thread_ = new std::thread(worker_mode ? &shm_ser_ipc::process_thread_func
+                                                   : &shm_ser_ipc::response_thread_func,
+                                       this);
     dzIPC::ThreadDispatch::apply_thread_options(response_thread_, thread_options_, verbose_,
                                                 topic_name_ + "_SerResponseThread");
 }
@@ -375,111 +669,448 @@ void shm_ser_ipc::ser_handshake()
 /******************************************************************************************************/
 void shm_ser_ipc::response_thread_func()
 {
+    /* 兼容后端（nodelet / fork 闸 / 后端不可用 / 注册失败）：单 route 单消费者 —— 启动前
+     * claim(compat_thread)，退出前**显式** release_recv（契约 §4.6 / 注销末步；漏了会让重新
+     * add_route 永久返回 busy、静默丢包）。 */
+    const std::shared_ptr<SerState> state = current_ser_state();
+    if (req_route_ && !req_route_->try_claim_recv(threepools::RecvOwner::compat_thread))
+    {
+        return;   // 已被别的消费者持有 ⇒ 不双收
+    }
+
     while (running.load(std::memory_order_acquire))
     {
         // --- Intra-process fast path: check local request queue ---
         // Always try_pop unconditionally — fp_queue_ exists from construction.
         // Registry registration/unregistration is handled by InitChannel/dtor.
         std::shared_ptr<IpcMsgBase> fp_item;
-        if (fp_queue_->try_pop(fp_item))
+        if (fp_queue_ && fp_queue_->try_pop(fp_item) && fp_item)
         {
-            auto* envelope = dynamic_cast<FastPathRequestEnvelope*>(fp_item.get());
-            if (envelope && envelope->reply_queue())
+            if (handle_fast_path(state, *fp_item))
             {
-                std::shared_ptr<IpcMsgBase> request_copy(envelope->request()->clone());
-                std::function<void(std::shared_ptr<ServiceData>&)> callback;
-                {
-                    std::lock_guard<std::mutex> lock(callback_mtx_);
-                    callback = callback_;
-                }
-                if (callback)
-                {
-                    std::shared_ptr<ServiceData> local_msg;
-                    {
-                        std::lock_guard<std::mutex> lock(message_mtx_);
-                        if (!message_)
-                        {
-                            continue;
-                        }
-                        local_msg.reset(message_->clone());
-                    }
-                    // Swap in the fast-path request (bypass deserialization).
-                    local_msg->request() = request_copy;
-                    callback(local_msg);
-                    // Push response directly to the requesting client's queue.
-                    envelope->reply_queue()->push(local_msg->response());
-                }
                 continue;
             }
         }
 
-        /* 服务端等待请求 — standard SHM path */
+        /* 服务端等待请求 — standard SHM path（兼容路径保持"阻塞 50ms"的既有语义，
+         * ⛔ 不加可读判据，否则循环退化成忙轮询）。 */
         ipc::buffer raw_data = ipc_r_ptr_->recv(50);
         if (raw_data.empty())
         {
             continue;
         }
-        /* 身份判断 */
-        std::shared_ptr<ServiceData> local_msg;
+        /* 处理路径与 worker 模式**共用**同一份（wire 分流 → callback → 响应发送）；
+         * 差别只在"谁调用"（这里没有 FIFO，取到即处理）。 */
+        process_request(state, std::move(raw_data));
+    }   // 客户段发送请求
+
+    if (req_route_)
+    {
+        req_route_->release_recv();   // 注销末步：兼容路径退出前归还收包独占
+    }
+}
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
+
+/* ==================== 阶段 5：数据面接入 / 注销 / 请求处理路径 ==================== */
+
+namespace {
+
+/* fork 防死锁闸（模块侧；共享层不做 pid 探测）：
+ * 池是进程级单例且 start() 一次性；fork 之后子进程继承"已 start"却没有工作线程，子进程里
+ * add_route 会走按需拉起（取池内部锁 + 建线程），而被 fork 打断的父进程可能正持这些锁 ⇒ 死锁。
+ * 因此 owner pid != 当前 pid 时**不调用池**，改走兼容接收线程。
+ * ⛔ 判断过程只取本文件的静态锁，绝不触碰池内部锁。 */
+int32_t ser_current_process_id() noexcept
+{
+#if defined(_WIN32)
+    return static_cast<int32_t>(::GetCurrentProcessId());
+#else
+    return static_cast<int32_t>(::getpid());
+#endif
+}
+
+int32_t ser_recv_pool_owner_pid()
+{
+    static std::mutex gate_mtx;
+    static int32_t owner = 0;
+    const int32_t pid = ser_current_process_id();
+    std::lock_guard<std::mutex> lock(gate_mtx);
+    if (owner == 0)
+    {
+        owner = pid;
+    }
+    return owner;
+}
+
+bool ser_recv_pool_allowed_in_this_process()
+{
+    return ser_recv_pool_owner_pid() == ser_current_process_id();
+}
+
+const char* ser_register_status_reason(threepools::RecvRegisterStatus s) noexcept
+{
+    switch (s)
+    {
+    case threepools::RecvRegisterStatus::backend_unavailable:
+        return "backend_unavailable (recv_wait_set backend unavailable)";
+    case threepools::RecvRegisterStatus::duplicate:
+        return "duplicate (route already registered on this worker)";
+    case threepools::RecvRegisterStatus::busy:
+        return "busy (another owner is receiving this route)";
+    case threepools::RecvRegisterStatus::stopped:
+        return "stopped (pool not started / already stopped)";
+    case threepools::RecvRegisterStatus::invalid_token:
+        return "invalid_token (request channel has no usable read wait token)";
+    case threepools::RecvRegisterStatus::invalid_route:
+        return "invalid_route";
+    case threepools::RecvRegisterStatus::wait_set_full:
+        return "wait_set_full (route capacity exceeded)";
+    case threepools::RecvRegisterStatus::ok:
+        break;
+    }
+    return "ok";
+}
+
+}   // namespace
+
+std::shared_ptr<SerState> shm_ser_ipc::current_ser_state() const
+{
+    std::lock_guard<std::mutex> lock(state_mtx_);
+    return ser_state_;
+}
+
+/* 数据面接入：建 state → 依次过 nodelet(C7) / fork 闸 / 后端能力闸 → add_route。
+ * 返回 true = 本次在共享 worker 上收包；false = **必须**走兼容 response_thread_func，
+ * 且已经在 stderr 打了显式原因（绝不静默回退、绝不忙轮询降级）。 */
+bool shm_ser_ipc::start_data_plane()
+{
+    const auto fallback = [this](const char* why) {
+        std::cerr << "\033[33m[" << topic_name_ << "_SerInfo] shm recv worker unusable (" << why
+                  << "); keeping per-server receive thread\033[0m" << std::endl;
+        return false;
+    };
+
+    /* 两条路径都要有 state（兼容路径也用它做 owner CAS / FIFO / 诊断）。 */
+    auto state = std::make_shared<SerState>();
+    state->route_name = service_prefix_for(topic_name_, domain_id_) + "_ser_r";
+    state->domain_id = static_cast<std::uint32_t>(domain_id_);
+    state->generation = receive_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    state->req_ch = ipc_r_ptr_;
+    {
+        std::lock_guard<std::mutex> lock(state_mtx_);
+        ser_state_ = state;
+    }
+
+    /* C7：nodelet 与固定 worker 二选一 —— nodelet 启用时保留兼容接收线程。 */
+    if (dzIPC::IsNodeletEnabled())
+    {
+        return fallback("nodelet enabled (C7: nodelet 与固定 worker 二选一)");
+    }
+    if (!ser_recv_pool_allowed_in_this_process())
+    {
+        return fallback("forked child: recv pool owner pid mismatch");
+    }
+    if (!threepools::RecvWorkerPool::backend_available())
+    {
+        return fallback("RecvWorkerPool backend unavailable");
+    }
+
+    auto route = std::make_shared<SerRequestRoute>(state);
+    if (!route->read_wait_token().valid())
+    {
+        return fallback("invalid_token (request channel has no read wait token)");
+    }
+
+    auto& pool = threepools::RecvWorkerPool::instance();
+    if (!pool.running())
+    {
+        (void)pool.start();   // 一次性；已被别的 server/模块启动过时返回 false
+    }
+    if (!pool.running())
+    {
+        return fallback("RecvWorkerPool::start() failed (thread creation?)");
+    }
+    const threepools::RecvRegisterStatus status = pool.add_route(route);
+    if (status != threepools::RecvRegisterStatus::ok)
+    {
+        return fallback(ser_register_status_reason(status));
+    }
+    req_route_ = route;
+    worker_mode_ = true;
+    std::cerr << "\033[32m[" << topic_name_ << "_SerInfo] request receive on shared SHM worker "
+              << threepools::RecvWorkerPool::worker_for(state->route_name.c_str(), state->domain_id, pool.worker_count())
+              << " (generation " << state->generation << ", workers " << pool.worker_count() << ")\033[0m"
+              << std::endl;
+    return true;
+}
+
+/* 数据面注销（方案 §4 的第 2–6 步 + FIFO 残余记账）。幂等；由析构调用。 */
+void shm_ser_ipc::stop_data_plane() noexcept
+{
+    const std::shared_ptr<SerState> state = current_ser_state();
+    if (state)
+    {
+        state->stopping.store(true, std::memory_order_release);   /* ④ route stopping */
+    }
+
+    if (worker_mode_ && req_route_)
+    {
+        /* ② worker 路径：remove_route 同步完成契约 §4.4 的 1-6 步
+         * （摘表 → wait_set.remove 唤醒 → stop_and_wake=disconnect 唤醒在途 → 等 worker 侧
+         * in-flight 归零 → wait_quiescent 等本模块 in-flight → release_recv 归还收包独占）。 */
+        threepools::RecvWorkerPool::instance().remove_route(req_route_.get());
+    }
+    else if (state && state->req_ch)
+    {
+        /* 兼容路径：唤醒在途 recv(50)（disconnect 亦使后续 recv 立刻返回空）。 */
+        state->req_ch->disconnect();
+    }
+
+    /* 处理线程：等当前一条处理完（含 callback 与响应发送）后退出。 */
+    if (state)
+    {
+        state->pending_cv.notify_all();
+    }
+    if (response_thread_ != nullptr)
+    {
+        if (response_thread_->joinable())
         {
-            std::lock_guard<std::mutex> lock(message_mtx_);
-            if (!message_)
+            response_thread_->join();
+        }
+        delete response_thread_;
+        response_thread_ = nullptr;
+    }
+
+    /* ⑤ 兼容路径在退出前**显式归还**收包独占（worker 路径已由 remove_route 第 6 步归还）。
+     * 漏了这一步会让重新 add_route 永久返回 busy（静默丢包）。 */
+    if (!worker_mode_ && req_route_)
+    {
+        req_route_->release_recv();
+    }
+
+    /* ⑥ FIFO 残余按停机策略**作废**（明确策略：停机时不排空、直接丢弃并记账，
+     * 与改造前"收包线程停掉后到达的请求无人应答"同一失败面，但有可观测计数）。 */
+    if (state)
+    {
+        std::lock_guard<std::mutex> lock(state->pending_mtx);
+        if (!state->pending.empty())
+        {
+            state->requests_dropped.fetch_add(state->pending.size(), std::memory_order_relaxed);
+            state->pending_bytes.store(0, std::memory_order_relaxed);
+            state->pending_count.store(0, std::memory_order_relaxed);
+            state->pending.clear();
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(state_mtx_);
+        req_route_.reset();
+        ser_state_.reset();
+    }
+    worker_mode_ = false;
+}
+
+void shm_ser_ipc::send_response(const std::shared_ptr<SerState>& state, const std::shared_ptr<ServiceData>& local_msg)
+{
+    if (!local_msg || !local_msg->response() || !ipc_w_ptr_ || !ipc_w_ptr_->valid())
+    {
+        if (state)
+        {
+            state->response_send_failures.fetch_add(1, std::memory_order_relaxed);
+        }
+        return;
+    }
+    /* 与基准实现同一份发送代码：DZFlat 借样优先，失败回退整包序列化 + 重试。 */
+    if (try_send_dzflat(ipc_w_ptr_, local_msg->response()))
+    {
+        state->responses_sent.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    ipc::buffer response_data(std::move(local_msg->response()->serialize()));
+    int retry_count = 0;
+    while (!ipc_w_ptr_->try_send(response_data.data(), response_data.size())
+           && running.load(std::memory_order_acquire))
+    {
+        retry_count++;
+        if (retry_count > 10)
+        {
+            break;
+        }
+    }
+    if (retry_count > 10)
+    {
+        state->response_send_failures.fetch_add(1, std::memory_order_relaxed);
+    }
+    else
+    {
+        state->responses_sent.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+/* 一次完整请求的处理路径（worker 与兼容线程**共用**；⛔ 绝不在收包 worker 里跑）。
+ * 与改造前的 response_thread_func 主体逐行同义，只是把"取一次"与"处理一次"分开。 */
+void shm_ser_ipc::process_request(const std::shared_ptr<SerState>& state, ipc::buffer raw_data)
+{
+    if (raw_data.empty())
+    {
+        return;
+    }
+    /* 唤醒伪影门：与基准实现的 process_received_buffer 同层（门在**分流函数内部**），
+     * 因此 worker 与兼容两条收包路径都必然过门（基准对齐笔记 §1.5 / B11）。 */
+    if (dzIPC::IsWakeupArtifact(raw_data))
+    {
+        dzIPC::NoteWakeupArtifact();
+        if (state)
+        {
+            state->wakeup_artifacts.fetch_add(1, std::memory_order_relaxed);
+        }
+        return;
+    }
+    std::shared_ptr<ServiceData> local_msg;
+    {
+        std::lock_guard<std::mutex> lock(message_mtx_);
+        if (!message_)
+        {
+            return;
+        }
+        local_msg.reset(message_->clone());
+    }
+    /* 双 wire 分流: DZFlat + typed request → 借样成只读视图(回调用 request_view<T>() 读,
+     * 零拷贝); TLV / schema-less → 物化进 owning request()。 */
+    auto tpl = local_msg->request();
+    std::shared_ptr<dzIPC::Sample> sample;
+    const int wr = classify_received(raw_data, tpl, tpl ? tpl->msg_id() : 0, sample);
+    if (wr == 1)
+    {
+        local_msg->request_sample() = std::move(sample);
+    }
+    else if (wr == 0)
+    {
+        if (!accept_wire(raw_data, local_msg->request()))
+        {
+            if (verbose_)
             {
-                continue;
+                std::cerr << "\033[33m[Warning] Received message with invalid ID on topic: " << topic_name_
+                          << "\033[0m" << std::endl;
             }
-            local_msg.reset(message_->clone());
+            return;
         }
-        /* 双 wire 分流: DZFlat + typed request → 借样成只读视图(回调用 request_view<T>()
-         * 读, 零拷贝); TLV / schema-less → 物化进 owning request()。 */
-        auto tpl = local_msg->request();
-        std::shared_ptr<dzIPC::Sample> sample;
-        const int wr = classify_received(raw_data, tpl, tpl ? tpl->msg_id() : 0, sample);
-        if (wr == 1)
-        {
-            /* 借样成功: request() 保持模板克隆(不填收到的数据), 数据在借样段里。 */
-            local_msg->request_sample() = std::move(sample);
-        }
-        else if (wr == 0)
-        {
-            if (!accept_wire(raw_data, local_msg->request()))
-            {
-                if (verbose_)
-                {
-                    std::cerr << "\033[33m[Warning] Received message with invalid ID on topic: " << topic_name_
-                              << "\033[0m" << std::endl;
-                }
-                continue;
-            }
-        }
-        else
-        {
-            continue;   // typed DZFlat 但 id/schema 不符 → 丢弃
-        }
-        std::function<void(std::shared_ptr<ServiceData>&)> callback;
-        {
-            std::lock_guard<std::mutex> lock(callback_mtx_);
-            callback = callback_;
-        }
-        if (callback)
+    }
+    else
+    {
+        return;   // typed DZFlat 但 id/schema 不符 → 丢弃
+    }
+
+    std::function<void(std::shared_ptr<ServiceData>&)> callback;
+    {
+        std::lock_guard<std::mutex> lock(callback_mtx_);
+        callback = callback_;
+    }
+    if (callback)
+    {
+        /* callback 时长不可控 ⇒ 必须可观测（方案 §6/§8）；异常隔离，绝不让处理线程死。 */
+        const auto t0 = std::chrono::steady_clock::now();
+        bool threw = false;
+        try
         {
             callback(local_msg);
         }
-        if (try_send_dzflat(ipc_w_ptr_, local_msg->response()))
+        catch (...)
         {
-            continue;   // 已借样送出
+            threw = true;
         }
-        ipc::buffer response_data(std::move(local_msg->response()->serialize()));
-        int retry_count = 0;
-        while (!ipc_w_ptr_->try_send(response_data.data(), response_data.size())
-               && running.load(std::memory_order_acquire))
+        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0)
+                            .count();
+        if (state)
         {
-            retry_count++;
-            if (retry_count > 10)
+            state->callback_count.fetch_add(1, std::memory_order_relaxed);
+            state->callback_ns_total.fetch_add(static_cast<std::uint64_t>(ns), std::memory_order_relaxed);
+            std::uint64_t prev = state->callback_ns_max.load(std::memory_order_relaxed);
+            while (static_cast<std::uint64_t>(ns) > prev
+                   && !state->callback_ns_max.compare_exchange_weak(prev, static_cast<std::uint64_t>(ns),
+                                                                    std::memory_order_relaxed))
             {
-                break;
+            }
+            if (threw)
+            {
+                state->callback_exceptions.fetch_add(1, std::memory_order_relaxed);
             }
         }
-    }   // 客户段发送请求
+        if (threw)
+        {
+            return;   // callback 抛异常：不发陈旧响应（与"不改接口语义"一致，且不让线程死）
+        }
+    }
+    send_response(state, local_msg);
+}
+
+/* nodelet 进程内快路径（**兼容模式专属**；worker 模式下 InitChannel 不注册 fp_queue）。
+ * ⛔ 同样不在共享 worker 里跑 callback。返回 true = 已消化掉这个 item。 */
+bool shm_ser_ipc::handle_fast_path(const std::shared_ptr<SerState>& state, IpcMsgBase& envelope_item)
+{
+    (void)state;
+    auto* envelope = dynamic_cast<FastPathRequestEnvelope*>(&envelope_item);
+    if (envelope == nullptr || !envelope->reply_queue())
+    {
+        return false;
+    }
+    std::shared_ptr<IpcMsgBase> request_copy(envelope->request()->clone());
+    std::function<void(std::shared_ptr<ServiceData>&)> callback;
+    {
+        std::lock_guard<std::mutex> lock(callback_mtx_);
+        callback = callback_;
+    }
+    if (!callback)
+    {
+        return true;   // 无回调也要按原样消化掉（与改造前同序）
+    }
+    std::shared_ptr<ServiceData> local_msg;
+    {
+        std::lock_guard<std::mutex> lock(message_mtx_);
+        if (!message_)
+        {
+            return true;
+        }
+        local_msg.reset(message_->clone());
+    }
+    local_msg->request() = request_copy;   // 快路径：绕过反序列化
+    callback(local_msg);
+    envelope->reply_queue()->push(local_msg->response());   // 响应直接进请求方队列
+    return true;
+}
+
+/* worker 模式的处理线程（形态 b）：只从本 server 的有界 FIFO 取**完整请求** → process_request。
+ * 每 server 一条处理线程 ⇒ callback 串行与响应顺序由"单线程消费本 server FIFO"天然保证。 */
+void shm_ser_ipc::process_thread_func()
+{
+    const std::shared_ptr<SerState> state = current_ser_state();
+    if (!state)
+    {
+        return;
+    }
+    while (running.load(std::memory_order_acquire) && !state->stopping.load(std::memory_order_acquire))
+    {
+        ipc::buffer raw;
+        {
+            std::unique_lock<std::mutex> lock(state->pending_mtx);
+            state->pending_cv.wait_for(lock, std::chrono::milliseconds{100}, [&] {
+                return !state->pending.empty() || !running.load(std::memory_order_acquire)
+                       || state->stopping.load(std::memory_order_acquire);
+            });
+            if (state->pending.empty())
+            {
+                continue;
+            }
+            raw = std::move(state->pending.front());
+            state->pending.pop_front();
+            state->pending_count.fetch_sub(1, std::memory_order_relaxed);
+            state->pending_bytes.fetch_sub(raw.size(), std::memory_order_relaxed);
+        }
+        process_request(state, std::move(raw));
+    }
 }
 
 /******************************************************************************************************/
