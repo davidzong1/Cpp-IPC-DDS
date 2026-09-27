@@ -1,6 +1,8 @@
 #include "dzIPC/common/sample_message.h"
 #include "dzIPC/socket_pub_sub_ipc.h"
+#include <unistd.h>
 #include <algorithm>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -8,6 +10,7 @@
 #include <typeinfo>
 #include <vector>
 #include "dzIPC/common/data_rev.h"
+#include "dzIPC/threepools/socket_recv_worker.h"
 #include "dzIPC/common/hash.h"
 #include "dzIPC/common/local_pub_sub_registry.h"
 #include "dzIPC/common/name_operator.h"
@@ -19,6 +22,320 @@
 
 namespace dzIPC {
 namespace socket {
+
+/* ===== 阶段 5：订阅收包接入共享层 socket worker（captain 裁定 A）=====
+ * 通用 worker 由共享层提供；本模块只写 route 适配器 + 注册/回退/停机协议。
+ * 收包路径只做：收取 + 多片重组 + 基础 wire 判别 + 投递进 msg_queue_/view_queue_。
+ * 裁定 C：worker 路径的 recv_once 入口先 udp_node_readable()，无数据立即让路；
+ *         兼容 subscribe_thread_ 路径不加该判据（否则退化成忙轮询）。
+ * 裁定 B：正返回值 = 本次完整消息的真实字节数（out_bytes = meta.total_size），不得用 1 充字节。 */
+
+/* 多片组包超时：与改造前逐字相同（不得缩短）。 */
+constexpr std::uint64_t kSocketSubRecvTimeoutMs = 50;
+/* 注销时等在途 recv_once 归零的上界（方案 §5 的 2000ms）。 */
+constexpr int64_t kSubQuiesceTimeoutMs = 2000;
+
+/* 订阅接收路径的 shared state（定义在 .cc；头文件只持 shared_ptr）。 */
+struct socket_sub_receive_state
+{
+    std::string route_key;
+    std::uint32_t domain_id{0};
+    std::uint32_t generation{0};
+
+    std::shared_ptr<ipc::socket::UDPNode> subscriber;
+    std::shared_ptr<ipc::socket::UDPNode> ack_tx;
+
+    mutable std::mutex mtx;
+    std::shared_ptr<TopicData> msg_template;
+    std::uint32_t exp_id{0};
+    std::uint32_t exp_hash{0};
+
+    std::shared_ptr<CircularQueue<IpcMsgBase>> msg_queue;
+    std::shared_ptr<CircularQueue<Sample>> view_queue;
+
+    std::atomic<threepools::RecvOwner> owner{threepools::RecvOwner::none};
+    std::atomic<bool> stopping{false};
+    std::atomic<std::size_t> recv_in_flight{0};
+    std::mutex quiesce_mtx;
+    std::condition_variable quiesce_cv;
+
+    std::atomic<std::uint64_t> messages_received{0};
+    std::atomic<std::uint64_t> bytes_received{0};
+    std::atomic<std::uint64_t> recv_errors{0};
+};
+
+namespace {
+
+/* ---- fork 防死锁闸（本模块自有的内部链接小工具，不引用其它模块符号）----
+ * 池是进程级单例且 start() 一次性；fork 后子进程继承"已 start"却没有工作线程，子进程里
+ * add_route 会走按需拉起（取池内锁 + 建线程），而被 fork 打断的父进程可能正持这些锁 ⇒ 死锁。
+ * 因此 owner pid != 当前 pid 时完全不调用池，改走兼容收包线程。
+ * 判断过程只取本文件的静态锁，不触碰池内部锁。 */
+int32_t sub_pool_owner_pid()
+{
+    static std::mutex gate_mtx;
+    static int32_t owner = 0;
+    const int32_t pid = static_cast<int32_t>(::getpid());
+    std::lock_guard<std::mutex> lock(gate_mtx);
+    if (owner == 0)
+    {
+        owner = pid;
+    }
+    return owner;
+}
+
+bool sub_pool_allowed_in_this_process()
+{
+    return sub_pool_owner_pid() == static_cast<int32_t>(::getpid());
+}
+
+/* DZIPC_SOCKET_COMPAT_THREAD=1 ⇒ 强制兼容 subscribe_thread_（与 socket_ser_cli 同名同义）。
+ * 进程内只读一次，避免"半程切换后端"。 */
+bool sub_compat_forced()
+{
+    static const bool forced = [] {
+        const char* v = std::getenv("DZIPC_SOCKET_COMPAT_THREAD");
+        if (v == nullptr || v[0] == '\0')
+        {
+            return false;
+        }
+        return !(v[0] == '0' && v[1] == '\0');
+    }();
+    return forced;
+}
+
+const char* sub_status_reason(threepools::RecvRegisterStatus s) noexcept
+{
+    switch (s)
+    {
+    case threepools::RecvRegisterStatus::backend_unavailable:
+        return "backend_unavailable";
+    case threepools::RecvRegisterStatus::duplicate:
+        return "duplicate";
+    case threepools::RecvRegisterStatus::busy:
+        return "busy";
+    case threepools::RecvRegisterStatus::stopped:
+        return "stopped";
+    case threepools::RecvRegisterStatus::invalid_token:
+        return "invalid_token";
+    case threepools::RecvRegisterStatus::invalid_route:
+        return "invalid_route";
+    case threepools::RecvRegisterStatus::wait_set_full:
+        return "wait_set_full";
+    case threepools::RecvRegisterStatus::ok:
+        break;
+    }
+    return "ok";
+}
+
+/* 收包独占状态机（契约 §4.6）：worker 路径与兼容线程路径共用同一份实现。 */
+threepools::RecvOwner sub_recv_owner(const socket_sub_receive_state& state) noexcept
+{
+    return state.owner.load(std::memory_order_acquire);
+}
+
+bool sub_try_claim_recv(socket_sub_receive_state& state, threepools::RecvOwner who) noexcept
+{
+    if (who == threepools::RecvOwner::none)
+    {
+        return false;
+    }
+    threepools::RecvOwner expected = threepools::RecvOwner::none;
+    return state.owner.compare_exchange_strong(expected, who, std::memory_order_acq_rel);
+}
+
+void sub_release_recv(socket_sub_receive_state& state) noexcept
+{
+    auto expected = state.owner.load(std::memory_order_acquire);
+    while (expected != threepools::RecvOwner::none)
+    {
+        if (state.owner.compare_exchange_weak(expected, threepools::RecvOwner::none, std::memory_order_acq_rel))
+        {
+            break;
+        }
+    }
+}
+
+/* 三支分流：与抽取前（subscribe lambda 内）逐行同义，只把 exp_id/exp_hash 提成参数、
+ * msg_queue_/view_queue_ 换成 state 上的同一对象，并把 continue 换成 return。
+ * 此处不做任何用户可见动作，只做 wire 判别与入队。 */
+void process_received_wire(const std::shared_ptr<socket_sub_receive_state>& state,
+                           std::shared_ptr<TopicData>& local_msg,
+                           ipc::buffer& wire,
+                           std::uint32_t exp_id,
+                           std::uint32_t exp_hash)
+{
+    if (wire.empty())
+    {
+        /* ---- 物化路径: TLV（收不到段时 wire 恒空, 见 data_rev.h）---- */
+        std::shared_ptr<IpcMsgBase> ptr_cache;
+        local_msg->swap(ptr_cache);
+        state->msg_queue->push(std::move(ptr_cache));
+        return;
+    }
+
+    /* ---- 借样路径: 段首是 DZFlat（见 data_rev.cc 的分流闸）---- */
+    const bool viewable = (exp_hash != 0);
+    if (!viewable)
+    {
+        /* schema-less 话题（GenericMessage / 手写类型）走物化队列；段字节仍是借的（wire 是接收层
+         * 去帧出来的独立连续块，自带所有权）。GenericMessage 覆写 dzflat_adopt 收下它；手写类型
+         * 没有覆写 ⇒ 返回 false ⇒ 按类型不匹配丢弃，与 AcceptWire 一致。
+         * 不设借样配额（UF-012 只管 SHM 腿）：这里的 wire 不占 chunk 池。 */
+        std::uint32_t seg_id = 0;
+        std::uint32_t seg_hash = 0;
+        {
+            dzflat::SegHeader h{};
+            std::memcpy(&h, wire.data(), sizeof(h));
+            seg_hash = h.schema_hash;
+        }
+        if (!IpcMsgBase::dzflat_peek_msg_id(wire.data(), wire.size(), seg_id) || seg_id != exp_id)
+        {
+            dzIPC::detail::NoteDzFlatRx(dzIPC::detail::DzFlatRxEvent::kDzFlatIdSkipped);
+            return;
+        }
+        dzIPC::detail::NoteDzFlatRx(dzIPC::detail::DzFlatRxEvent::kDzFlatAccepted);
+        if (!local_msg->topic()->dzflat_adopt(std::move(wire), seg_hash))
+        {
+            return;
+        }
+        std::shared_ptr<IpcMsgBase> ptr_cache;
+        local_msg->swap(ptr_cache);
+        state->msg_queue->push(std::move(ptr_cache));
+        return;
+    }
+
+    std::uint32_t seg_id = 0;
+    if (!IpcMsgBase::dzflat_peek_msg_id(wire.data(), wire.size(), seg_id) || seg_id != exp_id)
+    {
+        dzIPC::detail::NoteDzFlatRx(dzIPC::detail::DzFlatRxEvent::kDzFlatIdSkipped);
+        return;
+    }
+    dzflat::SegHeader h{};
+    std::memcpy(&h, wire.data(), sizeof(h));
+    if (h.schema_hash != exp_hash)
+    {
+        dzIPC::detail::NoteDzFlatRx(dzIPC::detail::DzFlatRxEvent::kDzFlatSchemaDrop);
+        return;
+    }
+    dzIPC::detail::NoteDzFlatRx(dzIPC::detail::DzFlatRxEvent::kDzFlatAccepted);
+    /* 借样：wire 是一段独立、连续的 DZFlat 段（由接收层去帧保证），原样移进 Sample 即可。 */
+    state->view_queue->push(std::make_shared<Sample>(std::move(wire), seg_id, exp_hash));
+}
+
+/* 一次"到完整消息边界"的收包 + 分流。worker 与兼容线程共用。
+ *   gate_on_readiness == true  : worker 路径 —— 先做非阻塞可读判据（裁定 C），无数据立即返回 0；
+ *   gate_on_readiness == false : 兼容路径 —— 保持"阻塞在 chunk_rev_topic(tm=50ms)"的既有语义，
+ *                                不能加可读判据，否则循环退化成忙轮询（阶段 5 红线）。 */
+std::size_t socket_sub_receive_once(const std::shared_ptr<socket_sub_receive_state>& state, bool gate_on_readiness)
+{
+    if (state->stopping.load(std::memory_order_acquire))
+    {
+        return 0;
+    }
+    if (gate_on_readiness && !udp_node_readable(state->subscriber))
+    {
+        return 0;
+    }
+
+    std::shared_ptr<TopicData> local_msg;
+    std::uint32_t exp_id = 0;
+    std::uint32_t exp_hash = 0;
+    {
+        std::lock_guard<std::mutex> lock(state->mtx);
+        if (state->msg_template)
+        {
+            local_msg.reset(state->msg_template->clone());
+        }
+        exp_id = state->exp_id;
+        exp_hash = state->exp_hash;
+    }
+    if (!local_msg)
+    {
+        return 0;
+    }
+
+    state->recv_in_flight.fetch_add(1, std::memory_order_acq_rel);
+    ipc::buffer wire;
+    std::size_t bytes = 0;
+    bool received = false;
+    try
+    {
+        /* rev timeout 50ms。out_payload 非空 ⇒ 收到 DZFlat 段时不做 TLV 反序列化，段（已去帧）
+         * 从 wire 交回；收到 TLV 时 wire 保持为空 —— 判据是 wire 是否为空。
+         * out_bytes（六参重载）= 本条完整消息的真实字节数（meta.total_size）。 */
+        received = chunk_rev_topic(state->subscriber, local_msg, kSocketSubRecvTimeoutMs, state->ack_tx, &wire, &bytes);
+    }
+    catch (...)
+    {
+        /* 绝不把异常抛给共享 worker 线程（它会 std::terminate）。 */
+        state->recv_errors.fetch_add(1, std::memory_order_relaxed);
+    }
+    state->recv_in_flight.fetch_sub(1, std::memory_order_acq_rel);
+    state->quiesce_cv.notify_all();
+    if (!received)
+    {
+        return 0;
+    }
+
+    process_received_wire(state, local_msg, wire, exp_id, exp_hash);
+    state->messages_received.fetch_add(1, std::memory_order_relaxed);
+    state->bytes_received.fetch_add(bytes, std::memory_order_relaxed);
+    /* 裁定 B：确已收到就必须返回非 0（worker 用 0 判"本轮无数据"）。 */
+    return bytes == 0 ? 1 : bytes;
+}
+
+/* SocketRecvRouteSource 适配器：本订阅的接收通道（只注册 subscriber_；
+ * ack_tx_ 是发送端点、不入组，绝不进 worker）。 */
+class socket_sub_receive_route final : public threepools::SocketRecvRouteSource
+{
+public:
+    explicit socket_sub_receive_route(std::shared_ptr<socket_sub_receive_state> state)
+        : state_(std::move(state))
+    {}
+
+    const char* route_name() const noexcept override { return state_->route_key.c_str(); }
+    std::uint32_t domain_id() const noexcept override { return state_->domain_id; }
+
+    /* owner = UDPNode*（宿主侧稳定身份），handle = udp_node_wait_handle（0 = 不可等待）。 */
+    threepools::SocketWaitToken wait_token() const noexcept override
+    {
+        threepools::SocketWaitToken token;
+        token.owner = state_->subscriber.get();
+        token.handle = udp_node_wait_handle(state_->subscriber);
+        return token;
+    }
+
+    std::size_t recv_once() override { return socket_sub_receive_once(state_, true); }
+
+    /* socket 侧没有 sequence 字可做廉价重检；事实来源是共享 worker 的 level-triggered wait(0) 全扫。 */
+    bool has_pending() const noexcept override { return false; }
+
+    threepools::RecvOwner recv_owner() const noexcept override { return sub_recv_owner(*state_); }
+    bool try_claim_recv(threepools::RecvOwner who) noexcept override { return sub_try_claim_recv(*state_, who); }
+    void release_recv() noexcept override { sub_release_recv(*state_); }
+
+    /* 注销协议第 3 步：置 stopping（拒绝新 recv_once）+ cancel_wait 打断在途组包。幂等、nullptr 安全。 */
+    void stop_and_wake() noexcept override
+    {
+        state_->stopping.store(true, std::memory_order_release);
+        udp_node_cancel_wait(state_->subscriber);
+    }
+
+    /* 注销协议第 5 步：等本模块 in-flight 归零（有界；超时只打诊断，不阻塞注销）。 */
+    void wait_quiescent() noexcept override
+    {
+        std::unique_lock<std::mutex> lock(state_->quiesce_mtx);
+        state_->quiesce_cv.wait_for(lock, std::chrono::milliseconds{kSubQuiesceTimeoutMs}, [this] {
+            return state_->recv_in_flight.load(std::memory_order_acquire) == 0;
+        });
+    }
+
+private:
+    std::shared_ptr<socket_sub_receive_state> state_;
+};
+
+}   // namespace
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
@@ -592,15 +909,13 @@ socket_sub_ipc::~socket_sub_ipc()
         }
     }
 
-    running.store(false, std::memory_order_release);
-    if (subscribe_thread_ != nullptr)
-    {
-        if (subscribe_thread_->joinable())
-        {
-            subscribe_thread_->join();
-        }
-        delete subscribe_thread_;
-    }
+    /* 析构 1-6 步（方案 §5）：
+     *   1) 上面的 registry 注销（持 topic_msg_mtx_）
+     *   2) active=false + 3) 注销 worker route（remove_route 内部：摘 wait 项 + 唤醒 /
+     *      cancel_wait / 等 in_flight 归零 2000ms / 归还 owner）；兼容模式为 cancel_wait + join
+     *   4/5) 关 subscriber_ 与 ack_tx_ —— fd/句柄只在 wait 项删除且 in-flight 清零**之后**才关
+     *   6) 释放 state（teardown_receive_path 已 reset） */
+    teardown_receive_path();
     if (subscriber_)
         subscriber_->close();
     if (ack_tx_)
@@ -637,6 +952,17 @@ void socket_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
             reg.register_subscriber(new_key, msg_queue_);
         }
         msg_id_ = new_msg_id;
+        /* worker 模式：worker 与兼容线程都从 state 快照取模板与分流期望值（worker 不持裸本对象）。
+         * 锁序：topic_msg_mtx_ → state->mtx（收包路径只取 state->mtx，不存在反向）。 */
+        if (receive_state_)
+        {
+            std::lock_guard<std::mutex> state_lock(receive_state_->mtx);
+            receive_state_->msg_template.reset(topic_msg_->clone());
+            receive_state_->exp_id = msg_id_;
+            receive_state_->exp_hash = (topic_msg_ && topic_msg_->topic())
+                                           ? topic_msg_->topic()->dzflat_schema_hash()
+                                           : 0u;
+        }
     }
 }
 
@@ -645,6 +971,11 @@ void socket_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
 /******************************************************************************************************/
 void socket_sub_ipc::InitChannel(std::string extra_info)
 {
+    /* D4 / 方案 §5：重复 InitChannel 先按同一顺序回收上一次的接收路径（幂等），再重新置
+     * running=true —— teardown_receive_path() 会把它置假，漏了这一步新起的收包线程会立刻看到
+     * running==false 直接退出（订阅端静默收不到任何消息）。 */
+    teardown_receive_path();
+    running.store(true, std::memory_order_release);
     try
     {
         subscriber_ = std::make_shared<ipc::socket::UDPNode>(this->topic_name_.c_str(), this->ipaddr_.c_str(),
@@ -687,121 +1018,51 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
         topic_type_name = extract_last_segment(topic_type_name);
         pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketSub, topic_name_, topic_type_name, "socket",
                           static_cast<int32_t>(domain_id_), extra_info});
-        subscribe_thread_ = new std::thread(
-            [this]()
+        /* ---- 接收路径：worker 优先；任何非 ok / 后端不可用 / 开关 / nodelet / fork 闸
+         *      ⇒ start_receive_path() 已打显式原因，回退兼容 subscribe_thread_。---- */
+        auto state = std::make_shared<socket_sub_receive_state>();
+        state->route_key = topic_name_ + "#" + std::to_string(domain_id_);
+        state->domain_id = static_cast<std::uint32_t>(domain_id_);
+        state->generation = receive_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        state->subscriber = subscriber_;
+        state->ack_tx = ack_tx_;
+        state->msg_queue = msg_queue_;
+        state->view_queue = view_queue_;
+        {
+            std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+            if (topic_msg_)
             {
-                while (running.load(std::memory_order_acquire))
+                state->msg_template.reset(topic_msg_->clone());
+            }
+            state->exp_id = msg_id_;
+            state->exp_hash = (topic_msg_ && topic_msg_->topic()) ? topic_msg_->topic()->dzflat_schema_hash() : 0u;
+        }
+        receive_state_ = state;
+
+        if (!start_receive_path())
+        {
+            /* 兼容回退：与 worker 路径**共用**同一个 state 与同一条收包函数，只是不带可读判据
+             * （gate_on_readiness=false），因此仍是"阻塞在 50ms 组包超时"，不会忙轮询。 */
+            subscribe_thread_ = new std::thread(
+                [this, state]()
                 {
+                    if (!sub_try_claim_recv(*state, threepools::RecvOwner::compat_thread))
                     {
-                        std::shared_ptr<TopicData> local_msg;
-                        {
-                            std::lock_guard<std::mutex> lock(topic_msg_mtx_);
-                            if (!topic_msg_)
-                            {
-                                continue;
-                            }
-                            local_msg.reset(topic_msg_->clone());
-                        }
-                        /* 分流所需的期望值, 与 SHM 订阅循环同源(shm_pub_sub_ipc.cc:685-687
-                         * 的 exp_id/exp_hash): msg_id 取**注册键**(模板会被 swap 移走),
-                         * schema_hash 取模板 —— 0 表示非 generator 生成的 typed 话题。 */
-                        std::uint32_t exp_id = 0;
-                        std::uint32_t exp_hash = 0;
-                        {
-                            std::lock_guard<std::mutex> lock(topic_msg_mtx_);
-                            exp_id = msg_id_;
-                            exp_hash = (topic_msg_ && topic_msg_->topic())
-                                           ? topic_msg_->topic()->dzflat_schema_hash()
-                                           : 0u;
-                        }
-                        ipc::buffer wire;
-                        /* rev timeout 50ms。out_payload 非空 ⇒ 收到 DZFlat 段时**不做 TLV
-                         * 反序列化**, 段(已去帧)从 wire 交回; 收到 TLV 时 wire 保持为空 ——
-                         * 判据是 wire 是否为空, 见 data_rev.h 的契约。 */
-                        if (chunk_rev_topic(subscriber_, local_msg, 50, ack_tx_, &wire))   // rev timeput 50ms
-                        {
-                            if (wire.empty())
-                            {
-                                /* ---- 物化路径: TLV(收不到段时 wire 恒空, 见 data_rev.h) ---- */
-                                std::shared_ptr<IpcMsgBase> ptr_cache;
-                                local_msg->swap(ptr_cache);
-                                msg_queue_->push(std::move(ptr_cache));
-                                continue;
-                            }
-                            /* ---- 借样路径: 段首是 DZFlat(见 data_rev.cc 的分流闸) ---- */
-                            const bool viewable = (exp_hash != 0);
-                            if (!viewable)
-                            {
-                                /* schema-less 话题(GenericMessage / 手写类型): 没有 C++ flat
-                                 * 视图可绑, 所以走物化队列; 但段字节**是借的**, 不拷 ——
-                                 * wire 是接收层去帧出来的独立连续块, 自带所有权
-                                 * (data_rev.cc 的 de_frame_dzflat 用 delete[] 收尾), 直接
-                                 * 移进消息即可。GenericMessage 覆写 dzflat_adopt 收下它, 于是
-                                 * Python 侧拿到 memoryview 而非拷贝(见 python/src/interface.cc
-                                 * 的 dzflat_memoryview)。
-                                 *
-                                 * 手写类型没有覆写 dzflat_adopt ⇒ 返回 false ⇒ 按"类型不匹配"
-                                 * 丢弃, 与 AcceptWire 对这类话题的处置一致(它读不了 DZFlat 段)。
-                                 *
-                                 * 这一条与 SHM 腿逐行同构(shm_pub_sub_ipc.cc 的 dzflat_adopt
-                                 * 分支), 差别只在 UDP 已先付过一次固有去帧拷贝。
-                                 * ⛔ 不设借样配额(UF-012 只管 SHM 腿): 这里的 wire 是去帧
-                                 * 独立堆块, 借样不占 chunk 池, 无界无害。 */
-                                std::uint32_t seg_id = 0, seg_hash = 0;
-                                {
-                                    dzflat::SegHeader h{};
-                                    std::memcpy(&h, wire.data(), sizeof(h));
-                                    seg_hash = h.schema_hash;
-                                }
-                                if (!IpcMsgBase::dzflat_peek_msg_id(wire.data(), wire.size(), seg_id)
-                                    || seg_id != exp_id)
-                                {
-                                    dzIPC::detail::NoteDzFlatRx(
-                                        dzIPC::detail::DzFlatRxEvent::kDzFlatIdSkipped);
-                                    continue;
-                                }
-                                dzIPC::detail::NoteDzFlatRx(
-                                    dzIPC::detail::DzFlatRxEvent::kDzFlatAccepted);
-                                if (!local_msg->topic()->dzflat_adopt(std::move(wire), seg_hash))
-                                {
-                                    continue;   /* 非 GenericMessage: 类型不匹配, 丢弃 */
-                                }
-                                std::shared_ptr<IpcMsgBase> ptr_cache;
-                                local_msg->swap(ptr_cache);
-                                msg_queue_->push(std::move(ptr_cache));
-                                continue;
-                            }
-                            std::uint32_t seg_id = 0;
-                            if (!IpcMsgBase::dzflat_peek_msg_id(wire.data(), wire.size(), seg_id)
-                                || seg_id != exp_id)
-                            {
-                                dzIPC::detail::NoteDzFlatRx(dzIPC::detail::DzFlatRxEvent::kDzFlatIdSkipped);
-                                continue;
-                            }
-                            dzflat::SegHeader h{};
-                            std::memcpy(&h, wire.data(), sizeof(h));
-                            if (h.schema_hash != exp_hash)
-                            {
-                                dzIPC::detail::NoteDzFlatRx(dzIPC::detail::DzFlatRxEvent::kDzFlatSchemaDrop);
-                                continue;
-                            }
-                            dzIPC::detail::NoteDzFlatRx(dzIPC::detail::DzFlatRxEvent::kDzFlatAccepted);
-                            /* 借样: wire 是一段**独立、连续**的 DZFlat 段(由接收层去帧保证),
-                             * 原样移进 Sample 即可 —— 用户读字段期间它一直有效(Sample 是
-                             * move-only 的持有者, 见 sample_message.h 的三条契约)。 */
-                            view_queue_->push(std::make_shared<Sample>(std::move(wire), seg_id, exp_hash));
-                        }
-                        else
-                        {
-                            continue;
-                        }
+                        return;
                     }
-                }
-            });   // 占位线程，保持对象存活直到析构
-        dzIPC::ThreadDispatch::apply_thread_options(subscribe_thread_, thread_options_, verbose_,
-                                                    topic_name_ + "_SocketSubReceiveThread");
+                    while (running.load(std::memory_order_acquire))
+                    {
+                        (void)socket_sub_receive_once(state, false);
+                    }
+                    sub_release_recv(*state);
+                });
+            dzIPC::ThreadDispatch::apply_thread_options(subscribe_thread_, thread_options_, verbose_,
+                                                        topic_name_ + "_SocketSubReceiveThread");
+        }
 
         // Register for intra-process fast-path delivery (once only).
+        // C7 裁决：worker 模式下**不**注册进程内快路径队列（nodelet 启用时本就走兼容收包线程）。
+        if (!worker_mode_)
         {
             std::lock_guard<std::mutex> lock(topic_msg_mtx_);
             if (!local_registered_)
@@ -817,6 +1078,119 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
         std::cerr << "\033[31m[" << topic_name_ << "SubInfo] Error initializing channel: " << e.what() << "\033[0m"
                   << std::endl;
     }
+}
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
+/* 接收路径注册：成功返回 true（走共享层固定 socket worker）。返回 false 表示**必须**走兼容
+ * subscribe_thread_，且已在 stderr 打了显式原因（绝不静默、绝不忙轮询降级）。
+ * 前置条件：InitChannel 已建好 receive_state_（含模板/期望值/队列/节点强引用）。 */
+bool socket_sub_ipc::start_receive_path()
+{
+    const auto fallback = [this](const char* why) {
+        std::cerr << "\033[33m[" << topic_name_ << "SubInfo] socket wait-set unusable (" << why
+                  << "); keeping per-subscription receive thread\033[0m" << std::endl;
+        return false;
+    };
+
+    if (sub_compat_forced())
+    {
+        return fallback("DZIPC_SOCKET_COMPAT_THREAD=1");
+    }
+    /* C7 裁决：nodelet 与固定 worker 二选一 —— nodelet 启用时保留兼容接收线程。 */
+    if (dzIPC::IsNodeletEnabled())
+    {
+        return fallback("nodelet enabled (C7: nodelet 与固定 worker 二选一)");
+    }
+    if (!sub_pool_allowed_in_this_process())
+    {
+        return fallback("forked child: recv pool owner pid mismatch");
+    }
+    if (!threepools::SocketRecvWorkerPool::backend_available())
+    {
+        return fallback("SocketWaitSet backend unavailable");
+    }
+    if (!receive_state_)
+    {
+        return fallback("receive state missing");
+    }
+
+    auto route = std::make_shared<socket_sub_receive_route>(receive_state_);
+    if (!route->wait_token().valid())
+    {
+        return fallback("subscriber channel is not waitable (invalid_token)");
+    }
+    auto& pool = threepools::SocketRecvWorkerPool::instance();
+    if (!pool.running())
+    {
+        (void)pool.start();   // 一次性；已被别的 service/模块启动过时返回 false
+    }
+    if (!pool.running())
+    {
+        return fallback("SocketRecvWorkerPool::start() failed (thread creation?)");
+    }
+    const threepools::RecvRegisterStatus status = pool.add_route(route);
+    if (status != threepools::RecvRegisterStatus::ok)
+    {
+        return fallback(sub_status_reason(status));
+    }
+    receive_route_ = route;
+    worker_mode_ = true;
+    if (verbose_)
+    {
+        std::cerr << "\033[32m[" << topic_name_ << "SubInfo] subscribe receive on shared socket worker "
+                  << threepools::SocketRecvWorkerPool::worker_for(receive_state_->route_key.c_str(),
+                                                                  receive_state_->domain_id, pool.worker_count())
+                  << " (generation " << receive_state_->generation << ", workers " << pool.worker_count() << ")\033[0m"
+                  << std::endl;
+    }
+    return true;
+}
+
+/* 接收路径注销（方案 §5 析构 1-6 步里的 2/3 步 + 6 步的状态释放）。
+ * worker 模式：remove_route 同步完成契约 §4.4 的 1-6 步（摘表 → wait_set.remove 唤醒 → stop_and_wake
+ *   = cancel_wait 打断在途组包 → 等 worker 侧 in-flight 归零 → wait_quiescent 等本模块 in-flight
+ *   → release_recv 归还收包独占）；兼容模式：cancel_wait 打断在途 receive + join 收包线程。
+ * fd/句柄在 wait 项删除且 in-flight 清零**之后**才由调用方关闭（本函数之后才 close 节点）。 */
+void socket_sub_ipc::teardown_receive_path()
+{
+    if (receive_state_)
+    {
+        /* ② active=false（方案 §5 的 route stopping）：拒绝新的 recv_once。 */
+        receive_state_->stopping.store(true, std::memory_order_release);
+    }
+
+    if (worker_mode_ && receive_route_)
+    {
+        threepools::SocketRecvWorkerPool::instance().remove_route(receive_route_.get());
+    }
+    else if (subscriber_ && udp_node_waitable(subscriber_))
+    {
+        /* 兼容模式：打断阻塞中的 receive(kSocketSubRecvTimeoutMs)，不必等满 50ms。
+         * 只在仍可等待时调，避免对已关闭（fd 号可能被复用）的节点做 shutdown。 */
+        udp_node_cancel_wait(subscriber_);
+    }
+
+    /* 兼容收包线程：running=false + join（等其当前一次收包/入队结束）。 */
+    running.store(false, std::memory_order_release);
+    if (subscribe_thread_ != nullptr)
+    {
+        if (subscribe_thread_->joinable())
+        {
+            subscribe_thread_->join();
+        }
+        delete subscribe_thread_;
+        subscribe_thread_ = nullptr;
+    }
+
+    if (receive_state_)
+    {
+        sub_release_recv(*receive_state_);   // 幂等：worker 路径已由 remove_route 第 6 步归还
+    }
+    receive_route_.reset();
+    receive_state_.reset();
+    worker_mode_ = false;
 }
 
 /******************************************************************************************************/

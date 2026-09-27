@@ -24,9 +24,21 @@ namespace dzIPC { class Sample; }
 #include "libipc/udp.h"
 
 namespace dzIPC {
+namespace threepools {
+/* 阶段 5 共享层：socket 侧 route 抽象（include/dzIPC/threepools/socket_recv_worker.h，
+ * 由 captain 裁定 A 归共享层唯一 owner）。公开头只做**前置声明**，真正的 include 放在
+ * .cc —— 只 include 本头的消费者不必为此拉进等待层，也不会看到任何平台头。 */
+class SocketRecvRouteSource;
+}   // namespace threepools
 namespace socket {
 class socket_pub_ipc;
 class socket_sub_ipc;
+
+/* socket_sub_ipc 订阅接收路径的 shared state（定义在 .cc）。
+ *
+ * 收包 worker 只通过 SocketRecvRouteSource 适配器接触它，**不持**裸 socket_sub_ipc
+ * 指针 —— 这是"注销返回后 worker 不再回调已析构对象"的前提（契约 §4.4）。 */
+struct socket_sub_receive_state;
 
 class IPC_EXPORT socket_pub_ipc : public pub_ipc_base
 {
@@ -184,6 +196,37 @@ public:
     socket_sub_ipc& operator=(const socket_sub_ipc&) = delete;
 
 private:
+    /* ---- 阶段 5：固定 socket worker 接入面（captain 裁定 A）----
+     *
+     * worker 本体由共享层提供（threepools/socket_recv_worker.h）；本类只写 **route 适配器**
+     * 与注册/回退/停机协议。⛔ 不复制 worker、不新增等待原语、不出现平台宏、
+     * 不 include 另一个 socket 模块。
+     *
+     * 抽取出来的两条处理路径（.cc 内定义，与抽取前逐行同义）：
+     *   · process_received_wire() —— 把一次 chunk_rev_topic() 的结果按 TLV / schema-less
+     *     dzflat_adopt / typed view 三条分支分流（含 NoteDzFlatRx 三档计数）；
+     *   · socket_receive_once()  —— 模板 clone → chunk_rev_topic → 上面的分流，
+     *     返回**本条完整消息的字节数**。
+     * worker 路径与兼容 subscribe_thread_ 路径**共用**这两条函数与同一个 receive_state_，
+     * 差别只在"谁调用"（契约 §4.6 的单消费者互斥）。 */
+    std::shared_ptr<socket_sub_receive_state> receive_state_;
+    std::shared_ptr<threepools::SocketRecvRouteSource> receive_route_;
+    /* true = 当前接收路径是共享层 worker；false = 兼容 subscribe_thread_（显式回退）。 */
+    bool worker_mode_{false};
+    /* 接收路径代际：每次重新注册 +1（restart 必须先完全注销旧代）。 */
+    std::atomic<std::uint32_t> receive_generation_{0};
+
+    /* 注册/注销接收路径。start 返回 false 表示本进程/本后端必须走兼容收包线程（已打显式原因）。 */
+    bool start_receive_path();
+    void teardown_receive_path();
+    /* 抽取出来的两条处理路径定义在 .cc，并以 socket_sub_receive_state 为载体 ——
+     * 收包 worker **不持**裸 socket_sub_ipc 指针：
+     *   · socket_sub_receive_once(state, gate_on_readiness) —— 模板 clone →（worker 路径）可读判据
+     *     → chunk_rev_topic → 分流；返回本条完整消息的**真实字节数**；
+     *   · process_received_wire(state, local_msg, wire, exp_id, exp_hash) —— TLV 物化 /
+     *     schema-less dzflat_adopt / typed view 三支分流（含 NoteDzFlatRx 三档计数）。
+     * worker 路径与兼容 subscribe_thread_ 路径共用它们与同一个 receive_state_。 */
+
     size_t domain_id_{0};
     std::atomic<bool> subscribed_{false};
     std::atomic<bool> running{true};
