@@ -7,7 +7,7 @@
 > 冲突处按勘误读（E1 已就地修正在 §1；E2 已就地修正在 §4.4；E3 已补进 §0 交付面）。
 > 落点见 `docs/消息接收架构改造/{事件驱动线程池需求.md §3.2/§5/§6, shm_sub_thread_consolidation_plan.md 阶段 5}`。
 
-## 0. 交付面（5 个文件边界）
+## 0. 交付面（5 个文件边界 + §6 的两项追加）
 
 | 文件 | 角色 | 是否新增 |
 |---|---|---|
@@ -67,11 +67,27 @@ class IPC_EXPORT UDPNode {
     /* 清除 wait_handle 上的就绪提示（level-triggered 重检前调用）。
      * Linux: no-op（epoll 本身就是 level-triggered）。Windows: WSAEnumNetworkEvents。 */
     void clear_wait() noexcept;
+
+    /* [t12 追加 · 裁定 C] 非阻塞可读判据：该接收通道**当前**是否有可读数据。
+     * 不阻塞、不改状态、**不做读操作**（不消费数据）；幂等、O(1)、无分配。
+     * server_fd 无效 / 未入组（role == SendOnly）/ 已 cancel_wait 一律 false。
+     * Linux: poll(fd, POLLIN, 0)；Windows: 0 超时 select。 */
+    bool readable() const noexcept;
 };
 ```
 
 **不变量**：`wait_handle() != 0` ⇒ `waitable() == true`；`cancel_wait()` 之后
-`waitable() == false` 且 `wait_handle() == 0`。
+`waitable() == false` 且 `wait_handle() == 0`；`readable() == true` ⇒
+`waitable() == true`（反之不成立）。
+
+**为什么需要 readable()（消费方必读，t4/t5 的 recv_once 靠它）**：
+socket 侧唯一的收包原语 `chunk_rev_topic` / `chunk_rev_server` **一律带 tm**，空闲时
+会阻塞到 tm（t4 的既有组包超时 50 ms、t5 的 200 ms）。而收包 worker 的预算循环是
+`for(;;){ n = recv_once(); if (n == 0) break; ... }` ⇒ 每次数据突发收尾（以及 add_route
+的注册轮）都会让**共享** worker 线程空读阻塞最长 tm。仓库里没有别的非阻塞收包原语可用：
+`receive_nowait()` 只出现在发送侧/排空辅助，`tm = 0` 会让 `wait_first_data_chunk` 因
+`used(0) >= 0` 永远立即返回 false，且 tm 同时兼作组装预算、不可改小。
+⇒ **实现必须先问 readable() 再调用 `chunk_rev_*`**：无数据时立即返回 0。
 
 ## 2. `dzIPC::socket` 桥接（`include/dzIPC/common/data_rev.h`）
 
@@ -82,6 +98,8 @@ IPC_EXPORT bool         udp_node_waitable(const std::shared_ptr<ipc::socket::UDP
 IPC_EXPORT std::uintptr_t udp_node_wait_handle(const std::shared_ptr<ipc::socket::UDPNode>& node) noexcept;
 IPC_EXPORT void         udp_node_cancel_wait(const std::shared_ptr<ipc::socket::UDPNode>& node) noexcept;
 IPC_EXPORT void         udp_node_clear_wait(const std::shared_ptr<ipc::socket::UDPNode>& node) noexcept;
+/* [t12 追加 · 裁定 C] 非阻塞可读判据的桥接（nullptr ⇒ false）。 */
+IPC_EXPORT bool         udp_node_readable(const std::shared_ptr<ipc::socket::UDPNode>& node) noexcept;
 ```
 
 ## 3. `dzIPC::threepools::SocketWaitSet`（新增）
@@ -411,17 +429,80 @@ class SocketRecvWorkerPool {      // 进程级故意泄漏的指针单例；池�
 | 线程数 | 默认 `hardware_concurrency()`（至少 1），上限 128，`DZIPC_SOCKET_RECV_WORKERS` 覆盖且**进程内只读一次** |
 | fork | 池**不做** pid 探测（不引入平台宏）；owner pid 闸是模块侧责任，pid 变化 ⇒ 不得调 `add_route` 且不触碰池锁（同 §4.8） |
 | callback | ⛔ `recv_once()` 只做收取 + 重组 + wire 判别 + 投递；用户回调由模块的处理路径承担（需求 §1.2） |
+| **recv_once 返回值** | 正返回值 = 本次完成的**完整消息/请求的字节数**（≥ 1）；0 = 无数据 / 断开。worker 把该值累进 `Stats::bytes_received` 并用于 `RecvBudget::max_bytes_per_route`，所以"返回 1"表示收到 1 字节的消息，不是"成功一次" |
+| **非阻塞判据（必做）** | 实现必须先 `if (!udp_node_readable(node)) return 0;` 再调用 `chunk_rev_*`：无数据时**立即返回 0**，⛔ 不得在共享 worker 线程上空读阻塞到 tm |
+| 字节出口 | 字节数取 `chunk_rev_topic` / `chunk_rev_server` 的 `std::size_t* out_bytes` 出口（t12 追加的重载，见 §6），⛔ 不得用 `msg_ptr->size()` 之类的近似，也不得硬编码 1 |
 
 至少被处理一次：注册成功时**无条件**让新 route 进 deferred FIFO 并敲一次唤醒通道，不依赖"注册后还有新事件"
 —— 注册之前已经在 socket 接收队列里的数据不会产生新事件，只靠 ready 判据会一直看不到它。
 
-聚焦自检：`test/test_socket_recv_worker.cpp`（5 条，注册进 CTest）—— 归属与 SHM 侧逐值对拍、
+聚焦自检：`test/test_socket_recv_worker.cpp`（7 条，注册进 CTest）—— 归属与 SHM 侧逐值对拍、
 注册判定顺序与单消费者互斥（duplicate/busy）、真通道收取 + `remove_route` 同步唤醒、空闲退出与按需拉起、
-池的固定归属与线程数口径。
+池的固定归属与线程数口径，以及 §6 的两条消费面判据（空闲 recv_once 立即返回 0；正返回值 = 已知发送长度）。
 
 ---
 
-## 6. 未在 Windows 验证（显式声明）
+## 6. t12 追加：非阻塞可读判据与字节出口（append-only）
+
+> 状态：**已实现并冻结**（t12）。两项都属于「冻结规则 = 新增一律追加」的追加面，
+> **不改任何既有签名与语义**；原符号全部保留（已链接的二进制不受影响）。
+> 勘误文档保持有效；本章与勘误冲突处按勘误读。
+
+### 7.1 `readable()` / `udp_node_readable`（裁定 C）
+
+```cpp
+bool ipc::socket::UDPNode::readable() const noexcept;                                            // §1
+bool dzIPC::socket::udp_node_readable(const std::shared_ptr<ipc::socket::UDPNode>&) noexcept;   // §2, nullptr ⇒ false
+```
+
+语义见 §1/§2。**这是 `recv_once` 的准入判据**：见 §5 表格「非阻塞判据（必做）」与 §1 末尾的说明。
+
+平台实现（平台宏只出现在允许位置）：
+
+| 平台 | 实现 | 为什么 |
+|---|---|---|
+| Linux | `poll(fd, POLLIN, 0) > 0`，且只认 `POLLIN` | 0 超时 ⇒ 不阻塞、无分配；**不做读操作**（探测不能吃掉一片数据）；单独出现的 `POLLERR`/`POLLHUP` 不算可读，否则坏 fd 会让 worker 空转 |
+| Windows | 0 超时 `select` + `FD_ISSET` | ⛔ 刻意**不用** `WSAEventSelect` 的事件查询（`WSAWaitForMultipleEvents(0)`）：那是「边沿记录」语义，查询/回收会改变事件状态，与本函数「不改变任何状态」的冻结语义冲突 |
+| 两平台 | fd 无效 / 未入组（SendOnly）/ 已 `cancel_wait()` ⇒ 一律 `false` | Linux 侧 fd 已被 `shutdown(SHUT_RD)`，poll 会永久报 `POLLIN|POLLHUP`（「可读」却读不出东西）⇒ 该短路是**语义必需**，不是优化 |
+
+### 7.2 字节出口 `out_bytes`（裁定 B）
+
+```cpp
+// 既有重载一字不动，只新增两条（原符号保留，已链接的二进制不受影响）：
+bool chunk_rev_topic (node, rev_msg, tm, ack_node, out_payload, std::size_t* out_bytes);
+bool chunk_rev_server(node, rev_msg, tm, ser_or_cli, ack_node, std::size_t* out_bytes);
+```
+
+- `recv_chunk_common_impl` 追加尾部默认参数 `std::size_t* out_bytes = nullptr`，在**每条成功返回路径**上
+  置 `*out_bytes = meta.total_size`（单页路径同值 —— 那里已确认 `first_page.size() == meta.total_size`）；
+  失败路径不保证写它，调用方应只在返回 `true` 时读；传 `nullptr` 时行为与改动前逐字节一致。
+- **为什么必须是共享层出口**：socket 侧收包 worker 把 `recv_once()` 的返回值当字节数累加
+  （`bytes += n`，用于 `Stats::bytes_received` 与 `RecvBudget::max_bytes_per_route`），而 t5 走的
+  `chunk_rev_server` 既没有 `out_payload` 重载、`TopicData`/`ServiceData` 也没有任何字节出口 ⇒
+  没有它时「成功」只能被记成 1 字节，预算与统计会**静默**变错（不是崩溃，是读数错）。
+
+### 7.3 t4/t5 适配器应当这样调用
+
+```cpp
+std::size_t MySocketRoute::recv_once()
+{
+    // ① 先做非阻塞可读判据：无数据立即让出，⛔ 不在共享 worker 线程上空读阻塞 tm。
+    if (!dzIPC::socket::udp_node_readable(node_)) return 0;
+
+    // ② 有数据才进收包原语，并用 out_bytes 拿本次完成的字节数（不是 1，也不是片长）。
+    std::size_t bytes = 0;
+    ipc::buffer payload;   // 需要借样时传；纯 TLV 路径传 nullptr
+    if (!dzIPC::socket::chunk_rev_topic(node_, rev_msg_, tm_, ack_node_, &payload, &bytes)) return 0;
+    return bytes;          // ③ 正返回值 = 本次完整消息的字节数
+}
+```
+
+聚焦自检：`test/test_socket_readable.cpp`（5 条）+ `test/test_socket_recv_worker.cpp` 的
+`SocketRecvWorkerBytes` 两条（空闲立即返回 0 / `out_bytes` 与已知发送长度对拍），均已注册进 CTest。
+
+---
+
+## 7. 未在 Windows 验证（显式声明）
 
 本机为 Linux 6.8，`cargo`/`rustc` 不可用不影响本任务。**Windows 路径
 （`src/libipc/platform/win/udp.h` 的 WSAEventSelect/WSAEvent、

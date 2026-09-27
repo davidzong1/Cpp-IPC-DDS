@@ -24,10 +24,13 @@
 #include <thread>
 #include <vector>
 
+#include <algorithm>
+
 #include "dzIPC/common/data_rev.h"
 #include "dzIPC/common/hash.h"
 #include "dzIPC/threepools/recv_worker.h"
 #include "dzIPC/threepools/socket_recv_worker.h"
+#include "ipc_msg/ipc_msg_base/ipc_msg_base.hpp"
 #include "libipc/udp.h"
 
 #include <gtest/gtest.h>
@@ -449,4 +452,286 @@ TEST(SocketRecvWorkerPool, FixedAffinityAndRouteDelegation)
     EXPECT_EQ(rb->recv_owner(), RecvOwner::none);
     /* 池**故意不 stop**：它是进程级单例，模块侧只 add/remove_route；
      * worker 线程会在空闲窗口后自己归还（本套件默认 budget 的 1s 内）。 */
+}
+
+/* ================================================================================
+ * [t12] 与"共享收包层消费面契约"对齐的两条判据
+ *
+ * ① recv_once() 的正返回值必须是**本次完整消息的字节数**(不是 1) —— worker 把该值
+ *    累进 Stats::bytes_received 并用于 RecvBudget::max_bytes_per_route。socket 侧这个数
+ *    只能来自 chunk_rev_topic / chunk_rev_server 的 out_bytes 出口(t12 追加), 因为
+ *    TopicData 没有任何字节出口。
+ * ② 空闲通道上 recv_once() 必须**立即**返回 0 —— 实现必须先问 udp_node_readable(),
+ *    不得让共享 worker 线程空读阻塞 chunk_rev_* 的 tm。
+ *
+ * 这里不用 udp_node_* 之外的帮助: 发送侧直接按线上分帧约定(tail = page_cnt(2) |
+ * now_page(2) | total_size(4) | msg_id(4), 数据每页 1460 字节)自造帧, 于是"已知发送
+ * 长度"是构造出来的常量, 与 out_bytes 对拍就是真对拍。
+ * ================================================================================ */
+
+namespace {
+
+constexpr std::size_t kWirePage = 1'472;
+constexpr std::size_t kWireTail = 12;
+constexpr std::size_t kWirePayloadPerPage = kWirePage - kWireTail;   // 1460, 与 ipc_msg_base 一致
+constexpr std::uint32_t kWireMsgId = 0x5A000001u;
+
+void put_u16_be(std::uint8_t* p, std::uint16_t v)
+{
+    p[0] = static_cast<std::uint8_t>(v >> 8);
+    p[1] = static_cast<std::uint8_t>(v & 0xFF);
+}
+
+void put_u32_be(std::uint8_t* p, std::uint32_t v)
+{
+    p[0] = static_cast<std::uint8_t>(v >> 24);
+    p[1] = static_cast<std::uint8_t>((v >> 16) & 0xFF);
+    p[2] = static_cast<std::uint8_t>((v >> 8) & 0xFF);
+    p[3] = static_cast<std::uint8_t>(v & 0xFF);
+}
+
+/* 按线上约定分帧: payload 末尾 4 字节是 kWireMsgId(check_id 读的正是最后 4 字节),
+ * tail.total_size = 线上总字节数(载荷 + 每页 12 字节 tail) —— 接收侧用它做页长校验。 */
+std::vector<std::vector<std::uint8_t>> frame_payload(const std::vector<std::uint8_t>& payload,
+                                                      std::uint16_t page_cnt, std::uint32_t total_size)
+{
+    std::vector<std::vector<std::uint8_t>> out;
+    out.reserve(page_cnt);
+    std::size_t off = 0;
+    for (std::uint16_t page = 1; page <= page_cnt; ++page)
+    {
+        const std::size_t n = std::min(kWirePayloadPerPage, payload.size() - off);
+        std::vector<std::uint8_t> chunk(n + kWireTail, 0);
+        std::memcpy(chunk.data(), payload.data() + off, n);
+        std::uint8_t* tail = chunk.data() + n;
+        put_u16_be(tail, page_cnt);
+        put_u16_be(tail + 2, page);
+        put_u32_be(tail + 4, total_size);
+        put_u32_be(tail + 8, kWireMsgId);
+        off += n;
+        out.push_back(std::move(chunk));
+    }
+    return out;
+}
+
+/* 制造"自己的 msg_id == kWireMsgId"的 TLV 消息: 构造 12 字节的消息缓存(去掉尾部 4
+ * 字节 msg_id ⇒ 剩 8 字节), 让 IpcMsgBase::check_id 放行。载荷本身是垃圾字节 —— 本
+ * 用例关心的只有长度。 */
+class WireProbeMsg : public IpcMsgBase
+{
+public:
+    ipc::buffer serialize() override { return ipc::buffer(); }
+    void deserialize(const ipc::buffer&) override {}
+    IpcMsgBase* clone() const override { return new WireProbeMsg(*this); }
+};
+
+bool send_framed(Channel& ch, const std::vector<std::vector<std::uint8_t>>& frames)
+{
+    for (const auto& f : frames)
+    {
+        char raw[2'048];
+        std::memcpy(raw, f.data(), f.size());
+        ipc::buffer b(static_cast<void*>(raw), f.size());
+        if (!ch.tx->send(b))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* 收包 worker 的参考 route: 与契约 §5 的"先 readable 再读, 用 out_bytes"逐字一致。 */
+class WireRoute : public SocketRecvRouteSource
+{
+public:
+    explicit WireRoute(Channel& ch, std::uint64_t chunk_tm_ms)
+        : ch_(ch)
+        , name_(ch.topic)
+        , tm_(chunk_tm_ms)
+    {}
+
+    const char* route_name() const noexcept override { return name_.c_str(); }
+    std::uint32_t domain_id() const noexcept override { return static_cast<std::uint32_t>(kDomain); }
+    SocketWaitToken wait_token() const noexcept override
+    {
+        return SocketWaitToken{ch_.rx.get(), dzIPC::socket::udp_node_wait_handle(ch_.rx)};
+    }
+
+    std::size_t recv_once() override
+    {
+        /* ① 先做非阻塞可读判据: 无数据时立即返回 0(不空读阻塞 tm)。 */
+        if (!dzIPC::socket::udp_node_readable(ch_.rx))
+        {
+            return 0;
+        }
+        /* ② 有数据才进 chunk_rev_*, 并用 out_bytes 拿本次字节数。 */
+        auto td = std::make_shared<dzIPC::TopicData>(std::make_shared<WireProbeMsg>(), kWireMsgId);
+        std::size_t bytes = 0;
+        ipc::buffer payload;
+        const bool ok = dzIPC::socket::chunk_rev_topic(ch_.rx, td, tm_, nullptr, &payload, &bytes);
+        if (!ok)
+        {
+            return 0;
+        }
+        last_bytes_.store(bytes, std::memory_order_release);
+        return bytes;
+    }
+
+    RecvOwner recv_owner() const noexcept override { return owner_.load(std::memory_order_acquire); }
+    bool try_claim_recv(RecvOwner who) noexcept override
+    {
+        RecvOwner expected = RecvOwner::none;
+        return owner_.compare_exchange_strong(expected, who, std::memory_order_acq_rel);
+    }
+    void release_recv() noexcept override
+    {
+        RecvOwner expected = owner_.load(std::memory_order_acquire);
+        while (expected != RecvOwner::none
+               && !owner_.compare_exchange_weak(expected, RecvOwner::none, std::memory_order_acq_rel))
+        {
+        }
+    }
+    void stop_and_wake() noexcept override
+    {
+        stopping_.store(true, std::memory_order_release);
+        dzIPC::socket::udp_node_cancel_wait(ch_.rx);
+    }
+    void wait_quiescent() noexcept override {}
+
+    std::size_t last_bytes() const noexcept { return last_bytes_.load(std::memory_order_acquire); }
+
+private:
+    Channel& ch_;
+    std::string name_;
+    std::uint64_t tm_;
+    std::atomic<RecvOwner> owner_{RecvOwner::none};
+    std::atomic<bool> stopping_{false};
+    std::atomic<std::size_t> last_bytes_{0};
+};
+
+}   // namespace
+
+/* ② 空闲通道: recv_once() 立即返回 0。
+ *
+ * 判据必须**同时**查两侧: 只看返回值的话, 一个"直接 return 0"的实现也能过; 只看上界
+ * 的话, "阻塞满 tm(200ms)"也能过。所以判"返回 0 且耗时可忽略"。
+ * tm 取 200ms(即 t5 的既有组包超时): "没做非阻塞判据"的实现在这条上至少慢 200ms。 */
+TEST(SocketRecvWorkerBytes, IdleRecvOnceReturnsZeroImmediately)
+{
+    Channel ch{"bytes_idle"};
+    if (!require_multicast(ch))
+    {
+        GTEST_SKIP() << "multicast unavailable on this host";
+        return;
+    }
+    if (!SocketRecvWorker::backend_available())
+    {
+        GTEST_SKIP() << "SocketWaitSet backend unavailable on this platform";
+        return;
+    }
+
+    RecvBudget budget;
+    budget.wait_timeout = 20ms;
+    budget.idle_keep_alive = 60s;   // 本用例只关心单次调用, 别让线程提前归还
+    SocketRecvWorker worker(0, budget);
+    ASSERT_TRUE(worker.start());
+
+    auto route = std::make_shared<WireRoute>(ch, 200);
+    if (worker.add_route(route) == RecvRegisterStatus::backend_unavailable)
+    {
+        GTEST_SKIP() << "SocketWaitSet backend unavailable on this platform";
+        return;
+    }
+    ASSERT_TRUE(wait_for([&] { return worker.thread_alive(); }, 1000));
+
+    /* 等注册轮收尾并排空残留, 然后测"真空闲"下的单次调用耗时。 */
+    std::this_thread::sleep_for(150ms);
+    while (!ch.rx->receive_nowait().empty())
+    {
+    }
+    ASSERT_FALSE(ch.rx->readable());
+
+    const auto t0 = Clock::now();
+    const std::size_t n = route->recv_once();
+    const auto elapsed_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count();
+    EXPECT_EQ(n, 0u) << "空闲时必须返回 0";
+    EXPECT_EQ(route->last_bytes(), 0u);
+    EXPECT_LT(elapsed_us, 5000) << "空闲 recv_once 必须立即返回(实测 " << elapsed_us
+                                << "us; tm=200ms ⇒ 没有非阻塞判据的实现至少 200000us)";
+
+    worker.remove_route(route.get());
+}
+
+/* ① 正返回值 = 本次完整消息的字节数, 与"已知发送长度"对拍。
+ *
+ * 单页(一条 tail)与多页(3 条 tail)各一条 —— 多页那条同时证明 out_bytes 取的是**完整
+ * 消息**长度(不是某一片的长度), 且 worker 的 bytes_received 会真的按它累加。 */
+TEST(SocketRecvWorkerBytes, OutBytesMatchesKnownPayloadLength)
+{
+    Channel ch{"bytes_len"};
+    if (!require_multicast(ch))
+    {
+        GTEST_SKIP() << "multicast unavailable on this host";
+        return;
+    }
+    if (!SocketRecvWorker::backend_available())
+    {
+        GTEST_SKIP() << "SocketWaitSet backend unavailable on this platform";
+        return;
+    }
+
+    RecvBudget budget;
+    budget.wait_timeout = 20ms;
+    budget.idle_keep_alive = 60s;
+    SocketRecvWorker worker(0, budget);
+    ASSERT_TRUE(worker.start());
+
+    auto route = std::make_shared<WireRoute>(ch, 200);
+    if (worker.add_route(route) == RecvRegisterStatus::backend_unavailable)
+    {
+        GTEST_SKIP() << "SocketWaitSet backend unavailable on this platform";
+        return;
+    }
+    ASSERT_TRUE(wait_for([&] { return worker.thread_alive(); }, 1000));
+    std::this_thread::sleep_for(150ms);
+    while (!ch.rx->receive_nowait().empty())
+    {
+    }
+
+    /* --- 单页: 载荷 300 ⇒ 线上 300 + 12 --- */
+    std::vector<std::uint8_t> single(300, 0x11);
+    put_u32_be(single.data() + single.size() - 4, kWireMsgId);
+    const std::size_t single_wire = single.size() + kWireTail;
+    for (int attempt = 0; attempt < 10 && route->last_bytes() != single_wire; ++attempt)
+    {
+        ASSERT_TRUE(send_framed(ch, frame_payload(single, 1, static_cast<std::uint32_t>(single_wire))));
+        (void)wait_for([&] { return route->last_bytes() == single_wire; }, 500);
+    }
+    EXPECT_EQ(route->last_bytes(), single_wire)
+        << "单页: out_bytes 必须等于线上总字节数(载荷 " << single.size() << " + tail " << kWireTail << ")";
+    /* 已读空 ⇒ 下一次立即 0。 */
+    EXPECT_EQ(route->recv_once(), 0u);
+
+    /* --- 多页: 载荷 3000 ⇒ 3 页, 线上 3000 + 3*12 --- */
+    std::vector<std::uint8_t> multi(3'000, 0x22);
+    put_u32_be(multi.data() + multi.size() - 4, kWireMsgId);
+    const std::size_t multi_wire = multi.size() + 3 * kWireTail;
+    const std::size_t before_bytes = worker.stats().bytes_received;
+    for (int attempt = 0; attempt < 10 && route->last_bytes() != multi_wire; ++attempt)
+    {
+        ASSERT_TRUE(send_framed(ch, frame_payload(multi, 3, static_cast<std::uint32_t>(multi_wire))));
+        (void)wait_for([&] { return route->last_bytes() == multi_wire; }, 500);
+    }
+    ASSERT_EQ(route->last_bytes(), multi_wire)
+        << "多页: out_bytes 必须是**完整消息**长度(不是某一片的长度 " << kWirePage << ")";
+    EXPECT_GT(route->last_bytes(), kWirePage) << "否则说明取的是片长而不是消息长";
+
+    /* worker 侧统计面: bytes_received 必须按真实字节累加(不是每条 1)。 */
+    ASSERT_TRUE(wait_for([&] { return worker.stats().bytes_received >= before_bytes + multi_wire; }, 2000));
+    const auto st = worker.stats();
+    EXPECT_GE(st.bytes_received, single_wire + multi_wire)
+        << "bytes_received=" << st.bytes_received << " < " << (single_wire + multi_wire);
+
+    worker.remove_route(route.get());
 }

@@ -4,6 +4,12 @@
 > 主体契约：`ipc-transport-phase5-shared-wait-layer-contract-99ff82a0f9af.md`
 > —— 公开签名、线程模型、route↔worker 归属规则、预算、注销协议、能力探测与
 > 回退策略**仍以它为准**；下面 E1/E2/E3 三条按本勘误读。
+> **状态更新（t12 交付后）**：正文新增 **§6**（`readable()` / `udp_node_readable` 的
+> 非阻塞可读判据，以及 `chunk_rev_*` 的 `out_bytes` 字节出口 —— 都属于"新增一律追加"，
+> 原符号全部保留），并在 §5 表格钉死两条消费面语义：「`recv_once()` 正返回值 = 本次完整
+> 消息/请求的字节数」与「必须先 `udp_node_readable` 再调 `chunk_rev_*`；无数据立即返回 0，
+> ⛔ 不得在共享 worker 线程上空读阻塞到 tm」。本勘误 E1/E2/E3 **继续有效**。
+>
 > **状态更新（t2 交付后）**：正文已按本勘误**就地修正**，冲突表述不复存在 ——
 > §1 的 `wait_handle()` 描述已改为"Linux 返回阻塞接收 fd、无 O_NONBLOCK/FIONBIO"
 > （E1）；§4.4 的 `add_route()` 判定表已改为"先 try_claim_recv 后查表"（E2）；

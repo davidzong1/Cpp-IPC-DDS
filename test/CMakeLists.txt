@@ -234,6 +234,15 @@ set_tests_properties(test_socket_wait_set PROPERTIES TIMEOUT 120)
 add_test(NAME test_socket_recv_worker COMMAND test_socket_recv_worker)
 set_tests_properties(test_socket_recv_worker PROPERTIES TIMEOUT 120)
 
+# t12 追加：非阻塞可读判据 readable()/udp_node_readable 的聚焦判据（见
+# test/test_socket_readable.cpp 抬头注释）。它是 socket 侧收包 worker 的**准入判据**：
+# 没有它，recv_once() 只能直接调 chunk_rev_topic/chunk_rev_server，而两者一律带 tm 且
+# 空闲时阻塞到 tm（50ms/200ms）⇒ 每次数据突发收尾都会让**共享** worker 线程空读阻塞
+# 最长 tm。三档失效（该真时不真 / 该假时不假 / 变慢）全部静默，必须常驻自动回路。
+# 用例内含真组播通道与毫秒级时间断言，实测约 0.1s；给 120s 只为卡死时报超时。
+add_test(NAME test_socket_readable COMMAND test_socket_readable)
+set_tests_properties(test_socket_readable PROPERTIES TIMEOUT 120)
+
 #target_link_libraries(${PROJECT_NAME} tcmalloc_minimal)
 
 # ================================================================
