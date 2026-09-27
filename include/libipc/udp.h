@@ -54,6 +54,62 @@ public:
     bool close() IPC_EXCEPTION_;
     void clear_cache() IPC_EXCEPTION_;
 
+    /* ---------------- 阶段 5: 可等待句柄 (纯新增, 签名冻结) ----------------
+     * 消费方: dzIPC 的 SocketWaitSet
+     * (include/dzIPC/threepools/socket_wait_set.h), 以及经
+     * dzIPC/common/data_rev.h 的 udp_node_* 四个转发接入的 socket 两个模块。
+     *
+     * 冻结语义见 docs/消息接收架构改造/
+     * ipc-transport-phase5-shared-wait-layer-contract-99ff82a0f9af.md §1,
+     * 并**以勘误** ...-errata-d8f45cfa45bb.md 的 E1 为准(勘误优先于正文):
+     *
+     *   wait_handle() **不改变** fd 的阻塞模式。Linux 返回的就是接收 fd 本身, 它
+     *   保持**阻塞**; 从 wait-set 拿到就绪后一律用 receive_nowait() 读取, 不得对该
+     *   fd 用裸 recvfrom() —— 那会让 worker 线程永久挂住。也**不得**自己给它置
+     *   非阻塞: receive(invalid_value) 的无限等待分支依赖阻塞语义, 置了会退化成
+     *   紧循环忙轮询(阶段 5 第一红线)。
+     *
+     * 不变量: wait_handle() != 0 ⇒ waitable() == true; cancel_wait() 之后
+     * waitable() == false 且 wait_handle() == 0。close() + connect() 会复位
+     * cancel 状态。 */
+
+    /* 该节点能否被多路等待: 已 connect、入组(role != SendOnly)、未被 cancel。
+     * SendOnly 不入组 ⇒ 永远收不到东西, 不构成可等待通道。 */
+    bool waitable() const noexcept;
+
+    /* 可等待句柄。Linux = 接收 fd(阻塞模式保持原样);
+     * Windows = 惰性创建的 WSAEVENT(首次调用内部做 WSAEventSelect; WinSock 的固有
+     * 副作用是把 socket 置为非阻塞)。0 表示不可等待。 */
+    std::uintptr_t wait_handle() const noexcept;
+
+    /* 取消阻塞在 wait_handle 上的等待, 并让本节点的接收面失效。
+     * Linux: shutdown(fd, SHUT_RD) —— 阻塞中的 epoll_wait / recvfrom 立刻返回,
+     *        此后 receive()/receive_nowait() 一律返回空 buffer。
+     * Windows: WSASetEvent(WSAEventSelect 的事件属于 node, 必须由 node 唤醒)。
+     * 幂等。⚠️ cancel 之后**不得**复用该 node 接收; close()+connect() 会复位。 */
+    void cancel_wait() noexcept;
+
+    /* 清除 wait_handle 上的就绪提示(level-triggered 重检前调用)。
+     * Linux: no-op(epoll 本身就是 level-triggered);
+     * Windows: WSAEnumNetworkEvents。 */
+    void clear_wait() noexcept;
+
+    /* ---------------- 阶段 5 追加(t12 裁定 C): 非阻塞可读判据 ----------------
+     *
+     * 该接收通道**当前**是否有可读数据。语义(冻结):
+     *   · 不阻塞、不改动任何状态、**不做读操作**(不消费数据、不动临时缓冲);
+     *   · 幂等、O(1)、无分配；
+     *   · server_fd 无效 / 未入组(role == SendOnly) / 已 cancel_wait 一律 false。
+     *
+     * Linux: poll(fd, POLLIN, 0) > 0(等价 FIONREAD); Windows: 对 fd 做 0 超时 select。
+     *
+     * 消费方(socket 收包 worker 的 recv_once)必须**先问它再读**:
+     * chunk_rev_topic/chunk_rev_server 一律带 tm 且空闲时会阻塞到 tm, 在**共享** worker
+     * 线程上直接调用它们, 每次数据突发收尾都会让该线程空转阻塞最长 tm(注册轮同理)。
+     * 有它就写成：if (!udp_node_readable(node)) return 0; 然后才 chunk_rev_* —— 无数据时
+     * 立即返回 0, 不占用共享线程。 */
+    bool readable() const noexcept;
+
 private:
     class UDPNode_;
     UDPNode_* p_;

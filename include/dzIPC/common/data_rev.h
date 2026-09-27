@@ -132,6 +132,26 @@ IPC_EXPORT bool chunk_rev_server(std::shared_ptr<ipc::socket::UDPNode>& node, st
                                  uint64_t tm, bool ser_or_cli,
                                  const std::shared_ptr<ipc::socket::UDPNode>& ack_node);
 
+/* --------- t12 追加: 本次完成字节数的出口 ---------
+ *
+ * 与上面**同一条**可靠路径、前 5 个参数与语义逐字节一致, 只是成功时额外把本条完整
+ * 消息/请求的**载荷长度**写进 *out_bytes(= 发送端交给分片器的字节数, meta.total_size;
+ * 单页与多页路径同值)。失败路径不保证写它 —— 调用方应只在返回 true 时读。
+ *
+ * 为什么必须是共享层出口(而不是让模块自己算):
+ *   socket 侧收包 worker 把 recv_once() 的返回值当字节数累加(socket_recv_worker.cc 的
+ *   `bytes += n`, 用于 RecvBudget::max_bytes_per_route 与 Stats::bytes_received);
+ *   而 t5 走的是 chunk_rev_server、既没有 out_payload 重载也没有任何字节出口 ⇒ 没有这
+ *   条重载时"成功"只能被记成 1 字节, 预算与统计会**静默**变错(不是崩溃, 是读数错)。
+ *
+ * 同样刻意做成重载而非给旧重载加默认参数: 保留原符号, 已链接的二进制不受影响。 */
+IPC_EXPORT bool chunk_rev_topic(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<TopicData>& rev_msg,
+                                uint64_t tm, const std::shared_ptr<ipc::socket::UDPNode>& ack_node,
+                                ipc::buffer* out_payload, std::size_t* out_bytes);
+IPC_EXPORT bool chunk_rev_server(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<ServiceData>& rev_msg,
+                                 uint64_t tm, bool ser_or_cli,
+                                 const std::shared_ptr<ipc::socket::UDPNode>& ack_node, std::size_t* out_bytes);
+
 IPC_EXPORT SocketSendReport chunk_send_ex(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publish_data,
                                           const SocketSendOptions& options);
 IPC_EXPORT bool chunk_send(std::shared_ptr<ipc::socket::UDPNode>& node, ipc::buffer& publish_data);
@@ -267,6 +287,44 @@ struct PeerAckInfo
 
 /* 读取指定发送节点的对端确认表快照, 按 receiver_id 升序 (跨线程安全)。 */
 IPC_EXPORT std::vector<PeerAckInfo> get_peer_ack_info(const ipc::socket::UDPNode* node);
+
+/* ---------------- 阶段 5: UDPNode 可等待句柄的桥接 (socket 两模块共用) ----------------
+ *
+ * socket 两个模块(socket_pub_sub / socket_ser_cli)**不直接拼句柄**, 统一走这四个
+ * 转发 —— 落点与语义见 docs/消息接收架构改造/
+ * ipc-transport-phase5-shared-wait-layer-contract-99ff82a0f9af.md §2。签名冻结。
+ *
+ * 为什么必须有这一层(而不是让模块直接 node->wait_handle()):
+ *   · 模块在 stop / 通道重建的窗口里持有的是**空 shared_ptr**, 判空漏一处就是空指针
+ *     解引用。这四个函数对 node == nullptr 一律返回中性值(false / 0 / no-op),
+ *     于是模块侧不需要在热路径上到处判空。
+ *   · 模块只 include 本头, 不 include 平台头 ⇒ socket 两模块的 .cc 里没有平台宏。
+ *
+ * 关于 wait_handle 的**阻塞模式**: 按勘误 E1(优先于契约正文), 它**不改变** fd 的
+ * 阻塞模式 —— Linux 返回的是阻塞的接收 fd。消费方从 wait-set 拿到就绪后**一律**
+ * 用 receive_nowait() / chunk_rev_* 读, 不得对返回的句柄用裸 recvfrom(), 也不得自己
+ * 置非阻塞(会把 receive(invalid_value) 的无限等待分支退化成紧循环忙轮询)。 */
+
+/* nullptr 安全: node 为空 ⇒ false。 */
+IPC_EXPORT bool udp_node_waitable(const std::shared_ptr<ipc::socket::UDPNode>& node) noexcept;
+/* nullptr 安全: node 为空 ⇒ 0(= 不可等待句柄)。 */
+IPC_EXPORT std::uintptr_t udp_node_wait_handle(const std::shared_ptr<ipc::socket::UDPNode>& node) noexcept;
+/* nullptr 安全: node 为空 ⇒ no-op(幂等, 不得崩)。 */
+IPC_EXPORT void udp_node_cancel_wait(const std::shared_ptr<ipc::socket::UDPNode>& node) noexcept;
+/* nullptr 安全: node 为空 ⇒ no-op(幂等, 不得崩)。 */
+IPC_EXPORT void udp_node_clear_wait(const std::shared_ptr<ipc::socket::UDPNode>& node) noexcept;
+
+/* [t12 追加 · 裁定 C] 非阻塞可读判据的桥接: node 为空 ⇒ false。
+ *
+ * 消费方(socket 收包 worker 的 recv_once)的**必读**语义:
+ *   chunk_rev_topic / chunk_rev_server 一律带 tm, 且空闲时会阻塞到 tm(50ms / 200ms);
+ *   在共享 worker 线程上无条件调用它们, 每次数据突发收尾都会让该线程空读阻塞最长 tm
+ *   (注册轮同理)。所以实现必须先问这个判据:
+ *       if (!dzIPC::socket::udp_node_readable(node)) return 0;   // 无数据 ⇒ 立即让出
+ *   然后才进 chunk_rev_*, 并用返回的字节数当 recv_once() 的正返回值。
+ *
+ * 语义同 UDPNode::readable(): 不阻塞、不改状态、**不做读操作**(不消费数据)。 */
+IPC_EXPORT bool udp_node_readable(const std::shared_ptr<ipc::socket::UDPNode>& node) noexcept;
 
 /* ---------------- 发送节流全局配置 (阶段 1) ----------------
  *

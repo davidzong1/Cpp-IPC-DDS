@@ -1,14 +1,19 @@
 #include "dzIPC/socket_ser_cli_ipc.h"
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>   // ::getpid()：fork 防死锁闸（与 auto_ser_cli_ipc.cc 同一取法）
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <iostream>
 #include <memory>
 #include <thread>
 #include <typeinfo>
+#include <utility>
 #include "dzIPC/common/data_rev.h"
 #include "dzIPC/common/hash.h"
 #include "dzIPC/common/name_operator.h"
+#include "dzIPC/threepools/socket_recv_worker.h"   // 阶段 5 共享层（captain 裁定 A：worker 归共享层）
 #include "ipc_msg/ipc_msg_base/udp_id_init_msg.hpp"
 #include "libipc/semaphore.h"
 #define ListenerWaitTime 1'000   // 1 second
@@ -21,6 +26,300 @@ enum class State {
     StopHS
 };
 using namespace ipc;
+
+/* ==================== 阶段 5：服务端请求接收接入共享层 socket worker ====================
+ *
+ * 分工（captain 裁定 A）：通用 socket 收包 worker（SocketRecvRouteSource / SocketRecvWorker /
+ * SocketRecvWorkerPool）由共享层 t2 交付并冻结（include/dzIPC/threepools/socket_recv_worker.h）。
+ * 本模块**只写 route 适配器 + 注册/回退/停机协议**：⛔ 不复制 worker、不新增等待原语、
+ * 不出现平台宏、不 include 另一个 socket 模块。
+ *
+ * 线程模型（worker 模式）：
+ *   共享层 worker 线程 ── recv_once() ──> chunk_rev_server（组包到**完整请求边界**，可跨分片）
+ *                                     └─ 入本 service 的**有界**请求队列
+ *   本 service 处理线程（response_thread_）── 出队 ──> 用户 callback
+ *                                     └─ response 序列化 + chunk_send
+ * ⛔ 用户 callback 与响应发送**不得**进收包 worker（需求 §1.2；recv_worker.h:214-220）。
+ *
+ * 有界队列的**满载策略**（明确，不留隐式无界堆积）：容量 kSerRequestQueueCap，满时丢**最旧**，
+ * 丢一次计一次 queue_drops。为什么不阻塞入队：worker 是**共享**的，阻塞它等于让同 worker 的
+ * 其它 route 一起等；客户端本来就是同步 rev_tm 等待，被丢的请求由它自己超时（与改造前
+ * "收包线程停了之后的请求不会被应答"是同一种失败面）。
+ *
+ * 读路径（勘误 E1，硬约束）：wait_handle() 给的 Linux fd 是**阻塞**的；从 wait-set 拿到就绪后
+ * 一律走 chunk_rev_server（内部 MSG_DONTWAIT 读第一片、按 ServerRevTime 组包），
+ * ⛔ 绝不裸 recvfrom、⛔ 绝不自己置 O_NONBLOCK。
+ */
+
+/* 注销时"等在途 recv_once 归零"的上界（与方案 §5 的 kSocketQuiesceTimeout 同值）。 */
+constexpr int64_t kSerQuiesceTimeoutMs = 2000;
+/* 处理线程等待队列的切片：仅作停机兜底唤醒（正常由 queue_cv 唤醒）。 */
+constexpr int64_t kSerQueueWaitMs = 100;
+
+/* service shared state：worker 与处理路径的共同事实来源。
+ * 收包 worker **只**通过下面的 socket_ser_request_route 适配器接触本结构，
+ * 因此 worker 不持裸 socket_ser_ipc 指针（注销后不再回调已析构对象的前提）。 */
+struct socket_ser_receive_state
+{
+    /* 稳定 service key：固定归属哈希与日志都用它，生成本对象后不再变化。 */
+    std::string route_key;
+    std::uint32_t domain_id{0};
+    /* 数据面代际：restart 建新 generation（新 state + 新适配器），旧代先完全注销。 */
+    std::uint32_t generation{0};
+
+    /* 只注册请求数据通道 ipc_r_ptr_；ack_r_tx_ 是**发送端点**、握手 socket 与数据面分离，
+     * 都不入 worker（方案 §3）。强引用 ⇒ worker 持 state 期间节点一直活着。 */
+    std::shared_ptr<ipc::socket::UDPNode> request_node;
+    std::shared_ptr<ipc::socket::UDPNode> request_ack_tx;
+    /* 响应通道：只由处理路径使用（worker 不碰）。 */
+    std::shared_ptr<ipc::socket::UDPNode> response_node;
+
+    /* 模板/回调快照：worker 与处理路径都从这里取。 */
+    mutable std::mutex mtx;
+    std::shared_ptr<ServiceData> msg_template;
+    std::function<void(std::shared_ptr<ServiceData>&)> callback;
+
+    /* 单 route 单消费者（契约 §4.6）：宿主用 atomic<RecvOwner> 三行实现。 */
+    std::atomic<threepools::RecvOwner> owner{threepools::RecvOwner::none};
+
+    /* route 生命周期：stopping 拒绝新的 recv_once；in_flight 供 wait_quiescent 等。 */
+    std::atomic<bool> stopping{false};
+    std::atomic<std::size_t> recv_in_flight{0};
+    std::mutex quiesce_mtx;
+    std::condition_variable quiesce_cv;
+
+    /* 有界请求队列：worker 入队 → 处理线程出队。 */
+    static constexpr std::size_t kQueueCap = 64;
+    std::mutex queue_mtx;
+    std::condition_variable queue_cv;
+    std::deque<std::shared_ptr<ServiceData>> queue;
+    std::atomic<std::uint64_t> queue_drops{0};
+    std::atomic<std::uint64_t> requests_received{0};
+    std::atomic<std::uint64_t> recv_errors{0};
+};
+
+namespace {
+
+/* fork 防死锁闸（captain 裁定 + socket_recv_worker.h 文件头）：池是进程级单例且 start()
+ * 一次性；fork 之后子进程继承"已 start"却没有工作线程，子进程里 add_route 会走按需拉起
+ * （要取池内部锁并创建线程），而被 fork 打断的父进程可能正持这些锁 ⇒ 子进程里死锁。
+ * 因此 owner pid != 当前 pid 时**不调用池**，改用兼容收包线程。
+ * ⛔ 判断过程只取本文件的静态锁，**不触碰池内部锁**。 */
+int32_t pool_owner_pid()
+{
+    static std::mutex gate_mtx;
+    static int32_t owner = 0;
+    const int32_t pid = static_cast<int32_t>(::getpid());
+    std::lock_guard<std::mutex> lock(gate_mtx);
+    if (owner == 0)
+    {
+        owner = pid;
+    }
+    return owner;
+}
+
+bool pool_allowed_in_this_process()
+{
+    return pool_owner_pid() == static_cast<int32_t>(::getpid());
+}
+
+/* DZIPC_SOCKET_COMPAT_THREAD=1 ⇒ 强制走兼容收包线程（与 t4 同名同义；进程内只读一次，
+ * 避免"半程切换后端"）。DZIPC_SOCKET_RECV_WORKERS 由共享池自己读一次，这里不碰。 */
+bool socket_recv_compat_forced()
+{
+    static const bool forced = [] {
+        const char* v = std::getenv("DZIPC_SOCKET_COMPAT_THREAD");
+        if (v == nullptr || v[0] == '\0')
+        {
+            return false;
+        }
+        return !(v[0] == '0' && v[1] == '\0');
+    }();
+    return forced;
+}
+
+const char* register_status_reason(threepools::RecvRegisterStatus s) noexcept
+{
+    using threepools::RecvRegisterStatus;
+    switch (s)
+    {
+    case RecvRegisterStatus::backend_unavailable:
+        return "backend_unavailable (SocketWaitSet::backend_available()==false)";
+    case RecvRegisterStatus::duplicate:
+        return "duplicate (route already registered on this worker)";
+    case RecvRegisterStatus::busy:
+        return "busy (another owner is receiving this route)";
+    case RecvRegisterStatus::stopped:
+        return "stopped (pool not started / already stopped)";
+    case RecvRegisterStatus::invalid_token:
+        return "invalid_token (request channel is not waitable)";
+    case RecvRegisterStatus::invalid_route:
+        return "invalid_route";
+    case RecvRegisterStatus::wait_set_full:
+        return "wait_set_full (channel capacity exceeded)";
+    case RecvRegisterStatus::ok:
+        break;
+    }
+    return "ok";
+}
+
+/* 一次完整请求的字节量纲：DZFlat 视图路径直接取段长（srv_data.h 的 request_sample()->size()，
+ * 零成本）；TLV owning 路径不重新序列化（那是热路径上的无谓开销），返回 1 表示"取到一次完整请求"。
+ * 契约只要求 recv_once 返回 0 = 无数据/断开、非 0 = 取到东西；两项预算里 1 MiB 只是上界提示，
+ * 真正的每轮让出由消息数(32)与处理时间(200us)决定。该口径已登记进"需回写方案文档条目"。 */
+std::size_t received_request_bytes(const std::shared_ptr<ServiceData>& request)
+{
+    if (request && request->request_is_view() && request->request_sample())
+    {
+        return request->request_sample()->size();
+    }
+    return 1;
+}
+
+void enqueue_request(const std::shared_ptr<socket_ser_receive_state>& state, std::shared_ptr<ServiceData> request)
+{
+    bool dropped = false;
+    {
+        std::lock_guard<std::mutex> lock(state->queue_mtx);
+        if (state->queue.size() >= socket_ser_receive_state::kQueueCap)
+        {
+            state->queue.pop_front();   // 满载：丢最旧，绝不阻塞共享 worker
+            dropped = true;
+        }
+        state->queue.push_back(std::move(request));
+    }
+    if (dropped)
+    {
+        state->queue_drops.fetch_add(1, std::memory_order_relaxed);
+    }
+    state->queue_cv.notify_one();
+}
+
+/* SocketRecvRouteSource 适配器：socket_ser_ipc 服务端的**请求数据通道**。
+ * recv_once() 只做"取一次到完整请求边界 + in-flight 记账 + 入队"，⛔ 不含用户 callback。 */
+class socket_ser_request_route final : public threepools::SocketRecvRouteSource
+{
+public:
+    explicit socket_ser_request_route(std::shared_ptr<socket_ser_receive_state> state)
+        : state_(std::move(state))
+    {}
+
+    const char* route_name() const noexcept override { return state_->route_key.c_str(); }
+    std::uint32_t domain_id() const noexcept override { return state_->domain_id; }
+
+    /* owner = UDPNode*（宿主侧稳定身份），handle = udp_node_wait_handle（0 = 不可等待）。 */
+    threepools::SocketWaitToken wait_token() const noexcept override
+    {
+        threepools::SocketWaitToken token;
+        token.owner = state_->request_node.get();
+        token.handle = udp_node_wait_handle(state_->request_node);   // nullptr 安全
+        return token;
+    }
+
+    std::size_t recv_once() override
+    {
+        const std::shared_ptr<socket_ser_receive_state>& state = state_;
+        if (state->stopping.load(std::memory_order_acquire))
+        {
+            return 0;
+        }
+        std::shared_ptr<ServiceData> request;
+        {
+            std::lock_guard<std::mutex> lock(state->mtx);
+            if (state->msg_template)
+            {
+                request.reset(state->msg_template->clone());
+            }
+        }
+        if (!request)
+        {
+            return 0;
+        }
+
+        state->recv_in_flight.fetch_add(1, std::memory_order_acq_rel);
+        std::size_t bytes = 0;
+        try
+        {
+            /* 一次调用 = 到**完整请求边界**（可跨多个分片；不得在组包中途切走）。
+             * 预算只在它返回之后检查（共享 worker 侧负责）。 */
+            if (chunk_rev_server(state->request_node, request, ServerRevTime, true, state->request_ack_tx))
+            {
+                bytes = received_request_bytes(request);
+            }
+        }
+        catch (...)
+        {
+            /* 绝不把异常抛给共享 worker 线程（它会 std::terminate）。 */
+            state->recv_errors.fetch_add(1, std::memory_order_relaxed);
+        }
+        state->recv_in_flight.fetch_sub(1, std::memory_order_acq_rel);
+        state->quiesce_cv.notify_all();
+
+        if (bytes == 0)
+        {
+            return 0;   // 超时/断开/组包失败
+        }
+        enqueue_request(state, std::move(request));
+        state->requests_received.fetch_add(1, std::memory_order_relaxed);
+        return bytes;
+    }
+
+    /* socket 侧没有 SHM 的 sequence 字可做廉价重检；事实来源是共享 worker 的
+     * level-triggered wait(0) 全扫，因此保持默认语义（false）。 */
+    bool has_pending() const noexcept override { return false; }
+
+    threepools::RecvOwner recv_owner() const noexcept override
+    {
+        return state_->owner.load(std::memory_order_acquire);
+    }
+
+    bool try_claim_recv(threepools::RecvOwner who) noexcept override
+    {
+        if (who == threepools::RecvOwner::none)
+        {
+            return false;
+        }
+        threepools::RecvOwner expected = threepools::RecvOwner::none;
+        return state_->owner.compare_exchange_strong(expected, who, std::memory_order_acq_rel);
+    }
+
+    /* 归还收包独占。worker 路径由 remove_route 第 6 步调用；兼容线程路径在退出前调用。
+     * 允许 worker/compat_thread 任一 owner 归还到 none（契约 §4.6 两种路径都要归还）。 */
+    void release_recv() noexcept override
+    {
+        auto expected = state_->owner.load(std::memory_order_acquire);
+        while (expected != threepools::RecvOwner::none)
+        {
+            if (state_->owner.compare_exchange_weak(expected, threepools::RecvOwner::none, std::memory_order_acq_rel))
+            {
+                break;
+            }
+        }
+    }
+
+    /* 注销协议第 3 步：置 stopping（拒绝新 recv_once）+ cancel_wait 打断在途组包。
+     * Linux 的 shutdown(SHUT_RD) 会让阻塞中的 receive/组包立刻返回空；幂等、nullptr 安全。 */
+    void stop_and_wake() noexcept override
+    {
+        state_->stopping.store(true, std::memory_order_release);
+        udp_node_cancel_wait(state_->request_node);
+        state_->queue_cv.notify_all();
+    }
+
+    /* 注销协议第 5 步：等本模块 in-flight 记账归零（有界；超时只打诊断不阻塞注销）。 */
+    void wait_quiescent() noexcept override
+    {
+        std::unique_lock<std::mutex> lock(state_->quiesce_mtx);
+        state_->quiesce_cv.wait_for(lock, std::chrono::milliseconds{kSerQuiesceTimeoutMs}, [this] {
+            return state_->recv_in_flight.load(std::memory_order_acquire) == 0;
+        });
+    }
+
+private:
+    std::shared_ptr<socket_ser_receive_state> state_;
+};
+
+}   // namespace
 
 namespace {
 /* 连接重试必须**可中断**。
@@ -90,6 +389,13 @@ void socket_ser_ipc::reset_message(const std::shared_ptr<ServiceData>& msg)
     new_msg.reset(msg->clone());
     std::lock_guard<std::mutex> lock(message_mtx_);
     message_ = std::move(new_msg);
+    /* worker 模式：worker 从 state 的**独立克隆**取模板（它不能碰本对象的 mutex）。
+     * 必须是独立对象 —— chunk_rev_server 把请求反序列化进传入的那个 ServiceData。 */
+    if (receive_state_)
+    {
+        std::lock_guard<std::mutex> state_lock(receive_state_->mtx);
+        receive_state_->msg_template.reset(message_->clone());
+    }
 }
 
 /******************************************************************************************************/
@@ -99,6 +405,12 @@ void socket_ser_ipc::reset_callback(std::function<void(std::shared_ptr<ServiceDa
 {
     std::lock_guard<std::mutex> lock(callback_mtx_);
     callback_ = std::move(callback);
+    /* worker 模式：处理路径从 state 快照取 callback（worker 侧持 state ⇒ 不持裸本对象指针）。 */
+    if (receive_state_)
+    {
+        std::lock_guard<std::mutex> state_lock(receive_state_->mtx);
+        receive_state_->callback = callback_;
+    }
 }
 
 /******************************************************************************************************/
@@ -108,18 +420,13 @@ void socket_ser_ipc::reset_callback(std::function<void(std::shared_ptr<ServiceDa
 socket_ser_ipc::~socket_ser_ipc()
 {
     running.store(false, std::memory_order_release);
-    /* 顺序: 停数据面(join response) -> join 握手线程 -> 关通道。
-     * response 线程先于握手线程 join, 因为前者读 ipc_r_ptr_, 后者只读 ser_hs (局部)。 */
+    /* 顺序: 注销接收路径(摘 route + 取消 OS wait + join 收/处理线程) -> join 握手线程
+     * -> 关通道。接收路径必须先于握手线程与关通道, 因为:
+     *   · 兼容 response 线程读 ipc_r_ptr_, worker 线程读 state->request_node;
+     *   · worker 侧可能仍持有 route 引用, 必须先由 remove_route 同步摘除;
+     *   · 关通道前必须保证没有线程还会碰这些节点, 否则是 use-after-close。 */
     data_plane_running_.store(false, std::memory_order_release);
-    if (response_thread_ != nullptr)
-    {
-        if (response_thread_->joinable())
-        {
-            response_thread_->join();
-        }
-        delete response_thread_;
-        response_thread_ = nullptr;
-    }
+    teardown_receive_path();
     /* handshake 线程也必须 join，否则析构返回后该线程仍会读取本对象的成员
        (running / topic_name_ / verbose_ 等)，造成 use-after-free。Windows
        上的堆分配器更激进地复用内存，命中崩溃的概率远高于 Linux */
@@ -161,7 +468,14 @@ void socket_ser_ipc::InitChannel(std::string extra_info)
         request_type_name = extract_last_segment(request_type_name);
         pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketServer, topic_name_, request_type_name, "socket",
                           static_cast<int32_t>(domain_id_), extra_info});
-        response_thread_ = new std::thread(&socket_ser_ipc::response_thread_func, this);
+        /* 接收路径：优先接入共享层固定 socket worker；任何非 ok / 后端不可用 / 被开关或
+         * fork 闸禁止 ⇒ start_receive_path() 已打显式原因，这里退回兼容 response 线程。 */
+        const bool worker_mode = start_receive_path();
+        /* ⛔ data_plane_running_ **最后**置位（裁定 ②）：此刻节点已建好、新 generation 已注册；
+         * 在此之前处理路径与 send_request 都必须看到"数据面未就绪"。 */
+        data_plane_running_.store(true, std::memory_order_release);
+        response_thread_ = new std::thread(
+            worker_mode ? &socket_ser_ipc::process_thread_func : &socket_ser_ipc::response_thread_func, this);
         dzIPC::ThreadDispatch::apply_thread_options(response_thread_, thread_options_, verbose_,
                                                     topic_name_ + "_SocketSerResponseThread");
         /* 握手线程只起一次。切换只换数据面, 握手通道是常驻的存活权威 (T2 §3 D6),
@@ -229,7 +543,8 @@ bool socket_ser_ipc::open_data_plane()
     {
         ack_w_rx_.reset();
     }
-    data_plane_running_.store(true, std::memory_order_release);
+    /* ⛔ 不在这里置 data_plane_running_（裁定 ②/⑥）：调用方必须在"新 generation 注册完成"
+     * 之后才置位，否则会出现"标志为真但接收路径还没接上"的窗口。 */
     return true;
 }
 
@@ -251,38 +566,32 @@ void socket_ser_ipc::close_data_plane()
     {
         ack_w_rx_->close();
     }
-    data_plane_running_.store(false, std::memory_order_release);
+    /* 标志由调用方管理（stop/析构/restart 的步序需要它"最后置真、最先置假"）。 */
 }
 
 /* ---- 数据面停/起: 路径切换的"停-切-起"里属于传输层的那一半 ----
  *
- * ⛔ 顺序不可颠倒: 先置 running=false -> response 线程退出 -> 再关通道。
- * 反过来的话, 收包线程会继续在已关闭的 node 上 receive (旧代码里 response_thread_
- * 只检查 running, 不检查 node 是否已被 close), 这是 use-after-close。
+ * 停机协议（裁定 ⑤ / 方案 §5）——顺序不可颠倒：
+ *   ① 标记 data_plane_running_=false：处理线程在完成**当前**请求后退出；拒绝新处理；
+ *   ② 同步注销 worker route：remove_route 内部完成契约 §4.4 的 1-6 步
+ *      （摘表 → wait_set.remove 唤醒 wait → stop_and_wake=cancel_wait 打断在途组包 →
+ *       等 worker 侧 in-flight 归零 → wait_quiescent 等本模块 in-flight → release_recv）；
+ *   ③ join 收/处理线程：等 callback 与响应发送 in-flight 归零（⛔ 禁止对象销毁后继续发送）；
+ *   ④ 关闭数据/ACK 节点。
+ * ⛔ 先停线程再看 worker / 反过来的话，收包线程会在已关闭的 node 上继续 receive
+ * （use-after-close）。兼容模式下没有 wait-set，② 退化为 udp_node_cancel_wait 唤醒在途 receive。
  *
  * ⛔ 不允许把"关掉握手通道让握手线程自己退"当作停数据面的手段: 那会同时打断
  * 存活检测, 让对端把一次切换读成一次断连 (T2 §3 D4)。
  *
- * 代价上界 = 当前那次 chunk_rev_server(ServerRevTime) 的剩余时间 + 关通道时间。
- * 实测该值远小于 200 ms, 但它是**有界**的, 这正是旧实现缺的那一条: 旧实现里
- * 建链失败会无限重试, 没有任何上界。 */
+ * 代价上界 = 当前那次 chunk_rev_server(ServerRevTime) 的剩余时间（cancel_wait 后更短）
+ * + 当前 callback 与响应发送的剩余时间 + 关通道时间。它是**有界**的，这正是旧实现缺的
+ * 那一条: 旧实现里建链失败会无限重试, 没有任何上界。 */
 void socket_ser_ipc::stop_data_plane()
 {
-    const bool was_running = data_plane_running_.load(std::memory_order_acquire);
-    /* 先置假 -> response 线程在收包超时后退出 -> 再关通道。顺序不可颠倒:
-     * 反过来的话收包线程会在已关闭的 node 上继续 receive, 是 use-after-close。 */
     data_plane_running_.store(false, std::memory_order_release);
-    if (response_thread_ != nullptr)
-    {
-        if (response_thread_->joinable())
-        {
-            response_thread_->join();
-        }
-        delete response_thread_;
-        response_thread_ = nullptr;
-    }
+    teardown_receive_path();
     close_data_plane();
-    (void)was_running;
     /* ⛔ 不清 handshake_completed_: 它的语义是"对端还活着", 而握手通道常驻,
      * 停数据面并不改变这个事实 (T2 §3 D6: 握手通道是唯一存活权威)。把两件事
      * 混在一个标志里会立刻产生一个死锁式的假象 —— 停过一次之后服务端永远
@@ -300,11 +609,21 @@ void socket_ser_ipc::restart_data_plane()
     {
         return;   // 对象正在析构, 不再起新线程
     }
-    if (!open_data_plane())
+    /* ⛔ restart 必须用**新 generation**，且旧代先**完全**注销再关旧节点（裁定 ②/⑥）：
+     *   完全注销旧 generation → 关旧节点 → 建并连接新节点 → 注册新 generation
+     *   → **最后**置 data_plane_running_。
+     * 反过来的话新节点可能拿到**旧 fd 号**，而旧 route 的 wait 项 / 在途 recv_once 还指着它
+     * ⇒ fd 复用事件误关联。旧 UDPNode 一律不复用（open_data_plane 每次都新建）。 */
+    teardown_receive_path();   // ① 完全注销旧 generation（含取消 OS wait 与等在途归零）
+    close_data_plane();        // ② 关旧节点（此刻已无任何线程在碰它们）
+    if (!open_data_plane())    // ③ 建并连接新节点（新 UDPNode ⇒ 新 fd）
     {
         return;
     }
-    response_thread_ = new std::thread(&socket_ser_ipc::response_thread_func, this);
+    const bool worker_mode = start_receive_path();   // ④ 注册新 generation
+    data_plane_running_.store(true, std::memory_order_release);   // ⑤ 最后置位
+    response_thread_ = new std::thread(
+        worker_mode ? &socket_ser_ipc::process_thread_func : &socket_ser_ipc::response_thread_func, this);
     dzIPC::ThreadDispatch::apply_thread_options(response_thread_, thread_options_, verbose_,
                                                 topic_name_ + "_SocketSerResponseThread");
 }
@@ -504,6 +823,184 @@ void socket_ser_ipc::response_thread_func()
                       << "\033[0m" << std::endl;
         }
     }   // 客户段发送请求
+}
+
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
+
+/* worker 模式的处理路径：出队**完整请求** → 用户 callback → 响应序列化与发送。
+ * ⛔ 这里（而不是收包 worker）才是允许跑用户回调的地方（需求 §1.2）。
+ * 停机语义与兼容 response_thread_func 逐条一致：running / data_plane_running_ 变假后，
+ * **当前这一条**处理完（含响应发送）即退出；队列里剩下的请求不再应答（已计 queue_drops
+ * 提示，与改造前"收包线程停掉后到达的请求无人应答"是同一失败面）。 */
+void socket_ser_ipc::process_thread_func()
+{
+    const std::shared_ptr<socket_ser_receive_state> state = receive_state_;
+    if (!state)
+    {
+        return;
+    }
+    while (running.load(std::memory_order_acquire) && data_plane_running_.load(std::memory_order_acquire))
+    {
+        std::shared_ptr<ServiceData> request;
+        {
+            std::unique_lock<std::mutex> lock(state->queue_mtx);
+            state->queue_cv.wait_for(lock, std::chrono::milliseconds{kSerQueueWaitMs}, [this, &state] {
+                return !state->queue.empty() || !running.load(std::memory_order_acquire)
+                       || !data_plane_running_.load(std::memory_order_acquire);
+            });
+            if (state->queue.empty())
+            {
+                continue;
+            }
+            request = std::move(state->queue.front());
+            state->queue.pop_front();
+        }
+        if (!request)
+        {
+            continue;
+        }
+        std::function<void(std::shared_ptr<ServiceData>&)> callback;
+        {
+            std::lock_guard<std::mutex> lock(state->mtx);
+            callback = state->callback;
+        }
+        if (callback)
+        {
+            callback(request);
+        }
+        ipc::buffer response_data(std::move(request->response()->serialize()));
+        /* 与兼容路径同一句: 响应走 BestEffort, 发送失败只打日志（不抛、不重试）。 */
+        if (!chunk_send(state->response_node, response_data))
+        {
+            std::cerr << "\033[31m[" << topic_name_ << "SerInfo] Error sending response: Failed to send"
+                      << "\033[0m" << std::endl;
+        }
+    }
+}
+
+/* 接收路径注册：成功返回 true（本次走固定 socket worker）。返回 false 表示**必须**
+ * 走兼容 response 线程，并且已经在 stderr 打了显式原因（绝不静默、绝不忙轮询降级）。 */
+bool socket_ser_ipc::start_receive_path()
+{
+    const auto fallback = [this](const char* why) {
+        std::cerr << "\033[33m[" << topic_name_ << "SerInfo] socket wait-set unusable (" << why
+                  << "); keeping per-service receive thread\033[0m" << std::endl;
+        return false;
+    };
+
+    if (socket_recv_compat_forced())
+    {
+        return fallback("DZIPC_SOCKET_COMPAT_THREAD=1");
+    }
+    if (!pool_allowed_in_this_process())
+    {
+        /* fork 后子进程不得碰池（池内锁可能被父进程持有）—— 见 pool_allowed_in_this_process。 */
+        return fallback("forked child: recv pool owner pid mismatch");
+    }
+    if (!threepools::SocketRecvWorkerPool::backend_available())
+    {
+        return fallback("SocketWaitSet backend unavailable");
+    }
+
+    auto state = std::make_shared<socket_ser_receive_state>();
+    state->route_key = topic_name_ + "#" + std::to_string(domain_id_);
+    state->domain_id = static_cast<std::uint32_t>(domain_id_);
+    /* 新 generation：restart 走的是"旧代完全注销 → 新代重新注册"，代际号只增不复用。 */
+    state->generation = receive_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    /* 只注册请求数据通道；ack_r_tx_ 是发送端点、握手 socket 与数据面分离，都不入 worker。 */
+    state->request_node = ipc_r_ptr_;
+    state->request_ack_tx = ack_r_tx_;
+    state->response_node = ipc_w_ptr_;
+    {
+        std::lock_guard<std::mutex> lock(message_mtx_);
+        if (message_)
+        {
+            /* 独立克隆：chunk_rev_server 会反序列化进传入的那个 ServiceData，共用模板
+             * 就等于让 worker 改模板。 */
+            state->msg_template.reset(message_->clone());
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(callback_mtx_);
+        state->callback = callback_;
+    }
+
+    auto route = std::make_shared<socket_ser_request_route>(state);
+    if (!route->wait_token().valid())
+    {
+        return fallback("request channel is not waitable (invalid_token)");
+    }
+    auto& pool = threepools::SocketRecvWorkerPool::instance();
+    if (!pool.running())
+    {
+        (void)pool.start();   // 一次性；已被别的 service/模块启动过时返回 false
+    }
+    if (!pool.running())
+    {
+        return fallback("SocketRecvWorkerPool::start() failed (thread creation?)");
+    }
+    const threepools::RecvRegisterStatus status = pool.add_route(route);
+    if (status != threepools::RecvRegisterStatus::ok)
+    {
+        return fallback(register_status_reason(status));
+    }
+    receive_state_ = state;
+    receive_route_ = route;
+    worker_mode_ = true;
+    if (verbose_)
+    {
+        std::cerr << "\033[32m[" << topic_name_ << "SerInfo] request receive on shared socket worker "
+                  << threepools::SocketRecvWorkerPool::worker_for(state->route_key.c_str(), state->domain_id,
+                                                                  pool.worker_count())
+                  << " (generation " << state->generation << ", workers " << pool.worker_count() << ")\033[0m"
+                  << std::endl;
+    }
+    return true;
+}
+
+/* 接收路径注销：返回即"shared worker 不会再碰这条 route，本对象可以安全关节点/析构"。 */
+void socket_ser_ipc::teardown_receive_path()
+{
+    if (worker_mode_ && receive_route_)
+    {
+        /* 契约 §4.4 的 1-6 步由 remove_route 同步完成（含 cancel_wait 与 release_recv）。 */
+        threepools::SocketRecvWorkerPool::instance().remove_route(receive_route_.get());
+    }
+    else if (ipc_r_ptr_ && udp_node_waitable(ipc_r_ptr_))
+    {
+        /* 兼容模式：收包线程可能正阻塞在 receive(ServerRevTime)。cancel_wait 让它立刻
+         * 返回（shutdown(SHUT_RD)），不必等满 200ms；节点随后由 close_data_plane 关闭。
+         * 只在仍可等待时调，避免对已关闭（fd 号可能被复用）的节点做 shutdown。 */
+        udp_node_cancel_wait(ipc_r_ptr_);
+    }
+
+    /* 等当前 callback 与响应发送结束（⛔ 禁止对象销毁后继续发送响应）。 */
+    if (response_thread_ != nullptr)
+    {
+        if (response_thread_->joinable())
+        {
+            response_thread_->join();
+        }
+        delete response_thread_;
+        response_thread_ = nullptr;
+    }
+
+    /* 队列里尚未处理的请求随本代作废（与改造前"收包线程停了之后无人应答"同一面），
+     * 计数而不是静默丢弃。 */
+    if (receive_state_)
+    {
+        std::lock_guard<std::mutex> lock(receive_state_->queue_mtx);
+        if (!receive_state_->queue.empty())
+        {
+            receive_state_->queue_drops.fetch_add(receive_state_->queue.size(), std::memory_order_relaxed);
+            receive_state_->queue.clear();
+        }
+    }
+    receive_route_.reset();
+    receive_state_.reset();
+    worker_mode_ = false;
 }
 
 /******************************************************************************************************/

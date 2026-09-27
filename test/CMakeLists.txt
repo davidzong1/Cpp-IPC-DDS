@@ -203,6 +203,37 @@ set_tests_properties(test_shm_ready_transition PROPERTIES TIMEOUT 120)
 add_test(NAME test_recv_wait_set COMMAND test_recv_wait_set)
 set_tests_properties(test_recv_wait_set PROPERTIES TIMEOUT 120)
 
+# 阶段 5 共享等待层 / 固定收包 worker 的两个聚焦套件（见 test/test_recv_worker.cpp
+# 与 test/test_socket_wait_set.cpp 抬头注释）。
+# 必须进 CTest 的理由与上面几项同构 —— 它们守的失效方式**全部是静默**的：
+#   · recv_worker：固定归属漂移 ⇒ thread_local 分片缓存换槽 ⇒ 偶发丢消息；
+#     注销不等在途 recv_once ⇒ 偶发 SIGSEGV；预算耗尽当丢弃 ⇒ 热话题静默丢包；
+#     单消费者互斥漏掉 ⇒ 兼容线程与 worker 双收同一条 route。
+#   · socket_wait_set：remove/stop 不唤醒阻塞中的 wait ⇒ worker 睡过注销 ⇒ 宿主按
+#     协议释放通道后被打（UAF）；摘除不彻底 ⇒ fd 复用把旧事件算到新通道 ⇒ 空转；
+#     只消费事件不真读 ⇒ LT 下忙轮询吃满 CPU。
+# 手工跑 build/bin/<name> 进不了任何自动回路，这两套件就是它们唯一的常驻判据。
+# target 由上面 file(GLOB) 自动生成，无需 add_executable。命名规范同前。
+#
+# 用例内含真 pub/sub、多线程 churn 与若干秒级有界等待（idle exit 一项本身要等
+# 1.1s 量级），实测两套件合计约 20s；给 120s 只为在死锁（本套件要抓的失败模式：
+# 注销等待在途 recv 时自锁、wait 线程永不返回）时让 ctest 报超时而非永久阻塞构建机，
+# 不是性能判据。
+add_test(NAME test_recv_worker COMMAND test_recv_worker)
+set_tests_properties(test_recv_worker PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_socket_wait_set COMMAND test_socket_wait_set)
+set_tests_properties(test_socket_wait_set PROPERTIES TIMEOUT 120)
+
+# 阶段 5 socket 侧共享收包 worker 的聚焦自检（见 test/test_socket_recv_worker.cpp
+# 抬头注释）。它与 test_recv_worker 同构：socket 收包 worker 是 t4（socket_pub_sub）
+# 与 t5（socket_ser_cli）共同消费的共享组件，四种失效方式（固定归属漂移 /
+# 与兼容收包线程双收 / 注销不唤醒阻塞中的 wait / 空闲退出后不按需拉起）**全部静默**，
+# 手工跑 build/bin/test_socket_recv_worker 进不了任何自动回路。
+# 用例内含真组播通道与若干秒级有界等待，实测约 2s；给 120s 只为卡死时报超时。
+add_test(NAME test_socket_recv_worker COMMAND test_socket_recv_worker)
+set_tests_properties(test_socket_recv_worker PROPERTIES TIMEOUT 120)
+
 #target_link_libraries(${PROJECT_NAME} tcmalloc_minimal)
 
 # ================================================================

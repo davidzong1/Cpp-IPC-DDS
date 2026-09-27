@@ -111,5 +111,50 @@ void UDPNode::clear_cache() IPC_EXCEPTION_
     if (n == nullptr) return;
     n->node_.clear_cache();
 }
+
+/* ---------------- 阶段 5: 可等待句柄的 pimpl 转发 ----------------
+ * 勘误 E3 指定的**唯一落点**: include/libipc/udp.h 新增的 4 个声明的实现在这里,
+ * 缺了就是未定义符号、链接失败。内容只有"4 个纯转发 + 失效态中性值", 不触碰任何
+ * 既有方法。
+ *
+ * 失效态(p_ == nullptr, 见上面 UF-002)必须返回**中性值**, 而不是抛/崩:
+ *   waitable    -> false (不可等待 ⇒ 调用方走兼容回退)
+ *   wait_handle -> 0     (0 是"不可等待句柄"的冻结编码)
+ *   cancel_wait / clear_wait -> no-op (幂等, 不得崩)
+ * 与既有方法同一口径: connect() 失效态返回 false, receive* 失效态返回空 buffer。 */
+
+bool UDPNode::waitable() const noexcept
+{
+    auto n = impl(p_);
+    return (n == nullptr) ? false : n->node_.waitable();
+}
+
+std::uintptr_t UDPNode::wait_handle() const noexcept
+{
+    auto n = impl(p_);
+    return (n == nullptr) ? std::uintptr_t{0} : n->node_.wait_handle();
+}
+
+void UDPNode::cancel_wait() noexcept
+{
+    auto n = impl(p_);
+    if (n == nullptr) return;
+    n->node_.cancel_wait();
+}
+
+void UDPNode::clear_wait() noexcept
+{
+    auto n = impl(p_);
+    if (n == nullptr) return;
+    n->node_.clear_wait();
+}
+
+/* 阶段 5 追加(t12 裁定 C): 非阻塞可读判据的纯转发。失效态(p_ == nullptr)同样返回
+ * 中性值 false —— 与 waitable() 同口径("不可读" ⇒ 调用方走兼容回退, 而不是空转)。 */
+bool UDPNode::readable() const noexcept
+{
+    auto n = impl(p_);
+    return (n == nullptr) ? false : n->node_.readable();
+}
 }   // namespace socket
 }   // namespace ipc

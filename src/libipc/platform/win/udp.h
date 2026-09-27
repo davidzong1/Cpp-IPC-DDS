@@ -18,6 +18,12 @@ class UDPNode
     SOCKET server_fd{INVALID_SOCKET};
     std::vector<char> temp_buffer;
     ipc::socket::NodeRole role{ipc::socket::NodeRole::SendRecv};
+    /* 阶段 5: 惰性创建的可等待事件(WSAEventSelect)。WSA_INVALID_EVENT = 尚未创建。
+     * mutable 是因为公开接口 wait_handle() 是 const noexcept(契约冻结签名),
+     * 而首次调用需要建事件 —— 与 POSIX 侧(返回已有的 fd)在签名上对齐。 */
+    mutable WSAEVENT wait_event_{WSA_INVALID_EVENT};
+    /* cancel_wait() 之后置位: 接收面失效, waitable()/wait_handle() 变中性值。 */
+    bool cancelled_{false};
 
     /* 见 posix/udp.h 同名函数: 只有入组的 socket 才收得到组播,
      * 只发不收的节点跳过入组以屏蔽自己的回绕。 */
@@ -56,6 +62,8 @@ public:
         , server_fd(rhs.server_fd)
         , temp_buffer(std::move(rhs.temp_buffer))
         , role(rhs.role)
+        , wait_event_(rhs.wait_event_)
+        , cancelled_(rhs.cancelled_)
     {
         std::memcpy(name, rhs.name, sizeof(name));
         std::memcpy(ip, rhs.ip, sizeof(ip));
@@ -64,6 +72,10 @@ public:
         rhs.ip[0] = '\0';
         rhs.port = 0;
         rhs.role = ipc::socket::NodeRole::SendRecv;
+        /* 阶段 5: 事件的所有权随句柄转移 —— 源对象析构时不得关它(否则新对象手里
+         * 就是一个已关闭句柄, WaitForMultipleObjects 会 WAIT_FAILED)。 */
+        rhs.wait_event_ = WSA_INVALID_EVENT;
+        rhs.cancelled_ = false;
     }
 
     UDPNode& operator=(UDPNode&& rhs) noexcept
@@ -77,11 +89,16 @@ public:
             server_fd = rhs.server_fd;
             temp_buffer = std::move(rhs.temp_buffer);
             role = rhs.role;
+            /* 阶段 5: 事件所有权随句柄转移, 同移动构造。 */
+            wait_event_ = rhs.wait_event_;
+            cancelled_ = rhs.cancelled_;
             rhs.server_fd = INVALID_SOCKET;
             rhs.name[0] = '\0';
             rhs.ip[0] = '\0';
             rhs.port = 0;
             rhs.role = ipc::socket::NodeRole::SendRecv;
+            rhs.wait_event_ = WSA_INVALID_EVENT;
+            rhs.cancelled_ = false;
         }
         return *this;
     }
@@ -91,6 +108,13 @@ public:
     ~UDPNode()
     {
         close();
+        /* 阶段 5: 关掉惰性创建的可等待事件。close() 已先解除 WSAEventSelect 关联,
+         * 这里才是事件的最终释放点(移动后的源对象 wait_event_ 已置空)。 */
+        if (wait_event_ != WSA_INVALID_EVENT)
+        {
+            ::WSACloseEvent(wait_event_);
+            wait_event_ = WSA_INVALID_EVENT;
+        }
     }
 
     UDPNode(const char* name, const char* ip, uint16_t port, ipc::socket::NodeRole role)
@@ -134,6 +158,9 @@ public:
 
         this->port = port;
         this->server_fd = INVALID_SOCKET;
+        /* 阶段 5: 重建节点复位 cancel 状态(冻结不变量: cancel 之后 waitable()==false /
+         * wait_handle()==0, 只有 close()+connect() 能恢复)。惰性事件本身保留复用。 */
+        cancelled_ = false;
         temp_buffer.resize(1'472);   // 预分配最大UDP报文长度
     }
 
@@ -190,6 +217,8 @@ public:
         {
             return false;
         }
+        /* 阶段 5: close() + connect() 复位 cancel 状态(见 create() 注释)。 */
+        cancelled_ = false;
 
         BOOL reuse = TRUE;
         int nRecvBuf = 1'024 * 1'024;   // 1MB
@@ -288,6 +317,10 @@ public:
         /* SendOnly 没有入组, 永远收不到东西。 */
         if (server_fd == INVALID_SOCKET || !joins_group())
             return ipc::buffer();
+        /* 阶段 5: cancel_wait() 之后接收面失效(冻结语义: 一律空 buffer), 不依赖
+         * shutdown 后 Winsock 的具体错误码。 */
+        if (cancelled_)
+            return ipc::buffer();
 
         fd_set read_fds;
         FD_ZERO(&read_fds);
@@ -324,6 +357,9 @@ public:
     {
         /* 同 receive_nowait: SendOnly 不入组, 等下去只是白白阻塞。 */
         if (server_fd == INVALID_SOCKET || !joins_group())
+            return ipc::buffer();
+        /* 阶段 5: cancel 之后一律返回空, 且**不得**跑无限等待分支。 */
+        if (cancelled_)
             return ipc::buffer();
 
         int err_cnt = 0;
@@ -419,6 +455,15 @@ public:
             ::setsockopt(server_fd, IPPROTO_IP, IP_DROP_MEMBERSHIP, reinterpret_cast<char*>(&mreq), sizeof(mreq));
         }
 
+        /* 阶段 5: 先解除 WSAEventSelect 关联再关 socket。
+         * WSAEventSelect 的事件属于 node(不是 socket), close 之后它还必须能用
+         * (cancel_wait 的 WSASetEvent 只有一个事件句柄可敲), 所以**不**在这里关它;
+         * 真正释放留到 wait_handle() 创建新事件或进程退出。 */
+        if (wait_event_ != WSA_INVALID_EVENT)
+        {
+            ::WSAEventSelect(server_fd, wait_event_, 0);
+        }
+
         ::closesocket(server_fd);
         server_fd = INVALID_SOCKET;
         return true;
@@ -442,6 +487,112 @@ public:
             if (::recvfrom(server_fd, discard_buf, int(sizeof(discard_buf)), 0, nullptr, nullptr) <= 0)
                 break;
         }
+    }
+
+    /* ================= 阶段 5: 可等待句柄 (平台实现) =================
+     * 被 ipc::socket::UDPNode 的同名方法(纯转发, src/libipc/socket/udp.cpp)调用,
+     * 语义冻结于契约 §1 与勘误 E1。 */
+
+    /* 同 POSIX 侧: 已连接 + 入组 + 未 cancel。SendOnly 不入组 ⇒ 不可等待。 */
+    bool waitable() const noexcept
+    {
+        return server_fd != INVALID_SOCKET && joins_group() && !cancelled_;
+    }
+
+    /* 可等待句柄 = 惰性创建的 WSAEVENT(不是 SOCKET)。
+     *
+     * 首次调用内部做 WSAEventSelect(fd, event, FD_READ | FD_CLOSE) —— WinSock 的
+     * 固有副作用是把该 socket 置为非阻塞, 这里没有显式 FIONBIO(勘误 E1 明确不要加)。
+     * 0 = 不可等待。
+     *
+     * 事件属于 node 而不是 socket: close() 只解除关联, 事件本身留到析构才关, 这样
+     * cancel_wait() 的 WSASetEvent 始终有一个有效句柄可敲。 */
+    std::uintptr_t wait_handle() const noexcept
+    {
+        if (!waitable())
+        {
+            return std::uintptr_t{0};
+        }
+        if (wait_event_ == WSA_INVALID_EVENT)
+        {
+            if (!ensure_wsa())
+            {
+                return std::uintptr_t{0};   // Winsock 未初始化 ⇒ 按不可等待处理
+            }
+            wait_event_ = ::WSACreateEvent();
+            if (wait_event_ == WSA_INVALID_EVENT)
+            {
+                return std::uintptr_t{0};   // 事件创建失败 ⇒ 走兼容回退, 不假装可等待
+            }
+        }
+        if (::WSAEventSelect(server_fd, wait_event_, FD_READ | FD_CLOSE) == SOCKET_ERROR)
+        {
+            /* 关联失败(例如 socket 刚被别的线程关掉) ⇒ 同样按不可等待处理。事件句柄保留:
+             * 下一次 close()+connect() 会重新关联。 */
+            return std::uintptr_t{0};
+        }
+        return reinterpret_cast<std::uintptr_t>(wait_event_);
+    }
+
+    /* 取消阻塞在 wait_handle 上的等待。
+     * Windows 侧不能靠 shutdown 唤醒 WaitForMultipleObjects —— 事件是 node 的, 敲自己的
+     * 事件是唯一手段。shutdown(SD_RECEIVE) 同时让读面失效(此后 recvfrom 立刻返回错误 ⇒
+     * receive* 返回空 buffer)。幂等。 */
+    void cancel_wait() noexcept
+    {
+        if (cancelled_)
+        {
+            return;
+        }
+        cancelled_ = true;
+        if (wait_event_ != WSA_INVALID_EVENT)
+        {
+            ::WSASetEvent(wait_event_);
+        }
+        if (server_fd != INVALID_SOCKET)
+        {
+            ::shutdown(server_fd, SD_RECEIVE);   // 关闭读方向
+        }
+    }
+
+    /* 清除 wait_handle 上的就绪提示: 回收 WSAEventSelect 记录的网络事件。
+     * 没有这一步事件会保持置位(WSAEventSelect 是边沿记录 + 手动回收), 下一次
+     * WaitForMultipleObjects 立刻返回同一通道 ⇒ level-triggered 重检退化成忙轮询。 */
+    void clear_wait() noexcept
+    {
+        if (server_fd == INVALID_SOCKET || wait_event_ == WSA_INVALID_EVENT)
+        {
+            return;
+        }
+        WSANETWORKEVENTS events{};
+        ::WSAEnumNetworkEvents(server_fd, wait_event_, &events);   // 同时重置事件
+    }
+
+    /* ---------------- 阶段 5 追加(t12 裁定 C): 非阻塞可读判据 ----------------
+     *
+     * 0 超时 select ⇒ 不阻塞、无分配、O(1), 且**不做读操作**(不消费数据)。
+     *
+     * ⛔ 刻意**不用** WSAEventSelect 的事件查询(如 WSAWaitForMultipleEvents(0)):
+     * 那个事件是"边沿记录"语义(见 clear_wait 注释), 查询/回收会**改变**事件状态,
+     * 而本函数的冻结语义是"不改变任何状态"。select 只读内核的接收队列状态, 幂等,
+     * 且与 wait_handle 的事件机制互不干扰。
+     *
+     * 语义边界同 POSIX 侧: 无效 fd / 未入组 / 已 cancel 一律 false。注意
+     * WaitForMultipleObjects 的就绪在 cancel 之后由 WSASetEvent 提供, 而这里返回
+     * false —— 两者服务不同的问题("该不该醒来" vs "有没有真数据"), 消费方据此区分
+     * "被唤醒" 与 "有数据可读"。 */
+    bool readable() const noexcept
+    {
+        if (server_fd == INVALID_SOCKET || !joins_group() || cancelled_)
+        {
+            return false;
+        }
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(server_fd, &read_fds);
+        timeval timeout{};   // 0 超时 = 纯查询
+        const int rc = ::select(0, &read_fds, nullptr, nullptr, &timeout);
+        return rc > 0 && FD_ISSET(server_fd, &read_fds);
     }
 };
 }   // namespace socket

@@ -1627,9 +1627,18 @@ bool wire_is_dzflat(const ipc::buffer& frame)
  *
  * 为什么出口参数做成"可空": 原有的两个 chunk_rev_topic 与两个 chunk_rev_server 都只
  * 需要物化结果、不关心缓冲, 让它们继续传 nullptr, 行为与改动前逐字节一致 —— 这是
- * "缺省即旧行为"的落点, 也是 out_payload 非空时才付那份拷贝的原因。 */
+ * "缺省即旧行为"的落点, 也是 out_payload 非空时才付那份拷贝的原因。
+ *
+ * [t12 追加] out_bytes: 成功返回时置为**本条完整消息/请求的载荷长度**
+ * (meta.total_size = 发送端交给分片器的字节数; 单页路径同值)。它存在的理由是
+ * socket 侧收包 worker 把 recv_once() 的返回值当字节数累加
+ * (socket_recv_worker.cc 的 bytes += n), 而 chunk_rev_server 没有 out_payload
+ * 重载、TopicData 也没有任何字节出口 ⇒ 没有它时 bytes_received /
+ * max_bytes_per_route 会退化成"每条 1 字节"的静默错误读数。
+ * 失败路径不保证写它(调用方应只在返回 true 时读); 传 nullptr 时行为与改动前一致。 */
 bool recv_chunk_common_impl(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ack_node,
-                            std::shared_ptr<IpcMsgBase>& msg_ptr, uint64_t tm, ipc::buffer* out_payload)
+                            std::shared_ptr<IpcMsgBase>& msg_ptr, uint64_t tm, ipc::buffer* out_payload,
+                            std::size_t* out_bytes = nullptr)
 {
     const auto begin = std::chrono::steady_clock::now();
 
@@ -1690,6 +1699,8 @@ bool recv_chunk_common_impl(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ac
             msg_ptr->deserialize(first_page);
         }
         send_ack(ack_out, meta, payload_crc32c, fb_ok, /*lost_pages=*/0, /*observed_bps=*/0);
+        /* 单页路径: 上面的检查已确认 first_page.size() == meta.total_size。 */
+        if (out_bytes != nullptr) *out_bytes = meta.total_size;
         return true;
     }
 
@@ -1935,6 +1946,8 @@ bool recv_chunk_common_impl(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ac
     const uint64_t asm_ms = elapsed_ms(assembly_begin);
     const uint32_t observed_bps = (asm_ms >= 1) ? static_cast<uint32_t>(meta.total_size * 1000 / asm_ms) : 0;
     send_ack(ack_out, meta, payload_crc32c, sender_feedback_ok, lost_pages, observed_bps);
+    /* 多页路径: 组装完成的载荷长度 = meta.total_size(与 assembled 的尺寸同源)。 */
+    if (out_bytes != nullptr) *out_bytes = meta.total_size;
     return true;
 }
 }   // namespace
@@ -1962,6 +1975,16 @@ bool chunk_rev_topic(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_pt
     return recv_chunk_common_impl(*node, ack_node ? ack_node.get() : nullptr, msg_ptr, tm, out_payload);
 }
 
+/* [t12 追加] 多了字节出口的重载(上面那个的严格超集): 前 5 个参数与语义逐字节一致,
+ * 只是成功时额外把本条消息的载荷长度写进 *out_bytes。append-only, 原符号保留。 */
+bool chunk_rev_topic(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<TopicData>& rev_msg, uint64_t tm,
+                     const std::shared_ptr<ipc::socket::UDPNode>& ack_node, ipc::buffer* out_payload,
+                     std::size_t* out_bytes)
+{
+    std::shared_ptr<IpcMsgBase> msg_ptr = rev_msg->topic();
+    return recv_chunk_common_impl(*node, ack_node ? ack_node.get() : nullptr, msg_ptr, tm, out_payload, out_bytes);
+}
+
 bool chunk_rev_server(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<ServiceData>& rev_msg, uint64_t tm,
                       bool ser_or_cli)
 {
@@ -1974,6 +1997,18 @@ bool chunk_rev_server(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_p
 {
     std::shared_ptr<IpcMsgBase> msg_ptr = ser_or_cli ? rev_msg->request() : rev_msg->response();
     return recv_chunk_common_impl(*node, ack_node ? ack_node.get() : nullptr, msg_ptr, tm, nullptr);
+}
+
+/* [t12 追加] 多了字节出口的重载。t5(socket_ser_cli)走的是 chunk_rev_server 且没有
+ * out_payload 重载、TopicData/ServiceData 也没有任何字节出口 —— 没有这条, worker 侧
+ * 只能把"成功"记成 1 字节(bytes_received / max_bytes_per_route 静默变错)。
+ * 前 5 个参数与语义与上面逐字节一致; append-only, 原符号保留。 */
+bool chunk_rev_server(std::shared_ptr<ipc::socket::UDPNode>& node, std::shared_ptr<ServiceData>& rev_msg, uint64_t tm,
+                      bool ser_or_cli, const std::shared_ptr<ipc::socket::UDPNode>& ack_node,
+                      std::size_t* out_bytes)
+{
+    std::shared_ptr<IpcMsgBase> msg_ptr = ser_or_cli ? rev_msg->request() : rev_msg->response();
+    return recv_chunk_common_impl(*node, ack_node ? ack_node.get() : nullptr, msg_ptr, tm, nullptr, out_bytes);
 }
 
 ipc::buffer chunk_rev_sniff(ipc::socket::UDPNode& node, uint64_t tm)
@@ -2890,6 +2925,43 @@ std::vector<PeerAckInfo> get_peer_ack_info(const ipc::socket::UDPNode* node)
     std::sort(out.begin(), out.end(),
               [](const PeerAckInfo& a, const PeerAckInfo& b) { return a.receiver_id < b.receiver_id; });
     return out;
+}
+/* ---------------- 阶段 5: UDPNode 可等待句柄的桥接实现 ----------------
+ * 4 个 nullptr 安全转发, 语义见 data_rev.h 同名声明处的注释与契约 §2。
+ * 这一层刻意薄: 它不缓存句柄、不做平台判断(平台差异全在 libipc 的 UDPNode 之后),
+ * 只是把"空 shared_ptr 是合法输入"这件事收敛到一个地方。 */
+
+bool udp_node_waitable(const std::shared_ptr<ipc::socket::UDPNode>& node) noexcept
+{
+    return node ? node->waitable() : false;
+}
+
+std::uintptr_t udp_node_wait_handle(const std::shared_ptr<ipc::socket::UDPNode>& node) noexcept
+{
+    return node ? node->wait_handle() : std::uintptr_t{0};
+}
+
+void udp_node_cancel_wait(const std::shared_ptr<ipc::socket::UDPNode>& node) noexcept
+{
+    if (node)
+    {
+        node->cancel_wait();
+    }
+}
+
+void udp_node_clear_wait(const std::shared_ptr<ipc::socket::UDPNode>& node) noexcept
+{
+    if (node)
+    {
+        node->clear_wait();
+    }
+}
+
+/* [t12 追加 · 裁定 C] 非阻塞可读判据。nullptr ⇒ false(与其它三个转发同一口径:
+ * 模块在 stop / 通道重建窗口里持有的就是空 shared_ptr)。 */
+bool udp_node_readable(const std::shared_ptr<ipc::socket::UDPNode>& node) noexcept
+{
+    return node ? node->readable() : false;
 }
 }   // namespace socket
 }   // namespace dzIPC

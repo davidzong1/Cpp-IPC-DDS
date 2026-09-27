@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <chrono>
@@ -25,6 +26,9 @@ class UDPNode
     ipc::buffer temp_buffer;
     char rev_fail_fail{};
     ipc::socket::NodeRole role{ipc::socket::NodeRole::SendRecv};
+    /* 阶段 5: cancel_wait() 之后置位 —— 接收面失效, waitable()/wait_handle()
+     * 变中性值(false / 0)。create()/connect() 复位。 */
+    bool cancelled_{false};
 
     /* 只有入了组的 socket 才会收到组播流量; 只发不收的节点跳过入组,
      * 从而天然屏蔽掉自己发出去又被内核回绕回来的分片。 */
@@ -52,6 +56,9 @@ public:
         strncpy(this->ip, ip, sizeof(this->ip) - 1);
         this->port = port;
         this->role = role;
+        /* 阶段 5: 重建节点复位 cancel 状态(冻结不变量: cancel 之后 waitable()==false /
+         * wait_handle()==0, 只有 close()+connect() 能恢复)。 */
+        cancelled_ = false;
         uint8_t* ptr = new uint8_t[1'472];
         temp_buffer = ipc::buffer(ptr, 1'472, [](void* p, std::size_t s)
                                   { delete[] static_cast<uint8_t*>(p); });   // 预分配最大UDP报文长度
@@ -137,6 +144,9 @@ public:
         {
             return false;
         }
+        /* 阶段 5: close()+connect() 复位 cancel 状态(冻结不变量: cancel 之后
+         * waitable()==false / wait_handle()==0, 只有重新连接才能恢复可等待)。 */
+        cancelled_ = false;
 
         int reuse = 1;
         int nRecvBuf = 1'024 * 1'024;   // 1MB
@@ -272,6 +282,12 @@ public:
         if (server_fd < 0 || !joins_group())
             return ipc::buffer();
 
+        /* 阶段 5: cancel_wait() 之后接收面失效 —— shutdown(fd, SHUT_RD) 已排空接收,
+         * 这里再显式短路, 保证"cancel 之后一律空 buffer"这条冻结语义不依赖内核
+         * 对已 shutdown 的 UDP socket 的具体返回形态。 */
+        if (cancelled_)
+            return ipc::buffer();
+
         ssize_t received = ::recvfrom(server_fd, temp_buffer.data(), temp_buffer.size(), MSG_DONTWAIT, nullptr, nullptr);
         if (received >= 0)
         {
@@ -290,6 +306,11 @@ public:
          * 这一条很关键 —— chunk_send_ex 的 ACK 等待循环若跑在 SendOnly 上,
          * 没有这个短路就会把 5 轮预算全耗在 select() 上。 */
         if (server_fd < 0 || !joins_group())
+            return ipc::buffer();
+
+        /* 阶段 5: 同 receive_nowait —— cancel 之后一律返回空, 且**不得**在已
+         * shutdown 的 fd 上跑无限等待分支(会立刻 EAGAIN 或紧循环)。 */
+        if (cancelled_)
             return ipc::buffer();
 
         int err_cnt = 0;
@@ -401,6 +422,110 @@ public:
         char discard_buf[4'096];
         while (::recvfrom(server_fd, discard_buf, sizeof(discard_buf), MSG_DONTWAIT, nullptr, nullptr) > 0)
             ;
+    }
+
+    /* ================= 阶段 5: 可等待句柄 (平台实现) =================
+     * 被 ipc::socket::UDPNode 的同名方法(*纯转发*, src/libipc/socket/udp.cpp)调用,
+     * 语义冻结于契约 §1 与勘误 E1(勘误优先于正文)。 */
+
+    /* 该节点能否被多路等待: 已连接 + 入组 + 未被 cancel。
+     * SendOnly 不入组 ⇒ 永远收不到东西, 不构成可等待通道。 */
+    bool waitable() const noexcept
+    {
+        return server_fd >= 0 && joins_group() && !cancelled_;
+    }
+
+    /* 可等待句柄 = 接收 fd。
+     *
+     * ⛔ 勘误 E1: **不改变** fd 的阻塞模式 —— 这里没有 fcntl(O_NONBLOCK), 返回的
+     * 就是那个**阻塞**的接收 fd。
+     *
+     * 依据(实现侧): epoll 是 level-triggered, 单消费者下 epoll_wait 报可读 ⇒ 数据
+     * 一定还在, 读的时候用 MSG_DONTWAIT(receive_nowait)即可, 不需要把 fd 本身置成
+     * 非阻塞; 而置了会**破坏既有语义** —— receive(invalid_value) 的无限等待分支用的
+     * 是不带 MSG_DONTWAIT 的阻塞 recvfrom, 非阻塞 fd 上它会立刻返回 EAGAIN, 调用方
+     * (如 data_rev.cc 的 ACK 等待)就从"阻塞等到数据"退化成紧循环忙轮询。
+     *
+     * 返回类型: fd 是 int, 转 std::uintptr_t 是无损的(非负小整数); 0 = 不可等待
+     * (fd 0 是合法 stdin, 但 UDPNode 的接收 fd 一定是 socket(), 不会是 0 —— 即便
+     * 理论上的极端情形, 也是"不可等待"这一侧的安全误判, 消费方回退兼容线程)。 */
+    std::uintptr_t wait_handle() const noexcept
+    {
+        if (!waitable())
+        {
+            return std::uintptr_t{0};
+        }
+        return static_cast<std::uintptr_t>(server_fd);
+    }
+
+    /* 取消阻塞在 wait_handle 上的等待, 并让本节点的接收面失效。
+     *
+     * shutdown(fd, SHUT_RD) 是 Linux 上唯一能**同时**做到两件事的手段:
+     *   · 让阻塞在 epoll_wait 上的等待方立刻返回(该 fd 变成 EPOLLIN|EPOLLRDHUP
+     *     就绪 —— 这正是 test_socket_wait_set.cpp 的 CancelWaitWakesBlockedWait
+     *     用例守的东西; 实测: 对 fd 只做了一个 epoll_ctl(DEL) 是**不会**唤醒
+     *     epoll_wait 的, 那会一直睡到超时, 所以唤醒必须走 shutdown 或独立通道);
+     *   · 让此后所有 recvfrom 立刻返回 0 ⇒ receive()/receive_nowait() 返回空。
+     * 幂等: 重复调用对已 shutdown 的 fd 是 no-op(errno 而已, 不检查不报错);
+     * cancelled_ 置位后 waitable()/wait_handle() 立即变中性值。
+     *
+     * ⛔ 不复用该 node 接收(契约 §1): 要恢复就 close() + connect()。 */
+    void cancel_wait() noexcept
+    {
+        if (cancelled_)
+        {
+            return;   // 幂等: 已取消的直接返回, 不再打内核
+        }
+        cancelled_ = true;
+        if (server_fd >= 0)
+        {
+            /* 返回值刻意不检查: SHUT_RD 对 UDP socket 已经"关了读"时可能返回
+             * ENOTCONN, 而无论哪种情形, 读面都已经失效 —— 这正是我们要的结果。 */
+            ::shutdown(server_fd, SHUT_RD);
+        }
+    }
+
+    /* 清除 wait_handle 上的就绪提示。
+     * Linux: **no-op** —— epoll 本身是 level-triggered, 直接重查 fd 的可读状态即可,
+     * 没有 Windows 那种需要 WSAEnumNetworkEvents 回收的按事件计数。 */
+    void clear_wait() noexcept {}
+
+    /* ---------------- 阶段 5 追加(t12 裁定 C): 非阻塞可读判据 ----------------
+     *
+     * poll(fd, POLLIN, 0) > 0 —— 0 超时 ⇒ 不阻塞、无分配、O(1), 且**不做读操作**
+     * (不消费数据、不动 temp_buffer), 因此可以任意次重复调用。
+     *
+     * 为什么必须是 poll 而不是"试着 recvfrom 一次": 后者会真的把数据取走(消费),
+     * 而调用方(收包 worker 的 recv_once)在"有数据"时要走完整的 chunk_rev_* 路径
+     * (含分片重组 + ACK), 不能被这里的探测吃掉一片。
+     *
+     * 为什么需要它: socket 侧唯一收包原语 chunk_rev_topic/chunk_rev_server 一律带 tm,
+     * 空闲时会阻塞到 tm(50ms / 200ms)。worker 的预算循环是
+     *   for(;;){ n = recv_once(); if (n == 0) break; ... }
+     * 没有这个判据时, 收尾那一次 recv_once() 会让**共享** worker 线程空读阻塞最长 tm。
+     *
+     * 语义边界: server_fd 无效 / 未入组(SendOnly) / 已 cancel 一律 false —— 与
+     * waitable() 同口径。cancelled_ 之后 fd 已被 shutdown(SHUT_RD) 而 poll 会永远报
+     * POLLIN|POLLHUP(readable 会变成 true 而读不到东西), 那个短路因此是**语义必需**,
+     * 不是优化。 */
+    bool readable() const noexcept
+    {
+        if (server_fd < 0 || !joins_group() || cancelled_)
+        {
+            return false;
+        }
+        pollfd pfd{};
+        pfd.fd = server_fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        const int rc = ::poll(&pfd, 1, 0);
+        if (rc <= 0)
+        {
+            return false;   // rc == 0 超时(无数据); rc < 0 出错 ⇒ 当作不可读
+        }
+        /* 只认"真数据可读"。POLLERR/POLLHUP 单独出现(不带 POLLIN)不算可读 ——
+         * 否则无数据的坏 fd 会让 worker 空转(阶段 5 的第一红线)。 */
+        return (pfd.revents & POLLIN) != 0;
     }
 };
 }   // namespace socket
