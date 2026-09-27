@@ -163,19 +163,6 @@ const char* register_status_reason(threepools::RecvRegisterStatus s) noexcept
     return "ok";
 }
 
-/* 一次完整请求的字节量纲：DZFlat 视图路径直接取段长（srv_data.h 的 request_sample()->size()，
- * 零成本）；TLV owning 路径不重新序列化（那是热路径上的无谓开销），返回 1 表示"取到一次完整请求"。
- * 契约只要求 recv_once 返回 0 = 无数据/断开、非 0 = 取到东西；两项预算里 1 MiB 只是上界提示，
- * 真正的每轮让出由消息数(32)与处理时间(200us)决定。该口径已登记进"需回写方案文档条目"。 */
-std::size_t received_request_bytes(const std::shared_ptr<ServiceData>& request)
-{
-    if (request && request->request_is_view() && request->request_sample())
-    {
-        return request->request_sample()->size();
-    }
-    return 1;
-}
-
 void enqueue_request(const std::shared_ptr<socket_ser_receive_state>& state, std::shared_ptr<ServiceData> request)
 {
     bool dropped = false;
@@ -223,6 +210,17 @@ public:
         {
             return 0;
         }
+        /* ---- 裁定 C：非阻塞可读前置判据（本轮 t13 补丁）----
+         * 无数据必须**立即返回 0**。理由：chunk_rev_server 空闲时会阻塞到 tm(=ServerRevTime
+         * 200ms)，而 recv_once 跑在**共享** worker 线程上 —— 空读一次就把同 worker 其它
+         * route 的时延推后最多 200ms（注册轮 add_route 无条件 requeue、以及每次数据突发
+         * 收尾各一次）。udp_node_readable 只做一次 poll(fd, POLLIN, 0)：不阻塞、不消费数据、
+         * 不改状态；node 为空 / 未入组 / cancel_wait 之后一律 false。
+         * ⛔ 不得靠改小 tm 来"省事"：tm 同时是**多片组装预算**，改小会破坏大请求组装。 */
+        if (!udp_node_readable(state->request_node))
+        {
+            return 0;
+        }
         std::shared_ptr<ServiceData> request;
         {
             std::lock_guard<std::mutex> lock(state->mtx);
@@ -238,14 +236,16 @@ public:
 
         state->recv_in_flight.fetch_add(1, std::memory_order_acq_rel);
         std::size_t bytes = 0;
+        bool received = false;
         try
         {
             /* 一次调用 = 到**完整请求边界**（可跨多个分片；不得在组包中途切走）。
-             * 预算只在它返回之后检查（共享 worker 侧负责）。 */
-            if (chunk_rev_server(state->request_node, request, ServerRevTime, true, state->request_ack_tx))
-            {
-                bytes = received_request_bytes(request);
-            }
+             * 预算只在它返回之后检查（共享 worker 侧负责）。
+             * out_bytes = 本次完成请求的真实载荷长度（meta.total_size）——共享 worker 把它
+             * 累加进 Stats::bytes_received 与 RecvBudget::max_bytes_per_route；
+             * ⛔ 不得用 1 充字节（会让字节预算与统计**静默失真**，不是崩溃是读数错）。 */
+            received = chunk_rev_server(state->request_node, request, ServerRevTime, true, state->request_ack_tx,
+                                        &bytes);
         }
         catch (...)
         {
@@ -255,13 +255,16 @@ public:
         state->recv_in_flight.fetch_sub(1, std::memory_order_acq_rel);
         state->quiesce_cv.notify_all();
 
-        if (bytes == 0)
+        if (!received)
         {
-            return 0;   // 超时/断开/组包失败
+            return 0;   // 断开 / 组包失败（此前可读判据已保证确有数据）
         }
         enqueue_request(state, std::move(request));
         state->requests_received.fetch_add(1, std::memory_order_relaxed);
-        return bytes;
+        /* 退化保护：确实收到请求就**必须**返回非 0（worker 用 0 判"本轮无数据"，返回 0 会让
+         * 它把这轮记成没取到东西）。0 字节载荷在本分片协议下不会出现，这里只是不把它退化成
+         * "收到却报无数据"。 */
+        return bytes == 0 ? 1 : bytes;
     }
 
     /* socket 侧没有 SHM 的 sequence 字可做廉价重检；事实来源是共享 worker 的
