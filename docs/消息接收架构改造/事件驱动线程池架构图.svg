@@ -1,0 +1,253 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1720" height="1376" viewBox="0 0 1720 1376" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif">
+<defs>
+<marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#5b7ba3"/></marker>
+<filter id="sh" x="-8%" y="-8%" width="116%" height="118%"><feDropShadow dx="0" dy="1.5" stdDeviation="2.2" flood-color="#1b3a5c" flood-opacity="0.10"/></filter>
+<style>text{dominant-baseline:auto}</style>
+</defs>
+<rect x="0" y="0" width="1720" height="1376" rx="0" fill="#f5f8fc" stroke="none" stroke-width="1.2"/>
+<rect x="0" y="0" width="1720" height="64" rx="0" fill="#0f2740" stroke="none" stroke-width="1.2"/>
+<text x="32" y="42" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="25" fill="#ffffff" font-weight="700" text-anchor="start">SHM 事件驱动接收线程池 · 架构与功能模块框架图</text>
+<text x="1688" y="27" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="12" fill="#9fb6cf" font-weight="400" text-anchor="end">依据：docs/消息接收架构改造/事件驱动线程池需求.md（阶段 1–5 实现说明 + 阶段 5 冻结契约 + 收尾验收报告）</text>
+<text x="1688" y="49" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#7d97b3" font-weight="400" text-anchor="end">矩形 = 功能模块 ｜ 实线箭头 = 调用 / 数据流 ｜ 虚线 = 约束与汇总 ｜ 灰色小字 = 源码落点</text>
+<rect x="32" y="84" width="1656" height="140" rx="12" fill="#ffffff" stroke="#c9d6e6" stroke-width="1.3"/>
+<rect x="32" y="94" width="4" height="120" rx="2" fill="#2f6fbf" stroke="none" stroke-width="1.2"/>
+<text x="50" y="111" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="15" fill="#2f6fbf" font-weight="700" text-anchor="start">① 模块接入层 · 消费方 route 适配器（route 的 owner；worker 只持适配器，不持裸模块指针）</text>
+<rect x="48" y="118" width="394" height="92" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="49.5" y="126" width="3" height="76" rx="1.5" fill="#2f6fbf" stroke="none" stroke-width="1.2"/>
+<text x="61" y="140" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="13" fill="#16324f" font-weight="700" text-anchor="start">shm_pub_sub_ipc（SHM 订阅侧）</text>
+<text x="61" y="156" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">RecvRouteSource 适配器 + RouteSession</text>
+<text x="61" y="172" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">nodelet 快路径：LocalPubSubRegistry</text>
+<text x="61" y="188" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">控制面：register_subscriber（10 ms）</text>
+<text x="61" y="202" font-family="Noto Sans Mono CJK SC, DejaVu Sans Mono, Consolas, monospace" font-size="10" fill="#8794a8" font-weight="400" text-anchor="start">include/dzIPC/shm_pub_sub_ipc.h</text>
+<rect x="458" y="118" width="394" height="92" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="459.5" y="126" width="3" height="76" rx="1.5" fill="#2f6fbf" stroke="none" stroke-width="1.2"/>
+<text x="471" y="140" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="13" fill="#16324f" font-weight="700" text-anchor="start">shm_ser_cli_ipc（SHM 服务端）</text>
+<text x="471" y="156" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">SerRequestRoute : RecvRouteSource</text>
+<text x="471" y="172" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">recv_once 只收包 + 重组，不含用户 callback</text>
+<text x="471" y="188" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">控制面：register_publisher（50 ms / 2 s）</text>
+<text x="471" y="202" font-family="Noto Sans Mono CJK SC, DejaVu Sans Mono, Consolas, monospace" font-size="10" fill="#8794a8" font-weight="400" text-anchor="start">include/dzIPC/shm_ser_cli_ipc.h</text>
+<rect x="868" y="118" width="394" height="92" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="869.5" y="126" width="3" height="76" rx="1.5" fill="#127c86" stroke="none" stroke-width="1.2"/>
+<text x="881" y="140" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="13" fill="#16324f" font-weight="700" text-anchor="start">socket_pub_sub_ipc</text>
+<text x="881" y="156" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">socket_sub_receive_route 适配器</text>
+<text x="881" y="172" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">chunk_rev_topic 返回 = 预算安全边界</text>
+<text x="881" y="188" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">零用户 callback；owner CAS 单消费者</text>
+<text x="881" y="202" font-family="Noto Sans Mono CJK SC, DejaVu Sans Mono, Consolas, monospace" font-size="10" fill="#8794a8" font-weight="400" text-anchor="start">include/dzIPC/socket_pub_sub_ipc.h</text>
+<rect x="1278" y="118" width="394" height="92" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="1279.5" y="126" width="3" height="76" rx="1.5" fill="#127c86" stroke="none" stroke-width="1.2"/>
+<text x="1291" y="140" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="13" fill="#16324f" font-weight="700" text-anchor="start">socket_ser_cli_ipc</text>
+<text x="1291" y="156" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">socket_ser_request_route 适配器</text>
+<text x="1291" y="172" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">chunk_rev_server 一次调用组装完整请求</text>
+<text x="1291" y="188" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">owner pid 闸：fork 后不得 add_route</text>
+<text x="1291" y="202" font-family="Noto Sans Mono CJK SC, DejaVu Sans Mono, Consolas, monospace" font-size="10" fill="#8794a8" font-weight="400" text-anchor="start">include/dzIPC/socket_ser_cli_ipc.h</text>
+<rect x="32" y="268" width="1090" height="86" rx="12" fill="#ffffff" stroke="#c9d6e6" stroke-width="1.3"/>
+<rect x="32" y="278" width="4" height="66" rx="2" fill="#6b4fd8" stroke="none" stroke-width="1.2"/>
+<text x="50" y="295" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="15" fill="#6b4fd8" font-weight="700" text-anchor="start">② 固定归属 · route 与 worker 的绑定（无 work-stealing）</text>
+<text x="48" y="312" font-family="Noto Sans Mono CJK SC, DejaVu Sans Mono, Consolas, monospace" font-size="11" fill="#3c4f68" font-weight="400" text-anchor="start">worker_id = FNV1a64(route_name ‖ domain_id) % worker_count　｜　N = CPU 数（上限 128）；worker_count == 0 ⇒ 取默认</text>
+<text x="48" y="330" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">route 在整个生命周期内只由该 worker 调用 recv_once()；注销后重新注册才允许重新分配。</text>
+<text x="48" y="346" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">不做 work-stealing：libipc 的 recv_cache() 是 thread_local 分片缓存，跨 worker 迁移会让多片消息前后片段进不同缓存而重组失败（需求 §2.1）。</text>
+<rect x="32" y="390" width="1090" height="340" rx="12" fill="#ffffff" stroke="#c9d6e6" stroke-width="1.3"/>
+<rect x="32" y="400" width="4" height="320" rx="2" fill="#0e7c66" stroke="none" stroke-width="1.2"/>
+<text x="50" y="417" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="15" fill="#0e7c66" font-weight="700" text-anchor="start">③ 数据面 · 固定分片收包池（RecvWorkerPool / RecvWorker）</text>
+<text x="50" y="437" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#6b7f96" font-weight="400" text-anchor="start">socket 侧与 SHM 侧逐条对称：SocketRecvWorkerPool / SocketRecvWorker，唯一差别是等待身份（SocketWaitToken 而非 ipc::recv_wait_token）。</text>
+<rect x="48" y="444" width="342" height="214" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="49.5" y="452" width="3" height="198" rx="1.5" fill="#0e7c66" stroke="none" stroke-width="1.2"/>
+<text x="61" y="466" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="13" fill="#16324f" font-weight="700" text-anchor="start">RecvWorkerPool（进程级单例）</text>
+<text x="61" y="482" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">instance()；start(0 ⇒ CPU 数，上限 128)</text>
+<text x="61" y="498" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">start() 一次性：随进程存活，stop 后不可重启</text>
+<text x="61" y="514" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">worker_for(route_name, domain_id, worker_count)</text>
+<text x="61" y="530" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">add_route(shared_ptr&lt;RecvRouteSource&gt;) → 状态码</text>
+<text x="61" y="546" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">remove_route(route) noexcept（同步完成）</text>
+<text x="61" y="562" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">stats() / route_count()（各 worker 求和）</text>
+<text x="61" y="578" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">backend_available() / backend_name()（静态缓存）</text>
+<text x="61" y="594" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">模块禁止调用池 stop()（三模块共 0 处）</text>
+<text x="61" y="650" font-family="Noto Sans Mono CJK SC, DejaVu Sans Mono, Consolas, monospace" font-size="10" fill="#8794a8" font-weight="400" text-anchor="start">include/dzIPC/threepools/recv_worker.h</text>
+<rect x="406" y="444" width="342" height="214" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="407.5" y="452" width="3" height="198" rx="1.5" fill="#0e7c66" stroke="none" stroke-width="1.2"/>
+<text x="419" y="466" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="13" fill="#16324f" font-weight="700" text-anchor="start">RecvWorker × N（N = CPU 数）</text>
+<text x="419" y="482" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">自有 ipc::recv_wait_set（归 worker，不随线程消亡）</text>
+<text x="419" y="498" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">固定 route 表：route → entry（持 shared_ptr 保活）</text>
+<text x="419" y="514" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">level-triggered 全扫 + consume_ready() 定位 ready</text>
+<text x="419" y="530" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">每 route 预算：32 条 / 1 MiB / 200 µs</text>
+<text x="419" y="546" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">预算只在完整 recv_once() 之后检查，组包中途不切走</text>
+<text x="419" y="562" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">耗尽不丢弃 ⇒ deferred FIFO（固定顺序，防饿死）</text>
+<text x="419" y="578" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">至多 1 条工作线程；Stats + last_seq 记账</text>
+<text x="419" y="594" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">recv_once() 只收包 + 重组 + wire 判别 + 入队</text>
+<text x="419" y="650" font-family="Noto Sans Mono CJK SC, DejaVu Sans Mono, Consolas, monospace" font-size="10" fill="#8794a8" font-weight="400" text-anchor="start">include/dzIPC/threepools/recv_worker.{h,cc}</text>
+<rect x="764" y="444" width="342" height="214" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="765.5" y="452" width="3" height="198" rx="1.5" fill="#0e7c66" stroke="none" stroke-width="1.2"/>
+<text x="777" y="466" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="13" fill="#16324f" font-weight="700" text-anchor="start">空闲退出与按需拉起（线程归还 OS）</text>
+<text x="777" y="482" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">start() 管活动期：对象与 wait-set 随进程存活</text>
+<text x="777" y="498" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">idle_keep_alive 默认 1000 ms；0 = 下一轮即退（测试）</text>
+<text x="777" y="514" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">窗口 = max(idle_keep_alive, wait_timeout)（≈1.1 s）</text>
+<text x="777" y="530" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">alive 双检 + 代际检查 ⇒ 并发 add_route 只拉起一次</text>
+<text x="777" y="546" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">route 表非空 ⇒ 线程不退出（thread_local 亲和前提）</text>
+<text x="777" y="562" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">退出不丢 wait-set / route 表 / deferred / 统计</text>
+<text x="777" y="578" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">拉起失败或并发 stop ⇒ 回滚注册并返回 stopped</text>
+<text x="777" y="594" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11.5" fill="#33485f" font-weight="400" text-anchor="start">空闲等待是阻塞 wait（≥1 ms），不引入忙轮询</text>
+<text x="777" y="650" font-family="Noto Sans Mono CJK SC, DejaVu Sans Mono, Consolas, monospace" font-size="10" fill="#8794a8" font-weight="400" text-anchor="start">src/dzIPC/threepools/recv_worker.cc（idle 逻辑）</text>
+<rect x="48" y="668" width="1058" height="48" rx="8" fill="#eef6f3" stroke="#cfe4dd" stroke-width="1.2"/>
+<text x="60" y="686" font-family="Noto Sans Mono CJK SC, DejaVu Sans Mono, Consolas, monospace" font-size="10.5" fill="#1c4b40" font-weight="400" text-anchor="start">worker 循环：while (running) { drain_deferred(); wait_set.wait(wait_timeout) → consume_ready() → run_budget(entry); drain_deferred(); }</text>
+<text x="60" y="703" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#1c4b40" font-weight="400" text-anchor="start">超时不是错误（wait_timeouts++）；注册成功时无条件让新 route 先被处理一次（进 deferred）—— 注册前已到达的数据不产生新 seq / wakeup。</text>
+<rect x="32" y="766" width="1090" height="190" rx="12" fill="#ffffff" stroke="#c9d6e6" stroke-width="1.3"/>
+<rect x="32" y="776" width="4" height="170" rx="2" fill="#c2410c" stroke="none" stroke-width="1.2"/>
+<text x="50" y="793" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="15" fill="#c2410c" font-weight="700" text-anchor="start">④ 共享等待层 · 启用收包池的前置能力（未通过不得启用 worker pool）</text>
+<text x="50" y="813" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#6b7f96" font-weight="400" text-anchor="start">wait-set 必须保证：消息到达与断开都唤醒 · generation 切换不丢 wakeup · 动态 add/remove 与 wait 无竞态 · 返回后可定位 ready route · 注销后无悬挂 token</text>
+<rect x="48" y="818" width="342" height="124" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="49.5" y="826" width="3" height="108" rx="1.5" fill="#c2410c" stroke="none" stroke-width="1.2"/>
+<text x="61" y="840" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="12.5" fill="#16324f" font-weight="700" text-anchor="start">ipc::recv_wait_token / recv_wait_set（SHM）</text>
+<text x="61" y="855" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">等的是共享内存里的 sequence 原子字（不是 fd）</text>
+<text x="61" y="870" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">Linux：futex_waitv 多地址等待（内核 6.8 实测可用）</text>
+<text x="61" y="885" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">add / remove / wait(timeout) / consume_ready / stop</text>
+<text x="61" y="900" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">探测只做一次：不支持 ⇒ backend_supported=false</text>
+<text x="61" y="915" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">消息到达与断开都唤醒；generation 切换不丢 wakeup</text>
+<text x="61" y="930" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">动态 add/remove 与 wait 无竞态；返回可定位 ready route</text>
+<rect x="406" y="818" width="342" height="124" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="407.5" y="826" width="3" height="108" rx="1.5" fill="#c2410c" stroke="none" stroke-width="1.2"/>
+<text x="419" y="840" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="12.5" fill="#16324f" font-weight="700" text-anchor="start">SocketWaitSet / SocketWaitToken（socket）</text>
+<text x="419" y="855" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">可读性只有内核知道 ⇒ 机制不能复用 SHM 那套</text>
+<text x="419" y="870" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">Linux = 接收 fd + epoll(LT)；Windows = WSAEVENT</text>
+<text x="419" y="885" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">句柄一律 std::uintptr_t；头文件零平台宏</text>
+<text x="419" y="900" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">remove/stop 走独立 eventfd 唤醒（epoll DEL 不唤醒）</text>
+<text x="419" y="915" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">consume_ready 只返回在册句柄 ⇒ fd 复用不误触发</text>
+<text x="419" y="930" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">同一实例同一时刻只允许一个线程在 wait() 里</text>
+<rect x="764" y="818" width="342" height="124" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="765.5" y="826" width="3" height="108" rx="1.5" fill="#c2410c" stroke="none" stroke-width="1.2"/>
+<text x="777" y="840" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="12.5" fill="#16324f" font-weight="700" text-anchor="start">RouteSession（阶段 2 生命周期协议）</text>
+<text x="777" y="855" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">ReceiveLease{route, generation}；acquire / release 配对</text>
+<text x="777" y="870" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">acquire → inflight++ → 锁外 recv → 减计数并通知</text>
+<text x="777" y="885" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">begin_rebuild：禁新 lease → disconnect/wakeup →</text>
+<text x="777" y="900" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">等 inflight 归零 → release/reset → 新建 → 发 generation</text>
+<text x="777" y="915" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">stop_and_wake() 非终态：成功重建会复位 stopping</text>
+<text x="777" y="930" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">析构前必须 wait_quiescent()，否则 lease 命中已析构对象</text>
+<rect x="32" y="992" width="1090" height="124" rx="12" fill="#ffffff" stroke="#c9d6e6" stroke-width="1.3"/>
+<rect x="32" y="1002" width="4" height="104" rx="2" fill="#475569" stroke="none" stroke-width="1.2"/>
+<text x="50" y="1019" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="15" fill="#475569" font-weight="700" text-anchor="start">⑥ libipc 底层 · route / 共享段 / 队列（API、队列契约与消息语义不变）</text>
+<rect x="48" y="1030" width="254" height="72" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="49.5" y="1038" width="3" height="56" rx="1.5" fill="#475569" stroke="none" stroke-width="1.2"/>
+<text x="61" y="1052" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="12.5" fill="#16324f" font-weight="700" text-anchor="start">ipc::route</text>
+<text x="61" y="1067" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#33485f" font-weight="400" text-anchor="start">recv / recv(0) / release / reset</text>
+<text x="61" y="1082" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#33485f" font-weight="400" text-anchor="start">read_wait_token()（进 wait-set）</text>
+<text x="61" y="1097" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#33485f" font-weight="400" text-anchor="start">disconnect() / quit_waiting()</text>
+<rect x="316" y="1030" width="254" height="72" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="317.5" y="1038" width="3" height="56" rx="1.5" fill="#475569" stroke="none" stroke-width="1.2"/>
+<text x="329" y="1052" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="12.5" fill="#16324f" font-weight="700" text-anchor="start">conn_info_head</text>
+<text x="329" y="1067" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#33485f" font-weight="400" text-anchor="start">recv_cache()：thread_local 分片缓存</text>
+<text x="329" y="1082" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#33485f" font-weight="400" text-anchor="start">⇒ 同 route 不可跨 worker 迁移</text>
+<text x="329" y="1097" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#33485f" font-weight="400" text-anchor="start">多片重组依赖单消费者</text>
+<rect x="584" y="1030" width="254" height="72" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="585.5" y="1038" width="3" height="56" rx="1.5" fill="#475569" stroke="none" stroke-width="1.2"/>
+<text x="597" y="1052" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="12.5" fill="#16324f" font-weight="700" text-anchor="start">control_plane（共享段）</text>
+<text x="597" y="1067" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#33485f" font-weight="400" text-anchor="start">peer_count / generation / heartbeat</text>
+<text x="597" y="1082" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#33485f" font-weight="400" text-anchor="start">owner heartbeat 与 stale 判定输入</text>
+<text x="597" y="1097" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#33485f" font-weight="400" text-anchor="start">订阅/发布端跨进程可见状态</text>
+<rect x="852" y="1030" width="254" height="72" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="853.5" y="1038" width="3" height="56" rx="1.5" fill="#475569" stroke="none" stroke-width="1.2"/>
+<text x="865" y="1052" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="12.5" fill="#16324f" font-weight="700" text-anchor="start">队列与消息语义</text>
+<text x="865" y="1067" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#33485f" font-weight="400" text-anchor="start">view_queue_ / msg_queue_ 背压与淘汰</text>
+<text x="865" y="1082" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#33485f" font-weight="400" text-anchor="start">DZFlat/TLV · msg_id/schema · adopt/evict</text>
+<text x="865" y="1097" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#33485f" font-weight="400" text-anchor="start">get / try_get / get_clone 契约不变</text>
+<rect x="1142" y="268" width="546" height="352" rx="12" fill="#ffffff" stroke="#c9d6e6" stroke-width="1.3"/>
+<rect x="1142" y="278" width="4" height="332" rx="2" fill="#1d4ed8" stroke="none" stroke-width="1.2"/>
+<text x="1160" y="295" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="15" fill="#1d4ed8" font-weight="700" text-anchor="start">⑤ 控制面 · ShmControlScheduler</text>
+<text x="1160" y="310" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#6b7f96" font-weight="400" text-anchor="start">进程级单例 · 1 条 worker 线程 · 故意泄漏（活得比全局静态模块对象久）· 到期驱动</text>
+<rect x="1158" y="318" width="514" height="104" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.2"/>
+<rect x="1159.5" y="326" width="3" height="88" rx="1.5" fill="#1d4ed8" stroke="none" stroke-width="1.2"/>
+<text x="1171" y="338" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="13" fill="#16324f" font-weight="700" text-anchor="start">SubControlState · 订阅侧控制动作</text>
+<text x="1171" y="356" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">on_sub_heartbeat(now)：首次 open → 读 generation/state</text>
+<text x="1171" y="372" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">→ generation 重建 / detach 分支 → peer_heartbeat() 刷新</text>
+<text x="1171" y="388" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">周期 10 ms；peer 记账必须留在项内（提到 topic 级会让 peer_count 偏大）</text>
+<text x="1171" y="404" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">peer_count 偏大 ⇒ 发布端 subscribed_ 与 stale 判定一起失真</text>
+<rect x="1158" y="430" width="514" height="104" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.2"/>
+<rect x="1159.5" y="438" width="3" height="88" rx="1.5" fill="#1d4ed8" stroke="none" stroke-width="1.2"/>
+<text x="1171" y="450" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="13" fill="#16324f" font-weight="700" text-anchor="start">PubControlState · 发布侧控制动作</text>
+<text x="1171" y="468" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">on_pub_heartbeat(now) + on_pub_stale_scan(now, dead_timeout)</text>
+<text x="1171" y="484" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">owner heartbeat 50 ms：peer 为 0 也必须无条件执行</text>
+<text x="1171" y="500" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">stale 扫描 50 ms：仅 has_peers() 为真时执行</text>
+<text x="1171" y="516" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">peer 判死 2 s = 200 × 订阅 heartbeat（两份字面量应收敛）</text>
+<rect x="1158" y="544" width="514" height="62" rx="8" fill="#eef3fb" stroke="#cfe0f5" stroke-width="1.2"/>
+<text x="1170" y="559.0" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#1c3f6e" font-weight="400" text-anchor="start">ControlTiming{sub_heartbeat 10 ms, pub_heartbeat 50 ms, peer_dead_timeout 2 s} 按项传入</text>
+<text x="1170" y="572.5" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#1c3f6e" font-weight="400" text-anchor="start">到期驱动 cv.wait_for（取最近到期项）；无注册项时无限期等待 —— 不是固定 10 ms 轮询</text>
+<text x="1170" y="586.0" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#1c3f6e" font-weight="400" text-anchor="start">RAII RegistrationToken：reset() = 同步注销（按项结算）；EntryId 单调永不复用、0 = 无效（防 ABA）</text>
+<text x="1170" y="599.5" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="10.5" fill="#a13a1e" font-weight="400" text-anchor="start">硬约束：回调不得抛出 / 不得在回调内 unregister 自身 / 不得在回调内 stop；坏项隔离摘除并计数</text>
+<rect x="1142" y="640" width="546" height="200" rx="12" fill="#ffffff" stroke="#c9d6e6" stroke-width="1.3"/>
+<rect x="1142" y="650" width="4" height="180" rx="2" fill="#a13a1e" stroke="none" stroke-width="1.2"/>
+<text x="1160" y="667" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="15" fill="#a13a1e" font-weight="700" text-anchor="start">显式回退与降级（禁止忙轮询、禁止运行中切换）</text>
+<text x="1160" y="668" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">add_route 判定顺序（返回 RecvRegisterStatus）：</text>
+<text x="1160" y="684" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">nullptr → invalid_route；!running() → stopped；token 无效 → invalid_token</text>
+<text x="1160" y="700" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">try_claim_recv 失败：本 worker 已注册 → duplicate；别的 owner 在收 → busy</text>
+<text x="1160" y="716" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">wait_set.add 失败且从未成功 → backend_unavailable（显式回退信号）</text>
+<text x="1160" y="732" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">add 失败但曾成功 → wait_set_full（通道超上限：应分到别的 worker）</text>
+<text x="1160" y="748" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">任何非 ok ⇒ 模块显式回退兼容收包线程并打日志；禁止 try_recv 全量忙轮询</text>
+<text x="1160" y="764" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">探测结果进程内缓存：不在运行中切换后端（避免半进程用池、半进程用线程）</text>
+<text x="1160" y="780" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">fork：子进程继承「池已 start」却无工作线程 ⇒ pid 闸在模块侧（不触碰池锁）</text>
+<rect x="1142" y="860" width="546" height="200" rx="12" fill="#ffffff" stroke="#c9d6e6" stroke-width="1.3"/>
+<rect x="1142" y="870" width="4" height="180" rx="2" fill="#0e7c66" stroke="none" stroke-width="1.2"/>
+<text x="1160" y="887" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="15" fill="#0e7c66" font-weight="700" text-anchor="start">观测 Stats 与验收门槛</text>
+<text x="1160" y="888" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">控制面 Stats：tick_count、tick_overrun_count、tick_duration_last/max_ns、</text>
+<text x="1160" y="904" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">              tick_deferred_count、callback_exception_count、entry_count</text>
+<text x="1160" y="920" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">worker Stats：wait_wakeups、wait_timeouts、wait_errors、messages_received、</text>
+<text x="1160" y="936" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">              bytes_received、budget_yields、deferred_drains、route_count、</text>
+<text x="1160" y="952" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">              idle_exits、thread_restarts（池 stats() = 各 worker 求和）</text>
+<text x="1160" y="968" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">实测口径：1000 订阅 threads 峰值 33 / 空闲 2；兼容路径对照 101 且不回落</text>
+<text x="1160" y="984" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">门禁：ctest worker 臂 + compat 臂各 14/14 · docs/hotpath_gate.sh 过闸</text>
+<text x="1160" y="1000" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">验收：单 route 无丢失/重复/乱序；热话题受预算约束、冷话题可调度；p99 与关闭延迟不劣化</text>
+<rect x="1142" y="1080" width="546" height="268" rx="12" fill="#ffffff" stroke="#c9d6e6" stroke-width="1.3"/>
+<rect x="1142" y="1090" width="4" height="248" rx="2" fill="#6b4fd8" stroke="none" stroke-width="1.2"/>
+<text x="1160" y="1107" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="15" fill="#6b4fd8" font-weight="700" text-anchor="start">阶段落地与遗留</text>
+<text x="1160" y="1108" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">阶段 1 · 控制面调度器：握手线程 O(N) → 进程级 1 条（已落地）</text>
+<text x="1160" y="1124" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">阶段 2 · RouteSession：receive lease / rebuild / stop+wake+quiescent（已落地）</text>
+<text x="1160" y="1140" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">阶段 3 · 分流提取：recv 侧只收包入队，用户 callback 移出收包核（已落地）</text>
+<text x="1160" y="1156" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">阶段 4 · libipc wait-set：token/set + 能力探测 + 显式回退（已落地）</text>
+<text x="1160" y="1172" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">阶段 5 · 固定分片收包池：route→worker 固定 + 预算 + deferred（已落地）</text>
+<text x="1160" y="1188" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">阶段 6 · 可选统一收包：仅当 wait-set 可用且重解码不造成全局队头阻塞时评估（未启用）</text>
+<text x="1160" y="1204" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">每阶段可独立回滚；任何阶段不得以静默高 CPU 轮询作为降级方案。</text>
+<text x="1160" y="1220" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#a13a1e" font-weight="400" text-anchor="start">遗留阻断：被验收的修订当前仅存于 git index / 工作区，尚未进入任何提交。</text>
+<text x="1160" y="1236" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#a13a1e" font-weight="400" text-anchor="start">即：完成提交后，本图所述构件才与某个可达修订一一对应。</text>
+<rect x="32" y="1146" width="1090" height="202" rx="12" fill="#ffffff" stroke="#c9d6e6" stroke-width="1.3"/>
+<rect x="32" y="1156" width="4" height="182" rx="2" fill="#1f3a5f" stroke="none" stroke-width="1.2"/>
+<text x="50" y="1173" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="15" fill="#1f3a5f" font-weight="700" text-anchor="start">贯穿各层：单消费者 · 顺序不变量 · 注销与析构顺序</text>
+<rect x="48" y="1180" width="342" height="154" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="49.5" y="1188" width="3" height="138" rx="1.5" fill="#1f3a5f" stroke="none" stroke-width="1.2"/>
+<text x="61" y="1202" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="12.5" fill="#16324f" font-weight="700" text-anchor="start">单 route 单消费者与顺序</text>
+<text x="61" y="1218" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">RecvOwner{none, compat_thread, worker} + CAS 独占</text>
+<text x="61" y="1234" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">兼容线程与 worker 不同时 recv（返回 busy，不双收）</text>
+<text x="61" y="1250" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">同一 route：消息顺序 / 多片重组 / thread_local 不迁移</text>
+<text x="61" y="1266" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">get / try_get / get_clone / try_get_clone API 一行不改</text>
+<text x="61" y="1282" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">用户 callback 不进 recv_once()（出收包 worker）</text>
+<text x="61" y="1298" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">SHM chunk 始终受 adopt 配额与 evict 回调约束</text>
+<rect x="406" y="1180" width="342" height="154" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="407.5" y="1188" width="3" height="138" rx="1.5" fill="#1f3a5f" stroke="none" stroke-width="1.2"/>
+<text x="419" y="1202" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="12.5" fill="#16324f" font-weight="700" text-anchor="start">RouteSession 不变量 I1–I5</text>
+<text x="419" y="1218" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">I1 recv 全程由 lease 的 shared_ptr 保活 route</text>
+<text x="419" y="1234" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">I2 inflight == 0 且已禁新 lease 才允许 release()</text>
+<text x="419" y="1250" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">I3 stopping / rebuilding 置位后 acquire 一律为空</text>
+<text x="419" y="1266" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">I4 acquire / release 严格配对（漏/多 ⇒ wait_quiescent 挂死）</text>
+<text x="419" y="1282" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">I5 generation 只挡新 recv，不得丢已弹出字节</text>
+<text x="419" y="1298" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">重建：禁新 lease → 唤醒 → 等 inflight=0 → release/reset</text>
+<text x="419" y="1314" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">→ 新建 route → 发布新 generation</text>
+<rect x="764" y="1180" width="342" height="154" rx="9" fill="#fbfdff" stroke="#d3dfee" stroke-width="1.1"/>
+<rect x="765.5" y="1188" width="3" height="138" rx="1.5" fill="#1f3a5f" stroke="none" stroke-width="1.2"/>
+<text x="777" y="1202" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="12.5" fill="#16324f" font-weight="700" text-anchor="start">注销与析构顺序（先后不可互换）</text>
+<text x="777" y="1218" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">remove_route：摘 route 表 → wait_set.remove(唤醒)</text>
+<text x="777" y="1234" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">→ stop_and_wake → 等 worker in-flight 归零</text>
+<text x="777" y="1250" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">→ wait_quiescent → release_recv()（owner 回 none）</text>
+<text x="777" y="1266" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">模块析构：注销 registry → pool.remove_route</text>
+<text x="777" y="1282" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">→ 注销控制面 → 关 socket / release route → 释放队列</text>
+<text x="777" y="1298" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">先注销 LocalPubSubRegistry，再停 RouteSession</text>
+<text x="777" y="1314" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#33485f" font-weight="400" text-anchor="start">（防快路径投递到销毁中的 msg_queue_）</text>
+<line x1="577" y1="226" x2="577" y2="262" stroke="#5b7ba3" stroke-width="1.7" marker-end="url(#ah)"/>
+<text x="565" y="250" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#48627f" font-weight="400" text-anchor="end">适配器注册：add_route / register_subscriber|publisher</text>
+<line x1="577" y1="356" x2="577" y2="384" stroke="#5b7ba3" stroke-width="1.7" marker-end="url(#ah)"/>
+<text x="565" y="376" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#48627f" font-weight="400" text-anchor="end">按 worker_for 固定归属投递 token</text>
+<line x1="577" y1="732" x2="577" y2="760" stroke="#5b7ba3" stroke-width="1.7" marker-end="url(#ah)"/>
+<text x="565" y="752" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#48627f" font-weight="400" text-anchor="end">wait_set.add(token) → wait() → consume_ready()</text>
+<line x1="577" y1="958" x2="577" y2="986" stroke="#5b7ba3" stroke-width="1.7" marker-end="url(#ah)"/>
+<text x="565" y="978" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#48627f" font-weight="400" text-anchor="end">read_wait_token() → route-&gt;recv() → release_receive()</text>
+<line x1="577" y1="1118" x2="577" y2="1140" stroke="#5b7ba3" stroke-width="1.7" marker-end="url(#ah)" stroke-dasharray="5 4"/>
+<text x="565" y="1134" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#48627f" font-weight="400" text-anchor="end">不变量与验收约束各层</text>
+<line x1="1420" y1="226" x2="1420" y2="262" stroke="#5b7ba3" stroke-width="1.7" marker-end="url(#ah)"/>
+<text x="1408" y="240" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#48627f" font-weight="400" text-anchor="end">register_subscriber | publisher + RegistrationToken（RAII）</text>
+<line x1="1420" y1="624" x2="1420" y2="636" stroke="#5b7ba3" stroke-width="1.7" marker-end="url(#ah)"/>
+<text x="1408" y="634" font-family="Noto Sans CJK SC, Source Han Sans SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="11" fill="#48627f" font-weight="400" text-anchor="end">控制面动作只看共享段与项内记账</text>
+</svg>
