@@ -92,3 +92,11 @@ brainstorm/**
 .reasonix/**
 reasonix.toml
 AGENTS.md
+**.log
+.agent-teams/**
+tmp/**
+.**_probe
+t4build_tree/**
+
+# captain 注: test/perf/** **不得**加入忽略 —— 验收证据(D9 基线/fd 边界/t6 三臂日志)
+# 在那里; 忽略它会让证据静默不入库(本工作区已两次整体清空, 见 git log 8c6dd08 前后)。

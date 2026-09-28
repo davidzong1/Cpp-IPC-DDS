@@ -208,7 +208,18 @@ private:
      *   · socket_receive_once()  —— 模板 clone → chunk_rev_topic → 上面的分流，
      *     返回**本条完整消息的字节数**。
      * worker 路径与兼容 subscribe_thread_ 路径**共用**这两条函数与同一个 receive_state_，
-     * 差别只在"谁调用"（契约 §4.6 的单消费者互斥）。 */
+     * 差别只在"谁调用"（契约 §4.6 的单消费者互斥）。
+     *
+     * ---- P0（阻塞解阻方案 §3）：receive_state_ 是跨线程共享的 shared_ptr 成员 ----
+     * 它自身需要独立同步 —— topic_msg_mtx_ / state->mtx 保护的都是别的对象，不能代替它。
+     *   · 任何读 / 写 / 清空都必须走下面三个访问口；⛔ 不得直接碰成员；
+     *   · 只在 receive_state_mtx_ 内复制 shared_ptr 快照，**不得**在持本锁时取
+     *     state->mtx / 队列锁、join 线程或访问 worker pool；
+     *   · 锁序（§3.2）：topic_msg_mtx_ →（短暂取快照后释放本锁）→ state->mtx。
+     *     receive_state_mtx_ **绝不**与 state->mtx 同时持有。
+     * receive_route_ / worker_mode_ / subscribe_thread_ 只由**串行**的 Init/teardown
+     * 路径写（API 约束：调用方必须串行化 InitChannel 与其停止路径），不额外加锁。 */
+    mutable std::mutex receive_state_mtx_;
     std::shared_ptr<socket_sub_receive_state> receive_state_;
     std::shared_ptr<threepools::SocketRecvRouteSource> receive_route_;
     /* true = 当前接收路径是共享层 worker；false = 兼容 subscribe_thread_（显式回退）。 */
@@ -219,6 +230,11 @@ private:
     /* 注册/注销接收路径。start 返回 false 表示本进程/本后端必须走兼容收包线程（已打显式原因）。 */
     bool start_receive_path();
     void teardown_receive_path();
+
+    /* ---- P0：receive_state_ 的同步访问口（唯一合法读写途径；语义同 socket_ser_ipc）---- */
+    std::shared_ptr<socket_sub_receive_state> current_receive_state() const;
+    void set_receive_state(const std::shared_ptr<socket_sub_receive_state>& state);
+    void clear_receive_state() noexcept;
     /* 抽取出来的两条处理路径定义在 .cc，并以 socket_sub_receive_state 为载体 ——
      * 收包 worker **不持**裸 socket_sub_ipc 指针：
      *   · socket_sub_receive_once(state, gate_on_readiness) —— 模板 clone →（worker 路径）可读判据

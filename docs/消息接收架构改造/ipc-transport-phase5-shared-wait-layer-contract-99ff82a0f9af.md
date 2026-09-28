@@ -502,7 +502,80 @@ std::size_t MySocketRoute::recv_once()
 
 ---
 
-## 7. 未在 Windows 验证（显式声明）
+## 7. t10 追加：消费方文档纪律（append-only，不改任何冻结签名与语义）
+
+> 状态：**文档条款追加**（t10）。本节只补"消费方必须怎么写文档/怎么验证"，
+> **不改** §1–§6 的接口、语义与冻结规则；与勘误冲突处仍按勘误读。
+
+### 7.1 同步边界表（P4 / 防复发 · 消费方文档必填项）
+
+> **由来**：第一轮交叉 Review（t7）的 **C-01（high）/ C-02（medium）** 根因是同一个形态 ——
+> `receive_state_`（`std::shared_ptr`）被生命周期路径写、被 `reset_*` / 处理线程读，**却未列入任何收尾清单**，
+> 因此无人发现它是并发访问点。共享层自身没有这个问题（`Entry` 由 `routes_mtx_` 保护），
+> 但**消费方**新引入的每个成员都需要同样的登记。
+
+**条款**：三份模块移植方案的"收尾清单/同步边界"部分**必须**含一张表，逐条列出新引入的对象/指针/标志：
+
+| 列 | 含义 | 要求 |
+| --- | --- | --- |
+| 对象 / 成员 | 新增的 `shared_ptr` / 容器 / 标志 / 计数器 | 逐个列出，不得省略"看起来只在一个线程用"的成员 |
+| 谁写 | 写入方（含生命周期入口与线程名） | 若来自多个线程，必须显式说明 |
+| 谁读 | 读取方 | 同上 |
+| 同步原语 / 约束 | 锁、原子、或"不加锁 + 调用方串行化"的 API 约束来源 | **不加锁必须给出约束来源**（如 auto 层的 `leg_mtx_`、头注释声明的调用约定），否则视为 C-01 同类风险 |
+
+**判据（可判定）**：对表中每个 `shared_ptr` 成员，`grep -n "<成员>" <模块 .cc>` 的全部命中点
+要么在访问器内部（且访问器持锁），要么在**同一把生命周期锁**保护下；出现"业务代码直接访问 + 无锁"即为缺陷。
+
+**实例（t8/t9 已闭环，可作范本）**：
+
+- `socket_ser_cli_ipc.cc`：`receive_state_` 的三个访问口 `:460/466/472`，成员访问仅 `:463/469/475` 三处且全在 `receive_state_mtx_` 临界区；
+- `socket_pub_sub_ipc.cc`：同型，成员访问仅 `:1231/1237/1243`；
+- `shm_ser_cli_ipc.cc`：`SerState` 经 `state_mtx_` 的 `current_ser_state()`（`:915`）取快照，`process_request()` / `handle_fast_path()` **不持裸宿主指针**。
+
+**锁序（t8 §3.2 已核对，写进本节以便复用）**：
+
+```text
+成员锁（取完快照即释放） → state 锁（state->mtx / queue_mtx / quiesce_mtx）
+⛔ 两组绝不交叉持有；⛔ 访问器内不得取任何 state 锁、不得 join、不得回调、不得访问 worker pool
+```
+
+### 7.2 「注释即条款」必须配机械核对（P5 / 防复发）
+
+> **由来**：t7 的 **C-03/C-04** 根因是「注释抄了语义、函数体继承了旧实现」——注释声称"兼容线程会 claim"，
+> 而函数体里**没有** claim 调用点。仅靠人工读注释无法发现这类缺陷。
+
+**条款**：凡把冻结契约的条款写成代码注释（如"兼容线程启动前 claim、退出后 release"），
+注释旁**必须**给出可 grep 的落地证据，且该证据必须是**调用点**（不是又一条注释）：
+
+| 注释类型 | 必配判据 | 期望值形态 |
+| --- | --- | --- |
+| "X 会调用 Y" | `grep -n "Y" <模块 .cc>` | 命中数 ≥ 声明数，且至少一处是**真实调用**而非注释 |
+| "Y 不依赖 Z" | `grep -c "Z" ...` | 显式数值（如 0） |
+| "只有一处赋值" | `grep -n "Z =" ...` | 命中数与注释一致 |
+
+**实例（t9 实测）**：`grep -n "compat_thread" src/dzIPC/socket_ser_cli_ipc.cc` 修前 = **0**、修后 ≥ 2（claim + 名字表）；
+`grep -c "req_route_->try_claim_recv\|req_route_->release_recv" src/dzIPC/shm_ser_cli_ipc.cc` = **0**（证明 claim/release 已上移到 state 级）。
+
+### 7.3 验收纪律 A8（build/ 假绿防线，强制）
+
+**条款**：任何验收、复现与复核**必须**先重跑 CMake 配置再重编 ——
+本仓库出现过 `build/` 残留**已消失实现**的符号（`nm -DC build/lib/libipc.so | grep -c SocketReceiveWorkerPool` 曾为 49+）导致**假绿**读数；
+且 `src/CMakeLists.txt` 的 `aux_source_directory` 与 `test/CMakeLists.txt` 的 `file(GLOB)` 都是**配置期**展开，新增文件不重配即静默漏编。
+
+```bash
+cd /home/zwc/cpp_ipc_dds && cmake -S . -B build && make -C build -j$(nproc)
+cd build && env -u DZIPC_SOCKET_COMPAT_THREAD -u DZIPC_SOCKET_RECV_WORKERS ctest --output-on-failure
+```
+
+**附加判据（本契约消费方通用）**：
+
+1. `nm -DC build/lib/libipc.so | grep -c "<你自己的 route 适配器符号>"` 必须 **> 0**（证明新实现真的进了库，而非旧产物）；
+2. worker 路径生效**不能**只看"用例通过"，必须同时满足：无 `wait-set unusable` 回退行 **且**（`verbose` 时）出现 `... receive on shared ... worker` 证据行；
+3. 两个开关环境变量必须显式清空（`DZIPC_SOCKET_COMPAT_THREAD`、`DZIPC_SOCKET_RECV_WORKERS`），否则读数会静默反转。
+
+---
+
+## 8. 未在 Windows 验证（显式声明）
 
 本机为 Linux 6.8，`cargo`/`rustc` 不可用不影响本任务。**Windows 路径
 （`src/libipc/platform/win/udp.h` 的 WSAEventSelect/WSAEvent、

@@ -17,6 +17,7 @@
 /* 阶段 5 共享层：固定 route 收包 worker。**只消费，不复制**（本层 owner 是
  * ipc-transport）；模块侧不出现任何平台宏，句柄/平台差异全在它后面。 */
 #include "dzIPC/threepools/recv_worker.h"
+#include "libipc/utility/log.h"   // ipc::error：注销超时诊断（P1 §5）
 #if defined(_WIN32)
 #include <windows.h>   // ::GetCurrentProcessId —— fork 防死锁闸的 pid 来源
 #else
@@ -50,10 +51,15 @@
  * 交给 Sample（借样）或物化进 ServiceData；错误出口（伪影/停机作废）一律让 buffer
  * 就地析构，归还发生在 buffer 析构处。
  *
- * 有界 FIFO 的**满载策略**（明确，不留隐式无界堆积）：容量 kMaxPendingRequests 条、
- * kMaxPendingBytes 字节，两者任一达到即**不再收取**（recv_once 返回 0，**不丢任何
- * 已到的请求**），并置 backpressured=true 让 has_pending() 返回 true ⇒ 共享 worker
- * 的 level-triggered 重检会把该 route 放回 deferred FIFO，下一轮预算继续尝试。
+ * 有界 FIFO 的**满载策略**（明确，不留隐式无界堆积；P1 §6.3 落地点）：容量
+ * kMaxPendingRequests 条、kMaxPendingBytes 字节，两者任一达到即**不再收取**
+ * （recv_once 返回 0，**不丢任何已到的请求**），并置 backpressured=true 让
+ * has_pending() 返回 true ⇒ 共享 worker 的 level-triggered 重检会把该 route 放回
+ * deferred FIFO，下一轮预算继续尝试。
+ * 入库前按「pending_bytes + request_bytes <= kMaxPendingBytes」判定（§6.3 规则 1）；
+ * 协议无单条尺寸上限（见 SerState 的说明），故补一条显式特例：队列为空时允许放入
+ * **一条**超限请求（否则会静默丢弃已经 try_recv 下来的请求）⇒ 严格上界 =
+ * kMaxPendingBytes + max(单条实测尺寸)；两种情况都有计数可观测。
  * 为什么不用 t5(socket) 的"满载丢最旧"：SHM 侧有 recv_wait_token::sequence() 这个
  * 廉价的重检字，返回 0 不会让请求搁死在通道里（has_pending() 保证同 route 下一轮
  * 仍被选中），因此能选**零丢失**的背压；socket 侧没有这个字，只能丢最旧。
@@ -105,7 +111,20 @@ struct SerState
     std::mutex quiesce_mtx;
     std::condition_variable quiesce_cv;
 
-    /* ---- 有界请求 FIFO：worker 入队（完整请求字节）→ 处理线程出队 ---- */
+    /* ---- 有界请求 FIFO：worker 入队（完整请求字节）→ 处理线程出队 ----
+     *
+     * P1（阻塞解阻方案 §6.3 规则 1）：**入库前判定**，保证稳态满足
+     *   pending_bytes + request_bytes <= kMaxPendingBytes
+     * 超限且队列非空 ⇒ 不收取（背压，请求留在通道里，零丢失）。
+     *
+     * ⚠️ 严格上界（不是「8 MiB 是绝对内存上界」）：协议**没有**单条消息尺寸上限
+     * （全仓 libipc 无 max message size 常量；recv_once 一旦 try_recv 成功就已经把整条
+     * 请求收下，**无法退回通道**）。因此补一条显式特例：队列**为空**时允许放入
+     * **一条**超限请求（否则会静默丢弃已收到的请求）。
+     * ⇒ 内存持有严格上界 = kMaxPendingBytes + max(单条请求实测尺寸)，
+     *   条数上界 = kMaxPendingRequests；两种情况都有计数可观测：
+     *   fifo_peak_bytes / fifo_peak_requests / oversize_admissions / max_request_bytes。
+     * 若 §6.2 对照实验证明该窗口造成 DZFlat 回退上升，则调小 cap 或改为协议层拒绝。 */
     static constexpr std::size_t kMaxPendingRequests = 64;
     static constexpr std::size_t kMaxPendingBytes = 8u << 20;   // 8 MiB
     std::mutex pending_mtx;
@@ -129,6 +148,66 @@ struct SerState
     std::atomic<std::uint64_t> callback_exceptions{0};   // callback 抛出（隔离：不让处理线程死）
     std::atomic<std::uint64_t> responses_sent{0};
     std::atomic<std::uint64_t> response_send_failures{0};
+    /* ---- P1（§6.2/§6.3）FIFO 容量可观测性：为容量对照实验提供原始读数 ---- */
+    std::atomic<std::uint64_t> fifo_peak_requests{0};      ///< 队列条数峰值
+    std::atomic<std::uint64_t> fifo_peak_bytes{0};          ///< 队列字节峰值
+    std::atomic<std::uint64_t> oversize_admissions{0};      ///< 空队列放行的超限请求条数
+    std::atomic<std::uint64_t> max_request_bytes{0};        ///< 见过的最大单条请求字节
+    std::atomic<std::uint64_t> backpressure_hits{0};        ///< 因满载未收取的次数
+};
+
+/* ---- P1（阻塞解阻方案 §4.1）：owner CAS 放在 shared state 上 ----
+ * worker 注册走的 route->try_claim_recv 与兼容线程走的本函数操作的是**同一个**
+ * `SerState::owner` 原子量，因此两路不可能同时成功；回退路径即使没有成功注册 worker
+ * route（req_route_ 为空）也照样能 claim/release。 */
+bool ser_state_try_claim_recv(SerState& state, threepools::RecvOwner who) noexcept
+{
+    if (who == threepools::RecvOwner::none)
+    {
+        return false;   // 契约 §4.6：who == none 一律拒绝
+    }
+    threepools::RecvOwner expected = threepools::RecvOwner::none;
+    return state.owner.compare_exchange_strong(expected, who, std::memory_order_acq_rel);
+}
+
+void ser_state_release_recv(SerState& state) noexcept
+{
+    auto expected = state.owner.load(std::memory_order_acquire);
+    while (expected != threepools::RecvOwner::none)
+    {
+        if (state.owner.compare_exchange_weak(expected, threepools::RecvOwner::none,
+                                              std::memory_order_acq_rel))
+        {
+            return;   // 重复 release 是安全的（幂等）
+        }
+    }
+}
+
+const char* ser_owner_name(threepools::RecvOwner who) noexcept
+{
+    switch (who)
+    {
+    case threepools::RecvOwner::none:
+        return "none";
+    case threepools::RecvOwner::compat_thread:
+        return "compat_thread";
+    case threepools::RecvOwner::worker:
+        return "worker";
+    }
+    return "?";
+}
+
+/* RAII：兼容接收线程无论正常退出还是异常退出都归还 owner（§4.2「线程退出用 RAII guard」）。 */
+struct SerCompatClaimGuard
+{
+    SerState* state{nullptr};
+    ~SerCompatClaimGuard()
+    {
+        if (state != nullptr)
+        {
+            ser_state_release_recv(*state);
+        }
+    }
 };
 
 /* SerRequestRoute：shm_ser_ipc 服务端的**请求数据通道**在共享层里的适配器。
@@ -146,33 +225,21 @@ public:
     ipc::recv_wait_token read_wait_token() const noexcept override;
     std::size_t recv_once() override;
     bool has_pending() const noexcept override;
+    /* P1：三方法一律转调 state 级 CAS（只有一份 owner 状态，§4.1 末段）。 */
     threepools::RecvOwner recv_owner() const noexcept override
     {
         return state_->owner.load(std::memory_order_acquire);
     }
     bool try_claim_recv(threepools::RecvOwner who) noexcept override
     {
-        if (who == threepools::RecvOwner::none)
-        {
-            return false;   // 契约 §4.6：who == none 一律拒绝
-        }
-        threepools::RecvOwner expected = threepools::RecvOwner::none;
-        return state_->owner.compare_exchange_strong(expected, who, std::memory_order_acq_rel);
+        return ser_state_try_claim_recv(*state_, who);
     }
     /* 归还收包独占（注销第 6 步，契约 §4.4）。worker 路径由 remove_route 内部调用，
      * 兼容线程路径在 response_thread_func 退出前显式调用；两种 owner 都必须能回到
      * none，漏一次就会让重新 add_route 永久返回 busy（静默丢包）。 */
     void release_recv() noexcept override
     {
-        threepools::RecvOwner expected = state_->owner.load(std::memory_order_acquire);
-        while (expected != threepools::RecvOwner::none)
-        {
-            if (state_->owner.compare_exchange_weak(expected, threepools::RecvOwner::none,
-                                                    std::memory_order_acq_rel))
-            {
-                return;
-            }
-        }
+        ser_state_release_recv(*state_);
     }
     /* 注销第 3 步：置 stopping（拒绝新的 recv_once）+ 唤醒阻塞中的 recv。
      * ipc::server::disconnect() 内部是 que_.disconnect() + quit_waiting()（唤醒
@@ -211,10 +278,13 @@ std::size_t SerRequestRoute::recv_once()
     /* 有界 FIFO 满载 ⇒ **不收取**（零丢失背压，而不是丢弃）：返回 0 并置 backpressured，
      * has_pending() 据此返回 true ⇒ 共享 worker 的 level-triggered 重检会把本 route 放回
      * deferred FIFO，下一轮预算继续尝试 —— 请求留在通道里，一个都不丢。 */
-    if (state_->pending_count.load(std::memory_order_acquire) >= SerState::kMaxPendingRequests
-        || state_->pending_bytes.load(std::memory_order_acquire) >= SerState::kMaxPendingBytes)
+    const std::size_t pending_bytes_now = state_->pending_bytes.load(std::memory_order_acquire);
+    const std::size_t pending_count_now = state_->pending_count.load(std::memory_order_acquire);
+    if (pending_count_now >= SerState::kMaxPendingRequests
+        || pending_bytes_now >= SerState::kMaxPendingBytes)
     {
         state_->backpressured.store(true, std::memory_order_release);
+        state_->backpressure_hits.fetch_add(1, std::memory_order_relaxed);
         return 0;
     }
 
@@ -239,14 +309,58 @@ std::size_t SerRequestRoute::recv_once()
             else
             {
                 bytes = raw.size();
+                /* P1（§6.3 规则 1+2）：入库前判定容量。稳态保证
+                 *   pending_bytes + bytes <= kMaxPendingBytes；
+                 * 超限时只允许「队列为空 ⇒ 放行这一条」的显式特例（因为请求已经被
+                 * try_recv 收下、无法退回通道），并计入 oversize_admissions。
+                 * 队列非空且会超限 ⇒ 不该发生（入口已挡 count/bytes 上限），保守起见
+                 * 仍按背压处理：不收取、不丢弃（buffer 就地析构，通道里的数据不受影响）。 */
+                bool accepted = false;
+                bool oversize = false;
                 {
                     std::lock_guard<std::mutex> lock(state_->pending_mtx);
-                    state_->pending.push_back(std::move(raw));   // 完整请求字节：所有权转移给 FIFO
-                    state_->pending_count.fetch_add(1, std::memory_order_relaxed);
-                    state_->pending_bytes.fetch_add(bytes, std::memory_order_relaxed);
-                    state_->backpressured.store(false, std::memory_order_release);
+                    const std::size_t cur_bytes = state_->pending_bytes.load(std::memory_order_relaxed);
+                    if (state_->pending.empty() || cur_bytes + bytes <= SerState::kMaxPendingBytes)
+                    {
+                        oversize = (cur_bytes + bytes > SerState::kMaxPendingBytes);
+                        state_->pending.push_back(std::move(raw));   // 完整请求字节：所有权转移给 FIFO
+                        state_->pending_count.fetch_add(1, std::memory_order_relaxed);
+                        state_->pending_bytes.fetch_add(bytes, std::memory_order_relaxed);
+                        state_->backpressured.store(false, std::memory_order_release);
+                        accepted = true;
+                        /* 峰值可观测（无锁 CAS 更新，供 §6.2 对照实验取原始读数）。 */
+                        const std::size_t cnt = state_->pending_count.load(std::memory_order_relaxed);
+                        const std::size_t byt = state_->pending_bytes.load(std::memory_order_relaxed);
+                        std::uint64_t prev = state_->fifo_peak_requests.load(std::memory_order_relaxed);
+                        while (cnt > prev
+                               && !state_->fifo_peak_requests.compare_exchange_weak(prev, cnt,
+                                                                                    std::memory_order_relaxed))
+                        {
+                        }
+                        prev = state_->fifo_peak_bytes.load(std::memory_order_relaxed);
+                        while (byt > prev
+                               && !state_->fifo_peak_bytes.compare_exchange_weak(prev, byt,
+                                                                                 std::memory_order_relaxed))
+                        {
+                        }
+                    }
                 }
-                state_->pending_cv.notify_one();
+                if (accepted)
+                {
+                    std::uint64_t prev = state_->max_request_bytes.load(std::memory_order_relaxed);
+                    while (bytes > prev
+                           && !state_->max_request_bytes.compare_exchange_weak(prev, bytes,
+                                                                               std::memory_order_relaxed))
+                    {
+                    }
+                    if (oversize) state_->oversize_admissions.fetch_add(1, std::memory_order_relaxed);
+                    state_->pending_cv.notify_one();
+                }
+                else
+                {
+                    state_->backpressured.store(true, std::memory_order_release);
+                    state_->backpressure_hits.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
     }
@@ -289,11 +403,25 @@ void SerRequestRoute::stop_and_wake() noexcept
 
 void SerRequestRoute::wait_quiescent() noexcept
 {
-    /* 注销第 5 步：等本模块 in-flight 记账归零（有界；超时只打诊断、不阻塞注销）。 */
-    std::unique_lock<std::mutex> lock(state_->quiesce_mtx);
-    state_->quiesce_cv.wait_for(lock, std::chrono::milliseconds{kSerQuiesceTimeoutMs}, [this] {
-        return state_->receive_inflight.load(std::memory_order_acquire) == 0;
-    });
+    /* 注销第 5 步：等本模块 in-flight 记账归零（有界；超时只打诊断、不阻塞注销）。
+     * P1（§5）：检查 wait_for 返回值；超时**先出锁取快照再打印**（不在持锁时写日志）。 */
+    bool timed_out = false;
+    std::size_t inflight = 0;
+    {
+        std::unique_lock<std::mutex> lock(state_->quiesce_mtx);
+        state_->quiesce_cv.wait_for(lock, std::chrono::milliseconds{kSerQuiesceTimeoutMs}, [this] {
+            return state_->receive_inflight.load(std::memory_order_acquire) == 0;
+        });
+        inflight = state_->receive_inflight.load(std::memory_order_acquire);
+        timed_out = inflight != 0;
+    }
+    if (timed_out)
+    {
+        ipc::error("[shm_ser] wait_quiescent timeout after %lld ms: route='%s' generation=%u in_flight=%llu; "
+                   "continuing bounded teardown\n",
+                   static_cast<long long>(kSerQuiesceTimeoutMs), state_->route_name.c_str(),
+                   state_->generation, static_cast<unsigned long long>(inflight));
+    }
 }
 
 
@@ -673,10 +801,22 @@ void shm_ser_ipc::response_thread_func()
      * claim(compat_thread)，退出前**显式** release_recv（契约 §4.6 / 注销末步；漏了会让重新
      * add_route 永久返回 busy、静默丢包）。 */
     const std::shared_ptr<SerState> state = current_ser_state();
-    if (req_route_ && !req_route_->try_claim_recv(threepools::RecvOwner::compat_thread))
+    /* P1（§4.2）：不再以 req_route_ != nullptr 作为 claim 条件 —— 回退路径（nodelet /
+     * fork 闸 / 后端不可用 / 注册失败）根本没有成功注册的 route，但 owner 状态在
+     * SerState 上，兼容线程照样必须 claim。worker 注册与本函数操作同一个原子量。 */
+    if (!state)
     {
-        return;   // 已被别的消费者持有 ⇒ 不双收
+        ipc::error("[shm_ser] compat receive thread: state missing for topic '%s'; exiting\n",
+                   topic_name_.c_str());
+        return;
     }
+    if (!ser_state_try_claim_recv(*state, threepools::RecvOwner::compat_thread))
+    {
+        ipc::error("[shm_ser] compat receive thread: claim failed for route '%s' (owner=%s); not double-receiving\n",
+                   state->route_name.c_str(), ser_owner_name(state->owner.load(std::memory_order_acquire)));
+        return;
+    }
+    SerCompatClaimGuard claim_guard{state.get()};   // 正常/异常退出都归还 owner
 
     while (running.load(std::memory_order_acquire))
     {
@@ -703,11 +843,7 @@ void shm_ser_ipc::response_thread_func()
          * 差别只在"谁调用"（这里没有 FIFO，取到即处理）。 */
         process_request(state, std::move(raw_data));
     }   // 客户段发送请求
-
-    if (req_route_)
-    {
-        req_route_->release_recv();   // 注销末步：兼容路径退出前归还收包独占
-    }
+    /* 归还收包独占由 SerCompatClaimGuard 统一完成（正常与异常出口都覆盖）。 */
 }
 
 /******************************************************************************************************/
@@ -885,10 +1021,12 @@ void shm_ser_ipc::stop_data_plane() noexcept
     }
 
     /* ⑤ 兼容路径在退出前**显式归还**收包独占（worker 路径已由 remove_route 第 6 步归还）。
-     * 漏了这一步会让重新 add_route 永久返回 busy（静默丢包）。 */
-    if (!worker_mode_ && req_route_)
+     * 漏了这一步会让重新 add_route 永久返回 busy（静默丢包）。
+     * P1：不再依赖 req_route_（回退路径它为空），直接在 state 的 owner 上归还；
+     * 幂等，故对两条路径都安全。 */
+    if (state && !worker_mode_)
     {
-        req_route_->release_recv();
+        ser_state_release_recv(*state);
     }
 
     /* ⑥ FIFO 残余按停机策略**作废**（明确策略：停机时不排空、直接丢弃并记账，
