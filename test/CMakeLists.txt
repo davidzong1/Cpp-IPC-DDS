@@ -243,6 +243,21 @@ set_tests_properties(test_socket_recv_worker PROPERTIES TIMEOUT 120)
 add_test(NAME test_socket_readable COMMAND test_socket_readable)
 set_tests_properties(test_socket_readable PROPERTIES TIMEOUT 120)
 
+# [t8] P0 并发回归（见 test/test_socket_ser_concurrency.cpp 抬头注释）。
+# 存在理由：t7 的 C-01/C-02 是 shared_ptr 成员的数据竞争，而既有 test/ 对
+# reset_message / reset_callback / stop_data_plane / restart_data_plane **零覆盖**
+# => 功能用例全绿对该竞争不可证伪。本套件把这三条入口真正并发跑起来。
+# 它**不**替代结构性访问点审查（那是 t9 的必查项），只回答"并发路径能跑通"。
+add_test(NAME test_socket_ser_concurrency COMMAND test_socket_ser_concurrency)
+set_tests_properties(test_socket_ser_concurrency PROPERTIES TIMEOUT 120)
+
+# [t8-C05] SHM ser-cli 有界 FIFO 的**容量行为**对照（见 test/test_shm_ser_backpressure.cpp）。
+# 存在理由：t8 给 SerState FIFO 落地了「入库前容量判定 + 零丢失背压」，但既有功能用例的请求
+# 速率太低、FIFO 永远不会满 ⇒ 该性质**无任何判据**。本用例用慢 callback 把 FIFO 压满，
+# 断言「所有请求最终都被应答」（零静默丢弃）。实测约 0.6s；给 120s 只为卡死时报超时。
+add_test(NAME test_shm_ser_backpressure COMMAND test_shm_ser_backpressure)
+set_tests_properties(test_shm_ser_backpressure PROPERTIES TIMEOUT 120)
+
 #target_link_libraries(${PROJECT_NAME} tcmalloc_minimal)
 
 # ================================================================

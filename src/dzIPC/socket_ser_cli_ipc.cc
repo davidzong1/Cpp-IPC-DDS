@@ -16,6 +16,7 @@
 #include "dzIPC/threepools/socket_recv_worker.h"   // 阶段 5 共享层（captain 裁定 A：worker 归共享层）
 #include "ipc_msg/ipc_msg_base/udp_id_init_msg.hpp"
 #include "libipc/semaphore.h"
+#include "libipc/utility/log.h"   // ipc::error：注销超时诊断（P1 §5）
 #define ListenerWaitTime 1'000   // 1 second
 #define ServerRevTime 200        // 200 ms, allow large fragmented UDP payloads to complete
 
@@ -309,13 +310,28 @@ public:
         state_->queue_cv.notify_all();
     }
 
-    /* 注销协议第 5 步：等本模块 in-flight 记账归零（有界；超时只打诊断不阻塞注销）。 */
+    /* 注销协议第 5 步：等本模块 in-flight 记账归零（有界；超时只打诊断不阻塞注销）。
+     * P1（§5）：检查 wait_for 返回值；超时**先出锁取快照再打印**（不在持锁时写日志）。 */
     void wait_quiescent() noexcept override
     {
-        std::unique_lock<std::mutex> lock(state_->quiesce_mtx);
-        state_->quiesce_cv.wait_for(lock, std::chrono::milliseconds{kSerQuiesceTimeoutMs}, [this] {
-            return state_->recv_in_flight.load(std::memory_order_acquire) == 0;
-        });
+        bool timed_out = false;
+        std::size_t inflight = 0;
+        {
+            std::unique_lock<std::mutex> lock(state_->quiesce_mtx);
+            state_->quiesce_cv.wait_for(lock, std::chrono::milliseconds{kSerQuiesceTimeoutMs}, [this] {
+                return state_->recv_in_flight.load(std::memory_order_acquire) == 0;
+            });
+            inflight = state_->recv_in_flight.load(std::memory_order_acquire);
+            timed_out = inflight != 0;
+        }
+        if (timed_out)
+        {
+            ipc::error("[socket_ser] wait_quiescent timeout after %lld ms: route='%s' generation=%u in_flight=%llu; "
+                       "continuing bounded teardown\n",
+                       static_cast<long long>(kSerQuiesceTimeoutMs),
+                       state_->route_key.c_str(), state_->generation,
+                       static_cast<unsigned long long>(inflight));
+        }
     }
 
 private:
@@ -323,6 +339,63 @@ private:
 };
 
 }   // namespace
+
+/* ---- P1（阻塞解阻方案 §4.1）：owner CAS 放在 shared state 上，而不是 route 上 ----
+ * 这样**兼容接收线程**（没有任何成功注册的 worker route）也能遵守同一份单消费者
+ * 独占状态机；worker 注册走的 route->try_claim_recv 与它操作同一个 state->owner
+ * 原子量，因此两路**不可能同时成功**。 */
+bool ser_state_try_claim_recv(socket_ser_receive_state& state, threepools::RecvOwner who) noexcept
+{
+    if (who == threepools::RecvOwner::none)
+    {
+        return false;   // 契约 §4.6：who == none 一律拒绝
+    }
+    threepools::RecvOwner expected = threepools::RecvOwner::none;
+    return state.owner.compare_exchange_strong(expected, who, std::memory_order_acq_rel);
+}
+
+void ser_state_release_recv(socket_ser_receive_state& state) noexcept
+{
+    auto expected = state.owner.load(std::memory_order_acquire);
+    while (expected != threepools::RecvOwner::none)
+    {
+        if (state.owner.compare_exchange_weak(expected, threepools::RecvOwner::none,
+                                              std::memory_order_acq_rel))
+        {
+            return;   // 重复 release 是安全的（幂等）
+        }
+    }
+}
+
+const char* ser_owner_name(threepools::RecvOwner who) noexcept
+{
+    switch (who)
+    {
+    case threepools::RecvOwner::none:
+        return "none";
+    case threepools::RecvOwner::compat_thread:
+        return "compat_thread";
+    case threepools::RecvOwner::worker:
+        return "worker";
+    }
+    return "?";
+}
+
+/* RAII：兼容接收线程无论正常退出还是异常退出都归还 owner（§4.2 "线程退出用 RAII guard"）。 */
+struct SerCompatClaimGuard
+{
+    socket_ser_receive_state* state{nullptr};
+    ~SerCompatClaimGuard()
+    {
+        if (state != nullptr)
+        {
+            ser_state_release_recv(*state);
+        }
+    }
+};
+
+/* P1：route 上的三方法转调 state 级 CAS，保证"只有一份 owner 状态"（§4.1 末段）。 */
+
 
 namespace {
 /* 连接重试必须**可中断**。
@@ -382,6 +455,26 @@ socket_ser_ipc::socket_ser_ipc(const std::string& topic_name, const std::shared_
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
+/* ---- P0：receive_state_ 的三个同步访问口（阻塞解阻方案 §3.1）----
+ * 只做 shared_ptr 自身的复制/替换/清空，不取 state 内部锁、不阻塞、不回调。 */
+std::shared_ptr<socket_ser_receive_state> socket_ser_ipc::current_receive_state() const
+{
+    std::lock_guard<std::mutex> lock(receive_state_mtx_);
+    return receive_state_;
+}
+
+void socket_ser_ipc::set_receive_state(const std::shared_ptr<socket_ser_receive_state>& state)
+{
+    std::lock_guard<std::mutex> lock(receive_state_mtx_);
+    receive_state_ = state;
+}
+
+void socket_ser_ipc::clear_receive_state() noexcept
+{
+    std::lock_guard<std::mutex> lock(receive_state_mtx_);
+    receive_state_.reset();
+}
+
 void socket_ser_ipc::reset_message(const std::shared_ptr<ServiceData>& msg)
 {
     if (!msg)
@@ -390,14 +483,20 @@ void socket_ser_ipc::reset_message(const std::shared_ptr<ServiceData>& msg)
     }
     std::shared_ptr<ServiceData> new_msg;
     new_msg.reset(msg->clone());
-    std::lock_guard<std::mutex> lock(message_mtx_);
-    message_ = std::move(new_msg);
+    /* 锁序（§3.2）：message_mtx_ →（取快照并**释放** receive_state_mtx_）→ state->mtx。
+     * 持 message_mtx_ 期间只复制快照，不取 state 锁。 */
+    std::shared_ptr<socket_ser_receive_state> state;
+    {
+        std::lock_guard<std::mutex> lock(message_mtx_);
+        message_ = std::move(new_msg);
+        state = current_receive_state();
+    }
     /* worker 模式：worker 从 state 的**独立克隆**取模板（它不能碰本对象的 mutex）。
      * 必须是独立对象 —— chunk_rev_server 把请求反序列化进传入的那个 ServiceData。 */
-    if (receive_state_)
+    if (state)
     {
-        std::lock_guard<std::mutex> state_lock(receive_state_->mtx);
-        receive_state_->msg_template.reset(message_->clone());
+        std::lock_guard<std::mutex> state_lock(state->mtx);
+        state->msg_template.reset(message_->clone());
     }
 }
 
@@ -406,13 +505,17 @@ void socket_ser_ipc::reset_message(const std::shared_ptr<ServiceData>& msg)
 /******************************************************************************************************/
 void socket_ser_ipc::reset_callback(std::function<void(std::shared_ptr<ServiceData>&)> callback)
 {
-    std::lock_guard<std::mutex> lock(callback_mtx_);
-    callback_ = std::move(callback);
-    /* worker 模式：处理路径从 state 快照取 callback（worker 侧持 state ⇒ 不持裸本对象指针）。 */
-    if (receive_state_)
+    std::shared_ptr<socket_ser_receive_state> state;
     {
-        std::lock_guard<std::mutex> state_lock(receive_state_->mtx);
-        receive_state_->callback = callback_;
+        std::lock_guard<std::mutex> lock(callback_mtx_);
+        callback_ = std::move(callback);
+        state = current_receive_state();   // 锁内只取快照，state->mtx 在锁外取（§3.2）
+    }
+    /* worker 模式：处理路径从 state 快照取 callback（worker 侧持 state ⇒ 不持裸本对象指针）。 */
+    if (state)
+    {
+        std::lock_guard<std::mutex> state_lock(state->mtx);
+        state->callback = callback_;
     }
 }
 
@@ -785,6 +888,25 @@ void socket_ser_ipc::server_handshake()
 /******************************************************************************************************/
 void socket_ser_ipc::response_thread_func()
 {
+    /* P1（§4.2）：兼容接收线程启动前从**安全访问口**取 state 并 claim(compat_thread)。
+     * 不再依赖"是否存在成功注册的 route"——owner 状态在 state 上，与 worker 注册共用
+     * 同一个原子量，因此两路不可能同时收包。claim 失败打印 route key 与当前 owner。 */
+    const std::shared_ptr<socket_ser_receive_state> state = current_receive_state();
+    if (!state)
+    {
+        std::cerr << "\033[31m[" << topic_name_
+                  << "SerInfo] compat receive thread: receive state missing; exiting\033[0m" << std::endl;
+        return;
+    }
+    if (!ser_state_try_claim_recv(*state, threepools::RecvOwner::compat_thread))
+    {
+        std::cerr << "\033[33m[" << topic_name_ << "SerInfo] compat receive thread: claim failed for route '"
+                  << state->route_key << "' (owner=" << ser_owner_name(state->owner.load(std::memory_order_acquire))
+                  << "); not double-receiving\033[0m" << std::endl;
+        return;
+    }
+    SerCompatClaimGuard claim_guard{state.get()};   // 正常/异常退出都归还 owner
+
     /* 两个条件缺一不可: running 是对象生命周期, data_plane_running_ 是数据面生命周期。
      * 只看 running 会让"停数据面"无法实现(切换的停-切-起需要它), 只看 data_plane_running_
      * 会让析构时的 join 依赖别的字段先被置位。 */
@@ -839,7 +961,8 @@ void socket_ser_ipc::response_thread_func()
  * 提示，与改造前"收包线程停掉后到达的请求无人应答"是同一失败面）。 */
 void socket_ser_ipc::process_thread_func()
 {
-    const std::shared_ptr<socket_ser_receive_state> state = receive_state_;
+    /* P0：处理线程只持本地快照（start/restart 会替换成员指针，必须走访问口）。 */
+    const std::shared_ptr<socket_ser_receive_state> state = current_receive_state();
     if (!state)
     {
         return;
@@ -893,20 +1016,13 @@ bool socket_ser_ipc::start_receive_path()
         return false;
     };
 
-    if (socket_recv_compat_forced())
-    {
-        return fallback("DZIPC_SOCKET_COMPAT_THREAD=1");
-    }
-    if (!pool_allowed_in_this_process())
-    {
-        /* fork 后子进程不得碰池（池内锁可能被父进程持有）—— 见 pool_allowed_in_this_process。 */
-        return fallback("forked child: recv pool owner pid mismatch");
-    }
-    if (!threepools::SocketRecvWorkerPool::backend_available())
-    {
-        return fallback("SocketWaitSet backend unavailable");
-    }
-
+    /* ⛔ 顺序要害（P0/P1，兼容路径的正确性依赖它）：state 必须在**任何**回退返回
+     * **之前**就建好并挂上。理由：兼容接收线程 `response_thread_func` 的单消费者
+     * claim 走的是 `state->owner`（方案 §4.1 的推荐设计），而所有回退分支都在本函数
+     * 前半段返回。若把 state 建在回退判断之后，兼容模式会拿到空 state ⇒ 立即以
+     * 「receive state missing」退出 ⇒ **无人收包**（静默停收，请求永不回应）。
+     * 这也正是方案 §3.1 末段要求的「所有回退路径在任何可能返回前创建并保存有效 route」
+     * 在 state 级设计下的等价物。 */
     auto state = std::make_shared<socket_ser_receive_state>();
     state->route_key = topic_name_ + "#" + std::to_string(domain_id_);
     state->domain_id = static_cast<std::uint32_t>(domain_id_);
@@ -929,6 +1045,23 @@ bool socket_ser_ipc::start_receive_path()
         std::lock_guard<std::mutex> lock(callback_mtx_);
         state->callback = callback_;
     }
+    /* ⛔ 在任何回退返回**之前**挂上 state：兼容接收线程要用 state->owner 做 claim。 */
+    set_receive_state(state);
+
+    /* ---- 回退判定（全部在 state 挂好之后）---- */
+    if (socket_recv_compat_forced())
+    {
+        return fallback("DZIPC_SOCKET_COMPAT_THREAD=1");
+    }
+    if (!pool_allowed_in_this_process())
+    {
+        /* fork 后子进程不得碰池（池内锁可能被父进程持有）—— 见 pool_allowed_in_this_process。 */
+        return fallback("forked child: recv pool owner pid mismatch");
+    }
+    if (!threepools::SocketRecvWorkerPool::backend_available())
+    {
+        return fallback("SocketWaitSet backend unavailable");
+    }
 
     auto route = std::make_shared<socket_ser_request_route>(state);
     if (!route->wait_token().valid())
@@ -949,7 +1082,6 @@ bool socket_ser_ipc::start_receive_path()
     {
         return fallback(register_status_reason(status));
     }
-    receive_state_ = state;
     receive_route_ = route;
     worker_mode_ = true;
     if (verbose_)
@@ -991,18 +1123,19 @@ void socket_ser_ipc::teardown_receive_path()
     }
 
     /* 队列里尚未处理的请求随本代作废（与改造前"收包线程停了之后无人应答"同一面），
-     * 计数而不是静默丢弃。 */
-    if (receive_state_)
+     * 计数而不是静默丢弃。P0：先取快照，再在锁外碰 state 内部锁。 */
+    const std::shared_ptr<socket_ser_receive_state> state = current_receive_state();
+    if (state)
     {
-        std::lock_guard<std::mutex> lock(receive_state_->queue_mtx);
-        if (!receive_state_->queue.empty())
+        std::lock_guard<std::mutex> lock(state->queue_mtx);
+        if (!state->queue.empty())
         {
-            receive_state_->queue_drops.fetch_add(receive_state_->queue.size(), std::memory_order_relaxed);
-            receive_state_->queue.clear();
+            state->queue_drops.fetch_add(state->queue.size(), std::memory_order_relaxed);
+            state->queue.clear();
         }
     }
     receive_route_.reset();
-    receive_state_.reset();
+    clear_receive_state();
     worker_mode_ = false;
 }
 

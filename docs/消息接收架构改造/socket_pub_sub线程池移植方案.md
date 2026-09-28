@@ -5,6 +5,8 @@
 > 依赖的冻结契约：`ipc-transport-phase5-shared-wait-layer-contract-99ff82a0f9af.md`
 > ＋**必读**勘误 `ipc-transport-phase5-shared-wait-layer-contract-errata-d8f45cfa45bb.md`（E1/E2/E3）。
 > 范围：socket_sub_ipc 数据接收；socket_pub_ipc discovery_loop 见 §6·U4（仅评估）。
+> ⚠️ **本波未达成项（t11 汇总时不得计入已交付）**：① §0·C9 / §6 的数据面 1000 订阅收包（`fd ≥ FD_SETSIZE(1024)` ⇒ abort，**既有缺陷**，归 ipc-transport）；
+> ② L3 多热/冷公平性**无专门用例**（测试缺口）；③ §6·U4 的控制面（`discovery_loop`）迁移本波**不落地**。详见 §9。
 
 ## 0. 与基准实现的偏差（文档更正点）
 
@@ -16,11 +18,14 @@
 | C2 | §3「Linux 可用 epoll；Windows 使用适配底层 socket 的等价事件机制」 | **勘误 E1**：`wait_handle()` **不改变** fd 的阻塞模式（Linux 返回**阻塞**接收 fd）。就绪后读取一律走 `chunk_rev_topic`/`receive_nowait`；⛔ 禁止对该 fd 用裸 `recvfrom`（会永久挂住 worker 线程，静默停收），⛔ 禁止自行置 `O_NONBLOCK`（会把既有 `receive(invalid_value)` 无限等待退化成紧循环忙轮询）。 |
 | C3 | §6·U0「扩展 UDPNode 的可等待句柄与取消等待 API」列在本模块阶段 | 该扩展属 ipc-transport 任务 A。本模块 U0 只做基线测量与回归对照（见 §7 证据表）。 |
 | C4 | §5「释放 shared state」未定义 worker 池的生命周期 | 进程级 `SocketReceiveWorkerPool` 是**故意泄漏的指针单例**（与 `RecvWorkerPool`/`LocalPubSubRegistry` 同构）：模块只 `add_route`/`remove_route`，**不** stop 池 —— 否则全局对象析构时的 `remove_route` 会打在已析构的池上。 |
-| C5 | 未写 worker 数与调参入口 | 默认 `hardware_concurrency()`，上限 128（`kMaxSocketWorkers`），`DZIPC_SOCKET_RECV_WORKERS` 覆盖；进程内只读一次。 |
+| C5 | 未写 worker 数与调参入口 | 默认 `hardware_concurrency()`，上限 128（实现里的常量名是 `kMaxWorkerCount`，见 `src/dzIPC/threepools/socket_recv_worker.cc:61`；早期草案写作 `kMaxSocketWorkers`，**以代码为准**），`DZIPC_SOCKET_RECV_WORKERS` 覆盖；进程内只读一次。 |
 | C6 | §6·U2「保留旧线程作为不支持平台的回退路径和调试比较路径」未给强制开关 | 新增 `DZIPC_SOCKET_COMPAT_THREAD=1`：强制走兼容路径，用于"同一套语义两条路径"对比与无 wait backend 平台的模拟验收。 |
 | C7 | §4「热 route 有界让出，冷 route 可调度」未给实现要点 | worker 循环在 deferred 非空时**先做一次 `wait(0)` 全量探测**再 drain。否则热 route 持续让出 ⇒ 循环再也进不到 `wait()`，新到达的冷 route 永远不被发现（实测 `DZIPC_SOCKET_RECV_WORKERS=1` 下冷 topic 30 条只到 1 条）。epoll 是 level-triggered，未读走的数据下一次 `wait(0)` 仍报到 ⇒ 该探测与 `recv_worker.cc` 的 `collect_pending()` 同为**事实来源**，wait-set 的 ready 缓存只是提示。 |
 | C8 | §5 未提醒 `running` 闸的重建 | `teardown_receive_path()` 无条件把 `running` 置 false（兼容循环的退出闸），因此 `InitChannel` 在调用它之后**必须**重新置 true。否则首次初始化时兼容线程立刻看到 false 直接退出，订阅端静默收不到任何消息（worker 路径不看 `running`，缺陷只在回退路径暴露）。 |
-| C9 | §7「1000 subscriber 的接收线程数固定为 worker 配置」被读作「1000 订阅可测」 | **线程数成立、数据面收包不成立**：订阅可建起（1000 订阅 `fds_after_init=2071`、`max_socket_fd=2069`，建订阅阶段无 abort，`threads_delta=32`），但**收包**在任一订阅 socket 的 fd **号** ≥ `FD_SETSIZE`(1024) 时 abort —— 实测 `scale1000 1 1000` → `max_socket_fd=2069 *** buffer overflow detected *** rc=134`；`scale1000 1 511` → `max_socket_fd=1091` 同样 abort；`scale1000 1 477` → `max_socket_fd=1023` 无 abort，`subs_with_any=429~445/477`（≈90–93%，best-effort 组播不保证每条都到，非本波缺陷）。**判据是 fd 号而不是订阅个数**：同一 478 订阅在 `max_socket_fd=1025`（rc=0）与 fd 号更大（abort）两种起点下都实测到过。根因在任务 A 交付面 `src/libipc/platform/posix/udp.h::UDPNode::receive(tm)` 的**既有** `select()+FD_SET(server_fd)` 定时等待（gdb：`__fdelt_chk` ← `UDPNode::receive` ← `recv_chunk_common_impl` ← `chunk_rev_topic` ← `socket_receive_once`）；改造前基线库同一探针在 511 订阅同样 abort（backtrace 逐帧相同）⇒ **既有限制、非本波引入**，但 board 的「改造后 >510/204 必须可测」第一验收项在 socket 数据面**未达成**。修复落点在 ipc-transport（该文件不在本模块写权限内）：把 `receive(tm)` 的 `select()` 换成 `poll()`（无 FD_SETSIZE 限制）。 |
+| C9 | §7「1000 subscriber 的接收线程数固定为 worker 配置」被读作「1000 订阅可测」 | **线程数成立、数据面收包不成立**：订阅可建起（1000 订阅 `fds_after_init=2071`、`max_socket_fd=2069`，建订阅阶段无 abort，`threads_delta=32`），但**收包**在任一订阅 socket 的 fd **号** ≥ `FD_SETSIZE`(1024) 时 abort —— 实测 `scale1000 1 1000` → `max_socket_fd=2069 *** buffer overflow detected *** rc=134`；`scale1000 1 511` → `max_socket_fd=1091` 同样 abort；`scale1000 1 477` → `max_socket_fd=1023` 无 abort，`subs_with_any=429~445/477`（≈90–93%，best-effort 组播不保证每条都到，非本波缺陷）。**判据是 fd 号而不是订阅个数**：同一 478 订阅在 `max_socket_fd=1025`（rc=0）与 fd 号更大（abort）两种起点下都实测到过。根因在任务 A 交付面 `src/libipc/platform/posix/udp.h::UDPNode::receive(tm)` 的**既有** `select()+FD_SET(server_fd)` 定时等待（gdb：`__fdelt_chk` ← `UDPNode::receive` ← `recv_chunk_common_impl` ← `chunk_rev_topic` ← `socket_receive_once`）；改造前基线库同一探针在 511 订阅同样 abort（backtrace 逐帧相同）⇒ **既有限制、非本波引入**，但 board 的「改造后 >510/204 必须可测」第一验收项在 socket 数据面**未达成**。修复落点在 ipc-transport（该文件不在本模块写权限内）：把 `receive(tm)` 的 `select()` 换成 `poll()`（无 FD_SETSIZE 限制）。
+**行号更正（t6/t7 实测，t10 回写）**：`src/libipc/platform/posix/udp.h` 的 `FD_SET(server_fd, &read_fds)` 在 **:347**、`::select(server_fd + 1, ...)` 在 **:353**
+（任务书/早期草案引用的 326/332 是 **t2 改动前**的 HEAD 行号，已随 t2 改动漂移；win 侧同构：`:327/330`、`:392/398`、`:482/484`、`:592`）。
+**归属复核（t10）**：本项**不修**，且**归 ipc-transport**（`src/libipc/platform/*/udp.h` 属共享层交付面，不在任何模块 inScope 内）。 |
 
 ## 1. 当前结构与目标
 
@@ -71,7 +76,7 @@ SHM `recv_wait_set` 等的是共享内存 sequence，不能等待 UDP socket —
 
 1. 注销 `LocalPubSubRegistry`（持有 `topic_msg_mtx_`）；
 2. `active = false`（route stopping，禁止新的 `recv_once`）；
-3. worker 模式：`pool.remove_route()` 内部依次 —— 摘除 wait 项并**唤醒**阻塞中的 `wait()` → `cancel_wait()` 打断阻塞中的 UDP receive → **等 `in_flight` 归零**（`kSocketQuiesceTimeout = 2000ms`，超时打诊断）→ `owner` 归还 `none`；
+3. worker 模式：`pool.remove_route()` 内部依次 —— 摘除 wait 项并**唤醒**阻塞中的 `wait()` → `cancel_wait()` 打断阻塞中的 UDP receive → **等 `in_flight` 归零**（实现常量名 `kSubQuiesceTimeoutMs = 2000`，见 `src/dzIPC/socket_pub_sub_ipc.cc:36`；早期草案写作 `kSocketQuiesceTimeout`，**以代码为准**；超时打诊断）→ `owner` 归还 `none`；
    兼容模式：`cancel_wait()` → `join` 订阅线程；
 4. 关闭 `subscriber_` / `ack_tx_`；
 5. 释放 shared state。
@@ -152,6 +157,77 @@ SHM `recv_wait_set` 等的是共享内存 sequence，不能等待 UDP socket —
 ## 8. 风险
 
 - `chunk_rev_topic` 包含分片组装和协议状态，不是单次非阻塞 recv。预算只能在安全的完整消息边界应用 —— 已实现为"一次 `recv_once` 返回后才检查三项预算"，**不得**在组包中途切走。
-- 单次组包占用上界 = `kSocketSubRecvTimeoutMs`(50) × 可能的等 ACK 轮次；`remove_route` 的等待上界 = `kSocketQuiesceTimeout`(2000ms)，超时只打诊断、不阻塞注销（之后 `cancel_wait` 已让该 node 接收面失效，调用方随即 `close`）。
+- 单次组包占用上界 = `kSocketSubRecvTimeoutMs`(50) × 可能的等 ACK 轮次；`remove_route` 的等待上界 = `kSubQuiesceTimeoutMs`(2000ms，即早期草案的 `kSocketQuiesceTimeout`)，超时只打诊断、不阻塞注销（之后 `cancel_wait` 已让该 node 接收面失效，调用方随即 `close`）。
 - 若将来要细粒度公平调度（组包中途让出），应先把 `data_rev.cc` 隐藏的每 UDPNode 重组状态迁移成 route-owned session，再重新验证 ACK/NACK 与超时语义 —— 与本波"不改 `data_rev.cc`"的边界一致。
 - Windows 分支（`WaitForMultipleObjects`、WSAEvent 路径）本次**未在 Windows 验证**，只做编译期与接口一致性保证；63 路上限由共享层 `max_channels()` 暴露，超限时 `add_route` 返回 `wait_set_full` 并由本模块显式回退兼容线程。
+
+---
+
+## 9. 未达成项、遗留项与同步边界表（t10 回写）
+
+### 9.1 未达成项（t11 汇总口径）
+
+| ID | 未达成项 | 依据（文档位置 → 实现/实测） | 归属 |
+| --- | --- | --- | --- |
+| **U-1（=D9/L1）** | **数据面 1000 订阅收包未达成**：任一订阅 socket 的 **fd 号** ≥ `FD_SETSIZE`(1024) 即 `__fdelt_chk` abort（本机有数据流时可用上界 ≈477 订阅者，`max_socket_fd ≤ 1023`）。**线程数**一项成立（`threads_max ≡ 33`），**收包**一项不成立 —— 两条必须分开读 | 本文 §0·C9、§7 证据表末行；t6 报告 §0（追加B）、§6 | **既有缺陷**，归 ipc-transport（`select()`→`poll()`），**本波不修** |
+| **U-2** | 多热/冷公平性**无专门用例**（仅有 `test_recv_worker`/`test_socket_recv_worker` 的 deferred/预算让路用例间接覆盖） | t6 报告 §8「L3」 | 测试（下一波），与本波放行解耦 |
+| **U-3** | 控制面 `socket_pub_ipc::discovery_loop` 迁移（§6·U4）**本波不落地** | 本文 §6·U4 三条理由 | 独立阶段，需与 SHM 控制面 owner 一起评审 |
+| **U-4** | Windows 分支（`WaitForMultipleObjects` / WSAEvent）**未在 Windows 验证** | 本文 §8 末条；契约 §7 | 声明性限制（非缺陷）；只做编译期与接口一致性保证 |
+
+### 9.2 补充观察（不构成本模块缺陷，但复核方必读）
+
+| ID | 观察 | 依据 | 处置 |
+| --- | --- | --- | --- |
+| L2 | 默认 `worker_count = hardware_concurrency()` ⇒ **单个订阅者即拉起本机 32 个 worker** | t6 报告 §8「L2」；共享层 `DZIPC_SOCKET_RECV_WORKERS` 进程内只读一次 | 配置观察（非缺陷）；小规模部署建议显式设 `DZIPC_SOCKET_RECV_WORKERS`（如 4）。池空闲退出后线程会归还 |
+| L4 | nodelet 模式走兼容线程 | 契约 §5 / captain 裁定 C7；t6 报告 §2.3（`socket_nodelet` 13 条 fallback 行） | **既定设计**，不是回退失败 |
+| L5 | `build_baseline/bin/baseline_probe_after` ABI 陈旧，用它测**当前**库会得到假缺陷（`sysmalloc Assertion` 堆损坏） | t6 报告 §10 第 2 条 | ⛔ 测当前库必须按当前头文件重编探针；该二进制只对基线库有效 |
+| R-4 | `large_msg_cache` 口径不一致：`include/libipc/def.h:49` = **40**，而 `src/libipc/ipc.cpp:461` / `include/dzIPC/common/nodelet_config.h:52` 注释写作 **32** | t7 报告 §5「C-05」；t8 报告 §1「C-05」 | **既有**文档不一致，非本波引入；**以代码为准（40）**；落点属 ipc-transport/文档侧 |
+
+### 9.3 worker 路径与兼容路径的**唯一机制差异**（口径，防误判）
+
+| 差异点 | worker 路径 | 兼容路径 | 为什么必须不同 |
+| --- | --- | --- | --- |
+| 可读判据 `udp_node_readable()` | **先判可读**，无数据立即 `return 0` | **不判**，保持阻塞 `chunk_rev_topic(tm=50ms)` | 兼容路径若加不可读即返回的判据，循环会退化成**忙轮询**（阶段 5 第一红线） |
+| 收包原语调用次数 | 每次 `recv_once()` 只调一次 `chunk_rev_topic`，到**一条完整消息**边界返回 | 循环内连续调用，阻塞在 50ms 组包窗口 | 预算只在"一次完整 `recv_once` 返回"后由**共享 worker** 检查，⛔ 不得在组包中途切走 |
+| 进程内快路径队列 | **不注册** `LocalPubSubRegistry` | 注册（nodelet 快路径在这里） | C7：`RecvWorkerPool` 未转发 `wakeup()`，worker 阻塞在 wait-set 时无法被"队列有新消息"叫醒 ⇒ 注册了会让消息投进没有消费者的队列而静默挂起 |
+| 停机顺序（C-06 修复后） | `remove_route`（内部摘 wait 项并唤醒） | `stopping=true` **与 `running=false` 同处** → `udp_node_cancel_wait` → join | 消除"`cancel_wait` 与 `running=false` 之间再进一次 `chunk_rev_topic`"的窗口 |
+
+### 9.4 同步边界表（P4 / 防复发 · 必填）
+
+> **由来**：t7 finding **C-02** 的根因就是 `receive_state_` **未列入任何收尾清单**（同 C-01，只是暴露面略小）。
+> 本节把新引入的同步面逐条登记；新增成员若未进本表，视为同类风险。
+
+| # | 对象 / 成员 | 谁写 | 谁读 | 同步原语 / 约束（实测锚点） |
+| --- | --- | --- | --- | --- |
+| B-1 | `socket_sub_ipc::receive_state_` | `InitChannel` / `start_receive_path` / `teardown_receive_path` | `reset_message`、处理/兼容线程 | **`receive_state_mtx_` + 三个访问口**（`current_/set_/clear_receive_state()`）；业务代码**零**直接成员访问（修后仅访问口内 3 处） |
+| B-2 | `socket_sub_receive_state::owner` | 共享 worker `add_route` / 兼容线程 claim / `remove_route` 第 6 步 | 三方 | `std::atomic<RecvOwner>` CAS（契约 §4.6 单消费者互斥；实测 `src/dzIPC/socket_pub_sub_ipc.cc:57`） |
+| B-3 | `receive_route_` / `worker_mode_` / `subscribe_thread_` | `InitChannel` / `start_receive_path` / `teardown_receive_path` | 同上三个入口 | **不加锁**，依赖 API 约束：调用方必须串行化 `InitChannel` / `stop_data_plane`（auto 层由 `leg_mtx_` 保证）；头注释已写明该约束 |
+| B-4 | `state->subscriber` / `state->ack_tx`（强引用） | `start_receive_path`（建 state 时） | worker `recv_once` | worker 侧 entry 持 `shared_ptr` ⇒ socket 活到 route 注销之后；**fd/句柄只在 wait 项删除且 `recv_in_flight` 清零后**才由 `close()` 关闭（防句柄复用误关联） |
+| B-5 | `state->msg_queue` / `state->view_queue` | worker `process_received_wire()` 入队 | 用户 `get*` / `try_get*` | `CircularQueue` 自身同步；**worker 内不调用 `set_evict_cb`**（唯一会把回收回调带进 worker 的入口，实测 `grep -c evict_cb` = 0） |
+
+> 锁序（t8 §3.2 已核对）：**成员锁（取完快照即释放）→ `state->mtx`**，两组绝不交叉持有。
+
+### 9.5 注释与调用点机械核对（P5 / 防复发）
+
+> **根因**：C-03/C-04 的本质是「**注释抄了语义、函数体继承了旧实现**」；同类风险在本模块表现为
+> "注释声称走兼容线程会 claim"，因此同样适用「注释旁必须给出可 grep 的调用点证据」。
+
+| 注释声明 | 机械判据（命令） | 期望 |
+| --- | --- | --- |
+| 兼容线程会 claim `compat_thread` | `grep -n "compat_thread" src/dzIPC/socket_pub_sub_ipc.cc` | **≥ 2**（claim 调用点 + 日志/名字表）—— 修前为 1（仅注释） |
+| worker 只在完整消息边界让出 | `grep -n "gate_on_readiness" src/dzIPC/socket_pub_sub_ipc.cc` | 命中定义、worker 调用（`true`）与兼容调用（`false`）三处 |
+| 读路径不碰 E1 红线 | `grep -n "recvfrom\|O_NONBLOCK\|FIONBIO" src/dzIPC/socket_pub_sub_ipc.cc` | **0 调用**（仅既有 `<fcntl.h>` include 不算） |
+| 不调用池 `stop` | `grep -rn "Pool::instance().stop" src/dzIPC/*.cc` | **0** |
+
+### 9.6 验收纪律（A8，强制）
+
+```bash
+cd /home/zwc/cpp_ipc_dds && cmake -S . -B build && make -C build -j$(nproc)
+cd build && env -u DZIPC_SOCKET_COMPAT_THREAD -u DZIPC_SOCKET_RECV_WORKERS ctest --output-on-failure
+env -u DZIPC_SOCKET_COMPAT_THREAD -u DZIPC_SOCKET_RECV_WORKERS ./bin/test_dzipc_socket
+```
+
+判据（三条同时成立才算 worker 路径生效）：① 无 `socket wait-set unusable (...)` 回退行；
+② `test_dzipc_socket` 与 `test_dzipc` rc=0、`[ FAILED ]` = 0；③（可选，需 `verbose`）出现 `subscribe receive on shared socket worker <N>` 证据行。
+⛔ 两个环境变量都必须显式清空：`DZIPC_SOCKET_COMPAT_THREAD` 残留会让读数反转，`DZIPC_SOCKET_RECV_WORKERS` 被共享层 static 只读一次、残留会**静默**改写线程数口径。
+⛔ 任何验收前必须重跑 CMake 配置再重编（`aux_source_directory`/`file(GLOB)` 是配置期展开；build/ 曾残留已消失实现的符号 ⇒ 旧产物假绿）。

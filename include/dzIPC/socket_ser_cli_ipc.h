@@ -84,6 +84,14 @@ protected:
     bool start_receive_path();
     void teardown_receive_path();
 
+    /* ---- P0：receive_state_ 的同步访问口（唯一合法读写途径）----
+     * current_* 返回**快照**（调用方持快照即可保证对象存活，之后可自由取 state->mtx）；
+     * set_receive_state / clear_receive_state 只在生命周期建/拆路径上调用。
+     * 三者都不阻塞、不回调、不取 state 锁。 */
+    std::shared_ptr<socket_ser_receive_state> current_receive_state() const;
+    void set_receive_state(const std::shared_ptr<socket_ser_receive_state>& state);
+    void clear_receive_state() noexcept;
+
 private:
     size_t domain_id_{0};
     std::atomic<bool> running{true};
@@ -115,6 +123,18 @@ private:
      * worker 本体由共享层提供（captain 裁定 A），本类只持 route 适配器与 service state。
      * worker 模式下只有 ipc_r_ptr_（请求数据通道）注册；ack_r_tx_ 是发送端点、握手
      * socket 与数据面分离，都不入 worker。 */
+    /* ---- P0（阻塞解阻方案 §3）：receive_state_ 是**跨线程共享的 shared_ptr 成员**，
+     * 它自身需要独立同步 —— message_mtx_ / callback_mtx_ / state->mtx 保护的都是别的
+     * 对象，不能代替它。规则：
+     *   · 任何读 / 写 / 清空都必须走下面三个访问口；⛔ 不得直接碰成员；
+     *   · 只在 receive_state_mtx_ 内复制 shared_ptr 快照，**不得**在持本锁时取
+     *     state->mtx / 队列锁、join 线程、调用 callback 或访问 worker pool；
+     *   · 锁序（§3.2）：message_mtx_/callback_mtx_ →（短暂取快照后释放本锁）→ state->mtx。
+     *     receive_state_mtx_ **绝不**与 state->mtx 同时持有。
+     * receive_route_ / worker_mode_ / response_thread_ 只由**串行**的 Init/stop/restart
+     * 路径写（API 约束：调用方必须串行化 InitChannel / stop_data_plane /
+     * restart_data_plane；auto 层由 leg_mtx_ 保证），因此这些字段不额外加锁。 */
+    mutable std::mutex receive_state_mtx_;
     std::shared_ptr<socket_ser_receive_state> receive_state_;
     std::shared_ptr<threepools::SocketRecvRouteSource> receive_route_;
     bool worker_mode_{false};

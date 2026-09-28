@@ -18,6 +18,7 @@
 #include "ipc_msg/ipc_msg_base/dzflat.h"
 #include "ipc_msg/ipc_msg_base/udp_id_init_msg.hpp"
 #include "libipc/platform/detail.h"
+#include "libipc/utility/log.h"   // ipc::error：注销超时诊断（P1 §5）
 #define ListenerWaitTime 1'000   // 1 second
 
 namespace dzIPC {
@@ -322,13 +323,28 @@ public:
         udp_node_cancel_wait(state_->subscriber);
     }
 
-    /* 注销协议第 5 步：等本模块 in-flight 归零（有界；超时只打诊断，不阻塞注销）。 */
+    /* 注销协议第 5 步：等本模块 in-flight 归零（有界；超时只打诊断，不阻塞注销）。
+     * P1（§5）：检查 wait_for 返回值；超时**先出锁取快照再打印**。 */
     void wait_quiescent() noexcept override
     {
-        std::unique_lock<std::mutex> lock(state_->quiesce_mtx);
-        state_->quiesce_cv.wait_for(lock, std::chrono::milliseconds{kSubQuiesceTimeoutMs}, [this] {
-            return state_->recv_in_flight.load(std::memory_order_acquire) == 0;
-        });
+        bool timed_out = false;
+        std::size_t inflight = 0;
+        {
+            std::unique_lock<std::mutex> lock(state_->quiesce_mtx);
+            state_->quiesce_cv.wait_for(lock, std::chrono::milliseconds{kSubQuiesceTimeoutMs}, [this] {
+                return state_->recv_in_flight.load(std::memory_order_acquire) == 0;
+            });
+            inflight = state_->recv_in_flight.load(std::memory_order_acquire);
+            timed_out = inflight != 0;
+        }
+        if (timed_out)
+        {
+            ipc::error("[socket_sub] wait_quiescent timeout after %lld ms: route='%s' generation=%u in_flight=%llu; "
+                       "continuing bounded teardown\n",
+                       static_cast<long long>(kSubQuiesceTimeoutMs),
+                       state_->route_key.c_str(), state_->generation,
+                       static_cast<unsigned long long>(inflight));
+        }
     }
 
 private:
@@ -952,17 +968,22 @@ void socket_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
             reg.register_subscriber(new_key, msg_queue_);
         }
         msg_id_ = new_msg_id;
-        /* worker 模式：worker 与兼容线程都从 state 快照取模板与分流期望值（worker 不持裸本对象）。
-         * 锁序：topic_msg_mtx_ → state->mtx（收包路径只取 state->mtx，不存在反向）。 */
-        if (receive_state_)
+    }
+    /* worker 模式：worker 与兼容线程都从 state 快照取模板与分流期望值（worker 不持裸本对象）。
+     * 锁序（P0 §3.2）：topic_msg_mtx_ →（取快照后释放 receive_state_mtx_）→ state->mtx；
+     * 两把锁**绝不**同时持有。 */
+    const std::shared_ptr<socket_sub_receive_state> state = current_receive_state();
+    if (state)
+    {
+        std::shared_ptr<TopicData> snapshot;
         {
-            std::lock_guard<std::mutex> state_lock(receive_state_->mtx);
-            receive_state_->msg_template.reset(topic_msg_->clone());
-            receive_state_->exp_id = msg_id_;
-            receive_state_->exp_hash = (topic_msg_ && topic_msg_->topic())
-                                           ? topic_msg_->topic()->dzflat_schema_hash()
-                                           : 0u;
+            std::lock_guard<std::mutex> lock(topic_msg_mtx_);
+            snapshot = topic_msg_;
         }
+        std::lock_guard<std::mutex> state_lock(state->mtx);
+        state->msg_template.reset(snapshot ? snapshot->clone() : nullptr);
+        state->exp_id = msg_id_;
+        state->exp_hash = (snapshot && snapshot->topic()) ? snapshot->topic()->dzflat_schema_hash() : 0u;
     }
 }
 
@@ -1037,7 +1058,7 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
             state->exp_id = msg_id_;
             state->exp_hash = (topic_msg_ && topic_msg_->topic()) ? topic_msg_->topic()->dzflat_schema_hash() : 0u;
         }
-        receive_state_ = state;
+        set_receive_state(state);
 
         if (!start_receive_path())
         {
@@ -1048,6 +1069,10 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
                 {
                     if (!sub_try_claim_recv(*state, threepools::RecvOwner::compat_thread))
                     {
+                        /* P1（§4.2）：claim 失败必须留痕（否则"无人消费"没有任何诊断面）。 */
+                        ipc::error("[socket_sub] compat receive thread: claim failed for route '%s' (owner=%d); "
+                                   "not double-receiving\n",
+                                   state->route_key.c_str(), static_cast<int>(sub_recv_owner(*state)));
                         return;
                     }
                     while (running.load(std::memory_order_acquire))
@@ -1111,12 +1136,14 @@ bool socket_sub_ipc::start_receive_path()
     {
         return fallback("SocketWaitSet backend unavailable");
     }
-    if (!receive_state_)
+    /* P0：取**本地快照**后再使用（成员指针可能被 teardown 替换）。 */
+    const std::shared_ptr<socket_sub_receive_state> state = current_receive_state();
+    if (!state)
     {
         return fallback("receive state missing");
     }
 
-    auto route = std::make_shared<socket_sub_receive_route>(receive_state_);
+    auto route = std::make_shared<socket_sub_receive_route>(state);
     if (!route->wait_token().valid())
     {
         return fallback("subscriber channel is not waitable (invalid_token)");
@@ -1140,9 +1167,9 @@ bool socket_sub_ipc::start_receive_path()
     if (verbose_)
     {
         std::cerr << "\033[32m[" << topic_name_ << "SubInfo] subscribe receive on shared socket worker "
-                  << threepools::SocketRecvWorkerPool::worker_for(receive_state_->route_key.c_str(),
-                                                                  receive_state_->domain_id, pool.worker_count())
-                  << " (generation " << receive_state_->generation << ", workers " << pool.worker_count() << ")\033[0m"
+                  << threepools::SocketRecvWorkerPool::worker_for(state->route_key.c_str(), state->domain_id,
+                                                                  pool.worker_count())
+                  << " (generation " << state->generation << ", workers " << pool.worker_count() << ")\033[0m"
                   << std::endl;
     }
     return true;
@@ -1155,11 +1182,16 @@ bool socket_sub_ipc::start_receive_path()
  * fd/句柄在 wait 项删除且 in-flight 清零**之后**才由调用方关闭（本函数之后才 close 节点）。 */
 void socket_sub_ipc::teardown_receive_path()
 {
-    if (receive_state_)
+    /* P0：先取快照（成员指针可能被并发的 set/clear 替换），再操作 state 内部字段。 */
+    const std::shared_ptr<socket_sub_receive_state> state = current_receive_state();
+    if (state)
     {
         /* ② active=false（方案 §5 的 route stopping）：拒绝新的 recv_once。 */
-        receive_state_->stopping.store(true, std::memory_order_release);
+        state->stopping.store(true, std::memory_order_release);
     }
+    /* P1（§5 停机顺序）：**先禁止新工作**（running=false 与 stopping 同处）**再唤醒**当前
+     * 等待，消除 cancel_wait 与 running=false 之间的紧循环窗口。 */
+    running.store(false, std::memory_order_release);
 
     if (worker_mode_ && receive_route_)
     {
@@ -1172,8 +1204,7 @@ void socket_sub_ipc::teardown_receive_path()
         udp_node_cancel_wait(subscriber_);
     }
 
-    /* 兼容收包线程：running=false + join（等其当前一次收包/入队结束）。 */
-    running.store(false, std::memory_order_release);
+    /* 兼容收包线程 join（等其当前一次收包/入队结束；running 已在上面置假）。 */
     if (subscribe_thread_ != nullptr)
     {
         if (subscribe_thread_->joinable())
@@ -1184,13 +1215,32 @@ void socket_sub_ipc::teardown_receive_path()
         subscribe_thread_ = nullptr;
     }
 
-    if (receive_state_)
+    if (state)
     {
-        sub_release_recv(*receive_state_);   // 幂等：worker 路径已由 remove_route 第 6 步归还
+        sub_release_recv(*state);   // 幂等：worker 路径已由 remove_route 第 6 步归还
     }
     receive_route_.reset();
-    receive_state_.reset();
+    clear_receive_state();
     worker_mode_ = false;
+}
+
+/* ---- P0：receive_state_ 的三个同步访问口（语义同 socket_ser_ipc）---- */
+std::shared_ptr<socket_sub_receive_state> socket_sub_ipc::current_receive_state() const
+{
+    std::lock_guard<std::mutex> lock(receive_state_mtx_);
+    return receive_state_;
+}
+
+void socket_sub_ipc::set_receive_state(const std::shared_ptr<socket_sub_receive_state>& state)
+{
+    std::lock_guard<std::mutex> lock(receive_state_mtx_);
+    receive_state_ = state;
+}
+
+void socket_sub_ipc::clear_receive_state() noexcept
+{
+    std::lock_guard<std::mutex> lock(receive_state_mtx_);
+    receive_state_.reset();
 }
 
 /******************************************************************************************************/
