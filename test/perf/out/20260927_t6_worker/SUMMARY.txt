@@ -1,0 +1,43 @@
+shm_rr                             rc=0   ok=1    failed=0
+0
+shm_sercli_auto_path               rc=0   ok=15   failed=0
+0
+shm_ser_cli_nodelet                rc=0   ok=5    failed=0
+0
+shm_ready_transition               rc=0   ok=3    failed=0
+0
+shm_uf003_crash                    rc=0   ok=2    failed=0
+0
+socket_dzipc_socket                rc=0   ok=2    failed=0
+0
+socket_dzipc_pub                   rc=0   ok=16   failed=0
+0
+socket_socket                      rc=0   ok=0
+0  failed=0
+0
+socket_nodelet                     rc=0   ok=11   failed=0
+0
+socket_borrow                      rc=0   ok=6    failed=0
+0
+socket_endpoint_split              rc=0   ok=18   failed=0
+0
+socket_only_transport              rc=0   ok=2    failed=0
+0
+socket_reliable_crc                rc=0   ok=4    failed=0
+0
+socket_topic_isolation             rc=0   ok=1    failed=0
+0
+sercli_dzipc                       rc=0   ok=8    failed=0
+0
+sercli_dzipc_larger                rc=0   ok=1    failed=0
+0
+shared_recv_worker                 rc=0   ok=16   failed=0
+0
+shared_socket_wait_set             rc=0   ok=9    failed=0
+0
+shared_recv_wait_set               rc=0   ok=9    failed=0
+0
+shared_control_scheduler           rc=0   ok=20   failed=0
+0
+shared_route_session               rc=0   ok=15   failed=0
+0

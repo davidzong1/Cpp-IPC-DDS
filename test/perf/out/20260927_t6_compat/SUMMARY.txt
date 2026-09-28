@@ -1,0 +1,23 @@
+socket_dzipc_socket                rc=0   ok=2    failed=0
+0
+socket_dzipc_pub                   rc=0   ok=16   failed=0
+0
+socket_socket                      rc=0   ok=0
+0  failed=0
+0
+socket_nodelet                     rc=0   ok=11   failed=0
+0
+socket_borrow                      rc=0   ok=6    failed=0
+0
+socket_endpoint_split              rc=0   ok=18   failed=0
+0
+socket_only_transport              rc=0   ok=2    failed=0
+0
+socket_reliable_crc                rc=0   ok=4    failed=0
+0
+socket_topic_isolation             rc=0   ok=1    failed=0
+0
+sercli_dzipc                       rc=0   ok=8    failed=0
+0
+sercli_dzipc_larger                rc=0   ok=1    failed=0
+0

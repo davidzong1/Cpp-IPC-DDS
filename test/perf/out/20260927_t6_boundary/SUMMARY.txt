@@ -1,0 +1,6 @@
+larger_data_shm_1MiB             rc=0   ok=1    failed=0
+dzipc_shm_full                   rc=0   ok=10   failed=0
+uf009_graceful_exit              rc=0   ok=3    failed=0
+uf004_shutdown_optout            rc=0   ok=7    failed=0
+dzflat_rx                        rc=0   ok=8    failed=0
+wire_accept                      rc=0   ok=9    failed=0
