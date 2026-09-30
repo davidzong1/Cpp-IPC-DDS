@@ -1,0 +1,520 @@
+=== W02 统一跨进程基准 | run_id=20260928-r24-W02 ===
+  source_revision : e800ccc496ac710b711c9346709e86a148c41241
+  build_type      : Release
+  compiler        : /usr/bin/c++ c++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0
+  exe             : /home/zwc/cpp_ipc_dds/build/bin/xproc_benchmark  sha256=01e48660a8e7dce0c2b7c876af54e03d84954c922eae06d9ac00e7e3c55cad72
+  libipc          : /home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0  sha256=cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46
+  clock           : vdso_ns_per_call=12.7576 syscall_ns_per_call=163.725 vdso_in_use=true
+  config_hash     : 19c46fe0c69ac096  (duration=1;warmup=0.3;rate=1000;queue=256;view_queue_cap=64;domain=1;queue_wait_ms=100;workload=full;wait=blocking;best_effort=0;nodelet=0;payloads=64/1024/65536/1048576;smoke=1;sample_limit=20000)
+  process_model   : cross-process（pub/sub 为 fork+exec 新映像）
+  out_dir         : artifacts/perf/20260928-r24-W02
+
+  CycloneDDS      : 已编译进基准（libddsc=/home/zwc/branch/lejulab_platform/src/lejusdk/3rd_party/x86_64/cyclonedds-0.10.2/lib/libddsc.so.0.10.2）
+
+  dds precheck    : roudi_pid=(none)
+  dds precheck    : cyc-iox 不可用 → 本轮跳过（原因见 stdout/ddscheck_cyc-iox.log）
+[0] path=tlv workload=timestamp wait=blocking payload=64B(实际 63B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2156 cpu=(0.058,0.063) cores=0.122
+       note: identity: parent_pid=3 pub_pid=31 sub_pid=30 | pub_ready_ns=148523074996051 in [148523071632910,148523092289767] | sub_ready_ns=148523075515690 in [148523071491434,148523092289744] | pub_starttime_ticks=14852307 sub_starttime_ticks=14852307 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.058468s, nvcsw 2196, nivcsw 3) sub=0(cpu 0.063049s, nvcsw 4885, nivcsw 3)
+       note: round=0
+[1] path=tlv workload=crc wait=blocking payload=64B(实际 63B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2202 cpu=(0.051,0.045) cores=0.095
+       note: identity: parent_pid=3 pub_pid=68 sub_pid=67 | pub_ready_ns=148524870235699 in [148524867137504,148524887832153] | sub_ready_ns=148524870436666 in [148524867018337,148524887832090] | pub_starttime_ticks=14852486 sub_starttime_ticks=14852486 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.050606s, nvcsw 2242, nivcsw 3) sub=0(cpu 0.044554s, nvcsw 4983, nivcsw 5)
+       note: round=0
+[2] path=tlv workload=full wait=blocking payload=64B(实际 63B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2203 cpu=(0.048,0.042) cores=0.090
+       note: identity: parent_pid=3 pub_pid=105 sub_pid=104 | pub_ready_ns=148526666330529 in [148526662259502,148526678795856] | sub_ready_ns=148526666016718 in [148526662100463,148526678795826] | pub_starttime_ticks=14852666 sub_starttime_ticks=14852666 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.048355s, nvcsw 2243, nivcsw 0) sub=0(cpu 0.041656s, nvcsw 4987, nivcsw 3)
+       note: round=0
+[3] path=tlv workload=timestamp wait=blocking payload=1024B(实际 1021B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2204 cpu=(0.050,0.047) cores=0.097
+       note: identity: parent_pid=3 pub_pid=142 sub_pid=141 | pub_ready_ns=148528457871998 in [148528452722709,148528469229314] | sub_ready_ns=148528456863152 in [148528452586207,148528469229265] | pub_starttime_ticks=14852845 sub_starttime_ticks=14852845 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.050429s, nvcsw 2244, nivcsw 3) sub=0(cpu 0.046904s, nvcsw 4997, nivcsw 4)
+       note: round=0
+[4] path=tlv workload=timestamp wait=busy payload=1024B(实际 1021B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2185 cpu=(0.052,1.813) cores=1.867
+       失败原因:
+         - 迟发超出阈值: late=13 (1.3000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+         - 发送积压超出阈值: backlog_max=3479416 ns = 3.479 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+       note: identity: parent_pid=3 pub_pid=179 sub_pid=178 | pub_ready_ns=148530249072219 in [148530245285269,148530259743544] | sub_ready_ns=148530248111445 in [148530245158567,148530259743511] | pub_starttime_ticks=14853024 sub_starttime_ticks=14853024 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.052296s, nvcsw 2221, nivcsw 7) sub=0(cpu 1.812769s, nvcsw 2979, nivcsw 12)
+       note: round=0
+[5] path=tlv workload=crc wait=blocking payload=1024B(实际 1021B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2193 cpu=(0.055,0.052) cores=0.107
+       note: identity: parent_pid=3 pub_pid=216 sub_pid=215 | pub_ready_ns=148532043298061 in [148532038634779,148532059261688] | sub_ready_ns=148532043170707 in [148532038447268,148532059261629] | pub_starttime_ticks=14853203 sub_starttime_ticks=14853203 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.055017s, nvcsw 2233, nivcsw 5) sub=0(cpu 0.052328s, nvcsw 4968, nivcsw 5)
+       note: round=0
+[6] path=tlv workload=crc wait=busy payload=1024B(实际 1021B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2194 cpu=(0.087,1.819) cores=1.908
+       失败原因:
+         - 迟发超出阈值: late=6 (0.6000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+       note: identity: parent_pid=3 pub_pid=253 sub_pid=252 | pub_ready_ns=148533840456218 in [148533836117633,148533856789285] | sub_ready_ns=148533840452690 in [148533835932909,148533856789224] | pub_starttime_ticks=14853383 sub_starttime_ticks=14853383 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.087034s, nvcsw 2235, nivcsw 7) sub=0(cpu 1.818761s, nvcsw 2876, nivcsw 7)
+       note: round=0
+[7] path=tlv workload=full wait=blocking payload=1024B(实际 1021B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2201 cpu=(0.054,0.050) cores=0.105
+       note: identity: parent_pid=3 pub_pid=290 sub_pid=289 | pub_ready_ns=148535637080005 in [148535632815572,148535653447966] | sub_ready_ns=148535637122165 in [148535632638325,148535653447837] | pub_starttime_ticks=14853563 sub_starttime_ticks=14853563 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.054030s, nvcsw 2240, nivcsw 2) sub=0(cpu 0.050426s, nvcsw 4984, nivcsw 2)
+       note: round=0
+[8] path=tlv workload=full wait=busy payload=1024B(实际 1021B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2200 cpu=(0.059,1.817) cores=1.878
+       note: identity: parent_pid=3 pub_pid=327 sub_pid=326 | pub_ready_ns=148537436314766 in [148537430797097,148537449405476] | sub_ready_ns=148537435597998 in [148537430617589,148537449405412] | pub_starttime_ticks=14853743 sub_starttime_ticks=14853743 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.058869s, nvcsw 2245, nivcsw 1) sub=0(cpu 1.817243s, nvcsw 2920, nivcsw 39)
+       note: round=0
+[9] path=tlv workload=timestamp wait=blocking payload=65536B(实际 65533B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2084 cpu=(0.118,0.087) cores=0.205
+       note: identity: parent_pid=3 pub_pid=364 sub_pid=363 | pub_ready_ns=148539256725760 in [148539247832241,148539268651104] | sub_ready_ns=148539256411627 in [148539247500846,148539268651072] | pub_starttime_ticks=14853924 sub_starttime_ticks=14853924 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.118370s, nvcsw 2125, nivcsw 2) sub=0(cpu 0.086701s, nvcsw 4769, nivcsw 3)
+       note: round=0
+[10] path=tlv workload=crc wait=blocking payload=65536B(实际 65533B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2069 cpu=(0.130,0.109) cores=0.238
+       失败原因:
+         - 迟发超出阈值: late=9 (0.9000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+       note: identity: parent_pid=3 pub_pid=401 sub_pid=400 | pub_ready_ns=148541051363077 in [148541046148609,148541062692093] | sub_ready_ns=148541050305868 in [148541045965312,148541062692038] | pub_starttime_ticks=14854104 sub_starttime_ticks=14854104 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.129650s, nvcsw 2110, nivcsw 2) sub=0(cpu 0.108592s, nvcsw 4719, nivcsw 5)
+       note: round=0
+[11] path=tlv workload=full wait=blocking payload=65536B(实际 65533B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2071 cpu=(0.112,0.122) cores=0.235
+       note: identity: parent_pid=3 pub_pid=438 sub_pid=437 | pub_ready_ns=148542843945734 in [148542838621053,148542855171275] | sub_ready_ns=148542842835222 in [148542838514508,148542855171187] | pub_starttime_ticks=14854283 sub_starttime_ticks=14854283 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.112431s, nvcsw 2113, nivcsw 2) sub=0(cpu 0.121975s, nvcsw 4716, nivcsw 7)
+       note: round=0
+[12] path=tlv workload=timestamp wait=blocking payload=1048576B(实际 1048573B) rate=500
+    -> FAIL plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=873 cpu=(0.498,0.280) cores=0.778
+       失败原因:
+         - 迟发超出阈值: late=331 (66.2000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+         - 发送积压超出阈值: backlog_max=3392675 ns = 1.696 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+       note: identity: parent_pid=3 pub_pid=475 sub_pid=474 | pub_ready_ns=148544637799505 in [148544632709008,148544651290565] | sub_ready_ns=148544637111852 in [148544632528254,148544651290521] | pub_starttime_ticks=14854463 sub_starttime_ticks=14854463 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.497658s, nvcsw 719, nivcsw 206) sub=0(cpu 0.280075s, nvcsw 2124, nivcsw 502)
+       note: round=0
+[13] path=tlv workload=crc wait=blocking payload=1048576B(实际 1048573B) rate=500
+    -> FAIL plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=736 cpu=(0.477,0.328) cores=0.806
+       失败原因:
+         - 迟发超出阈值: late=306 (61.2000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+         - 发送积压超出阈值: backlog_max=3630495 ns = 1.815 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+       note: identity: parent_pid=3 pub_pid=512 sub_pid=511 | pub_ready_ns=148546447388369 in [148546435412641,148546463881244] | sub_ready_ns=148546446307289 in [148546435205422,148546463881213] | pub_starttime_ticks=14854643 sub_starttime_ticks=14854643 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.476559s, nvcsw 558, nivcsw 72) sub=0(cpu 0.327943s, nvcsw 1817, nivcsw 152)
+       note: round=0
+[14] path=tlv workload=full wait=blocking payload=1048576B(实际 1048573B) rate=500
+    -> FAIL plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=738 cpu=(0.451,0.491) cores=0.943
+       失败原因:
+         - 迟发超出阈值: late=8 (1.6000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+       note: identity: parent_pid=3 pub_pid=549 sub_pid=548 | pub_ready_ns=148548250023069 in [148548244099381,148548269019952] | sub_ready_ns=148548247863547 in [148548239853799,148548269019930] | pub_starttime_ticks=14854824 sub_starttime_ticks=14854824 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.450504s, nvcsw 779, nivcsw 177) sub=0(cpu 0.491332s, nvcsw 1974, nivcsw 316)
+       note: round=0
+[15] path=dzflat-a workload=timestamp wait=blocking payload=64B(实际 63B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2164 fallback=3 cpu=(0.053,0.057) cores=0.110
+       note: identity: parent_pid=3 pub_pid=586 sub_pid=585 | pub_ready_ns=148550052263932 in [148550048524261,148550069242114] | sub_ready_ns=148550052254088 in [148550048338975,148550069241953] | pub_starttime_ticks=14855004 sub_starttime_ticks=14855004 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.053350s, nvcsw 2214, nivcsw 1) sub=0(cpu 0.056539s, nvcsw 4886, nivcsw 5)
+       note: round=0
+[16] path=dzflat-a workload=crc wait=blocking payload=64B(实际 63B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2197 fallback=2 cpu=(0.053,0.057) cores=0.111
+       note: identity: parent_pid=3 pub_pid=623 sub_pid=622 | pub_ready_ns=148551872562756 in [148551867157485,148551883731868] | sub_ready_ns=148551871566736 in [148551866956923,148551883731718] | pub_starttime_ticks=14855186 sub_starttime_ticks=14855186 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.053400s, nvcsw 2248, nivcsw 8) sub=0(cpu 0.057117s, nvcsw 4985, nivcsw 4)
+       note: round=0
+[17] path=dzflat-a workload=full wait=blocking payload=64B(实际 63B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2198 fallback=2 cpu=(0.050,0.049) cores=0.100
+       note: identity: parent_pid=3 pub_pid=660 sub_pid=659 | pub_ready_ns=148553683960211 in [148553678551393,148553695124127] | sub_ready_ns=148553682972220 in [148553678426179,148553695124071] | pub_starttime_ticks=14855367 sub_starttime_ticks=14855367 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.050401s, nvcsw 2245, nivcsw 0) sub=0(cpu 0.049101s, nvcsw 4983, nivcsw 5)
+       note: round=0
+[18] path=dzflat-a workload=timestamp wait=blocking payload=1024B(实际 1021B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2201 fallback=2 cpu=(0.084,0.053) cores=0.138
+       失败原因:
+         - 迟发超出阈值: late=15 (1.5000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+       note: identity: parent_pid=3 pub_pid=697 sub_pid=696 | pub_ready_ns=148555496622680 in [148555491269392,148555507823716] | sub_ready_ns=148555495642203 in [148555491095200,148555507823696] | pub_starttime_ticks=14855549 sub_starttime_ticks=14855549 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.084456s, nvcsw 2253, nivcsw 12) sub=0(cpu 0.053320s, nvcsw 5002, nivcsw 3)
+       note: round=0
+[19] path=dzflat-a workload=timestamp wait=busy payload=1024B(实际 1021B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2201 fallback=2 cpu=(0.049,1.805) cores=1.856
+       note: identity: parent_pid=3 pub_pid=734 sub_pid=733 | pub_ready_ns=148557309455728 in [148557304280057,148557320815475] | sub_ready_ns=148557308462659 in [148557304116709,148557320815407] | pub_starttime_ticks=14855730 sub_starttime_ticks=14855730 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.049264s, nvcsw 2244, nivcsw 0) sub=0(cpu 1.804720s, nvcsw 2742, nivcsw 20)
+       note: round=0
+[20] path=dzflat-a workload=crc wait=blocking payload=1024B(实际 1021B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2202 fallback=3 cpu=(0.049,0.045) cores=0.094
+       note: identity: parent_pid=3 pub_pid=771 sub_pid=770 | pub_ready_ns=148559101801754 in [148559097603685,148559118228068] | sub_ready_ns=148559101821200 in [148559097437168,148559118227959] | pub_starttime_ticks=14855909 sub_starttime_ticks=14855909 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.049208s, nvcsw 2254, nivcsw 1) sub=0(cpu 0.045070s, nvcsw 4991, nivcsw 2)
+       note: round=0
+[21] path=dzflat-a workload=crc wait=busy payload=1024B(实际 1021B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2194 fallback=3 cpu=(0.082,1.816) cores=1.900
+       失败原因:
+         - 迟发超出阈值: late=15 (1.5000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+       note: identity: parent_pid=3 pub_pid=808 sub_pid=807 | pub_ready_ns=148560918553508 in [148560914330529,148560934991410] | sub_ready_ns=148560918572940 in [148560914143891,148560934991291] | pub_starttime_ticks=14856091 sub_starttime_ticks=14856091 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.082200s, nvcsw 2238, nivcsw 9) sub=0(cpu 1.815518s, nvcsw 2745, nivcsw 19)
+       note: round=0
+[22] path=dzflat-a workload=full wait=blocking payload=1024B(实际 1021B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2201 fallback=3 cpu=(0.050,0.051) cores=0.102
+       note: identity: parent_pid=3 pub_pid=845 sub_pid=844 | pub_ready_ns=148562715477690 in [148562711325504,148562732050109] | sub_ready_ns=148562715516621 in [148562711153307,148562732050026] | pub_starttime_ticks=14856271 sub_starttime_ticks=14856271 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.049963s, nvcsw 2249, nivcsw 4) sub=0(cpu 0.051485s, nvcsw 4988, nivcsw 4)
+       note: round=0
+[23] path=dzflat-a workload=full wait=busy payload=1024B(实际 1021B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2201 fallback=2 cpu=(0.048,1.804) cores=1.853
+       失败原因:
+         - 迟发超出阈值: late=79 (7.9000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+         - 发送积压超出阈值: backlog_max=3437004 ns = 3.437 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+       note: identity: parent_pid=3 pub_pid=882 sub_pid=881 | pub_ready_ns=148564532138740 in [148564528327764,148564544871590] | sub_ready_ns=148564531727102 in [148564528145481,148564544871532] | pub_starttime_ticks=14856452 sub_starttime_ticks=14856452 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.047899s, nvcsw 2187, nivcsw 548) sub=0(cpu 1.804109s, nvcsw 2715, nivcsw 74)
+       note: round=0
+[24] path=dzflat-a workload=timestamp wait=blocking payload=65536B(实际 65533B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=1891 fallback=2 cpu=(0.088,0.048) cores=0.136
+       失败原因:
+         - 迟发超出阈值: late=151 (15.1000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+         - 发送积压超出阈值: backlog_max=3252796 ns = 3.253 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+       note: identity: parent_pid=3 pub_pid=919 sub_pid=918 | pub_ready_ns=148566339189608 in [148566329354428,148566353661174] | sub_ready_ns=148566337598911 in [148566329166106,148566353661077] | pub_starttime_ticks=14856632 sub_starttime_ticks=14856632 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.087528s, nvcsw 1808, nivcsw 1569) sub=0(cpu 0.048152s, nvcsw 4272, nivcsw 577)
+       note: round=0
+[25] path=dzflat-a workload=crc wait=blocking payload=65536B(实际 65533B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=1997 fallback=2 cpu=(0.106,0.062) cores=0.168
+       失败原因:
+         - 迟发超出阈值: late=81 (8.1000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+         - 发送积压超出阈值: backlog_max=3671422 ns = 3.671 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+       note: identity: parent_pid=3 pub_pid=956 sub_pid=955 | pub_ready_ns=148568154739582 in [148568149964370,148568166537785] | sub_ready_ns=148568154659183 in [148568149740715,148568166537728] | pub_starttime_ticks=14856815 sub_starttime_ticks=14856814 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.105761s, nvcsw 2018, nivcsw 421) sub=0(cpu 0.062266s, nvcsw 4502, nivcsw 818)
+       note: round=0
+[26] path=dzflat-a workload=full wait=blocking payload=65536B(实际 65533B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=1859 fallback=2 cpu=(0.098,0.105) cores=0.204
+       失败原因:
+         - 迟发超出阈值: late=57 (5.7000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+         - 发送积压超出阈值: backlog_max=2859458 ns = 2.859 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+       note: identity: parent_pid=3 pub_pid=993 sub_pid=992 | pub_ready_ns=148569971617667 in [148569966992343,148569983700366] | sub_ready_ns=148569970627112 in [148569966784678,148569983700344] | pub_starttime_ticks=14856996 sub_starttime_ticks=14856996 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.098188s, nvcsw 1899, nivcsw 534) sub=0(cpu 0.105124s, nvcsw 4259, nivcsw 313)
+       note: round=0
+[27] path=dzflat-a workload=timestamp wait=blocking payload=1048576B(实际 1048573B) rate=500
+    -> FAIL plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=940 fallback=2 cpu=(0.426,0.046) cores=0.472
+       失败原因:
+         - 迟发超出阈值: late=34 (6.8000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+         - 发送积压超出阈值: backlog_max=8293408 ns = 4.147 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+       note: identity: parent_pid=3 pub_pid=1030 sub_pid=1029 | pub_ready_ns=148571786427282 in [148571780405229,148571799422114] | sub_ready_ns=148571784623279 in [148571780175352,148571799422090] | pub_starttime_ticks=14857178 sub_starttime_ticks=14857178 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.425639s, nvcsw 974, nivcsw 212) sub=0(cpu 0.046015s, nvcsw 2464, nivcsw 247)
+       note: round=0
+[28] path=dzflat-a workload=crc wait=blocking payload=1048576B(实际 1048573B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=973 fallback=2 cpu=(0.467,0.165) cores=0.633
+       note: identity: parent_pid=3 pub_pid=1067 sub_pid=1066 | pub_ready_ns=148573601128829 in [148573595295111,148573616082251] | sub_ready_ns=148573601237078 in [148573594133903,148573616082226] | pub_starttime_ticks=14857359 sub_starttime_ticks=14857359 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.467093s, nvcsw 1026, nivcsw 8) sub=0(cpu 0.165007s, nvcsw 2522, nivcsw 22)
+       note: round=0
+[29] path=dzflat-a workload=full wait=blocking payload=1048576B(实际 1048573B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=1026 fallback=2 cpu=(0.375,0.392) cores=0.768
+       note: identity: parent_pid=3 pub_pid=1104 sub_pid=1103 | pub_ready_ns=148575415902877 in [148575410376366,148575428992127] | sub_ready_ns=148575415133001 in [148575410181542,148575428992097] | pub_starttime_ticks=14857541 sub_starttime_ticks=14857541 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.374671s, nvcsw 1080, nivcsw 11) sub=0(cpu 0.391951s, nvcsw 2636, nivcsw 6)
+       note: round=0
+[30] path=dzflat-b workload=timestamp wait=blocking payload=64B(实际 63B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2201 fallback=2 cpu=(0.049,0.048) cores=0.097
+       失败原因:
+         - 发送积压超出阈值: backlog_max=1218560 ns = 1.219 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+         - 段头/结构自相矛盾 1197 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1141 sub_pid=1140 | pub_ready_ns=148577228239688 in [148577223612910,148577240134104] | sub_ready_ns=148577227839622 in [148577223447885,148577240133998] | pub_starttime_ticks=14857722 sub_starttime_ticks=14857722 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.049082s, nvcsw 2246, nivcsw 1) sub=0(cpu 0.048126s, nvcsw 4987, nivcsw 1)
+       note: round=0
+[31] path=dzflat-b workload=crc wait=blocking payload=64B(实际 63B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2203 fallback=3 cpu=(0.049,0.047) cores=0.096
+       失败原因:
+         - 段头/结构自相矛盾 1199 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1178 sub_pid=1177 | pub_ready_ns=148579041386647 in [148579037051791,148579057710829] | sub_ready_ns=148579041419418 in [148579036849150,148579057710774] | pub_starttime_ticks=14857903 sub_starttime_ticks=14857903 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.048801s, nvcsw 2253, nivcsw 1) sub=0(cpu 0.047268s, nvcsw 4995, nivcsw 0)
+       note: round=0
+[32] path=dzflat-b workload=full wait=blocking payload=64B(实际 63B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2203 fallback=2 cpu=(0.048,0.044) cores=0.092
+       失败原因:
+         - 段头/结构自相矛盾 1199 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1215 sub_pid=1214 | pub_ready_ns=148580858961753 in [148580853715088,148580870219221] | sub_ready_ns=148580857849591 in [148580853587611,148580870219177] | pub_starttime_ticks=14858085 sub_starttime_ticks=14858085 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.047863s, nvcsw 2253, nivcsw 2) sub=0(cpu 0.044330s, nvcsw 4994, nivcsw 1)
+       note: round=0
+[33] path=dzflat-b workload=timestamp wait=blocking payload=1024B(实际 1021B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2199 fallback=2 cpu=(0.048,0.044) cores=0.092
+       失败原因:
+         - 段头/结构自相矛盾 1195 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1252 sub_pid=1251 | pub_ready_ns=148582672062193 in [148582666843007,148582683340434] | sub_ready_ns=148582670970773 in [148582666722224,148582683340387] | pub_starttime_ticks=14858266 sub_starttime_ticks=14858266 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.047941s, nvcsw 2249, nivcsw 2) sub=0(cpu 0.043778s, nvcsw 4987, nivcsw 4)
+       note: round=0
+[34] path=dzflat-b workload=timestamp wait=busy payload=1024B(实际 1021B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2198 fallback=2 cpu=(0.049,1.806) cores=1.857
+       失败原因:
+         - 段头/结构自相矛盾 1194 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1289 sub_pid=1288 | pub_ready_ns=148584485845342 in [148584480403787,148584496956441] | sub_ready_ns=148584484840573 in [148584480213233,148584496956387] | pub_starttime_ticks=14858448 sub_starttime_ticks=14858448 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.048805s, nvcsw 2243, nivcsw 1) sub=0(cpu 1.806374s, nvcsw 2743, nivcsw 9)
+       note: round=0
+[35] path=dzflat-b workload=crc wait=blocking payload=1024B(实际 1021B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2201 fallback=2 cpu=(0.048,0.043) cores=0.091
+       失败原因:
+         - 段头/结构自相矛盾 1197 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1326 sub_pid=1325 | pub_ready_ns=148586277989516 in [148586273821130,148586290331313] | sub_ready_ns=148586277685338 in [148586273648749,148586290331242] | pub_starttime_ticks=14858627 sub_starttime_ticks=14858627 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.047946s, nvcsw 2252, nivcsw 0) sub=0(cpu 0.043030s, nvcsw 4983, nivcsw 2)
+       note: round=0
+[36] path=dzflat-b workload=crc wait=busy payload=1024B(实际 1021B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2204 fallback=2 cpu=(0.047,1.806) cores=1.855
+       失败原因:
+         - 段头/结构自相矛盾 1200 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1363 sub_pid=1362 | pub_ready_ns=148588100814194 in [148588095845551,148588112383529] | sub_ready_ns=148588099850902 in [148588095696127,148588112383506] | pub_starttime_ticks=14858809 sub_starttime_ticks=14858809 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.047463s, nvcsw 2246, nivcsw 0) sub=0(cpu 1.805886s, nvcsw 2753, nivcsw 16)
+       note: round=0
+[37] path=dzflat-b workload=full wait=blocking payload=1024B(实际 1021B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2201 fallback=2 cpu=(0.047,0.044) cores=0.091
+       失败原因:
+         - 段头/结构自相矛盾 1197 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1400 sub_pid=1399 | pub_ready_ns=148589893407431 in [148589888179036,148589904688797] | sub_ready_ns=148589892645553 in [148589887996385,148589904688756] | pub_starttime_ticks=14858988 sub_starttime_ticks=14858988 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.046765s, nvcsw 2249, nivcsw 1) sub=0(cpu 0.043994s, nvcsw 4983, nivcsw 4)
+       note: round=0
+[38] path=dzflat-b workload=full wait=busy payload=1024B(实际 1021B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2202 fallback=3 cpu=(0.047,1.811) cores=1.860
+       失败原因:
+         - 迟发超出阈值: late=9 (0.9000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+         - 段头/结构自相矛盾 1198 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1437 sub_pid=1436 | pub_ready_ns=148591704138801 in [148591699913615,148591720508757] | sub_ready_ns=148591704147335 in [148591699786825,148591720508705] | pub_starttime_ticks=14859169 sub_starttime_ticks=14859169 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.046596s, nvcsw 2246, nivcsw 1) sub=0(cpu 1.811477s, nvcsw 2742, nivcsw 12)
+       note: round=0
+[39] path=dzflat-b workload=timestamp wait=blocking payload=65536B(实际 65533B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2127 fallback=2 cpu=(0.090,0.042) cores=0.131
+       失败原因:
+         - 段头/结构自相矛盾 1123 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1474 sub_pid=1473 | pub_ready_ns=148593502021465 in [148593496797351,148593513234516] | sub_ready_ns=148593500887663 in [148593496634929,148593513234466] | pub_starttime_ticks=14859349 sub_starttime_ticks=14859349 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.089570s, nvcsw 2175, nivcsw 3) sub=0(cpu 0.041757s, nvcsw 4839, nivcsw 6)
+       note: round=0
+[40] path=dzflat-b workload=crc wait=blocking payload=65536B(实际 65533B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2123 fallback=2 cpu=(0.099,0.054) cores=0.153
+       失败原因:
+         - 迟发超出阈值: late=9 (0.9000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+         - 发送积压超出阈值: backlog_max=2164722 ns = 2.165 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+         - 段头/结构自相矛盾 1119 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1511 sub_pid=1510 | pub_ready_ns=148595315113221 in [148595310060384,148595326609433] | sub_ready_ns=148595314080465 in [148595309885039,148595326609375] | pub_starttime_ticks=14859531 sub_starttime_ticks=14859531 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.098651s, nvcsw 2170, nivcsw 6) sub=0(cpu 0.054087s, nvcsw 4834, nivcsw 9)
+       note: round=0
+[41] path=dzflat-b workload=full wait=blocking payload=65536B(实际 65533B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2093 fallback=2 cpu=(0.093,0.071) cores=0.165
+       失败原因:
+         - 迟发超出阈值: late=6 (0.6000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+         - 发送积压超出阈值: backlog_max=2119399 ns = 2.119 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+         - 段头/结构自相矛盾 1089 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1548 sub_pid=1547 | pub_ready_ns=148597128152751 in [148597122825020,148597139339923] | sub_ready_ns=148597127087919 in [148597122644983,148597139339902] | pub_starttime_ticks=14859712 sub_starttime_ticks=14859712 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.093186s, nvcsw 2138, nivcsw 9) sub=0(cpu 0.071254s, nvcsw 4758, nivcsw 7)
+       note: round=0
+[42] path=dzflat-b workload=timestamp wait=blocking payload=1048576B(实际 1048573B) rate=500
+    -> FAIL plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=1036 fallback=2 cpu=(0.358,0.041) cores=0.400
+       失败原因:
+         - 段头/结构自相矛盾 532 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1585 sub_pid=1584 | pub_ready_ns=148598942838118 in [148598937554794,148598956243691] | sub_ready_ns=148598941098377 in [148598937317529,148598956243668] | pub_starttime_ticks=14859893 sub_starttime_ticks=14859893 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.358428s, nvcsw 1084, nivcsw 12) sub=0(cpu 0.041211s, nvcsw 2650, nivcsw 12)
+       note: round=0
+[43] path=dzflat-b workload=crc wait=blocking payload=1048576B(实际 1048573B) rate=500
+    -> FAIL plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=1055 fallback=2 cpu=(0.462,0.109) cores=0.572
+       失败原因:
+         - 段头/结构自相矛盾 551 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1622 sub_pid=1621 | pub_ready_ns=148600755280870 in [148600750118788,148600768843696] | sub_ready_ns=148600754508673 in [148600749881230,148600768843588] | pub_starttime_ticks=14860075 sub_starttime_ticks=14860075 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.462369s, nvcsw 1103, nivcsw 0) sub=0(cpu 0.108617s, nvcsw 2695, nivcsw 1)
+       note: round=0
+[44] path=dzflat-b workload=full wait=blocking payload=1048576B(实际 1048573B) rate=500
+    -> FAIL plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=1041 fallback=2 cpu=(0.356,0.208) cores=0.565
+       失败原因:
+         - 段头/结构自相矛盾 537 次 > 阈值 0（t47 补列；此前该量完全不落列）
+       note: identity: parent_pid=3 pub_pid=1659 sub_pid=1658 | pub_ready_ns=148602569248126 in [148602564197991,148602582824562] | sub_ready_ns=148602568528926 in [148602563997293,148602582824498] | pub_starttime_ticks=14860256 sub_starttime_ticks=14860256 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.355658s, nvcsw 1090, nivcsw 3) sub=0(cpu 0.208397s, nvcsw 2669, nivcsw 1)
+       note: round=0
+[45] path=cyclonedds-udp workload=timestamp wait=blocking payload=64B(实际 63B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.091,2.217) cores=2.309
+       note: identity: parent_pid=3 pub_pid=1699 sub_pid=1698 | pub_ready_ns=148604391085159 in [148604381003527,148604401660764] | sub_ready_ns=148604391081288 in [148604380809881,148604401660701] | pub_starttime_ticks=14860438 sub_starttime_ticks=14860438 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.090644s, nvcsw 2231, nivcsw 0) sub=0(cpu 2.216567s, nvcsw 3226, nivcsw 17)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[46] path=cyclonedds-udp workload=crc wait=blocking payload=64B(实际 63B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.081,2.218) cores=2.302
+       note: identity: parent_pid=3 pub_pid=1718 sub_pid=1717 | pub_ready_ns=148606592740263 in [148606585364954,148606603955302] | sub_ready_ns=148606592748250 in [148606585177946,148606603955242] | pub_starttime_ticks=14860658 sub_starttime_ticks=14860658 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.081288s, nvcsw 2228, nivcsw 1) sub=0(cpu 2.218473s, nvcsw 3166, nivcsw 16)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[47] path=cyclonedds-udp workload=full wait=blocking payload=64B(实际 63B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.128,2.220) cores=2.351
+       失败原因:
+         - 迟发超出阈值: late=8 (0.8000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+       note: identity: parent_pid=3 pub_pid=1737 sub_pid=1736 | pub_ready_ns=148608790674720 in [148608783806746,148608802395360] | sub_ready_ns=148608790673433 in [148608783618291,148608802395216] | pub_starttime_ticks=14860878 sub_starttime_ticks=14860878 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.128248s, nvcsw 2214, nivcsw 10) sub=0(cpu 2.220257s, nvcsw 3321, nivcsw 11)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[48] path=cyclonedds-udp workload=timestamp wait=blocking payload=1024B(实际 1021B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.103,2.227) cores=2.332
+       note: identity: parent_pid=3 pub_pid=1756 sub_pid=1755 | pub_ready_ns=148610989021435 in [148610981507002,148611000156643] | sub_ready_ns=148610989019686 in [148610981328372,148611000156591] | pub_starttime_ticks=14861098 sub_starttime_ticks=14861098 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.102781s, nvcsw 2211, nivcsw 1) sub=0(cpu 2.226710s, nvcsw 3466, nivcsw 14)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[49] path=cyclonedds-udp workload=timestamp wait=busy payload=1024B(实际 1021B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.100,2.225) cores=2.327
+       note: identity: parent_pid=3 pub_pid=1775 sub_pid=1774 | pub_ready_ns=148613190776744 in [148613182099465,148613202767063] | sub_ready_ns=148613190775108 in [148613181900602,148613202767031] | pub_starttime_ticks=14861318 sub_starttime_ticks=14861318 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.099815s, nvcsw 2205, nivcsw 1) sub=0(cpu 2.224611s, nvcsw 3675, nivcsw 7)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[50] path=cyclonedds-udp workload=crc wait=blocking payload=1024B(实际 1021B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.101,2.223) cores=2.327
+       note: identity: parent_pid=3 pub_pid=1794 sub_pid=1793 | pub_ready_ns=148615391047148 in [148615383856582,148615402457386] | sub_ready_ns=148615391045270 in [148615383692497,148615402457352] | pub_starttime_ticks=14861538 sub_starttime_ticks=14861538 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.101497s, nvcsw 2187, nivcsw 0) sub=0(cpu 2.222840s, nvcsw 3317, nivcsw 5)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[51] path=cyclonedds-udp workload=crc wait=busy payload=1024B(实际 1021B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.115,2.232) cores=2.349
+       失败原因:
+         - 发送积压超出阈值: backlog_max=2310419 ns = 2.310 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+       note: identity: parent_pid=3 pub_pid=1813 sub_pid=1812 | pub_ready_ns=148617596165903 in [148617586440871,148617607124713] | sub_ready_ns=148617596160676 in [148617586228753,148617607124671] | pub_starttime_ticks=14861758 sub_starttime_ticks=14861758 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.114760s, nvcsw 2175, nivcsw 0) sub=0(cpu 2.231591s, nvcsw 3620, nivcsw 7)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[52] path=cyclonedds-udp workload=full wait=blocking payload=1024B(实际 1021B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.098,2.216) cores=2.317
+       note: identity: parent_pid=3 pub_pid=1832 sub_pid=1831 | pub_ready_ns=148619796489491 in [148619788476790,148619807127100] | sub_ready_ns=148619794984319 in [148619788281364,148619807126889] | pub_starttime_ticks=14861978 sub_starttime_ticks=14861978 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.098268s, nvcsw 2190, nivcsw 2) sub=0(cpu 2.216495s, nvcsw 3271, nivcsw 21)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[53] path=cyclonedds-udp workload=full wait=busy payload=1024B(实际 1021B) rate=1000
+    -> FAIL plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.097,2.221) cores=2.320
+       失败原因:
+         - 发送积压超出阈值: backlog_max=1555642 ns = 1.556 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+       note: identity: parent_pid=3 pub_pid=1851 sub_pid=1850 | pub_ready_ns=148621998540418 in [148621989438624,148622010068200] | sub_ready_ns=148621998535304 in [148621989312761,148622010067991] | pub_starttime_ticks=14862198 sub_starttime_ticks=14862198 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.096855s, nvcsw 2315, nivcsw 2) sub=0(cpu 2.220663s, nvcsw 3775, nivcsw 14)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[54] path=cyclonedds-udp workload=timestamp wait=blocking payload=65536B(实际 65533B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.284,2.308) cores=2.594
+       note: identity: parent_pid=3 pub_pid=1870 sub_pid=1869 | pub_ready_ns=148624197233280 in [148624192594560,148624209119813] | sub_ready_ns=148624198341630 in [148624192369627,148624209119787] | pub_starttime_ticks=14862419 sub_starttime_ticks=14862419 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.284360s, nvcsw 1910, nivcsw 5) sub=0(cpu 2.307550s, nvcsw 7863, nivcsw 7)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[55] path=cyclonedds-udp workload=crc wait=blocking payload=65536B(实际 65533B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.283,2.301) cores=2.585
+       note: identity: parent_pid=3 pub_pid=1889 sub_pid=1888 | pub_ready_ns=148626397156117 in [148626390632779,148626409281850] | sub_ready_ns=148626396631909 in [148626390464390,148626409281786] | pub_starttime_ticks=14862639 sub_starttime_ticks=14862639 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.282594s, nvcsw 1899, nivcsw 0) sub=0(cpu 2.300720s, nvcsw 9254, nivcsw 12)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[56] path=cyclonedds-udp workload=full wait=blocking payload=65536B(实际 65533B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.321,2.326) cores=2.650
+       note: identity: parent_pid=3 pub_pid=1908 sub_pid=1907 | pub_ready_ns=148628603311145 in [148628593701376,148628614414488] | sub_ready_ns=148628603312819 in [148628593503119,148628614414422] | pub_starttime_ticks=14862859 sub_starttime_ticks=14862859 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.321391s, nvcsw 1828, nivcsw 3) sub=0(cpu 2.325924s, nvcsw 8703, nivcsw 14)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[57] path=cyclonedds-udp workload=timestamp wait=blocking payload=1048576B(实际 1048573B) rate=500
+    -> FAIL plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.999,2.777) cores=3.779
+       失败原因:
+         - 迟发超出阈值: late=115 (23.0000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+         - 发送积压超出阈值: backlog_max=5500298 ns = 2.750 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+       note: identity: parent_pid=3 pub_pid=1927 sub_pid=1926 | pub_ready_ns=148630804924456 in [148630797140158,148630819913771] | sub_ready_ns=148630805127319 in [148630796958504,148630819913621] | pub_starttime_ticks=14863079 sub_starttime_ticks=14863079 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.998848s, nvcsw 667, nivcsw 20) sub=0(cpu 2.777230s, nvcsw 22610, nivcsw 24)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[58] path=cyclonedds-udp workload=crc wait=blocking payload=1048576B(实际 1048573B) rate=500
+    -> FAIL plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.962,2.800) cores=3.766
+       失败原因:
+         - 迟发超出阈值: late=77 (15.4000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+         - 发送积压超出阈值: backlog_max=43044132 ns = 21.522 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+       note: identity: parent_pid=3 pub_pid=1946 sub_pid=1945 | pub_ready_ns=148633010460808 in [148633001704104,148633022346085] | sub_ready_ns=148633010419252 in [148633001530809,148633022346057] | pub_starttime_ticks=14863300 sub_starttime_ticks=14863300 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.962267s, nvcsw 805, nivcsw 5) sub=0(cpu 2.800152s, nvcsw 12009, nivcsw 20)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[59] path=cyclonedds-udp workload=full wait=blocking payload=1048576B(实际 1048573B) rate=500
+    -> FAIL plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(1.055,2.762) cores=3.818
+       失败原因:
+         - 迟发超出阈值: late=57 (11.4000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+         - 发送积压超出阈值: backlog_max=3552286 ns = 1.776 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+       note: identity: parent_pid=3 pub_pid=1965 sub_pid=1964 | pub_ready_ns=148635202180642 in [148635194555676,148635219343293] | sub_ready_ns=148635202125321 in [148635194369880,148635219343233] | pub_starttime_ticks=14863519 sub_starttime_ticks=14863519 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=(none) cpu_window_s=null (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 1.054985s, nvcsw 702, nivcsw 21) sub=0(cpu 2.762326s, nvcsw 28909, nivcsw 16)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[跳过] cyc-iox: DDS 预检未通过（该档不可用，见 stdout/ddscheck_cyc-iox.log）
+
+=== 汇总: 26/60 用例通过 ===
+未通过用例:
+  - r4_tlv_timestamp_busy_1024B_1000Hz
+      迟发超出阈值: late=13 (1.3000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+      发送积压超出阈值: backlog_max=3479416 ns = 3.479 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+  - r6_tlv_crc_busy_1024B_1000Hz
+      迟发超出阈值: late=6 (0.6000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+  - r10_tlv_crc_blocking_65536B_1000Hz
+      迟发超出阈值: late=9 (0.9000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+  - r12_tlv_timestamp_blocking_1048576B_500Hz
+      迟发超出阈值: late=331 (66.2000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+      发送积压超出阈值: backlog_max=3392675 ns = 1.696 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+  - r13_tlv_crc_blocking_1048576B_500Hz
+      迟发超出阈值: late=306 (61.2000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+      发送积压超出阈值: backlog_max=3630495 ns = 1.815 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+  - r14_tlv_full_blocking_1048576B_500Hz
+      迟发超出阈值: late=8 (1.6000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+  - r18_dzflat-a_timestamp_blocking_1024B_1000Hz
+      迟发超出阈值: late=15 (1.5000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+  - r21_dzflat-a_crc_busy_1024B_1000Hz
+      迟发超出阈值: late=15 (1.5000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+  - r23_dzflat-a_full_busy_1024B_1000Hz
+      迟发超出阈值: late=79 (7.9000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+      发送积压超出阈值: backlog_max=3437004 ns = 3.437 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+  - r24_dzflat-a_timestamp_blocking_65536B_1000Hz
+      迟发超出阈值: late=151 (15.1000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+      发送积压超出阈值: backlog_max=3252796 ns = 3.253 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+  - r25_dzflat-a_crc_blocking_65536B_1000Hz
+      迟发超出阈值: late=81 (8.1000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+      发送积压超出阈值: backlog_max=3671422 ns = 3.671 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+  - r26_dzflat-a_full_blocking_65536B_1000Hz
+      迟发超出阈值: late=57 (5.7000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+      发送积压超出阈值: backlog_max=2859458 ns = 2.859 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+  - r27_dzflat-a_timestamp_blocking_1048576B_500Hz
+      迟发超出阈值: late=34 (6.8000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+      发送积压超出阈值: backlog_max=8293408 ns = 4.147 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+  - r30_dzflat-b_timestamp_blocking_64B_1000Hz
+      发送积压超出阈值: backlog_max=1218560 ns = 1.219 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+      段头/结构自相矛盾 1197 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r31_dzflat-b_crc_blocking_64B_1000Hz
+      段头/结构自相矛盾 1199 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r32_dzflat-b_full_blocking_64B_1000Hz
+      段头/结构自相矛盾 1199 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r33_dzflat-b_timestamp_blocking_1024B_1000Hz
+      段头/结构自相矛盾 1195 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r34_dzflat-b_timestamp_busy_1024B_1000Hz
+      段头/结构自相矛盾 1194 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r35_dzflat-b_crc_blocking_1024B_1000Hz
+      段头/结构自相矛盾 1197 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r36_dzflat-b_crc_busy_1024B_1000Hz
+      段头/结构自相矛盾 1200 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r37_dzflat-b_full_blocking_1024B_1000Hz
+      段头/结构自相矛盾 1197 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r38_dzflat-b_full_busy_1024B_1000Hz
+      迟发超出阈值: late=9 (0.9000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+      段头/结构自相矛盾 1198 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r39_dzflat-b_timestamp_blocking_65536B_1000Hz
+      段头/结构自相矛盾 1123 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r40_dzflat-b_crc_blocking_65536B_1000Hz
+      迟发超出阈值: late=9 (0.9000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+      发送积压超出阈值: backlog_max=2164722 ns = 2.165 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+      段头/结构自相矛盾 1119 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r41_dzflat-b_full_blocking_65536B_1000Hz
+      迟发超出阈值: late=6 (0.6000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+      发送积压超出阈值: backlog_max=2119399 ns = 2.119 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+      段头/结构自相矛盾 1089 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r42_dzflat-b_timestamp_blocking_1048576B_500Hz
+      段头/结构自相矛盾 532 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r43_dzflat-b_crc_blocking_1048576B_500Hz
+      段头/结构自相矛盾 551 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r44_dzflat-b_full_blocking_1048576B_500Hz
+      段头/结构自相矛盾 537 次 > 阈值 0（t47 补列；此前该量完全不落列）
+  - r47_cyclonedds-udp_full_blocking_64B_1000Hz
+      迟发超出阈值: late=8 (0.8000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+  - r51_cyclonedds-udp_crc_busy_1024B_1000Hz
+      发送积压超出阈值: backlog_max=2310419 ns = 2.310 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+  - r53_cyclonedds-udp_full_busy_1024B_1000Hz
+      发送积压超出阈值: backlog_max=1555642 ns = 1.556 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+  - r57_cyclonedds-udp_timestamp_blocking_1048576B_500Hz
+      迟发超出阈值: late=115 (23.0000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+      发送积压超出阈值: backlog_max=5500298 ns = 2.750 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+  - r58_cyclonedds-udp_crc_blocking_1048576B_500Hz
+      迟发超出阈值: late=77 (15.4000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+      发送积压超出阈值: backlog_max=43044132 ns = 21.522 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+  - r59_cyclonedds-udp_full_blocking_1048576B_500Hz
+      迟发超出阈值: late=57 (11.4000%) > 阈值[abs<=5 且 rate<=0.5000%]（阈值见 manifest.failure_thresholds；仅落列不判定=静默排除，故进判定）
+      发送积压超出阈值: backlog_max=3552286 ns = 1.776 个周期 > 阈值 1.000 （阈值见 manifest.failure_thresholds）
+结果目录: artifacts/perf/20260928-r24-W02

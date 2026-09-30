@@ -1,0 +1,15 @@
+# R1/t31 判决性归因：空闲 CPU 到底属「RecvWorker 池 collect_pending 全扫」还是「控制面调度器」
+#
+# [A] 2×2 反事实（外部逐 tid 读 /proc/<pid>/task/<tid>/stat）
+#     A 调度器ON 池ON    → 0.56 core（唯一忙 tid = 调度器）
+#     B 调度器OFF 池ON    → ~0.00（2033 线程）
+#     C 调度器ON 池OFF    → 0.59 core ← 池整体停用而 CPU 不降
+#     D 两个都OFF         → ~0.00
+#   DZIPC_SHM_CONTROL_SCHEDULER=1 DZIPC_SHM_RECV_COMPAT=1 见源码 src/dzIPC/shm_pub_sub_ipc.cc:94/335
+#
+# [B] 决定性标定：--state 2（池完全不参与，全进程仅 2 条线程）
+for n in 100 500 1000; do
+  ./build/t31/w10_idle_fresh --n $n --domain $((29000+n)) --state 2 --windows 1 --win-s 10
+done
+#   实测：n=100 → 0.00600 core；n=500 → 0.07900；n=1000 → 0.31700
+#   而 state3（entries=2000）实测 0.583–0.589 ≈ 0.317×2 ⇒ 成本随**控制项数**线性，与池无关

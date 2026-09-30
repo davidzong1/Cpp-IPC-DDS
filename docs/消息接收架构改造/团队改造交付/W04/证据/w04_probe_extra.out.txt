@@ -1,0 +1,23 @@
+# W04 探针输出汇总（原始 stdout/stderr，只追加）
+# 采集: 2026-09-28T20:05:25+08:00  主机: Linux 6.8.0-138-generic  构建: build/ Release  库: 65608d9255e7318a
+
+===== [R-02] 同线程 remove_route（头文件承诺「不等待」，实现等满 2000ms）=====
+PROBE: add_route status=0; the worker will now call recv_once -> remove_route(self)
+PROBE: inside recv_once, calling remove_route(self) from worker thread
+RecvWorker: route 'w04probe_route' recv_once did not quiesce within 2000 ms
+PROBE: remove_route RETURNED (same-thread fallback exists)
+RecvWorker[0]: idle exit (no routes for >= 1000 ms)
+PROBE: main survived 3s of waiting (no deadlock observed in this window)
+rc=0
+
+===== [R-16] 并发 pool.start(3) vs start(9) =====
+PROBE5: start(3)=1 start(9)=0 worker_count=3 running=1 -> EXACTLY ONE WINS
+PROBE5: start(3)=1 start(9)=0 worker_count=3 running=1 -> EXACTLY ONE WINS
+PROBE5: start(3)=1 start(9)=0 worker_count=3 running=1 -> EXACTLY ONE WINS
+
+===== [补充] clear_storage 后同段名重建的 sequence 地址稳定性 =====
+PROBE3-A (sender 在册，receiver 重建): before=0x728d93ade004 after=0x728d93ade004 -> STABLE
+PROBE3-B before=0x728d93aa6004
+PROBE3-B after =0x728d93aa6004 -> see above
+PROBE3-C (clear_storage 后重建): before=0x728d93aa6004 after=0x728d93aa6004 -> STABLE
+rc=0

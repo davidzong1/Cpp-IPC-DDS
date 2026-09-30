@@ -1,0 +1,756 @@
+// Copyright (c) 2023 Contributors to the Eclipse Foundation
+//
+// See the NOTICE file(s) distributed with this work for additional
+// information regarding copyright ownership.
+//
+// This program and the accompanying materials are made available under the
+// terms of the Apache Software License 2.0 which is available at
+// https://www.apache.org/licenses/LICENSE-2.0, or the MIT license
+// which is available at https://opensource.org/licenses/MIT.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! # Example
+//!
+//! ```
+//! use iceoryx2::prelude::*;
+//! # fn main() -> Result<(), Box<dyn core::error::Error>> {
+//! let node = NodeBuilder::new().create::<ipc::Service>()?;
+//! let event = node.service_builder(&"MyEventName".try_into()?)
+//!     .event()
+//!     .open_or_create()?;
+//!
+//! let notifier = event
+//!     .notifier_builder()
+//!     .default_event_id(EventId::new(12))
+//!     .create()?;
+//!
+//! // notify with default event id 123
+//! notifier.notify()?;
+//!
+//! // notify with some custom event id
+//! notifier.notify_with_custom_event_id(EventId::new(6))?;
+//!
+//! # Ok(())
+//! # }
+//! ```
+
+use core::ptr::NonNull;
+use core::time::Duration;
+
+use alloc::vec;
+use alloc::vec::Vec;
+
+use iceoryx2_bb_concurrency::atomic::Ordering;
+use iceoryx2_bb_concurrency::cell::UnsafeCell;
+use iceoryx2_bb_elementary::CallbackProgression;
+use iceoryx2_bb_elementary_traits::testing::abandonable::Abandonable;
+use iceoryx2_bb_lock_free::mpmc::counting_bit_set::RelocatableCountingBitSet;
+use iceoryx2_cal::bag::Bag;
+use iceoryx2_cal::bag::{BagFamily, BagStateFamily};
+use iceoryx2_cal::{
+    arc_sync_policy::ArcSyncPolicy, dynamic_storage::DynamicStorage, event::NotifierBuilder,
+};
+use iceoryx2_cal::{event::Event, named_concept::NamedConceptBuilder};
+use iceoryx2_log::{debug, fail, warn};
+
+use crate::port::port_lifetime_tag::PortLifetimeTag;
+use crate::service::SharedServiceState;
+use crate::service::resource::NoResource;
+use crate::{
+    identifiers::{UniqueListenerId, UniqueNodeId, UniqueNotifierId},
+    port::port_name::PortName,
+    port::update_connections::UpdateConnections,
+    service::{
+        self,
+        config_scheme::event_config,
+        dynamic_config::event::{ListenerDetails, NotifierDetails},
+        naming_scheme::event_concept_name,
+        port_factory::notifier::NotifierConfig,
+    },
+};
+
+use super::event_id::EventId;
+
+/// Failures that can occur when a new [`Notifier`] is created with the
+/// [`crate::service::port_factory::notifier::PortFactoryNotifier`].
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub enum NotifierCreateError {
+    /// The maximum amount of [`Notifier`]s that can connect to a
+    /// [`Service`](crate::service::Service) is
+    /// defined in [`crate::config::Config`]. When this is exceeded no more [`Notifier`]s
+    /// can be created for a specific [`Service`](crate::service::Service).
+    ExceedsMaxSupportedNotifiers,
+    /// Caused by a failure when instantiating a [`ArcSyncPolicy`] defined in the
+    /// [`Service`](crate::service::Service) as `ArcThreadSafetyPolicy`.
+    FailedToDeployThreadsafetyPolicy,
+    /// The tracking port tag, required for cleanup, could not be created.
+    UnableToCreatePortTag,
+    /// The [`UniqueNotifierId`] could not be generated.
+    UnableToGenerateUniqueNotifierId,
+}
+
+impl core::fmt::Display for NotifierCreateError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "NotifierCreateError::{self:?}")
+    }
+}
+
+impl core::error::Error for NotifierCreateError {}
+
+/// Defines the failures that can occur while a [`Notifier::notify()`] call.
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub enum NotifierNotifyError {
+    /// A [`Notifier::notify_with_custom_event_id()`] was called and the provided [`EventId`]
+    /// is greater than the maximum supported [`EventId`] by the
+    /// [`Service`](crate::service::Service)
+    EventIdOutOfBounds,
+    /// The notification was delivered to all [`Listener`](crate::port::listener::Listener) ports
+    /// but the deadline contract, the maximum time span between two notifications, of the
+    /// [`Service`](crate::service::Service) was violated.
+    MissedDeadline,
+    /// The notification was delivered but the elapsed system time could not be acquired.
+    /// Therefore, it is unknown if the deadline was missed or not.
+    UnableToAcquireElapsedTime,
+    /// The [`ListenerKey`], used to notify a specific [`Listener`](crate::port::listener::Listener)
+    /// with [`Notifier::notify_single_listener()`] is invalid. This can occur when the connection
+    /// to the corresponding `Listener` was closed.
+    InvalidListenerKey,
+}
+
+impl core::fmt::Display for NotifierNotifyError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "NotifierNotifyError::{self:?}")
+    }
+}
+
+impl core::error::Error for NotifierNotifyError {}
+
+#[derive(Debug)]
+struct Connection<Service: service::Service> {
+    notifier: <Service::Event as Event<RelocatableCountingBitSet>>::Notifier,
+    listener_id: UniqueListenerId,
+    node_id: UniqueNodeId,
+}
+
+#[derive(Debug)]
+struct ListenerConnections<Service: service::Service> {
+    #[allow(clippy::type_complexity)]
+    connections: Vec<UnsafeCell<Option<Connection<Service>>>>,
+    service_state: SharedServiceState<Service, NoResource>,
+    list_state: UnsafeCell<<Service::Bag as BagFamily>::BagState<ListenerDetails>>,
+}
+
+impl<Service: service::Service> Abandonable for ListenerConnections<Service> {
+    unsafe fn abandon_in_place(mut this: NonNull<Self>) {
+        let this = unsafe { this.as_mut() };
+        unsafe { SharedServiceState::abandon_in_place(NonNull::from_mut(&mut this.service_state)) };
+    }
+}
+
+impl<Service: service::Service> ListenerConnections<Service> {
+    fn new(
+        size: usize,
+        service_state: SharedServiceState<Service, NoResource>,
+        list_state: UnsafeCell<<Service::Bag as BagFamily>::BagState<ListenerDetails>>,
+    ) -> Self {
+        let mut new_self = Self {
+            connections: vec![],
+            service_state,
+            list_state,
+        };
+
+        new_self.connections.reserve(size);
+        for _ in 0..size {
+            new_self.connections.push(UnsafeCell::new(None))
+        }
+
+        new_self
+    }
+
+    fn create(&self, index: usize, listener_id: UniqueListenerId, node_id: UniqueNodeId) {
+        let msg = "Unable to establish connection to listener";
+        let event_name = event_concept_name(&listener_id);
+        let event_config = event_config::<Service>(self.service_state.shared_node().config());
+        if self.get(index).is_none() {
+            match <Service::Event as iceoryx2_cal::event::Event<RelocatableCountingBitSet>>::NotifierBuilder::new(&event_name)
+                .config(&event_config)
+                .open()
+            {
+                Ok(notifier) => {
+                    *self.get_mut(index) = Some(Connection {
+                        notifier,
+                        listener_id,
+                        node_id,
+                    });
+                }
+                Err(
+                    iceoryx2_cal::event::NotifierOpenError::DoesNotExist
+                    | iceoryx2_cal::event::NotifierOpenError::InitializationNotYetFinalized,
+                ) => (),
+                Err(iceoryx2_cal::event::NotifierOpenError::VersionMismatch) => {
+                    warn!(from self,
+                        "{} since a version mismatch was detected! All entities must use the same iceoryx2 version!",
+                        msg);
+                }
+                Err(iceoryx2_cal::event::NotifierOpenError::InsufficientPermissions) => {
+                    warn!(from self, "{} since the permissions do not match. The service or the participants are maybe misconfigured.", msg);
+                }
+                Err(iceoryx2_cal::event::NotifierOpenError::Interrupt) => {
+                    debug!(from self, "{} since an interrupt signal was received.", msg);
+                }
+                Err(iceoryx2_cal::event::NotifierOpenError::InternalFailure) => {
+                    debug!(from self, "{} due to an internal failure.", msg);
+                }
+            }
+        }
+    }
+
+    fn get(&self, index: usize) -> &Option<Connection<Service>> {
+        unsafe { &(*self.connections[index].get()) }
+    }
+
+    fn get_details(&self, index: usize) -> Option<&ListenerDetails> {
+        unsafe { (*self.list_state.get()).get(index) }
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    fn get_mut(&self, index: usize) -> &mut Option<Connection<Service>> {
+        unsafe { &mut (*self.connections[index].get()) }
+    }
+
+    fn len(&self) -> usize {
+        self.connections.len()
+    }
+
+    fn remove(&self, index: usize) {
+        *self.get_mut(index) = None;
+    }
+
+    fn update_connections(&self) {
+        if unsafe {
+            self.service_state
+                .dynamic_storage()
+                .get()
+                .event()
+                .listeners
+                .update_state(&mut *self.list_state.get())
+        } {
+            self.populate_listener_channels();
+        }
+    }
+
+    fn populate_listener_channels(&self) {
+        let mut visited_indices = vec![];
+        visited_indices.resize(self.len(), None);
+
+        unsafe {
+            (*self.list_state.get()).for_each(|index, listener_id| {
+                visited_indices[index] = Some(*listener_id);
+                CallbackProgression::Continue
+            })
+        };
+
+        for (i, index) in visited_indices.iter().enumerate() {
+            match index {
+                Some(details) => {
+                    let create_connection = match self.get(i) {
+                        None => true,
+                        Some(connection) => {
+                            let is_connected = connection.listener_id != details.listener_id;
+                            if is_connected {
+                                self.remove(i);
+                            }
+                            is_connected
+                        }
+                    };
+
+                    if create_connection {
+                        self.create(i, details.listener_id, details.node_id);
+                    }
+                }
+                None => self.remove(i),
+            }
+        }
+    }
+}
+
+/// The key to notify a single listener with the [`Notifier`]
+#[derive(Debug, Clone, Copy)]
+pub struct ListenerKey {
+    connection_index: usize,
+    listener_id: UniqueListenerId,
+}
+
+/// The mono notifier for a single listener. This is used with
+/// [`Notifier::for_each_listener()`].
+#[derive(Debug)]
+pub struct Monofier<'a, Service: service::Service> {
+    notifier: &'a Notifier<Service>,
+    listener_key: ListenerKey,
+}
+
+impl<Service: service::Service> Monofier<'_, Service> {
+    /// Returns the [`ListenerKey`] of the [`Listener`](crate::port::listener::Listener),
+    /// the [`Monofier`] would notify
+    pub fn listener_key(&self) -> ListenerKey {
+        self.listener_key
+    }
+
+    /// Notifies the [`Listener`](crate::port::listener::Listener), the [`Monofier`] correlates to.
+    pub fn notify(&self) -> Result<(), NotifierNotifyError> {
+        self.notify_with_custom_event_id(self.notifier.default_event_id)
+    }
+
+    /// Notifies the [`Listener`](crate::port::listener::Listener), the [`Monofier`] correlates to,
+    /// with a custom [`EventId`].
+    pub fn notify_with_custom_event_id(&self, value: EventId) -> Result<(), NotifierNotifyError> {
+        self.notifier
+            .notify_single_listener_with_custom_event_id_no_update_connections(
+                &self.listener_key,
+                value,
+            )
+    }
+}
+
+/// Represents the sending endpoint of an event based communication.
+#[derive(Debug)]
+pub struct Notifier<Service: service::Service> {
+    listener_connections: Service::ArcThreadSafetyPolicy<ListenerConnections<Service>>,
+    default_event_id: EventId,
+    event_id_max_value: usize,
+    dynamic_notifier_handle: <Service::Bag as BagFamily>::BagHandle,
+    notifier_details: &'static NotifierDetails,
+    on_drop_notification: Option<EventId>,
+    // IMPORTANT!
+    // Fields of a rust struct are dropped in declaration order. Since this tag is our marker that the
+    // port exists and might require cleanup after a crash, the tag must be defined as last member of
+    // the struct.
+    // Otherwise the process might crash during cleanup, has already removed the tag but other resources
+    // are still existing. This would make a cleanup from another process impossible.
+    lifetime_tag: PortLifetimeTag<Service>,
+}
+
+unsafe impl<Service: service::Service> Send for Notifier<Service> where
+    Service::ArcThreadSafetyPolicy<ListenerConnections<Service>>: Send + Sync
+{
+}
+
+unsafe impl<Service: service::Service> Sync for Notifier<Service> where
+    Service::ArcThreadSafetyPolicy<ListenerConnections<Service>>: Send + Sync
+{
+}
+
+impl<Service: service::Service> Abandonable for Notifier<Service> {
+    unsafe fn abandon_in_place(mut this: NonNull<Self>) {
+        let this = unsafe { this.as_mut() };
+        unsafe {
+            Service::ArcThreadSafetyPolicy::abandon_in_place(NonNull::from_mut(
+                &mut this.listener_connections,
+            ))
+        };
+        unsafe {
+            Abandonable::abandon_in_place(NonNull::from_mut(&mut this.lifetime_tag));
+        }
+    }
+}
+
+impl<Service: service::Service> Drop for Notifier<Service> {
+    fn drop(&mut self) {
+        if let Some(event_id) = self.on_drop_notification
+            && let Err(e) = self.notify_with_custom_event_id(event_id)
+        {
+            warn!(from self, "Unable to send notifier_dropped_event {:?} due to ({:?}).",
+                    event_id, e);
+        }
+
+        self.listener_connections
+            .lock()
+            .service_state
+            .dynamic_storage()
+            .get()
+            .event()
+            .release_notifier_handle(self.dynamic_notifier_handle)
+    }
+}
+
+impl<Service: service::Service> UpdateConnections for Notifier<Service> {
+    fn update_connections(&self) -> Result<(), super::update_connections::ConnectionFailure> {
+        self.listener_connections.lock().update_connections();
+        Ok(())
+    }
+}
+
+impl<Service: service::Service> Notifier<Service> {
+    pub(crate) fn new(
+        service: SharedServiceState<Service, NoResource>,
+        config: NotifierConfig,
+    ) -> Result<Self, NotifierCreateError> {
+        let mut new_self = Self::new_without_auto_event_emission(service.clone(), config)?;
+
+        let static_config = service.static_config().event();
+        new_self.on_drop_notification = static_config
+            .notifier_dropped_event
+            .map(EventId::new)
+            .into();
+
+        if let Some(event_id) = static_config.notifier_created_event() {
+            match new_self.notify_with_custom_event_id(event_id) {
+                Ok(_)
+                | Err(
+                    NotifierNotifyError::MissedDeadline
+                    | NotifierNotifyError::UnableToAcquireElapsedTime,
+                ) => (),
+                Err(e) => {
+                    warn!(from new_self,
+                        "The new notifier was unable to send out the notifier_created_event: {:?} due to ({:?}).",
+                        event_id, e);
+                }
+            }
+        }
+
+        Ok(new_self)
+    }
+
+    pub(crate) fn new_without_auto_event_emission(
+        service: SharedServiceState<Service, NoResource>,
+        config: NotifierConfig,
+    ) -> Result<Self, NotifierCreateError> {
+        let msg = "Unable to create Notifier port";
+        let origin = "Notifier::new()";
+        let notifier_id = fail!(from origin,
+            when UniqueNotifierId::new::<Service>(config.port_name, service.shared_node().config()),
+            with NotifierCreateError::UnableToGenerateUniqueNotifierId, "{msg} since the UniqueNotifierId could not be generated.");
+
+        // !MUST! be the first thing that is created when a new port is instantiated otherwise the
+        // port resources might leak if this process is killed in between.
+        let lifetime_tag = PortLifetimeTag::new(
+            origin,
+            msg,
+            notifier_id.0.value(),
+            service.shared_node(),
+            NotifierCreateError::UnableToCreatePortTag,
+        )?;
+
+        let listener_list = &service.dynamic_storage().get().event().listeners;
+
+        let node_id = *service.shared_node().id();
+        let static_config = service.static_config().event();
+        let listener_connections = Service::ArcThreadSafetyPolicy::new(ListenerConnections::new(
+            listener_list.capacity(),
+            service.clone(),
+            UnsafeCell::new(unsafe { listener_list.get_state() }),
+        ));
+
+        let listener_connections = match listener_connections {
+            Ok(v) => v,
+            Err(e) => {
+                fail!(from origin, with NotifierCreateError::FailedToDeployThreadsafetyPolicy,
+                      "{msg} since the threadsafety policy could not be instantiated ({e:?}).");
+            }
+        };
+
+        listener_connections.lock().populate_listener_channels();
+
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+
+        // !MUST! be the last task otherwise a notifier is added to the dynamic config without
+        // the creation of all required channels
+        let (details, handle) = match listener_connections
+            .lock()
+            .service_state
+            .dynamic_storage()
+            .get()
+            .event()
+            .register_notifier_id(NotifierDetails {
+                notifier_id,
+                node_id,
+                notifier_name: config.port_name,
+            }) {
+            Some(v) => v,
+            None => {
+                fail!(from origin, with NotifierCreateError::ExceedsMaxSupportedNotifiers,
+                            "{} since it would exceed the maximum supported amount of notifiers of {}.",
+                            msg, service.static_config().event().max_notifiers);
+            }
+        };
+
+        Ok(Self {
+            lifetime_tag,
+            listener_connections,
+            default_event_id: config.default_event_id,
+            event_id_max_value: static_config.event_id_max_value,
+            dynamic_notifier_handle: handle,
+            notifier_details: unsafe { &*details },
+            on_drop_notification: None,
+        })
+    }
+
+    /// Returns the [`UniqueNotifierId`] of the [`Notifier`]
+    pub fn id(&self) -> UniqueNotifierId {
+        self.notifier_details.notifier_id
+    }
+
+    /// Returns the [`PortName`] of the [`Notifier`]
+    pub fn name(&self) -> &PortName {
+        &self.notifier_details.notifier_name
+    }
+
+    /// Returns the deadline of the corresponding [`Service`](crate::service::Service).
+    pub fn deadline(&self) -> Option<Duration> {
+        self.listener_connections
+            .lock()
+            .service_state
+            .static_config()
+            .event()
+            .deadline
+            .map(|v| v.value.into())
+            .into()
+    }
+
+    /// Notifies all [`crate::port::listener::Listener`] connected to the service with the default
+    /// event id provided on creation.
+    /// On success the number of
+    /// [`crate::port::listener::Listener`]s that were notified otherwise it returns
+    /// [`NotifierNotifyError`].
+    pub fn notify(&self) -> Result<usize, NotifierNotifyError> {
+        self.notify_with_custom_event_id(self.default_event_id)
+    }
+
+    /// Notifies all [`crate::port::listener::Listener`] connected to the service with a custom
+    /// [`EventId`].
+    /// On success the number of
+    /// [`crate::port::listener::Listener`]s that were notified otherwise it returns
+    /// [`NotifierNotifyError`].
+    pub fn notify_with_custom_event_id(
+        &self,
+        value: EventId,
+    ) -> Result<usize, NotifierNotifyError> {
+        self.__internal_notify(value, false)
+    }
+
+    /// Notifies the [`Listener`](crate::port::listener::Listener), the [`ListenerKey`] corresponds to.
+    /// If the key is invalid, e.g. because the corresponding `Listener` is gone, an error is returned.
+    pub fn notify_single_listener(
+        &self,
+        listener_key: &ListenerKey,
+    ) -> Result<(), NotifierNotifyError> {
+        self.notify_single_listener_with_custom_event_id(listener_key, self.default_event_id)
+    }
+
+    /// Notifies the [`Listener`](crate::port::listener::Listener), the [`ListenerKey`] corresponds to,
+    /// with a custom [`EventId`].
+    /// If the key is invalid, e.g. because the corresponding `Listener` is gone, an error is returned.
+    pub fn notify_single_listener_with_custom_event_id(
+        &self,
+        listener_key: &ListenerKey,
+        value: EventId,
+    ) -> Result<(), NotifierNotifyError> {
+        let listener_connections = self.listener_connections.lock();
+        listener_connections.update_connections();
+
+        self.notify_single_listener_with_custom_event_id_no_update_connections(listener_key, value)
+    }
+
+    fn notify_single_listener_with_custom_event_id_no_update_connections(
+        &self,
+        listener_key: &ListenerKey,
+        value: EventId,
+    ) -> Result<(), NotifierNotifyError> {
+        use iceoryx2_cal::event::Notifier;
+        let msg = "Unable to notify single listener";
+
+        if self.event_id_max_value < value.as_value() {
+            fail!(from self, with NotifierNotifyError::EventIdOutOfBounds,
+                  "{} since the EventId {:?} exceeds the maximum supported EventId value of {}.",
+                  msg, value, self.event_id_max_value);
+        }
+
+        let listener_connections = self.listener_connections.lock();
+
+        if let Some(connection) = listener_connections.get(listener_key.connection_index)
+            && connection.listener_id == listener_key.listener_id
+        {
+            match connection.notifier.notify(value) {
+                Err(iceoryx2_cal::event::NotifierNotifyError::Disconnected) => {
+                    listener_connections.remove(listener_key.connection_index);
+                }
+                Err(e) => {
+                    warn!(from self, "Unable to send notification to single listener via connection {:?} due to {:?}.",
+                              connection, e)
+                }
+                Ok(_) => {}
+            }
+        } else {
+            fail!(from self, with NotifierNotifyError::InvalidListenerKey,
+                  "{} since the listener key is invalid.",
+                  msg);
+        }
+
+        self.handle_deadline(&listener_connections)?;
+
+        Ok(())
+    }
+
+    /// Iterates over all connected [`Listener`](crate::port::listener::Listener) and executes the callback
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use iceoryx2::prelude::*;
+    /// # fn main() -> Result<(), Box<dyn core::error::Error>> {
+    /// # let node = NodeBuilder::new().create::<ipc::Service>()?;
+    /// # let event = node.service_builder(&"MyEventName".try_into()?)
+    /// #     .event()
+    /// #     .open_or_create()?;
+    /// #
+    /// # let notifier = event
+    /// #     .notifier_builder()
+    /// #     .create()?;
+    ///
+    /// let listener_name = PortName::new("hypnotoad")?;
+    /// notifier.for_each_listener(|monofier, details| {
+    ///     // NOTE: use `details.listener_name.starts_with("hypnotoad")` for a more fuzzy match
+    ///     if details.listener_name == listener_name {
+    ///         let _ = monofier.notify();
+    ///         // NOTE: use CallbackProgression::Continue to notify all listener that match the name
+    ///         return CallbackProgression::Stop;
+    ///     }
+    ///     CallbackProgression::Continue
+    /// });
+    ///
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn for_each_listener<
+        F: FnMut(&Monofier<Service>, &ListenerDetails) -> CallbackProgression,
+    >(
+        &self,
+        mut callback: F,
+    ) {
+        let listener_connections = self.listener_connections.lock();
+        listener_connections.update_connections();
+
+        for i in 0..listener_connections.len() {
+            let connection = listener_connections.get(i).as_ref();
+            let details = listener_connections.get_details(i);
+            match (connection, details) {
+                (Some(connection), Some(details)) => {
+                    let listener_key = ListenerKey {
+                        connection_index: i,
+                        listener_id: connection.listener_id,
+                    };
+                    let monofier = Monofier {
+                        notifier: self,
+                        listener_key,
+                    };
+
+                    let callback_result = callback(&monofier, details);
+                    if callback_result == CallbackProgression::Stop {
+                        break;
+                    }
+                }
+                (Some(connection), None) => {
+                    warn!(from self, "Inconsistency detected! No listener details but connection for id: {:?}.",
+                          connection.listener_id);
+                }
+                (None, Some(details)) => {
+                    warn!(from self, "Inconsistency detected! No connection but listener id: {:?}.",
+                          details.listener_id);
+                }
+                (None, None) => { /* nothing to do */ }
+            }
+        }
+    }
+
+    /// Notifies all [`crate::port::listener::Listener`] connected to the service with a custom
+    /// [`EventId`].
+    /// On success the number of
+    /// [`crate::port::listener::Listener`]s that were notified otherwise it returns
+    /// [`NotifierNotifyError`].
+    ///
+    /// When `skip_self_deliver` is set to true the [`Notifier`] will only notify
+    /// [`crate::port::listener::Listener`]s that were NOT created by the same node (have the same
+    /// [`crate::node::NodeId`])
+    #[doc(hidden)]
+    pub fn __internal_notify(
+        &self,
+        value: EventId,
+        skip_self_deliver: bool,
+    ) -> Result<usize, NotifierNotifyError> {
+        let msg = "Unable to notify event";
+        let listener_connections = self.listener_connections.lock();
+        listener_connections.update_connections();
+
+        use iceoryx2_cal::event::Notifier;
+        let mut number_of_triggered_listeners = 0;
+
+        if self.event_id_max_value < value.as_value() {
+            fail!(from self, with NotifierNotifyError::EventIdOutOfBounds,
+                            "{} since the EventId {:?} exceeds the maximum supported EventId value of {}.",
+                            msg, value, self.event_id_max_value);
+        }
+
+        for i in 0..listener_connections.len() {
+            if let Some(connection) = listener_connections.get(i)
+                && !(skip_self_deliver && connection.node_id == self.notifier_details.node_id)
+            {
+                match connection.notifier.notify(value) {
+                    Err(iceoryx2_cal::event::NotifierNotifyError::Disconnected) => {
+                        listener_connections.remove(i);
+                    }
+                    Err(e) => {
+                        warn!(from self, "Unable to send notification via connection {:?} due to {:?}.",
+                                    connection, e)
+                    }
+                    Ok(_) => {
+                        number_of_triggered_listeners += 1;
+                    }
+                }
+            }
+        }
+
+        self.handle_deadline(&listener_connections)?;
+
+        Ok(number_of_triggered_listeners)
+    }
+
+    fn handle_deadline(
+        &self,
+        listener_connections: &ListenerConnections<Service>,
+    ) -> Result<(), NotifierNotifyError> {
+        if let Some(deadline) = listener_connections
+            .service_state
+            .static_config()
+            .event()
+            .deadline
+            .as_option_ref()
+        {
+            let msg = "The notification was sent";
+            let duration_since_creation = fail!(from self, when deadline.creation_time.elapsed(),
+                                with NotifierNotifyError::UnableToAcquireElapsedTime,
+                                "{} but the elapsed system time could not be acquired which is required for deadline handling.",
+                                msg);
+
+            let previous_duration_since_creation = listener_connections
+                .service_state
+                .dynamic_storage()
+                .get()
+                .event()
+                .elapsed_time_since_last_notification
+                .swap(duration_since_creation.as_nanos() as u64, Ordering::Relaxed);
+
+            let duration_since_last_notification = Duration::from_nanos(
+                duration_since_creation.as_nanos() as u64 - previous_duration_since_creation,
+            );
+
+            if duration_since_last_notification > deadline.value.into() {
+                fail!(from self, with NotifierNotifyError::MissedDeadline,
+                "{} but the deadline was hit. The service requires a notification after {:?} but {:?} passed without a notification.",
+                msg, deadline.value, duration_since_last_notification);
+            }
+        }
+
+        Ok(())
+    }
+}

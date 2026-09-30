@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "dzIPC/measure/counters.h"   /* W08: 路径分流计数直接落到 W03 的注册表 */
 #include "libipc/def.h"
 
 namespace dzIPC {
@@ -13,6 +14,10 @@ std::atomic<bool> g_nodelet_enabled{false};
 std::atomic<bool> g_dzflat_enabled{false};
 std::atomic<std::uint64_t> g_dzflat_published{0};
 std::atomic<std::uint64_t> g_dzflat_fallback{0};
+/* W08: 预构造段入口(publish_prebuilt_segment)的成功条数。W03 的三路径 ID 只定义了
+ * tlv / dzflat-a / dzflat-b, 没有这一入口, 故记在本模块(⛔不并进 A/B —— 它既不是
+ * "对象→共享段"也不是"应用原地构造")。 */
+std::atomic<std::uint64_t> g_dzflat_prebuilt{0};
 
 /* 步骤③ 的 view 队列容量钉。默认 ON —— 理由见 nodelet_config.h 的 ⚠️ 段:
  * 默认 OFF 等于"池会被队列吃干"这个已知缺陷仍然出厂。 */
@@ -49,6 +54,47 @@ IPC_EXPORT void ResetDzFlatCounters()
 {
     g_dzflat_published.store(0, std::memory_order_relaxed);
     g_dzflat_fallback.store(0, std::memory_order_relaxed);
+    /* W08: 追加口一并复位(否则按配置逐轮采数时上一轮会把这一轮算歪)。 */
+    g_dzflat_prebuilt.store(0, std::memory_order_relaxed);
+}
+
+/* ---------------------------------------------------------------------------
+ * W08 路径分流(实现见头文件同名段的说明)。⛔本函数**只做计数**, 不读消息内容、
+ * 不改任何发布/接收行为; 热路径上就是一次 relaxed fetch_add(无锁、无分配、无日志)。
+ * ------------------------------------------------------------------------- */
+namespace detail {
+IPC_EXPORT void NoteDzFlatPathDelivered(DzFlatPath path, std::uint64_t wire_bytes) noexcept
+{
+    using measure::CounterId;
+    switch (path)
+    {
+    case DzFlatPath::Tlv:
+        DZIPC_MEASURE_INC(CounterId::tlv_messages);
+        DZIPC_MEASURE_ADD(CounterId::tlv_wire_bytes, wire_bytes);
+        break;
+    case DzFlatPath::DzFlatA:
+        DZIPC_MEASURE_INC(CounterId::dzflat_a_messages);
+        DZIPC_MEASURE_ADD(CounterId::dzflat_wire_bytes, wire_bytes);
+        break;
+    case DzFlatPath::DzFlatB:
+        DZIPC_MEASURE_INC(CounterId::dzflat_b_messages);
+        DZIPC_MEASURE_ADD(CounterId::dzflat_wire_bytes, wire_bytes);
+        break;
+    case DzFlatPath::PrebuiltSegment:
+        /* W03 的三路径 ID 未定义这一入口 ⇒ 条数记在本模块; 传输字节仍归入
+         * dzflat_wire_bytes(它确实是 DZFlat 段)。交付里已登记该 ID 缺口。 */
+        g_dzflat_prebuilt.fetch_add(1, std::memory_order_relaxed);
+        DZIPC_MEASURE_ADD(CounterId::dzflat_wire_bytes, wire_bytes);
+        break;
+    case DzFlatPath::kCount:
+        break;
+    }
+}
+}   // namespace detail
+
+IPC_EXPORT std::uint64_t DzFlatPrebuiltSegmentCount() noexcept
+{
+    return g_dzflat_prebuilt.load(std::memory_order_relaxed);
 }
 
 IPC_EXPORT void EnableViewQueuePin(bool enabled)

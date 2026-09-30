@@ -1,0 +1,8 @@
+window=2.0s  payload: 8x usleep(1ms) keep-alive threads + 1x busy spin thread
+CLK_TCK=100
+A  /proc/self/status voluntary delta       = 1
+B  task-group       voluntary delta       = 15171
+C  /proc/self/stat   utime+stime delta     = 205 ticks (1.0250 core over 2s)
+D  task-group        utime+stime delta     = 206 ticks (1.0300 core over 2s)
+judgement: A << B  => self/status ctxt switch is NOT thread-group aggregate
+judgement: C~=D (C/D = 0.995) => self/stat CPU IS thread-group aggregate

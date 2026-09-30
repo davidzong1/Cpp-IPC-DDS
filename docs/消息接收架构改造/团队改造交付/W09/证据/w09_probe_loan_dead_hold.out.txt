@@ -1,0 +1,10 @@
+# W09 §7.3 复现输出（t22 输入：loan 借样后暴死 ⇒ published=0 死悬挂）
+2026-09-28T20:52:50+08:00
+# 库指纹 2af82d372fbacdd1
+
+--- 子进程 n=1（借 1 块后不发布，直接 _exit）---
+CHILD_HELD=1 (published 全为 0)
+
+--- 父进程（同档还能借到几块）---
+fail: loan, que->ready_sending() == false
+PARENT_CAN_LOAN=0 (pool=40)

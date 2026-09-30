@@ -1,0 +1,8 @@
+CONFIG valid=1000/1000 entries=2000 pool_routes=1000 workers=32 threads=0
+WIN 60s cpu=0.5958 core
+ORG 控制面: ticks=8555.6/s × entries=2000 × 2 = 3.422e+07 项访问/s
+ORG 接收池: scan_rounds=351.9/s scanned_routes_total=10998.5/s = 1.100e+04 项访问/s
+ORG 比值 控制面/接收池 = 3111.6×
+ORG 若全部成本归一为「项访问」: 1.741e-08 core·s/项 (用控制面口径)
+ORG 接收池按其占比应分摊 = 0.00019 core（实际总 0.5958）
+POOLSTATS wait_wakeups=0.0/s wait_timeouts=319.9/s recv_once_calls=0.0/s idle_exits_delta=0

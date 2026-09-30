@@ -4,8 +4,11 @@
 #include <algorithm>
 #include <condition_variable>
 #include <cstdint>
+#include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <memory>
 #include <typeinfo>
 #include <vector>
@@ -103,6 +106,193 @@ bool sub_compat_forced()
         return !(v[0] == '0' && v[1] == '\0');
     }();
     return forced;
+}
+
+/* ===== D-22：socket 通道「连接建立」的**有界**重试与可识别诊断 ==================
+ *
+ * 背景（队长裁决 D-22；完整取证见 artifacts/perf/20260929-r32-W10-portfix/）：
+ * 原实现是 `while (!node->connect()) { sleep(1s); }` —— 三个缺陷叠在一起：
+ *   ① **无上界**：一条话题永远连不上，就永远不返回，千路运行整片挂死（实测 rc=124，
+ *      30 s 内 373~537 行重连日志，且**外部无法打断**）；
+ *   ② **无诊断**：只打印"重连中"，既不说是哪个端口、也不说 errno 是什么 ——
+ *      现场无法把"端口被占"与"地址写错/权限/路由"分开；
+ *   ③ **不可退出**：析构/切换路径的 join 会永久阻塞（同类问题在 socket_ser_cli 的
+ *      `connect_with_retry` 里已有先例：那里只为可中断而加 running 检查，其余语义逐字不变）。
+ *
+ * 本函数的三条纪律：
+ *   · **有上界**：默认最多 kSocketConnectAttemptsDefault 次尝试（首次立即 + 其后 1 s 间隔，
+ *     与旧实现的重试间隔**逐位相同**：分批 10×100 ms 只为让 sleep 可被打断）；
+ *   · **有诊断**：每次失败立即取 errno 并分类（port_in_use / permission_denied /
+ *     address_not_available / no_route / fd_exhausted / other_errno），首报 + 末报 + 每 10 次
+ *     节流一行（与 note_pool_exhausted 同口径：真失败时逐条打印会淹没日志，而这里要的是
+ *     "看得见"）；耗尽时再打一条**结构化终报**（含 topic/role/port/ip/errno/次数/耗时/处置建议）；
+ *   · **显式失败**：返回 false ⇒ 调用方**必须**提前返回，不得把"没连上的通道"当成可用
+ *     （不注册 info_pool 条目、不起发现线程/收包路径）。⛔ 不静默、不假装 ready。
+ *
+ * 兼容路径（旧语义，**显式**启用）：`DZIPC_SOCKET_CONNECT_MAX_ATTEMPTS=0` ⇒ 无界重试，
+ * 并在进程内首报一行说明"已显式启用无界重试"。取 0 是"无界"，不是"不重试"。
+ * 上限可配置的理由：不同部署的端口争用时长差别很大（脚本化 CI 里 30 s 足够；
+ * 长期被外部服务占用的机器上，运维可能希望更早失败以便快速定位）。
+ *
+ * ⛔ 本函数**不修改端口公式、不做端口回退/漂移**（队长 D-22 第 2 条明确不要求）。
+ *    它只把"永远等下去"换成"有界等 + 说清为什么失败"。 */
+constexpr int kSocketConnectAttemptsDefault = 30;
+
+/* 上限：进程内只读一次（与 DZIPC_SOCKET_COMPAT_THREAD 同一纪律，杜绝半程切换）。 */
+int socket_connect_max_attempts()
+{
+    static const int n = [] {
+        const char* v = std::getenv("DZIPC_SOCKET_CONNECT_MAX_ATTEMPTS");
+        if (v == nullptr || v[0] == '\0')
+        {
+            return kSocketConnectAttemptsDefault;
+        }
+        const long parsed = std::strtol(v, nullptr, 10);
+        if (parsed < 0)
+        {
+            return kSocketConnectAttemptsDefault;   /* 负数视为未设，不留"负次尝试"的怪态 */
+        }
+        return static_cast<int>(parsed);            /* 0 = 无界（显式兼容路径） */
+    }();
+    return n;
+}
+
+const char* connect_errno_class(int e) noexcept
+{
+    switch (e)
+    {
+    case 0:
+        return "unknown";
+    case EADDRINUSE:
+        return "port_in_use";
+    case EACCES:
+    case EPERM:
+        return "permission_denied";
+    case EADDRNOTAVAIL:
+        return "address_not_available";
+    case ENODEV:
+    case ENETUNREACH:
+        return "no_route";
+    case EMFILE:
+    case ENFILE:
+        return "fd_exhausted";
+    default:
+        return "other_errno";
+    }
+}
+
+/* 处置建议按 errno 分类给 —— 给错方向的建议比不给更坏。 */
+const char* connect_remediation(int e) noexcept
+{
+    switch (e)
+    {
+    case EADDRINUSE:
+        return "端口已被占用；建议: ss -ulnp | grep :<port> 查占用者；若占用者在 "
+               "net.ipv4.ip_local_port_range 内, 可由运维收窄该区间或用 "
+               "net.ipv4.ip_local_reserved_ports 为 dzIPC 端口窗口让路(root); "
+               "亦可换 domain 或话题名绕开该端口(端口是话题名的纯函数)";
+    case EACCES:
+    case EPERM:
+        return "权限不足；建议: 检查容器 seccomp/cap_net_bind_service 与端口是否 <1024";
+    case EADDRNOTAVAIL:
+        return "本机没有该组播地址；建议: 检查网卡/组播路由与容器网络模式";
+    case ENODEV:
+    case ENETUNREACH:
+        return "组播地址不可达；建议: 检查多播路由表与默认路由接口";
+    case EMFILE:
+    case ENFILE:
+        return "fd 耗尽；建议: 提高 RLIMIT_NOFILE(千路 socket 约 2 fd/route)";
+    default:
+        return "未归类的 errno；请按 strerror 排查, 并保留本行日志";
+    }
+}
+
+/* 返回 true = 已连上；false = 有界重试耗尽，或对象正在停止（running 变假）⇒ 调用方必须
+ * **提前返回**并把本通道当"不可用"处理。 */
+bool connect_with_bounded_retry(ipc::socket::UDPNode* node, const std::atomic<bool>& running,
+                                const std::string& topic_name, const char* who, const char* noun,
+                                const std::string& ipaddr, uint16_t port)
+{
+    if (node == nullptr)
+    {
+        return false;
+    }
+    const int max_attempts = socket_connect_max_attempts();
+    if (max_attempts == 0)
+    {
+        static std::atomic<bool> legacy_notice_printed{false};
+        bool expected = false;
+        if (legacy_notice_printed.compare_exchange_strong(expected, true))
+        {
+            std::cerr << "\033[33m[dzIPC][socket_connect] DZIPC_SOCKET_CONNECT_MAX_ATTEMPTS=0 ⇒ 已**显式**启用"
+                         "无界重试（W05/2025 之前的历史语义）: 连接失败将持续重试且不设上限, "
+                         "外部只能通过销毁对象(停止标志)打断\033[0m" << std::endl;
+        }
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    int first_errno = 0;
+    for (int attempt = 1;; ++attempt)
+    {
+        if (!running.load(std::memory_order_acquire))
+        {
+            std::cerr << "\033[33m[" << topic_name << who << "] connect aborted: object is stopping "
+                      << "(attempt " << attempt << ", port " << port << ")\033[0m" << std::endl;
+            return false;
+        }
+        /* ⛔ errno = 0 必须**紧贴**调用之前：connect() 也可能因为**非 errno 原因**返回
+         * false（pimpl 失效态、inet_pton 解析失败路径），此时残留的旧 errno 会把它
+         * 误分类成"端口被占"之类的具体原因 —— 那比不分类更坏。置 0 后这种情况统一
+         * 落到 "unknown"，读日志的人不会得到一条自信的错误结论。 */
+        errno = 0;
+        if (node->connect())
+        {
+            return true;
+        }
+        /* ⛔ errno 必须在 connect() 返回后**立即**取：UDPNode::connect() 内部会 close(fd),
+         * 任何后续 syscall 都可能覆写 errno。实测 (errno_preservation.txt): libipc 的
+         * pimpl + IPC_EXCEPTION_ 包装不会吃掉 bind 的 EADDRINUSE，但仍以立即取为准。 */
+        const int e = errno;
+        if (first_errno == 0)
+        {
+            first_errno = e;
+        }
+        const bool legacy = (max_attempts == 0);
+        const bool last = (!legacy && attempt >= max_attempts);
+        const bool first = (attempt == 1);
+        /* 首报 + 末报 + 每 10 次节流（避免 500+ 行洪水，又保证"看得见"）。 */
+        if (first || last || (attempt % 10) == 0)
+        {
+            std::cerr << "\033[31m[" << topic_name << who << "] Failed to connect " << noun << " (attempt " << attempt
+                      << (legacy ? "" : ("/" + std::to_string(max_attempts))) << "), reconnect after 1 second: "
+                      << "port=" << port << " ip=" << ipaddr << " errno=" << e << "(" << connect_errno_class(e)
+                      << ":" << std::strerror(e) << ")\033[0m" << std::endl;
+        }
+        if (last)
+        {
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+                                .count();
+            std::cerr << "\033[31m[dzIPC][socket_connect_failed] topic=" << topic_name << " role=" << who
+                      << " noun=" << noun << " port=" << port << " ip=" << ipaddr
+                      << " attempts=" << attempt << " elapsed_ms=" << ms << " first_errno=" << first_errno << "("
+                      << connect_errno_class(first_errno) << ":" << std::strerror(first_errno) << ")"
+                      << " last_errno=" << e << "(" << connect_errno_class(e) << ")"
+                      << " ⇒ 本通道**不可用**, 已显式失败(不再重试); " << connect_remediation(first_errno)
+                      << "; 如需旧的无界重试: DZIPC_SOCKET_CONNECT_MAX_ATTEMPTS=0\033[0m" << std::endl;
+            return false;
+        }
+        /* 分批睡眠：一次睡满 1 s 会让"停止"的最坏延迟多 1 s（同 socket_ser_cli 先例）。 */
+        for (int i = 0; i < 10; ++i)
+        {
+            if (!running.load(std::memory_order_acquire))
+            {
+                std::cerr << "\033[33m[" << topic_name << who << "] connect aborted: object is stopping "
+                          << "(after attempt " << attempt << ", port " << port << ")\033[0m" << std::endl;
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
 }
 
 const char* sub_status_reason(threepools::RecvRegisterStatus s) noexcept
@@ -435,11 +625,12 @@ void socket_pub_ipc::InitChannel(std::string extra_info)
         if (verbose_)
             std::cerr << "\033[32m[" << topic_name_ << "PubInfo] Publisher initialized on IP: " << this->ipaddr_
                       << " Port: " << this->port_hash_ << " for topic: " << topic_name_ << "\033[0m" << std::endl;
-        while (!publisher_->connect())
+        /* D-22：同样的有界重试（发布端是 SendOnly、不 bind，故端口冲突面不落在这里；
+         * 但"无上界 + 无诊断"这条缺陷与角色无关，一并收口）。 */
+        if (!connect_with_bounded_retry(publisher_.get(), running, topic_name_, "PubInfo", "publisher", ipaddr_,
+                                        port_hash_))
         {
-            std::cerr << "\033[31m[" << topic_name_
-                      << "PubInfo] Failed to connect publisher,reconnect affter 1 second...\033[0m" << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            return;
         }
         /* ACK 通道连不上不算致命: BestEffort 完全不需要它, 只有 publish_blocking
          * 会退化回"在数据通道上等 ACK"(即端点分离之前的行为)。 */
@@ -1010,11 +1201,13 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
         if (verbose_)
             std::cerr << "\033[32m[" << topic_name_ << "SubInfo] Subscriber initialized on IP: " << this->ipaddr_
                       << " Port: " << this->port_hash_ << " for topic: " << topic_name_ << "\033[0m" << std::endl;
-        while (!subscriber_->connect())
+        /* D-22：有界重试 + 可识别诊断（取代原先的 `while (!connect()) sleep(1s)` 无界循环）。
+         * ⛔ 连不上就**显式失败并提前返回**：不注册 info_pool 条目、不建收包路径 ——
+         * 让"某几路没建起来"在注册台账/逐 route 合法收包数上直接可见，而不是整片挂住。 */
+        if (!connect_with_bounded_retry(subscriber_.get(), running, topic_name_, "SubInfo", "subscriber", ipaddr_,
+                                        port_hash_))
         {
-            std::cerr << "\033[31m[" << topic_name_
-                      << "SubInfo] Failed to connect subscriber,reconnect affter 1 second...\033[0m" << std::endl;
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            return;
         }
         /* ACK 通道连不上不影响收数据, 只是无法回确认 —— BestEffort 下本就不需要。 */
         if (!ack_tx_->connect())

@@ -1,0 +1,59 @@
+==============================================================================
+R1/t31 独立复算 —— run_root = artifacts/perf/20260929-r25-W10
+==============================================================================
+
+[1] artifacts/perf/20260929-r25-W10/shm-ind-1000/ledger.csv: 1000 行
+  [OK ] 行数 == 1000  实测 1000
+  [OK ] route 唯一（无重复）  唯一 1000
+  [OK ] route 下标恰为 0..999（无遗漏）  min=0 max=999
+  [OK ] 全条件满足（registered=1 ∧ rx==planned ∧ dup=corrupt=timeout=0）  1000/1000
+  [OK ] 不满足样例为空  不满足 0 条
+      合计: {'planned': 3005, 'sent': 3005, 'rx': 3005, 'dup': 0, 'out_of_order': 0, 'corrupt': 0, 'timeout': 0}
+  [OK ] planned == sent == rx = 3005  3005/3005/3005
+  [OK ] planned 分布 = 999×3 + 1×8（首 route 含 5 条恢复消息）  {'8': 1, '3': 999}
+
+[2] artifacts/perf/20260929-r25-W10/shm-ind-1000/samples.jsonl: 6010 行, keys=['direction', 'path', 'route', 'route_idx', 'run_id', 'seq']
+  [OK ] 无任何时延字段（⇒ 该 run 不含 §10.7 三组计时）
+  [OK ] direction = tx:rx = 3005:3005  {'tx': 3005, 'rx': 3005}
+  [OK ] 台账 sent/rx 与 samples 逐 route 一致且序号为 0..n-1  不一致 0 项
+  [OK ] samples 覆盖全部 1000 route
+
+[3] artifacts/perf/20260929-r25-W10/shm-ind-1000/counters.json
+  [OK ] counters: registered_count == expected_count
+  [OK ] counters: valid_rx_count == expected_count
+  [OK ] registry: registration_attempts == registration_ok == 1000  1000/1000
+  [OK ] registry: tlv_messages == 3005（3×1000 + 5 恢复）  3005
+  [OK ] registry: tlv_wire_bytes == 88 B/条 × 3005（64 载荷 + 24 头）  264440 vs 264440
+  [OK ] registry: fallback_total == 0 且 wait_set_full == wait_token_invalid == 0
+  [OK ] failure_classes 十类全 0 且 first_failed_resource == none
+  [OK ] registry: diagnostics_enabled == False（⇒ scan_* 族受门控，读数不能当开诊断值）
+
+[4] 本 run 读数为 0 但**产品代码无写入点**的计数（0 是「未接线」，不是「实测为 0」）:
+      chunk_exhausted                  = 0
+      chunk_alloc_failed               = 0
+      queue_evicted                    = 0
+      queue_backpressure               = 0
+      generation_mismatch              = 0
+      publish_blocked                  = 0
+      rx_timeout                       = 0
+      fd_limit                         = 0
+      fallback_pool_exhausted          = 0
+      fallback_type_incompatible       = 0
+      fallback_oversized               = 0
+      payload_checksum_ok              = 0
+      payload_checksum_bad             = 0
+      seq_lost                         = 0
+      ⇒ 判据见 verify_w10_chunk_counter.cpp（池真实耗尽而 chunk_exhausted 仍为 0）
+  [OK ] shm-ind-1: 行数=1 且全条件满足 1/1  行数 1 满足 1
+  [OK ] shm-ind-100: 行数=100 且全条件满足 100/100  行数 100 满足 100
+  [OK ] shm-bcast-32: 行数=32 且全条件满足 32/32  行数 32 满足 32
+  [OK ] shm-hotcold-1000: 行数=1000 且冷路 999/999 各收≥1 条  行数 1000 冷路 999/999
+  [OK ] shm-hotcold-1000: 热路 route0 planned=40000 sent=0 rx=64（sent 列仅在定速臂有意义 ⇒ 与 rx 不可比）
+
+[5] verdict.md §13.2 第 6 条实测单元格（原文）:
+      | 6 | 结束时 route/token/fd/队列/chunk 回基线（±5%） | routes 500→0，fd 5→4 | 见下 |
+      ⇒ 单元格仅含 route/fd ⇒ §13.2 第 6 条的 token/queue/chunk 三项**未被测量**（未确认；作为 finding 记录，不计入本脚本的自洽判定）
+
+==============================================================================
+✅ 台账 / samples / counters / 其余拓扑 全部自洽（复算数值见上）
+⚠️ 但 §13.2 第 3 条（独立计数）与第 6 条（token/queue/chunk 回基线）不满足——见 verdict 文档

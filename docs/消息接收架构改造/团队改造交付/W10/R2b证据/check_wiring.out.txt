@@ -1,0 +1,25 @@
+[1] 调用点落数
+  ✓ shm_pub_sub_ipc.cc  note_dzflat_attempt = 3 (期望 ≥3)
+  ✓ shm_pub_sub_ipc.h   note_dzflat_borrow_failed = 3 (期望 ≥3)
+[2] 11 个新激活 ID 全部可达（分类器为唯一写入者）
+  ✓ path_selection_dzflat_disabled (counters.h 内 3 处)
+  ✓ path_selection_type_unsupported (counters.h 内 2 处)
+  ✓ fallback_reason_unknown (counters.h 内 2 处)
+  ✓ fallback_total (counters.h 内 2 处)
+  ✓ fallback_capacity_full (counters.h 内 2 处)
+  ✓ fallback_oversized (counters.h 内 2 处)
+  ✓ fallback_type_incompatible (counters.h 内 2 处)
+  ✓ borrow_failed_no_receiver (counters.h 内 3 处)
+  ✓ borrow_failed_oversized (counters.h 内 3 处)
+  ✓ borrow_failed_publish (counters.h 内 3 处)
+  ✓ borrow_failed_reason_unknown (counters.h 内 5 处)
+[3] 新增 ID 未越界（t41 不动 counters.h）
+  ✓ counters.h sha256 与 t35 记录一致（零改动）
+[4] t35 家族不被重复计数（调用点不含 chunk_exhausted/chunk_alloc_failed/queue_evicted）
+  ✓ chunk_exhausted 在本次改动面为 0 处（唯一写入点仍在 ipc.cpp/circularqueue.h）
+  ✓ chunk_alloc_failed 在本次改动面为 0 处（唯一写入点仍在 ipc.cpp/circularqueue.h）
+  ✓ queue_evicted 在本次改动面为 0 处（唯一写入点仍在 ipc.cpp/circularqueue.h）
+[5] B 借样失败绝不进 fallback_total（分类器内静态核对）
+  ✓ borrow_failed 落点不含 fallback_total
+
+CHECK_WIRING: PASS

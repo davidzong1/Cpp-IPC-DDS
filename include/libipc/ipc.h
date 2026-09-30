@@ -45,6 +45,47 @@ namespace ipc
 
     bool valid() const noexcept { return (id >= 0) && (data != nullptr); }
   };
+  /**
+   * \brief `loan()` **失败原因**的只读出口（t46 新增, 不改变 `loan_t` 布局）。
+   *
+   * 为什么需要它：`loan_t::valid()` 把四种完全不同的处境压成一个 false, 而调用方的
+   * 处置义务**并不相同** ——
+   *   · `pool_exhausted`      = 背压, 回退整包路径仍能送达（可重试/可等）;
+   *   · `no_receiver`         = 没有对端, 借了也无人回收;
+   *   · `size_too_large`      = **请求本身不合法**（重试无用, 回退也未必对）;
+   *   · `storage_unavailable` = 段/mmap 建不出来（环境问题, 与背压无关）。
+   * 在只有 bool 的年代, 上层只能把它们统一记成 `reason_unknown`（见 W03 的
+   * `note_dzflat_borrow_failed` 注释与 t46 交付 §4 的"分类器 vs 落点分歧"实测）。
+   *
+   * \note 这是**加法**接口：`loan(size)` 原样保留, 新出口走独立重载 ⇒ 既有二进制
+   *       与既有源码都不受影响（`sizeof(loan_t)` 不变, 旧符号仍在）。
+   */
+  enum class loan_status : std::uint8_t
+  {
+    ok = 0,                 ///< 借到了（此时 loan_t::valid() == true）
+    invalid_handle,         ///< handle 为空 / 队列未 open（`queue_of` 为空）
+    not_ready,              ///< `ready_sending() == false`（本端尚未成为该队列的发送端）
+    no_receiver,            ///< 连接上没有任何接收方（chunk 无人回收）
+    pool_exhausted,         ///< 该尺寸档 chunk 池耗尽 —— **背压**, 调用方回退整包路径
+    size_too_large,         ///< 请求容量超出可表示范围（段尺寸算术会溢出）⇒ ⛔ 拒绝而非返回假容量
+    storage_unavailable,    ///< 段建不出来 / id 越界（mmap 失败、段被占等）
+  };
+
+  /// 稳定的可读名（用于日志/证据；⛔ 不参与任何判定）。
+  inline const char *loan_status_name(loan_status st) noexcept
+  {
+    switch (st)
+    {
+    case loan_status::ok:                  return "ok";
+    case loan_status::invalid_handle:      return "invalid_handle";
+    case loan_status::not_ready:           return "not_ready";
+    case loan_status::no_receiver:         return "no_receiver";
+    case loan_status::pool_exhausted:      return "pool_exhausted";
+    case loan_status::size_too_large:      return "size_too_large";
+    case loan_status::storage_unavailable: return "storage_unavailable";
+    }
+    return "unknown";
+  }
 
   template <typename Flag>
   struct IPC_EXPORT chan_impl
@@ -113,6 +154,12 @@ namespace ipc
      * 成功后必须以 publish_loan 或 discard_loan 之一结束, 否则泄漏。
      */
     static ipc::loan_t loan(ipc::handle_t h, std::size_t size, bool verbose);
+
+    /** \brief 带**失败原因出口**的 loan（t46）。`*st` 为空指针时与上面那条逐位等价。
+     *  ⛔ 不改变 `loan_t` 布局, 也不改变 `loan(size)` 的任何行为（除 "size_too_large"
+     *  这一条**只对溢出请求**生效的安全修复, 见 t46 交付 §4.3）。 */
+    static ipc::loan_t loan(ipc::handle_t h, std::size_t size,
+                            ipc::loan_status *st, bool verbose);
 
     /// \brief 把已借出的 chunk 作为一条消息投递(单条, 不拆包)。
     /// 失败时 chunk 已被本函数归还, 调用方不得再 discard_loan。
@@ -327,6 +374,13 @@ namespace ipc
      * \endcode
      */
     loan_t loan(std::size_t size) { return detail_t::loan(h_, size, verbose_); }
+
+    /// 带原因出口的借样（t46）。用法: `ipc::loan_status st; auto lo = ch.loan(n, st);`
+    /// ⛔ `valid()` 语义不变：`st == ok` 与 `lo.valid() == true` 在**所有**出口上都一致。
+    loan_t loan(std::size_t size, loan_status &st)
+    {
+      return detail_t::loan(h_, size, &st, verbose_);
+    }
 
     bool publish_loan(loan_t const &lo, std::uint64_t tm = default_timeout)
     {

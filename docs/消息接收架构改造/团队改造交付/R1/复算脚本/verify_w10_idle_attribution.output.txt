@@ -1,0 +1,10 @@
+### [A] 2×2 逐 tid 反事实（节选自 build/t31/cell_*.log + matrix4.sh）
+state=3 n=1000 domain=27837 pool running=1 workers=32 route_count=1000 threads=34
+state=3 n=1000 domain=27366 pool running=1 workers=32 route_count=1000 threads=2033
+state=3 n=1000 domain=27857 pool running=0 workers=0 route_count=0 threads=1002
+state=3 n=1000 domain=27293 pool running=0 workers=0 route_count=0 threads=3001
+
+### [B] state 2 标定（n=100/500/1000，池未启动）
+state=2 n=1000 domain=31001 pool running=0 workers=0 route_count=0 threads=2
+0,2,10.000,2,0.31400,13957.3,13.9573,0,0,0,0,0,0,0
+   scheduler entries=1000 tick_delta=139254 tick_wakes_per_s=13925.3 tick_max_us=4081.71 overruns=0

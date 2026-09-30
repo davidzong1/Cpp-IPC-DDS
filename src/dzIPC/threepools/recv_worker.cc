@@ -1,5 +1,6 @@
 #include "dzIPC/threepools/recv_worker.h"
 
+#include <cassert>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -12,6 +13,13 @@
 #include <vector>
 
 #include "libipc/utility/log.h"
+
+/* §10.2 扫描/等待计数（W06 接线，D-23）。
+ * ⛔ 只**引用**既有 ID 与既有 `ScanRoundScope`，不新增 ID、不改任何字段语义
+ * （`include/dzIPC/measure/counters.h` 保持只读引用）。
+ * 这些量的 `CounterMeta::diagnostics_only == true` ⇒ 只在诊断开启时累加；
+ * 常开孪生量在 `RecvWorkerStats`（本文件同一批计数点旁），两者可互核。 */
+#include "dzIPC/measure/counters.h"
 
 namespace dzIPC {
 namespace threepools {
@@ -111,7 +119,6 @@ struct RecvWorker::Impl
 
     const std::size_t worker_id;
     const RecvBudget budget;
-
     ipc::recv_wait_set wait_set;
 
     mutable std::mutex mtx;
@@ -152,6 +159,50 @@ struct RecvWorker::Impl
     std::atomic<std::uint64_t> idle_exits{0};        ///< 空闲退出次数（只增）
     std::atomic<std::uint64_t> thread_restarts{0};   ///< 按需拉起次数（只增，不含首次）
 
+    /* W06（方案 §10.3）：单次 recv_once 耗时与预算超额。
+     *   recv_once_calls       —— 调用次数（分母）
+     *   recv_once_max_ns      —— 单次耗时最大值（ns）
+     *   recv_once_over_budget —— 单次耗时 > max_processing_time_per_route 的次数
+     * 计时在**完整 recv_once() 返回后**取值，与预算检查同一个安全边界。 */
+    std::atomic<std::uint64_t> recv_once_calls{0};
+    std::atomic<std::uint64_t> recv_once_max_ns{0};
+    std::atomic<std::uint64_t> recv_once_over_budget{0};
+
+    /* W06（t30 / 队长裁决 D-23，方案 §10.2）：**常驻**扫描量 —— 无时钟、无诊断门控。
+     *
+     * 为什么与 `measure` 的诊断孪生并存（而不是只留一套）：§10.2 明写"低开销常驻计数
+     * 与详细诊断采样分开"。诊断门控的 `scan_*` 只在 `diagnostics_enabled()` 时累加，
+     * 而正式性能窗口按 W03 口径通常**关闭**诊断（W08 已如此）；若只有门控版，正式窗口
+     * 里就没有任何扫描量可读 ⇒ W10 只能拿 CPU 近似线性当替代量。本组三件套（轮数 /
+     * 遍历 route 数 / 就绪轮数）加深度两件套，只做 relaxed 原子加与一次 CAS 最大值：
+     *   · scan_rounds           —— `collect_pending()` 执行轮数（有效就绪比例的分母）
+     *   · scanned_routes_total  —— 每轮遍历的 route 数之和（除以轮数 = 均值）
+     *   · scan_ready_rounds     —— 本轮全扫**确实发现新就绪**的轮数（分子）
+     *   · deferred_depth_last   —— 最近一轮入队前的 deferred 深度
+     *   · deferred_depth_max    —— 深度最大值
+     * 唯一不常驻的量是**扫描耗时**：它必须取两次时钟，成本不可忽略 ⇒ 只由诊断门控的
+     * `ScanRoundScope` 提供（W03 实测：关 0.176 ns/轮、开 29.3 ns/轮）。两者在
+     * `collect_pending()` 里**同一位置、同一取值**写入，故诊断开启时逐值相等（自洽判据）。 */
+    std::atomic<std::uint64_t> scan_rounds{0};
+    std::atomic<std::uint64_t> scanned_routes_total{0};
+    std::atomic<std::uint64_t> scan_ready_rounds{0};
+    std::atomic<std::uint64_t> deferred_depth_last{0};
+    std::atomic<std::uint64_t> deferred_depth_max{0};
+
+    /* R0-9/R0-10 的**结束值**每 worker 累加器（W06 接线，t53）。
+     *
+     * 一类量两个落点：门控全局计数（`scan.finish()`，W03 维护，⛔ 本层只读引用）与
+     * **本 worker** 的常驻累加器（本成员）。为什么常驻侧也必须有：诊断关闭时门控计数
+     * 是"未采集"，若只看门控面，正式性能窗口里就完全没有结束值可读（与 t30 的常驻/
+     * 门控分工同一条理由）。
+     *
+     * ⛔ 本累加器**不写任何 gauge**（R0-10）：它按 worker 累积，全池当前总深度由
+     * `RecvWorkerPool::stats()` 对 `deferred_depth_after_last` **求和**得到 —— 单个 gauge
+     * 只剩"最后写入者"的值，无法表达多 worker 的总量（t44 自测反例：全池 12、gauge 7）。
+     * 线程纪律：只由拥有本 worker 的那条线程在 `collect_pending()` 内使用（单消费者），
+     * 故内部全为 relaxed 原子、无锁。 */
+    dzIPC::measure::ScanRoundAccumulator scan_acc_;
+
     void loop();
     void thread_main(std::uint64_t epoch) noexcept;
     void wait_once(std::chrono::milliseconds timeout);
@@ -172,6 +223,30 @@ void RecvWorker::Impl::collect_pending()
      *   · 消息到达与"断开"用同一个 seq（断开也必须被处理）。
      * wait-set 的 ready 集合是提示，这里才是事实来源。 */
     std::lock_guard<std::mutex> lock(mtx);
+
+    /* ---- §10.2 扫描观测（W06 接线，队长裁决 D-23）--------------------------------
+     *
+     * ⛔ 本块**只观测、不改判定**：下面那个 for 循环的遍历范围、跳过条件、入队条件
+     * 与 CAS 顺序与接线前逐字相同（"不得为降低 CPU 而删除扫描或改为持续 try_recv
+     * 轮询" —— 方案 §10.2 / W04 §10.2）。删除本块不影响任何一条 route 的就绪判定。
+     *
+     * 观测量的口径（与 W03 `ScanRoundScope` 及字段定义逐条对齐）：
+     *   · `routes.size()`  —— 本轮**遍历**的 route 数（含已标记 removed 项：它们同样
+     *     在循环里被读一次 seq，构成扫描成本）；→ scan_rounds / scanned_routes_total
+     *   · 扫描耗时（scope 析构时取第二次 clock_gettime）；→ scan_time_ns_total
+     *   · `deferred.size()`（**入队前**取，与 W03 样例 `ScanRoundScope(n, deferred.size())`
+     *     同口径）；→ deferred_depth_last / deferred_depth_max
+     *   · `queued > 0` —— 本轮全扫确实发现了至少一条新就绪 route；→ ready_observed
+     *     （有效就绪比例 = ready_observed / scan_rounds，分母即扫描轮数）
+     *
+     * 开销：诊断**关闭**时构造 + 析构各只有一次 relaxed 布尔读（W03 实测 0.176 ns/轮）；
+     * 开启时每轮多两次 `clock_gettime(CLOCK_MONOTONIC)`（W03 实测 29.3 ns/轮）。
+     * ⛔ 这里**不**新增任何 CounterId、不另立平行命名。 */
+    const std::size_t scanned = routes.size();
+    const std::size_t depth_in = deferred.size();
+    dzIPC::measure::ScanRoundScope scan(scanned, depth_in);
+    std::size_t queued = 0;
+
     for (const auto& entry : routes)
     {
         if (entry->removed.load(std::memory_order_acquire)) continue;
@@ -179,8 +254,59 @@ void RecvWorker::Impl::collect_pending()
         if (seq == entry->last_seq.load(std::memory_order_acquire)) continue;
         bool expected = false;
         if (entry->queued.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        {
             deferred.push_back(entry);
+            ++queued;
+        }
     }
+    scan.set_ready(queued > 0);
+
+    /* ---- 常驻孪生（无时钟、无诊断门控；W06 接线）-------------------------------
+     *
+     * 为什么还要一套常驻量：§10.2 要求"低开销常驻计数与详细诊断采样分开"，且
+     * W10 的规模工装在**不开诊断**的正式窗口里也要能读扫描量。这套量只做 relaxed
+     * 原子加法与一次 CAS 最大值，**不取时钟**（唯一的时钟开销在 `ScanRoundScope`，
+     * 恒受诊断门控）。两者在**同一位置、同一取值**写入 ⇒ 诊断开启时必须逐值相等，
+     * 这构成一条可机械核对的自洽判据（见交付文档）。 */
+    scan_rounds.fetch_add(1, std::memory_order_relaxed);
+    scanned_routes_total.fetch_add(scanned, std::memory_order_relaxed);
+    if (queued > 0) scan_ready_rounds.fetch_add(1, std::memory_order_relaxed);
+    deferred_depth_last.store(depth_in, std::memory_order_relaxed);
+    {
+        std::uint64_t prev = deferred_depth_max.load(std::memory_order_relaxed);
+        while (depth_in > prev
+               && !deferred_depth_max.compare_exchange_weak(prev, depth_in, std::memory_order_relaxed))
+        {
+        }
+    }
+
+    /* ---- R0-9 / R0-10 结束值（W06 接线，t53）---------------------------------
+     *
+     * 为什么必须有这一段（t12 实测到的零值语义混淆）：`ScanRoundScope::finish()` 若不
+     * 调用，`scan_ready_routes_total` / `deferred_depth_after_*` 四个门控计数**一个都不写**
+     * ⇒ 读数恒 0，而 `0` 会被误读成"本轮没有新就绪 route / 扫描后队列为空"。接线之后
+     * 它们才表达真实事实。⛔ 本段只**上报观测值**：上面的 for 循环逐字未动。
+     *
+     * 两套落点（与 t30 的常驻/门控分工同构，⛔ 不得互相替代）：
+     *   · `scan.finish(queued, depth_after)` —— 写**门控**全局计数（诊断关闭时零写入，
+     *     属"未采集"，⛔ 不得当作"深度为 0"；判别用 `counter_is_uncollected()`）；
+     *   · `scan_acc_.add(scan.result())` —— 写**本 worker** 的常驻累加器（relaxed 原子、
+     *     不取时钟、⛔ 不写任何 gauge），由 `RecvWorkerStats` 导出。全池**当前**总深度 =
+     *     Σ 每 worker 的 `deferred_depth_after_last`（R0-10 冻结的求法；任一 gauge 都
+     *     不能冒充它 —— t44 自测反例：全池 12 而 gauge 7）。
+     *
+     * ⚠️ 顺序（承重，别改）：`finish()` 放在**遍历 + `set_ready` + 常驻孪生之后**，
+     * 于是 `result().elapsed_ns` 的区间与 `scan_time_ns_total`（构造 → 析构）几乎重合，
+     * 两者可直接对账（t44 声明的守恒判据 `Σ elapsed_ns ≈ scan_time_ns_total`）。t44 的
+     * `finish()` 明确允许它在 `set_ready()` 前后任一点调用，此处取"之后"。
+     * `depth_after` 取**扫描后、运行预算前**的 `deferred.size()`；`set_ready()` 与常驻
+     * 孪生都不改 `deferred`，故在其后读取仍是同一事实。
+     *
+     * 开销：常驻半（`scan_acc_`）无时钟、无门控，每轮 4 次 relaxed 原子加 + 1 次 CAS；
+     * 门控半（`finish()`）在诊断关闭时只置两个成员即 return（⛔ 不读时钟）。 */
+    const std::size_t depth_after = deferred.size();
+    scan.finish(queued, depth_after);
+    scan_acc_.add(scan.result());
 }
 
 bool RecvWorker::Impl::requeue(const std::shared_ptr<Entry>& entry)
@@ -257,6 +383,13 @@ void RecvWorker::Impl::run_budget(const std::shared_ptr<Entry>& entry)
         if (entry->removed.load(std::memory_order_acquire)) break;
 
         std::size_t n = 0;
+        /* W06（方案 §10.3）：单次 recv_once 耗时**单独**记录。
+         * 计时边界 = 完整的一次 recv_once() 调用（含宿主侧组包/分流/入队）。这不是
+         * 诊断门控项 —— §10.3 明确要求"单独记录 recv_once 耗时和预算超额"，否则
+         * "时间预算是否生效"无法判断（200 µs 预算并不能抢占一次耗时调用）。
+         * 代价：每次调用两次 steady_clock 读取（实测 ~20 ns/次量级），相对一次
+         * 收包可忽略；开销对照见交付文档。 */
+        const auto t0 = Clock::now();
         try
         {
             n = entry->route->recv_once();
@@ -270,6 +403,25 @@ void RecvWorker::Impl::run_budget(const std::shared_ptr<Entry>& entry)
                        entry->route->route_name() != nullptr ? entry->route->route_name() : "?");
             more = true;
             break;
+        }
+        {
+            const auto ns = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count());
+            recv_once_calls.fetch_add(1, std::memory_order_relaxed);
+            std::uint64_t prev = recv_once_max_ns.load(std::memory_order_relaxed);
+            while (ns > prev
+                   && !recv_once_max_ns.compare_exchange_weak(prev, ns, std::memory_order_relaxed))
+            {
+            }
+            if (ns > static_cast<std::uint64_t>(budget.max_processing_time_per_route.count() * 1000))
+            {
+                recv_once_over_budget.fetch_add(1, std::memory_order_relaxed);
+                /* §10.2/§10.3 诊断孪生（W06 接线）：与常开量同一计数点、同一判据
+                 * （严格 `>` 预算，单位 µs→ns 的换算逐字相同）。 */
+                DZIPC_MEASURE_DIAG_INC(dzIPC::measure::CounterId::recv_once_over_budget);
+            }
+            /* `recv_once_calls` 的诊断孪生：**每次调用**都记（分母），与常开量同点。 */
+            DZIPC_MEASURE_DIAG_INC(dzIPC::measure::CounterId::recv_once_calls);
         }
 
         if (n == 0)
@@ -316,6 +468,10 @@ void RecvWorker::Impl::run_budget(const std::shared_ptr<Entry>& entry)
     {
         budget_yields.fetch_add(1, std::memory_order_relaxed);
         deferred_drains.fetch_add(1, std::memory_order_relaxed);
+        /* §10.2 诊断孪生（W06 接线）：与上面两个常开量同一计数点，语义逐字对应。
+         * 诊断关闭时是一条 relaxed 布尔读 + 分支不进入（实测 0.176 ns 量级）。 */
+        DZIPC_MEASURE_DIAG_INC(dzIPC::measure::CounterId::budget_yields);
+        DZIPC_MEASURE_DIAG_INC(dzIPC::measure::CounterId::deferred_drains);
     }
 }
 
@@ -331,6 +487,11 @@ void RecvWorker::Impl::wait_once(std::chrono::milliseconds timeout)
             wait_errors.fetch_add(1, std::memory_order_relaxed);
         else
             wait_timeouts.fetch_add(1, std::memory_order_relaxed);
+        /* §10.2「等待超时次数」的诊断孪生（W06 接线）：与常开量同一计数点。
+         * ⛔ 语义澄清：本处只统计**真正超时返回**（`wait()` 返回 false）的次数；
+         * `wait_errors`（后端不可用）与 `wait_wakeups`（有就绪/被打断）都不计入 ——
+         * 把三者混算会让"等待超时"失去可解释性。 */
+        DZIPC_MEASURE_DIAG_INC(dzIPC::measure::CounterId::wait_timeout_count);
         return;
     }
     wait_wakeups.fetch_add(1, std::memory_order_relaxed);
@@ -390,16 +551,45 @@ void RecvWorker::Impl::loop()
             alive.store(false, std::memory_order_release);
             lock.unlock();
             idle_exits.fetch_add(1, std::memory_order_relaxed);
+            /* §10.2 诊断孪生（W06 接线，同一计数点）。⛔ 放在 alive.store(false) 之后、
+             * return 之前：这次退出已经不可撤销，计数必须与它同真值。 */
+            DZIPC_MEASURE_DIAG_INC(dzIPC::measure::CounterId::idle_exits);
             ipc::log("RecvWorker[%zu]: idle exit (no routes for >= %lld ms)\n", worker_id,
                      static_cast<long long>(idle_span.count()));
             return;
         }
 
-        /* 只有没有待处理项时才睡得久（wait 返回 true 也可能是被 remove/stop 唤醒，
-         * ready 为空 —— 那时 collect_pending 之后仍然没活干，下一轮继续等，不忙转）。 */
-        wait_once(budget.wait_timeout);
-        idle_since = Clock::now();   // 这一轮有活干：重置空闲计时
+        /* W06-F1（承重顺序）：**已有待处理项时不得先睡**。
+         *
+         * 原实现此处无条件 `wait_once(budget.wait_timeout)` 再 drain，等于"上一步刚用
+         * `collect_pending()` 把就绪 route 排进了队列，却先阻塞一个等待切片再服务它"。
+         * 直接后果（实测，反事实实验见 W06 证据 `logs/f1_counterfactual.log`）：
+         *   · idle route 上单条消息的交付延迟地板恒等于 `wait_timeout`（默认 100 ms）：
+         *     反事实 mean **90.1 ms** / max **100.2 ms**；同一时刻 `wait_wakeups` 基本不增
+         *     （就绪提示来自 collect_pending 的 seq 全扫，而不是内核唤醒）。
+         *   · 更糟的是它会把"延迟"变成"延迟 + 丢一次发现"：`run_budget` 结尾那次
+         *     `last_seq.store(当前 seq)` 读的是**调用返回那一刻**的值，若真实数据正好落在
+         *     "recv_once 读到 0"与"写 last_seq"之间，这次 seq 变化就被吞掉，该 route 直到
+         *     **下一次** seq 变化才被重新选中（同进程 generation 重建只有一次 seq 变化）。
+         *     这是"看起来像偶发丢包/偶发慢"的成因。
+         * 修后同探针 mean **0.16 ms** / max **0.18 ms**（同一二进制、同一域，仅改此处顺序）。
+         *
+         * 但"直接 drain"不能是无条件的：宿主 `has_pending()` 恒真的**病态**实现会让该
+         * route 每轮都 requeue 自己（每轮 kMaxEmptyPollsPerBudget=4 次空读）⇒ 无上限自旋
+         * （实测 947 次/s，而 W04 的 `test_lifecycle_contract` L4 判据是 ≤ 200 次/s）。
+         * 因此：
+         *   · 这一轮 drain **取到了数据** ⇒ 立刻进入下一轮（热路径不再被 wait_timeout 拖慢）；
+         *   · 一条都没取到（队列里只剩"预算耗尽但读不到数据"的项）⇒ **阻塞让出**
+         *     `wait_timeout`，把速率上界还给等待，而不是忙转。
+         * 让出不会吞掉唤醒：`wait_once()` 返回后重新 `collect_pending()` 全扫，level-triggered
+         * 判据才是事实来源。 */
+        const std::uint64_t msgs_before = messages_received.load(std::memory_order_relaxed);
         drain_deferred();
+        if (messages_received.load(std::memory_order_relaxed) == msgs_before)
+        {
+            wait_once(budget.wait_timeout);
+        }
+        idle_since = Clock::now();   // 这一轮有活干：重置空闲计时
     }
 }
 
@@ -475,7 +665,13 @@ bool RecvWorker::Impl::ensure_thread_alive()
             thread = std::move(previous);
             return false;
         }
-        if (thread_started_once) thread_restarts.fetch_add(1, std::memory_order_relaxed);
+        if (thread_started_once)
+        {
+            thread_restarts.fetch_add(1, std::memory_order_relaxed);
+            /* §10.2 诊断孪生（W06 接线，同一计数点）。⛔ 不含首次 start()：
+             * 与常开量 `thread_restarts` 的语义逐字一致（"按需拉起次数，不含首次"）。 */
+            DZIPC_MEASURE_DIAG_INC(dzIPC::measure::CounterId::thread_restarts);
+        }
         thread_started_once = true;
     }
     if (previous.joinable()) previous.join();
@@ -693,6 +889,16 @@ void RecvWorker::remove_route(const RecvRouteSource* route) noexcept
 {
     if (impl_ == nullptr || route == nullptr) return;
 
+    /* W04-F1（队长裁决 D-11）：**同线程调用是不支持的用法**，实现里没有旁路。
+     * 本函数第 4/5 步要等在途 recv_once 与 lease 归零；从 worker 线程调用时，那个在途
+     * 调用就是调用者自己 ⇒ 必然等满 kQuiesceTimeout(2000ms) 才由超时分支返回。
+     * debug 构建下当场断言（可机械核对：见头文件注释的 grep 判据）；Release 下保留
+     * "等满 2000ms + 诊断日志"作为运行期可观测信号 —— 它不是兜底支持，只是不会永久死锁。 */
+#if !defined(NDEBUG)
+    assert(impl_->thread.get_id() != std::this_thread::get_id()
+           && "remove_route() must not be called from the worker thread (see W04-F1)");
+#endif
+
     std::shared_ptr<Impl::Entry> entry;
     {
         std::lock_guard<std::mutex> lock(impl_->mtx);
@@ -777,8 +983,30 @@ RecvWorkerStats RecvWorker::stats() const
     out.recv_errors = impl_->recv_errors.load(std::memory_order_relaxed);
     out.idle_exits = impl_->idle_exits.load(std::memory_order_relaxed);
     out.thread_restarts = impl_->thread_restarts.load(std::memory_order_relaxed);
+    out.recv_once_calls = impl_->recv_once_calls.load(std::memory_order_relaxed);
+    out.recv_once_max_ns = impl_->recv_once_max_ns.load(std::memory_order_relaxed);
+    out.recv_once_over_budget = impl_->recv_once_over_budget.load(std::memory_order_relaxed);
+    /* t30/D-23：§10.2 的常驻扫描量（本 worker 的三件套 + 深度两件套）。 */
+    out.scan_rounds = impl_->scan_rounds.load(std::memory_order_relaxed);
+    out.scanned_routes_total = impl_->scanned_routes_total.load(std::memory_order_relaxed);
+    out.scan_ready_rounds = impl_->scan_ready_rounds.load(std::memory_order_relaxed);
+    out.deferred_depth_last = impl_->deferred_depth_last.load(std::memory_order_relaxed);
+    out.deferred_depth_max = impl_->deferred_depth_max.load(std::memory_order_relaxed);
+    /* t53：R0-9/R0-10 结束值（本 worker 的常驻导出；与门控全局计数同源同点）。 */
+    out.scan_ready_routes_total = impl_->scan_acc_.ready_routes_total();
+    out.deferred_depth_after_last = impl_->scan_acc_.deferred_depth_after_last();
+    out.deferred_depth_after_max = impl_->scan_acc_.deferred_depth_after_max();
+    out.deferred_depth_after_total = impl_->scan_acc_.deferred_depth_after_total();
+    out.scan_elapsed_ns_total = impl_->scan_acc_.elapsed_ns_total();
     out.route_count = route_count();
     return out;
+}
+
+const RecvBudget& RecvWorker::budget() const noexcept
+{
+    /* impl_ 永远非空（构造期 new）；budget 是 Impl 的 const 成员，随 Impl 存活。 */
+    static const RecvBudget kFallback{};
+    return impl_ != nullptr ? impl_->budget : kFallback;
 }
 
 std::size_t RecvWorker::route_count() const noexcept
@@ -962,6 +1190,31 @@ RecvWorkerStats RecvWorkerPool::stats() const
         out.recv_errors += s.recv_errors;
         out.idle_exits += s.idle_exits;
         out.thread_restarts += s.thread_restarts;
+        out.recv_once_calls += s.recv_once_calls;
+        out.recv_once_over_budget += s.recv_once_over_budget;
+        if (s.recv_once_max_ns > out.recv_once_max_ns) out.recv_once_max_ns = s.recv_once_max_ns;
+        /* t30/D-23：§10.2 常驻扫描量求和。⛔ 深度两项在池级取**最大值而不是求和**：
+         * 逐 worker 的 `deferred_depth_last` 是"该 worker 最近一轮的深度"（仪表量），
+         * 把 N 个 worker 的仪表值相加会得到一个不存在的"总和深度"（既非任一时刻的
+         * 真实深度，也无法与 `deferred_depth_max` 比较）。池级的正确读法是
+         * "最繁忙的那个 worker 有多深" ⇒ 取 max；`scan_*` 三件套是真计数 ⇒ 求和。 */
+        out.scan_rounds += s.scan_rounds;
+        out.scanned_routes_total += s.scanned_routes_total;
+        out.scan_ready_rounds += s.scan_ready_rounds;
+        if (s.deferred_depth_last > out.deferred_depth_last) out.deferred_depth_last = s.deferred_depth_last;
+        if (s.deferred_depth_max > out.deferred_depth_max) out.deferred_depth_max = s.deferred_depth_max;
+        /* t53（R0-10）：结束值的池级聚合纪律 —— 与上面两个"入队前"gauge **相反**：
+         *   · `deferred_depth_after_last` = **Σ 每 worker**（全池**当前**总深度；任一 gauge
+         *     都不能表达它 —— t44 自测反例：全池 12 而 gauge 7）；
+         *   · `deferred_depth_after_total` / `scan_ready_routes_total` /
+         *     `scan_elapsed_ns_total` = **sum**（都是可安全相加的累计量）；
+         *   · `deferred_depth_after_max` = **max**（峰值，与 `deferred_depth_max` 同纪律）。 */
+        out.scan_ready_routes_total += s.scan_ready_routes_total;
+        out.deferred_depth_after_last += s.deferred_depth_after_last;
+        out.deferred_depth_after_total += s.deferred_depth_after_total;
+        out.scan_elapsed_ns_total += s.scan_elapsed_ns_total;
+        if (s.deferred_depth_after_max > out.deferred_depth_after_max)
+            out.deferred_depth_after_max = s.deferred_depth_after_max;
         out.route_count += s.route_count;
     }
     return out;
@@ -979,6 +1232,15 @@ std::size_t RecvWorkerPool::route_count() const noexcept
     std::size_t total = 0;
     for (auto* worker : workers) total += worker->route_count();
     return total;
+}
+
+const RecvBudget& RecvWorkerPool::budget() const noexcept
+{
+    static const RecvBudget kDefault{};
+    if (impl_ == nullptr) return kDefault;
+    std::lock_guard<std::mutex> lock(impl_->mtx);
+    if (impl_->workers.empty()) return kDefault;
+    return impl_->workers.front()->budget();
 }
 
 }   // namespace threepools

@@ -45,6 +45,49 @@ IPC_EXPORT std::uint64_t DzFlatFallbackCount();
 IPC_EXPORT void ResetDzFlatCounters();
 
 // ---------------------------------------------------------------------------
+// W08: DZFlat **路径分流**计数（追加口；上面 dzflat/fallback 两个计数器的语义与取值
+// 一律不变）。
+//
+// 为什么必须分流: 既有 NoteDzFlatPublish 只分"走了 DZFlat / 回落整包", 而 A 级
+// (publish(shared_ptr) 就地写 chunk, 见 src/dzIPC/shm_pub_sub_ipc.cc)与 B 级
+// (应用 loan + 原地构造 + publish_loaned, 见 shm_pub_sub_ipc.h)共用同一支计数
+// ⇒ 报告无法证明"B 路径真的被执行", 也无法把 W03 的
+// tlv_messages / dzflat_a_messages / dzflat_b_messages 分开填 —— 而
+// dzIPC/measure/path_evidence.h 要求三路径计数必须分开, 否则该路径只能标"未确认"。
+//
+// 本钩子是**转发层**: 实现在 nodelet_config.cc, 把 W03 的
+// measure::CounterRegistry 同名 ID 直接 +1(热路径一次 relaxed fetch_add, 无锁无分配);
+// 头文件侧不引入测量层依赖。
+//
+// 口径(§10.7: 每成功交付一条消息恰好 +1 一次, 不重记):
+//   Tlv             —— 整包序列化那条成功交给底层(含 DZFlat 失败后的回退)
+//   DzFlatA         —— try_publish_dzflat 成功(对象 → 共享段一次复制)
+//   DzFlatB         —— publish_loaned 成功(应用在借样内存里原地构造)
+//   PrebuiltSegment —— publish_prebuilt_segment 成功(段已在调用方地址空间 → chunk
+//                      一次 memcpy)。⛔它既不是 A 也不是 B, 单列, 不并进 A/B。
+//
+// B 级**失败**不在这里记 tlv: 按借样契约(loaned_message.h 顶部三条), 失败是常态、
+// 由应用回退到普通 publish, 那一次回退已在 A/TLV 的调用点被记一次 —— 这里再记会把
+// 比值算歪。
+//
+// wire_bytes 累加**实际传输字节**(TLV = 序列化包大小; DZFlat = 段大小)。
+// ⛔逻辑载荷字节(应用字节)本层拿不到(TLV 侧无通用 API), 对应计数器留 0 并在 W08
+// 交付里登记为"未接线" —— 不以 0 冒充已测。
+// ---------------------------------------------------------------------------
+enum class DzFlatPath : std::uint32_t
+{
+    Tlv = 0,              ///< 整包序列化(含 DZFlat 失败后的回退)
+    DzFlatA = 1,          ///< 对象 → 共享段一次复制
+    DzFlatB = 2,          ///< 应用在借样内存里原地构造
+    PrebuiltSegment = 3,  ///< 预构造段 → chunk 一次 memcpy
+    kCount = 4,
+};
+/// 预构造段入口的条数(W03 三路径 ID 未定义该入口, 故记在本模块; 其余三路径的条数
+/// 直接读 measure::CounterRegistry 的快照)。埋点函数 NoteDzFlatPathDelivered 在
+/// detail 里(见下), 与既有 NoteDzFlatPublish 同一口径。
+IPC_EXPORT std::uint64_t DzFlatPrebuiltSegmentCount() noexcept;
+
+// ---------------------------------------------------------------------------
 // view 队列容量钉(进程级, 默认 ON)。设计见 docs/shm_chunk_pool_occupancy_plan.md §3 步骤③。
 //
 // 要解决的问题: SHM 订阅侧的 view 队列持有的是**借样** Sample —— 每个 Sample 里的
@@ -84,6 +127,9 @@ IPC_EXPORT std::size_t ViewQueueCap();
 namespace detail {
 /// 传输层内部埋点: 每条 SHM 发布记一次(true = 走了 DZFlat, false = 回退整包)。
 IPC_EXPORT void NoteDzFlatPublish(bool used_dzflat);
+/// W08: 传输层内部埋点 —— 三路径分流(见上方 DzFlatPath 段的口径与理由)。
+/// ⛔只计数, 不读消息内容、不改任何发布/接收行为。
+IPC_EXPORT void NoteDzFlatPathDelivered(DzFlatPath path, std::uint64_t wire_bytes) noexcept;
 }   // namespace detail
 
 // ---------------------------------------------------------------------------

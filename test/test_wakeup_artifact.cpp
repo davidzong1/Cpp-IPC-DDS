@@ -58,7 +58,9 @@
 #include "dzIPC/common/nodelet_config.h"
 #include "dzIPC/common/topic_data.h"
 #include "dzIPC/common/wire_accept.h"
+#include "dzIPC/detail/shm_sub_seam.h"
 #include "dzIPC/shm_pub_sub_ipc.h"
+#include "dzIPC/threepools/recv_worker.h"
 #include "ipc_msg/ipc_msg_base/dzflat.h"
 #include "ipc_msg/std_msgs/std_string.hpp"
 #include "ipc_msg/test_msg2/test_msg.hpp"
@@ -100,6 +102,65 @@ struct TopicName
 
     const char* c_str() const { return name.c_str(); }
 };
+
+/* ── W06：接收臂 + 收包心跳（本文件在两条接收臂下都必须成立）────────────────
+ *
+ * 阶段 2 的这条用例是在**兼容收包线程**（每 route 一条线程、阻塞 `recv(50)`）下写的：
+ * 那时"收包线程卡在 recv 里"是常态，`disconnect` 必然叫醒它 ⇒ 必然产生叫醒伪影
+ * （全零 64B 缓冲），于是"伪影计数 > 0"是**该臂**的正对照。
+ *
+ * W06 把 SHM pub/sub 的数据面接进固定 worker 后，这条用例的**同一个触发源**落到
+ * 另一条臂上，两条臂的性质**结构性不同**：
+ *   · worker 臂的 `recv_once()` 是 `recv(0)`（非阻塞，契约 §4.2 要求）⇒ "卡在 recv 里
+ *     被 disconnect 叫醒"这个形态不存在；伪影长度/形态的守门无法由此触发。
+ *   · 取而代之，worker 臂的承重保证是：`pool.remove_route` 同步完成契约 §4.4 的 1–6 步
+ *     （含 `stop_and_wake`），返回后 worker 不会再碰这条 route，且**收包循环确实跑过**
+ *     （每次注册进 deferred FIFO ⇒ 至少一次完整 `recv_once()` 返回）。
+ *
+ * 因此判据 C（"门确实被走到过"）按臂取值，**两条臂各自都有牙**：
+ *   · 兼容臂：`WakeupArtifactCount() > 0`（原判据，逐字保留）；
+ *   · worker 臂：`kAfterRecvRelease` 心跳 ≥ 重建轮数（收包循环确实在跑）+ 伪影数为 0
+ *     属**结构性**（守门本身的有效性由层 1 的 `DisconnectWokenRecvProducesDetectableArtifact`
+ *     独立钉住 —— 那条用例在两条臂下都通过）。
+ * ⛔ 不得把 worker 臂的 C 判据改写成"没有伪影就算过"：那正是本文件开头警告的伪绿。 */
+struct RecvArm
+{
+    std::atomic<int> worker_path{0};
+    std::atomic<int> compat_path{0};
+    std::atomic<int> compat_reason{-1};
+    std::atomic<unsigned> recv_release_ticks{0};
+
+    static RecvArm*& instance()
+    {
+        static RecvArm* p = nullptr;
+        return p;
+    }
+    bool worker() const { return worker_path.load() > 0; }
+};
+
+void wakeup_arm_hook(const dzIPC::detail::SeamEvent& ev) noexcept
+{
+    RecvArm* a = RecvArm::instance();
+    if (a == nullptr)
+    {
+        return;
+    }
+    switch (ev.point)
+    {
+    case dzIPC::detail::SeamPoint::kRecvPathWorker:
+        a->worker_path.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case dzIPC::detail::SeamPoint::kRecvPathCompat:
+        a->compat_path.fetch_add(1, std::memory_order_relaxed);
+        a->compat_reason.store(static_cast<int>(ev.size), std::memory_order_relaxed);
+        break;
+    case dzIPC::detail::SeamPoint::kAfterRecvRelease:
+        a->recv_release_ticks.fetch_add(1, std::memory_order_relaxed);
+        break;
+    default:
+        break;
+    }
+}
 
 /* 纯 route 的段名 guard（层 1 用）。 */
 struct RouteName
@@ -342,6 +403,12 @@ TEST(WakeupArtifactGate, NoPhantomMessageOnGenerationRebuild)
     dzIPC::shm::shm_sub_ipc sub{sub_td, tn.name, tn.domain, /*queue_size=*/8, /*verbose=*/false};
     sub.InitChannel();
 
+    /* W06：装接收臂观测器（钩子在 recv 循环与注册路径上被调用，不持锁、不阻塞）。 */
+    RecvArm arm;
+    ASSERT_EQ(RecvArm::instance(), nullptr);
+    RecvArm::instance() = &arm;
+    dzIPC::detail::SetSeamHook(&wakeup_arm_hook);
+
     dzIPC::ResetWakeupArtifactCount();
     dzIPC::ResetDzFlatRxCounters();
 
@@ -380,9 +447,32 @@ TEST(WakeupArtifactGate, NoPhantomMessageOnGenerationRebuild)
     /* 主判据 C：门确实被走到过。否则上面两条可能是"根本没产生伪影"的伪绿。
      * （伪影只可能在订阅端已握手、收包线程卡在 recv 里时产生 —— 这解释了为什么
      * 计数在订阅端完成握手之前恒为 0。） */
-    EXPECT_GT(dzIPC::WakeupArtifactCount(), 0u)
-        << kRounds << " 轮重建都没观测到伪影 ⇒ 本用例前提不成立（收包线程没卡在 recv 里），"
-                        "主判据 A/B 因此没有牙";
+    if (arm.worker())
+    {
+        /* ---- W06 worker 臂：见文件头"两条臂结构性不同"----
+         * ① 确实走了固定 worker 臂，且**没有**被回退线程掩盖（方案 §13.2 条件 4）；
+         * ② 收包循环确实跑过（kAfterRecvRelease 心跳 ≥ 重建轮数）；
+         * ③ 伪影数为 0 在 worker 臂是**结构性**的（recv(0) 非阻塞），不是"门没走到"；
+         * ④ 用户可见结果两条主判据 A/B 仍逐字成立。 */
+        EXPECT_EQ(arm.compat_path.load(), 0)
+            << "worker 臂上出现了 kRecvPathCompat ⇒ 接收路径被回退线程顶替（方案 §13.2 条件 4 禁止）";
+        EXPECT_GE(arm.recv_release_ticks.load(), static_cast<unsigned>(kRounds))
+            << kRounds << " 轮重建期间收包循环一次都没跑完（kAfterRecvRelease 心跳 "
+            << arm.recv_release_ticks.load() << "）⇒ 主判据 A/B 没有牙";
+        EXPECT_EQ(dzIPC::WakeupArtifactCount(), 0u)
+            << "worker 臂的 recv(0) 不产生叫醒伪影；这里出现非零说明接收路径已不是固定 worker";
+    }
+    else
+    {
+        EXPECT_GT(arm.compat_path.load(), 0)
+            << "既没走 worker 臂也没走兼容臂 ⇒ 接收路径观测点没被走到，本用例前提不成立";
+        EXPECT_GT(dzIPC::WakeupArtifactCount(), 0u)
+            << kRounds << " 轮重建都没观测到伪影 ⇒ 本用例前提不成立（收包线程没卡在 recv 里），"
+                            "主判据 A/B 因此没有牙";
+    }
+
+    RecvArm::instance() = nullptr;
+    dzIPC::detail::SetSeamHook(nullptr);
 }
 
 /* 阴性对照：守门不许把真消息一起丢掉。

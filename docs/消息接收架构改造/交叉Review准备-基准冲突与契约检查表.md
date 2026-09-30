@@ -88,7 +88,9 @@
 |---|---|---|
 | **D1** callback/响应发送不得进 `recv_once()` | **以需求 §1.2 + 冻结契约 `recv_worker.h:218-220` 为准**；t3 任务描述已内嵌该裁决（标题即「裁决D1：callback 不入 worker」），t3 的 `SerState`/`SerRequestRoute` 当时尚未落笔；方案 `shm_ser_cli线程池移植方案.md:34` 的回写属 **t10 既定动作**，不是 t3 的挡路石 | ⛔ **若 t3 把 callback 放进 `recv_once()` ⇒ 判 blocker 并退回**；**不得**以「方案这么写所以合规」为由放行 |
 | **C7** 池未转发 `wakeup()` | **已裁定**：nodelet 与固定 worker **二选一**，本波**不要求**共享层转发 `wakeup()`；nodelet 启用 ⇒ 保留兼容接收线程、worker 模式不注册进程内队列；t3/t5 已被告知「不得声称已支持 nodelet 走 worker」 | **不再列为 blocker**；只需核对「模块确实回退 + 无半吊子实现（既不注册又不回退 / 声称已支持）」 |
-| **D9** `posix/udp.h:346 FD_SET` / `:352 ::select` | **已证毕为既有缺陷、非本波引入**：t6 只读准备用 `build_baseline` 与当前 HEAD 两库同探针对照，两库**同 `exit=134`**、归一化 gdb 帧 **`FRAMES_IDENTICAL=yes`**、两库均含 `__fdelt_chk@GLIBC_2.15` 未定义引用；证据目录 `.t6_probe/d9/`（`base.log`/`head.log` + `base_gdb.frames`/`head_gdb.frames`，均 21:15） | 按「**既有代码、非本波移植缺陷**」登记为遗留项（归属 ipc-transport，本波不修）；**不计入三模块审查扣分** |
+| **D9** ~~`posix/udp.h:346 FD_SET` / `:352 ::select`~~ → **【D-20 纠正】`posix/udp.h:347 FD_SET` / `:353 ::select`** | **已证毕为既有缺陷、非本波引入**：t6 只读准备用 `build_baseline` 与当前 HEAD 两库同探针对照，两库**同 `exit=134`**、归一化 gdb 帧 **`FRAMES_IDENTICAL=yes`**、两库均含 `__fdelt_chk@GLIBC_2.15` 未定义引用；证据目录 `.t6_probe/d9/`（`base.log`/`head.log` + `base_gdb.frames`/`head_gdb.frames`，均 21:15） | 按「**既有代码、非本波移植缺陷**」登记为遗留项（归属 ipc-transport，本波不修）；**不计入三模块审查扣分** |
+
+> **D-20 行号纠正依据**（2026-09-28）：锚定提交 `e800ccc`（blob `19b6132687874c23a742fa7d0b216a1aaa58cef2`）逐行为 `:345 fd_set` / `:346 FD_ZERO` / `:347 FD_SET` / `:349-351 timeval` / `:353 ::select`。原 `:346`/`:352` **各小 1** ⇒ 全历史扫描（10 个提交：`:346=FD_SET` **0** 次、`:347=FD_SET` **1** 次）裁定为 **off-by-one**，非"多套口径"。只改行号定位，不改数值/结论。对照：`收尾验收报告.md:132` 本来就正确。
 
 **(3) t12 两个新增接口纳入 t7 核对（「只加不改」）**
 
@@ -170,7 +172,7 @@
 | D4 | `running` 闸重建 | 文档（t4 待办） | 模块未动，t4 必须自证「`teardown_receive_path()` 后 `InitChannel` 重新置 true」 |
 | D6 | 容量数字三层混用 | 各自实现 | SHM `recv_wait_set` 127/63；`SocketWaitSet::max_channels()` Linux **4096**/Win **63**（`socket_wait_set.cc:31/33`）；池 worker 上限 128（`recv_worker.cc:64`） |
 | D7 | 控制面线程未收敛 | 需求 §10 阶段 1 验收 vs 方案现状 | ❌ 阶段 1 仍是「库内就绪、产品未接入」：全仓无 `ShmControlScheduler::register_subscriber/register_publisher` 产品调用点（`grep` 仅命中 `LocalPubSubRegistry`）；`shm_pub_sub_ipc.h:140/201` 两线程仍在；`shm_ser_cli_ipc.cc:285/336` 握手线程未迁。t11 必须列为**未达成验收项** |
-| **D9** | `select()+FD_SET` 既有限制 | 工作区（既有缺陷，非本波引入） | ❌ **仍未修**：`src/libipc/platform/posix/udp.h:346 FD_SET` / `:352 ::select`；win 侧 `:327/392/482`。归因口径：既有代码、非模块移植缺陷；修复落点 ipc-transport（→ `poll()`）。t6 的 1000 订阅收包验收在其修复前**必红** |
+| **D9** | `select()+FD_SET` 既有限制 | 工作区（既有缺陷，非本波引入） | ❌ **仍未修**：~~`src/libipc/platform/posix/udp.h:346 FD_SET` / `:352 ::select`~~ → **【D-20 纠正】`:347 FD_SET` / `:353 ::select`**；win 侧 `:327/392/482`。归因口径：既有代码、非模块移植缺陷；修复落点 ipc-transport（→ `poll()`）。t6 的 1000 订阅收包验收在其修复前**必红** |
 
 ---
 

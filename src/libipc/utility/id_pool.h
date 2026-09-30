@@ -87,6 +87,24 @@ public:
         return true;
     }
 
+    /**
+     * \brief 把空闲链整表复位为「全空闲」。
+     *
+     * 用途唯一（见 docs/消息接收架构改造/团队改造交付/W09/死进程借样泄漏收口_D14.md）：
+     * **池段是崩溃遗留段**时，段内空闲链只反映死进程留下的状态（它借走的 id 永远不会
+     * 归还，而 published()==0 的块按 UF-003 §5 的窗口论证⛔不得被逐块清扫）。
+     * 判据不是池内状态而是**段级**：该段除本进程外无任何活进程映射 ⇒ 段内不存在在飞
+     * 持有者 ⇒ 整表复位安全。
+     *
+     * ⛔ 调用方必须：①确认段级无活映射者；②在**池锁内**调用（与借出/归还互斥）。
+     * 详见 ipc.cpp 的 reclaim_orphan_segment 安全性论证。
+     */
+    void reset_free_chain() {
+        cursor_ = 0;
+        init();
+        prepared_ = true;
+    }
+
     void       * at(storage_id_t id)       { return &(next_[id].data_); }
     void const * at(storage_id_t id) const { return &(next_[id].data_); }
 };

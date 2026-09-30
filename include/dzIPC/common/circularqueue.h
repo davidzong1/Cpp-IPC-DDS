@@ -1,4 +1,9 @@
 #pragma once
+/* F1/t35：队列淘汰的**唯一**写入点（见下方 push_owned 的 evict 分支）。
+ * ⛔ 只读引用既有 ID `queue_evicted`；counters.h 是 header-only（无其它依赖、无环）。
+ * 本头同时被 socket/shm 的 pub_sub/ser_cli 四个模块头包含 —— 引入 counters.h 只增
+ * 一份 inline 声明，不改任何既有类型/布局（不新增成员、不改模板签名）。 */
+#include "dzIPC/measure/counters.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -116,6 +121,15 @@ private:
       MsgPtr dropped;
       if (try_dequeue(dropped))
       {
+        /* ---- F1/t35：队列淘汰计数（§13.2#3 的"队列淘汰"独立计数）----
+         * 位置在**驱逐成功之后、回调之前**：淘汰是"抢不到槽位而挤掉最老"的既成事实，
+         * 与应用侧回调是否注册（evict_cb_ 为空也要计）无关 —— 只钩回调会让"没注册回调
+         * 的队列"淘汰全不计数（正是本任务要修的漏计形态）。
+         * 本处是**全仓唯一的队列淘汰点**（`try_enqueue` 失败的唯一处理分支）⇒ 满足
+         * "每 ID 单个写入点"；热路径上多一次 relaxed fetch_add（队列满时才走到）。
+         * 口径：淘汰**条数**（不是事件数）—— 每次挤掉最老的一条即 +1。 */
+        ::dzIPC::measure::CounterRegistry::instance().inc(
+            ::dzIPC::measure::CounterId::queue_evicted);
         if (evict_cb_)
         {
           evict_cb_(dropped);

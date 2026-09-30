@@ -53,7 +53,15 @@ namespace detail {
 /* 打点位置。数值一旦定下就不要改 —— 测试按数值区间断言「析构各点的相对顺序」。 */
 enum class SeamPoint : int
 {
-    /* ---- 收包循环 (src/dzIPC/shm_pub_sub_ipc.cc 的 subscribe_thread_ lambda) ---- */
+    /* ---- 收包路径 (shm_pub_sub_ipc 的收包一次) ----
+     *
+     * W06 起收包一次被抽成 shm_sub_ipc::recv_once_locked()，**worker 路径与兼容
+     * 线程路径共用同一份实现** —— 因此这两个点的语义与位置逐句不变（原来是
+     * subscribe_thread_ lambda 的函数体，现在随函数体一起搬）：
+     *   · worker：由 RecvWorker 的宿主适配器 SubRecvRoute::recv_once() 调用；
+     *   · compat：由 compat_recv_loop() 调用。
+     * 两条路径的 recv 等待时长不同（worker = recv(0) 非阻塞；compat = recv(50)），
+     * 但打点位置与 generation 语义完全相同。 */
     kAfterRecv        = 0,   /* recv() 已返回、尚未 release_receive。此时 inflight 仍为 1
                               * ⇒ 钩子**不得阻塞**(会拖住并发 begin_rebuild 的第 4 步)。 */
     kAfterRecvRelease = 1,   /* release_receive() 已执行、尚未分流。**I5 的暂停点**:
@@ -67,6 +75,43 @@ enum class SeamPoint : int
     kDtorAfterJoinHandshake = 19,   /* §5 第 5' 步: 握手线程已 join */
     kDtorAfterQuiescent     = 20,   /* §5 第 6 步: wait_quiescent() 已返回 */
     kDtorAfterRelease       = 21,   /* §5 第 7 步: 旧 route 已 release */
+
+    /* ---- W06 接收路径接入/注销（worker 路径与兼容路径的**可分性**观测点）----
+     *
+     * 用途：让"到底走了哪条路径"成为**运行期可观测**的事实，而不是从
+     * "线程数少了"反推。方案 §13.2 条件 4 要求"不能通过额外 per-route 线程补齐"，
+     * 验收模式必须**能检测回退**、不能用回退线程掩盖固定 worker 目标：
+     *   · kRecvPathWorker    —— 数据面接入共享 RecvWorker（无 subscribe_thread_）；
+     *   · kRecvPathCompat    —— 显式回退兼容收包线程（原因见同一次事件的 size 字段）。
+     * event.size 携带的原因码 = CompatFallbackReason 的数值（0 = 非回退）。
+     * 数值 32/33 与既有 0..21 不重叠。 */
+    kRecvPathWorker         = 32,
+    kRecvPathCompat         = 33,
+};
+
+/* W06：接收路径选择/回退的**原因码**（写在 kRecvPathCompat 事件的 `size` 字段；
+ * kRecvPathWorker 恒为 kNone）。数值一旦定下就不要改 —— 测试与采集器按它分类，
+ * 并且它让"回退了吗"变成可机械统计的事实，而不是从线程数反推。
+ *
+ * ⛔ kForcedCompatEnv 与 kNoRoute **不是故障回退**：
+ *   · kForcedCompatEnv —— 配置显式要求兼容路径（回滚开关），属"路径选择"；
+ *   · kNoRoute         —— 本次还没有 route（控制面尚未 Ready 或重建失败），
+ *                        池根本未尝试，下一次重建会重试。
+ * 两者的 fallback 计数都不 +1（与 W09 的"路径选择不是回退"同一纪律）。 */
+enum class RecvPathReason : int
+{
+    kNone               = 0,   ///< 走共享 worker（kRecvPathWorker）
+    kForcedCompatEnv    = 1,   ///< 回滚开关强制兼容（配置，不是回退）
+    kForkChild          = 2,   ///< fork 子进程 pid 闸（防死锁，走兼容线程）
+    kBackendUnavailable = 3,   ///< wait-set 后端不可用（永久回退信号）
+    kPoolStartFailed    = 4,   ///< 池 start() 失败（线程创建失败）
+    kNoRoute            = 5,   ///< 尚无 route（未尝试池；下次重建重试）
+    kInvalidToken       = 6,   ///< read_wait_token() 无效
+    kWaitSetFull        = 7,   ///< 该 worker 的 127 token 容量满
+    kBusy               = 8,   ///< 别的 owner（如兼容线程）正在 recv
+    kDuplicate          = 9,   ///< 同一 route 已在本 worker 注册
+    kStopped            = 10,  ///< 池未 start / 已 stop
+    kInvalidRoute       = 11,  ///< route == nullptr
 };
 
 /* 打点携带的信息。`route` 在 kAfterRecv 上是刚返回的那条 route(可读 connected_id()

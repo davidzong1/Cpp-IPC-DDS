@@ -1,0 +1,38 @@
+{
+  "run_id": "w02-schema-fixture",
+  "schema": "w02-xproc-benchmark/1.0",
+  "cases": [
+    {
+      "case_id": "ok_case",
+      "load_ok": true,
+      "timing_ok": true,
+      "case_ok": true,
+      "bad_header": 0,
+      "gates": {
+        "late_ok": true,
+        "backlog_ok": true,
+        "send_blocked_ok": true,
+        "abnormal_ok": true,
+        "bad_header_ok": true
+      },
+      "failure_reasons": []
+    },
+    {
+      "case_id": "gate0_no_reason",
+      "load_ok": true,
+      "timing_ok": true,
+      "case_ok": false,
+      "bad_header": 0,
+      "gates": {
+        "late_ok": true,
+        "backlog_ok": false,
+        "send_blocked_ok": true,
+        "abnormal_ok": true,
+        "bad_header_ok": true
+      },
+      "failure_reasons": [
+        "发送积压超出阈值: …"
+      ]
+    }
+  ]
+}

@@ -176,7 +176,16 @@ public:
     RecvRegisterStatus add_route(const std::shared_ptr<SocketRecvRouteSource>& route);
 
     /* 同步注销：返回即"worker 不会再碰这条 route"。幂等；未知 route / nullptr 都是无操作。
-     * **不得**从 worker 线程调用（实现检测到同线程调用时只做摘除与唤醒、不等待并打诊断）。 */
+     *
+     * ⛔ **不得**从 worker 线程调用（W04-F1 队长裁决 D-11：改注释 + 升级为可机械核对的判据）。
+     *    与 SHM 侧逐字同因：本函数按契约 §4.4 第 4/5 步等待在途 `recv_once()` 与模块
+     *    in-flight 归零，从 worker 线程调用时在途的那一次就是调用者自己 ⇒ 必然等满
+     *    `kQuiesceTimeout`（2000 ms）后由超时分支打诊断返回。**实现里没有同线程旁路**，
+     *    该用法不被支持，只是"不会永久死锁"。
+     *
+     * 机械核对判据：
+     *   `grep -c "this_thread::get_id" src/dzIPC/threepools/socket_recv_worker.cc` 期望 **3**
+     *   （`stop()`/析构各 1 + `remove_route()` 入口的 debug `assert`）；**没有**同线程旁路。 */
     void remove_route(const SocketRecvRouteSource* route) noexcept;
 
     /* 唤醒阻塞中的 wait 立即重评估（不改路由表）。 */

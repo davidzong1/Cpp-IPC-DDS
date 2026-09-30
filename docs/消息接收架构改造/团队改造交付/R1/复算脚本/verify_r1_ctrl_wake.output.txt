@@ -1,0 +1,110 @@
+# R-1 控制面项 独立复算原始记录（架构负责人 t32 / D-25）
+# 生成时刻: 2026-09-29 22:55:36 +0800  指纹: e1c2a7e99f8bd2e8
+
+## A. 从 r25-W10 **既有证据**读出的原始读数（⛔ 纯读，不重跑）
+### A1 state3（1000 sub + 1000 pub，门槛3 定义配置）
+artifacts/perf/20260929-r25-W10/idle-state3-1000.log:state=3 n=1000 domain=3203 pool running=1 workers=32 route_count=1000 threads=34
+artifacts/perf/20260929-r25-W10/idle-state3-1000.log:   scheduler entries=2000 tick_delta=522274 tick_wakes_per_s=8704.6 tick_max_us=1355.87 overruns=0
+### A2 state2（1000 已注册未连接）
+artifacts/perf/20260929-r25-W10/idle-state2-1000.log:state=2 n=1000 domain=3202 pool running=0 workers=0 route_count=0 threads=2
+artifacts/perf/20260929-r25-W10/idle-state2-1000.log:0,2,60.000,2,0.29683,14159.2,14.1592,0,0,0,0,0,0,0
+artifacts/perf/20260929-r25-W10/idle-state2-1000.log:   scheduler entries=1000 tick_delta=848471 tick_wakes_per_s=14141.1 tick_max_us=2109.17 overruns=0
+### A3 state1（无 route）
+artifacts/perf/20260929-r25-W10/idle-state1-1000.log:state=1 n=1000 domain=3201 pool running=0 workers=0 route_count=0 threads=2
+artifacts/perf/20260929-r25-W10/idle-state1-1000.log:0,1,60.000,2,0.00000,0.0,0.0000,0,0,0,0,0,0,0
+artifacts/perf/20260929-r25-W10/idle-state1-1000.log:   scheduler entries=0 tick_delta=0 tick_wakes_per_s=0.0 tick_max_us=2393.14 overruns=0
+### A4 gate3 标定（同一运行的 60s/30s 两组）
+## A. 三态空闲（n=1000, 60 s 窗口, 逐 TID ctx 聚合）
+--- state 3 ---
+state=3 n=1000 domain=6203 pool running=1 workers=32 route_count=1000 threads=34
+0,3,60.000,34,0.58333,9101.1,9.1011,0,0,19196,0,0,0,0
+   scheduler entries=2000 tick_delta=525772 tick_wakes_per_s=8762.9 tick_max_us=1493.00 overruns=0
+--- state 2 ---
+state=2 n=1000 domain=6202 pool running=0 workers=0 route_count=0 threads=2
+0,2,60.000,2,0.12167,5032.6,5.0326,0,0,0,0,0,0,0
+   scheduler entries=1000 tick_delta=301549 tick_wakes_per_s=5025.8 tick_max_us=9372.65 overruns=0
+--- state 1 ---
+state=1 n=1000 domain=6201 pool running=0 workers=0 route_count=0 threads=2
+0,1,60.000,2,0.00000,0.0,0.0000,0,0,0,0,0,0,0
+   scheduler entries=0 tick_delta=0 tick_wakes_per_s=0.0 tick_max_us=1111.45 overruns=0
+state1_after_destroy route_count=0 threads=2 idle_exits=0 restarts=0
+
+## B. 去掉观测器成本后的纯 CPU（--cpu-only, 30 s）
+--- state 3 ---
+state=3 n=1000 domain=6213 pool running=1 workers=32 route_count=1000 threads=34
+0,3,30.000,34,0.58200,0.0,0.0000,0,0,9600,0,0,0,0
+   scheduler entries=2000 tick_delta=263746 tick_wakes_per_s=8791.5 tick_max_us=1625.53 overruns=0
+--- state 2 ---
+state=2 n=1000 domain=6212 pool running=0 workers=0 route_count=0 threads=2
+0,2,30.000,2,0.29433,0.0,0.0000,0,0,0,0,0,0,0
+   scheduler entries=1000 tick_delta=433426 tick_wakes_per_s=14447.4 tick_max_us=444.98 overruns=0
+--- state 1 ---
+state=1 n=1000 domain=6211 pool running=0 workers=0 route_count=0 threads=2
+0,1,30.000,2,0.00000,0.0,0.0000,0,0,0,0,0,0,0
+   scheduler entries=0 tick_delta=0 tick_wakes_per_s=0.0 tick_max_us=4317.38 overruns=0
+
+## B. 我本次独立复跑（同源重编，⛔ 不写 r25 目录）
+### B1 state3 60s 窗口 ×3（门槛3 的窗口要求 ≥60 s）
+0,3,60.000,34,0.59417,8890.4,8.8904,0,0,19198,0,0,0,0
+   scheduler entries=2000 tick_delta=512906 tick_wakes_per_s=8548.4 tick_max_us=3021.30 overruns=0
+0,3,60.000,34,0.59450,8887.9,8.8879,0,0,19200,0,0,0,0
+   scheduler entries=2000 tick_delta=512589 tick_wakes_per_s=8543.1 tick_max_us=1326.67 overruns=0
+0,3,60.000,34,0.59417,8898.2,8.8982,0,0,19199,0,0,0,0
+   scheduler entries=2000 tick_delta=513288 tick_wakes_per_s=8554.8 tick_max_us=1483.68 overruns=0
+### B2 state3 20s 窗口 ×5
+0,3,20.000,34,0.59500,8864.6,8.8646,0,0,6400,0,0,0,0
+   scheduler entries=2000 tick_delta=170430 tick_wakes_per_s=8521.5 tick_max_us=1332.65 overruns=0
+0,3,20.000,34,0.59150,8950.6,8.9506,0,0,6400,0,0,0,0
+   scheduler entries=2000 tick_delta=172156 tick_wakes_per_s=8607.8 tick_max_us=1362.32 overruns=0
+0,3,20.000,34,0.59550,8879.9,8.8799,0,0,6400,0,0,0,0
+   scheduler entries=2000 tick_delta=170733 tick_wakes_per_s=8536.6 tick_max_us=1844.62 overruns=0
+0,3,20.000,34,0.59450,8893.3,8.8933,0,0,6400,0,0,0,0
+   scheduler entries=2000 tick_delta=171007 tick_wakes_per_s=8550.3 tick_max_us=1401.54 overruns=0
+0,3,20.000,34,0.59400,8888.6,8.8886,0,0,6400,0,0,0,0
+   scheduler entries=2000 tick_delta=170911 tick_wakes_per_s=8545.5 tick_max_us=1448.77 overruns=0
+### B3 公式项标定：wakescan（heartbeat=10ms，20s）
+entries=1     heartbeat=10ms window=20.0s tick_wakes=100.0/s  公式项数×(1000/hb)=100.0/s  比值=1.00  tick_max_us=26.8 overruns=0
+entries=10    heartbeat=10ms window=20.0s tick_wakes=100.0/s  公式项数×(1000/hb)=1000.0/s  比值=0.10  tick_max_us=40.5 overruns=0
+entries=100   heartbeat=10ms window=20.0s tick_wakes=200.2/s  公式项数×(1000/hb)=10000.0/s  比值=0.02  tick_max_us=54.5 overruns=0
+entries=1000  heartbeat=10ms window=20.0s tick_wakes=2142.1/s  公式项数×(1000/hb)=100000.0/s  比值=0.02  tick_max_us=92.2 overruns=0
+entries=2000  heartbeat=10ms window=20.0s tick_wakes=4544.6/s  公式项数×(1000/hb)=200000.0/s  比值=0.02  tick_max_us=88.9 overruns=0
+### B4 公式项标定：mixwake（产品同形 1000sub@10ms + 1000pub@50ms，20s）×5
+sub=1000(10ms)+pub=1000(50ms) entries=2000 wakes=7130.9/s  公式Σ=120000.0/s  比值=0.059  tick_max_us=520.3 overruns=0
+sub=1000(10ms)+pub=1000(50ms) entries=2000 wakes=3712.8/s  公式Σ=120000.0/s  比值=0.031  tick_max_us=108.1 overruns=0
+sub=1000(10ms)+pub=1000(50ms) entries=2000 wakes=4995.4/s  公式Σ=120000.0/s  比值=0.042  tick_max_us=99.3 overruns=0
+sub=1000(10ms)+pub=1000(50ms) entries=2000 wakes=4358.9/s  公式Σ=120000.0/s  比值=0.036  tick_max_us=108.8 overruns=0
+sub=1000(10ms)+pub=1000(50ms) entries=2000 wakes=4683.4/s  公式Σ=120000.0/s  比值=0.039  tick_max_us=122.5 overruns=0
+### B5 唤醒率的**决定因素**：产品同形 × 注册散布（18s，各项 1000 pairs）
+pairs=1000  目标注册=0.0    ms 实测注册=2.56    ms | wakes=   3773.8/s callbacks=  120000.0/s 项/批= 31.80 | 公式Σ=120000/s 高估=31.8×
+pairs=1000  目标注册=5.0    ms 实测注册=5.01    ms | wakes=   6705.4/s callbacks=  120000.0/s 项/批= 17.90 | 公式Σ=120000/s 高估=17.9×
+pairs=1000  目标注册=10.0   ms 实测注册=10.53   ms | wakes=  14489.4/s callbacks=  120000.4/s 项/批=  8.28 | 公式Σ=120000/s 高估=8.3×
+pairs=1000  目标注册=20.0   ms 实测注册=20.03   ms | wakes=  14012.0/s callbacks=  120000.3/s 项/批=  8.56 | 公式Σ=120000/s 高估=8.6×
+pairs=1000  目标注册=50.0   ms 实测注册=50.00   ms | wakes=  10613.0/s callbacks=  120000.0/s 项/批= 11.31 | 公式Σ=120000/s 高估=11.3×
+pairs=1000  目标注册=100.0  ms 实测注册=100.05  ms | wakes=   9988.7/s callbacks=  120000.7/s 项/批= 12.01 | 公式Σ=120000/s 高估=12.0×
+pairs=1000  目标注册=200.0  ms 实测注册=200.07  ms | wakes=   5604.5/s callbacks=  120000.0/s 项/批= 21.41 | 公式Σ=120000/s 高估=21.4×
+pairs=1000  目标注册=400.0  ms 实测注册=400.05  ms | wakes=   2668.4/s callbacks=  120000.1/s 项/批= 44.97 | 公式Σ=120000/s 高估=45.0×
+pairs=1000  目标注册=700.0  ms 实测注册=700.05  ms | wakes=   9993.9/s callbacks=  120000.7/s 项/批= 12.01 | 公式Σ=120000/s 高估=12.0×
+### B6 批量因子（callbacks/tick）与注册散布
+n=1000  散布=0.0   ms 注册耗时=1.01   ms | tick=   1684.0/s callbacks=  100000.0/s 项/批=  59.38 | 每周期批数= 16.84 (period=10ms) | 公式Σ= 100000.0/s 比值=0.0168
+n=1000  散布=2.0   ms 注册耗时=2.01   ms | tick=   2848.8/s callbacks=  100000.0/s 项/批=  35.10 | 每周期批数= 28.49 (period=10ms) | 公式Σ= 100000.0/s 比值=0.0285
+n=1000  散布=5.0   ms 注册耗时=5.03   ms | tick=   7772.5/s callbacks=  100000.0/s 项/批=  12.87 | 每周期批数= 77.72 (period=10ms) | 公式Σ= 100000.0/s 比值=0.0777
+n=1000  散布=10.0  ms 注册耗时=10.05  ms | tick=  15601.7/s callbacks=  100000.6/s 项/批=   6.41 | 每周期批数=156.02 (period=10ms) | 公式Σ= 100000.0/s 比值=0.1560
+n=1000  散布=20.0  ms 注册耗时=20.02  ms | tick=  15355.7/s callbacks=  100000.7/s 项/批=   6.51 | 每周期批数=153.56 (period=10ms) | 公式Σ= 100000.0/s 比值=0.1536
+n=1000  散布=50.0  ms 注册耗时=50.05  ms | tick=  10731.9/s callbacks=  100000.1/s 项/批=   9.32 | 每周期批数=107.32 (period=10ms) | 公式Σ= 100000.0/s 比值=0.1073
+
+## C. 恒等式核验：ctx ?= 调度器唤醒率 + 池 wait_timeout 率（同 ctx 口径）
+读数来源                               ctx/s(测)    tick/s  pool wait/s         和       偏差
+r25 idle-state3-1000 (60s)           9040.0    8704.6        320.0    9024.6   -0.17%
+gate3 A state3 (60s)                 9101.1    8762.9        319.9    9082.8   -0.20%
+gate3 B state3 cpu-only(30s)            n/a    8791.5        320.0    9111.5      n/a
+r25 idle-state2-1000 (60s)          14159.2   14141.1          0.0   14141.1   -0.13%
+gate3 A state2 (60s)                 5032.6    5025.8          0.0    5025.8   -0.14%
+gate3 B state2 (30s)                    n/a   14447.4          0.0   14447.4      n/a
+
+## D. 结论（复算要点）
+D1 Σ 理论上界 = 1000×(1000/10) + 1000×(1000/50) = 120000/s（1000 sub + 1000 pub）
+D2 Σ **不是**期望值：实测唤醒率随**注册散布**在 0.47k–14.7k/s 之间变化（B5），
+   ⇒ 报告引用的『1.5–4.6 k/s』只是某一种注册散布下的点值，**不足以作上界**。
+D3 由 B6：批量因子（callbacks/tick）= 6.3–51.7 ⇒ 唤醒率 = Σ / 批量因子。
+D4 由 C：ctx 与『调度器唤醒率 + 池 wait_timeout』恒等（偏差 ≤0.20%），
+   ⇒ R-1 的控制面项应换成**实测调度器唤醒率**，池项单列（实测 320/s，与结构下限 320/s 吻合）。

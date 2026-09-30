@@ -1,0 +1,156 @@
+# t40：**按闸门原样连续实跑两次**（`bash docs/hotpath_gate.sh build`，同一工作区、同一构建、几分钟内）
+
+| 次 | 命令 | 门 1 的 1 MiB 档读数 | 判定 |
+|---|---|---|---|
+| 第 1 次 | `bash docs/hotpath_gate.sh build` | **191 msg/s** | ⛔ **未过闸**（< 下限 700） |
+| 第 2 次 | 同上（无任何代码/构建改动） | **1367 msg/s** | ✅ **过闸** |
+
+⇒ **同一条命令、同一份二进制，两次给出相反的判定**。这是本任务「门限余量过薄、无法区分回归与波动」的**最直接证据**：
+  191 与 1367 相差 **7.2×**，而 700 就卡在两者之间。
+
+## 第 1 次的完整门 1 输出
+```
+==> 门 1: DZIPC 层高速 pub/sub 吞吐(A′ 就是死在这里)
+  ✗ payload=1048576  速率 191 msg/s < 下限 700 —— 没报错但被打塌
+  ✓ payload=64       pubsub_shm_64B_tput     167335 msg/s  丢包= 65.39%  CPU=1.81
+==> 门 2: 邻接回归（8 项全 OK）
+⛔ 未过闸 —— 逐项读数在 /tmp/hotpath_gate/
+```
+⚠️ 注：第 1 次的原始读数文件（`/tmp/hotpath_gate/tput_1048576.txt`）**未及归档即被第 2 次覆盖**（闸门固定写 `/tmp/hotpath_gate/`，无 run_id）⇒ 上表第 1 次一栏的来源是**当次控制台输出**（本会话可见），第 2 次的原始文件已归档为 `tput_1048576.txt`。
+   ⚠️ **这本身是闸门的一个可观测性缺口**：`hotpath_gate.sh` 用固定路径 `/tmp/hotpath_gate/`，**不支持 `run_id`、连续运行会互相覆盖**⇒ 事后无法对同一批读数做时间序列。**建议随判据形态一并修**（归队长裁决，本任务不改脚本）。
+
+## 第 2 次的门 1 原始读数（已归档）
+```
+[33m[dzIPC][view_queue] queue_size = 1024 超过钉上限, 被钉到 10: chunk 池每尺寸档只有 40 块且全机共享(建 route 不带 prefix), 队列配得比池大就会把池吃干。两个钉面同用此上限: view 队列钉到 10; adopt 借样(schema-less 话题的 DZFlat 经 msg_queue_)配额同为 10, 配额满即自动物化拷贝 —— 零拷贝只在配额内生效, 超额每消息多一次拷贝。见 docs/shm_chunk_pool_occupancy_plan.md §3 步骤③与 UF-012; EnableViewQueuePin(false) 可恢复原值。[0m
+chunk pool exhausted: kind = send, chunk_size = 1057792, size = 1057249, pool capacity = 40, count = 1 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+RecvWorker[3]: idle exit (no routes for >= 1000 ms)
+RecvWorker[19]: idle exit (no routes for >= 1000 ms)
+RecvWorker[6]: idle exit (no routes for >= 1000 ms)
+RecvWorker[4]: idle exit (no routes for >= 1000 ms)
+RecvWorker[2]: idle exit (no routes for >= 1000 ms)
+RecvWorker[15]: idle exit (no routes for >= 1000 ms)
+RecvWorker[11]: idle exit (no routes for >= 1000 ms)
+RecvWorker[0]: idle exit (no routes for >= 1000 ms)
+RecvWorker[31]: idle exit (no routes for >= 1000 ms)
+RecvWorker[30]: idle exit (no routes for >= 1000 ms)
+RecvWorker[1]: idle exit (no routes for >= 1000 ms)
+RecvWorker[28]: idle exit (no routes for >= 1000 ms)
+RecvWorker[27]: idle exit (no routes for >= 1000 ms)
+RecvWorker[29]: idle exit (no routes for >= 1000 ms)
+RecvWorker[16]: idle exit (no routes for >= 1000 ms)
+RecvWorker[13]: idle exit (no routes for >= 1000 ms)
+RecvWorker[12]: idle exit (no routes for >= 1000 ms)
+RecvWorker[20]: idle exit (no routes for >= 1000 ms)
+RecvWorker[9]: idle exit (no routes for >= 1000 ms)
+RecvWorker[8]: idle exit (no routes for >= 1000 ms)
+RecvWorker[18]: idle exit (no routes for >= 1000 ms)
+RecvWorker[17]: idle exit (no routes for >= 1000 ms)
+RecvWorker[21]: idle exit (no routes for >= 1000 ms)
+RecvWorker[14]: idle exit (no routes for >= 1000 ms)
+RecvWorker[26]: idle exit (no routes for >= 1000 ms)
+RecvWorker[23]: idle exit (no routes for >= 1000 ms)
+RecvWorker[24]: idle exit (no routes for >= 1000 ms)
+RecvWorker[25]: idle exit (no routes for >= 1000 ms)
+RecvWorker[22]: idle exit (no routes for >= 1000 ms)
+RecvWorker[10]: idle exit (no routes for >= 1000 ms)
+RecvWorker[7]: idle exit (no routes for >= 1000 ms)
+[33m[dzIPC][view_queue] queue_size = 1024 超过钉上限, 被钉到 10: chunk 池每尺寸档只有 40 块且全机共享(建 route 不带 prefix), 队列配得比池大就会把池吃干。两个钉面同用此上限: view 队列钉到 10; adopt 借样(schema-less 话题的 DZFlat 经 msg_queue_)配额同为 10, 配额满即自动物化拷贝 —— 零拷贝只在配额内生效, 超额每消息多一次拷贝。见 docs/shm_chunk_pool_occupancy_plan.md §3 步骤③与 UF-012; EnableViewQueuePin(false) 可恢复原值。[0m
+RecvWorker[0]: idle exit (no routes for >= 1000 ms)
+RecvWorker[11]: idle exit (no routes for >= 1000 ms)
+RecvWorker[2]: idle exit (no routes for >= 1000 ms)
+RecvWorker[3]: idle exit (no routes for >= 1000 ms)
+RecvWorker[19]: idle exit (no routes for >= 1000 ms)
+RecvWorker[17]: idle exit (no routes for >= 1000 ms)
+RecvWorker[7]: idle exit (no routes for >= 1000 ms)
+RecvWorker[14]: idle exit (no routes for >= 1000 ms)
+RecvWorker[5]: idle exit (no routes for >= 1000 ms)
+RecvWorker[1]: idle exit (no routes for >= 1000 ms)
+RecvWorker[24]: idle exit (no routes for >= 1000 ms)
+RecvWorker[22]: idle exit (no routes for >= 1000 ms)
+RecvWorker[6]: idle exit (no routes for >= 1000 ms)
+RecvWorker[4]: idle exit (no routes for >= 1000 ms)
+RecvWorker[12]: idle exit (no routes for >= 1000 ms)
+RecvWorker[31]: idle exit (no routes for >= 1000 ms)
+RecvWorker[28]: idle exit (no routes for >= 1000 ms)
+RecvWorker[26]: idle exit (no routes for >= 1000 ms)
+RecvWorker[18]: idle exit (no routes for >= 1000 ms)
+RecvWorker[27]: idle exit (no routes for >= 1000 ms)
+RecvWorker[20]: idle exit (no routes for >= 1000 ms)
+RecvWorker[16]: idle exit (no routes for >= 1000 ms)
+RecvWorker[29]: idle exit (no routes for >= 1000 ms)
+RecvWorker[21]: idle exit (no routes for >= 1000 ms)
+RecvWorker[25]: idle exit (no routes for >= 1000 ms)
+RecvWorker[30]: idle exit (no routes for >= 1000 ms)
+RecvWorker[15]: idle exit (no routes for >= 1000 ms)
+RecvWorker[8]: idle exit (no routes for >= 1000 ms)
+RecvWorker[23]: idle exit (no routes for >= 1000 ms)
+RecvWorker[9]: idle exit (no routes for >= 1000 ms)
+RecvWorker[10]: idle exit (no routes for >= 1000 ms)
+======================================================================
+ dzIPC 通信性能测试
+======================================================================
+  test_time             : 2026-09-30 04:48:59+0800
+  hostname              : zwc-leju
+  os                    : Linux
+  kernel                : 6.8.0-138-generic
+  arch                  : x86_64
+  distro                : Ubuntu 22.04.5 LTS
+  cpu_model             : Intel(R) Core(TM) i9-14900KF
+  cpu_vendor            : GenuineIntel
+  cpu_logical_cores     : 32
+  cpu_physical_cores    : 24
+  cpu_mhz_now           : 4277.156
+  cpu_mhz_max           : 5700
+  cpu_governor          : powersave
+  cpu_cache             : L1d=48K, L1i=32K, L2=2048K, L3=36864K
+  cpu_flags             : sse4_2,avx,avx2,constant_tsc,nonstop_tsc,rdtscp
+  mem_total             : 65647728 kB
+  mem_available         : 35041536 kB
+  hugepages_thp         : always [madvise] never
+  dev_shm_size          : 31.30 GiB
+  net_rmem_max          : 536870912
+  net_wmem_max          : 536870912
+  net_rmem_default      : 536870912
+  net_netdev_backlog    : 1000
+  isolcpus              : no
+  loadavg_1min_at_start : 4.11
+  compiler              : 11.4.0
+  build_type            : release (NDEBUG, -O2)
+  cxx_standard          : 201703
+  nodelet_fast_path     : disabled
+  process_model         : multi-process (fork+exec), 收发分属不同进程
+----------------------------------------------------------------------
+  测量时长/用例        : 5 s
+  预热时长/用例        : 0.5 s
+  时延用例发送速率     : 1000 Hz
+  payload 扫描         : 1048576 B
+  输出目录             : /tmp/hotpath_gate/perf_1048576
+======================================================================
+
+---- pubsub_shm ----
+  pubsub_shm_1048576B_lat                1000 msg/s   1000.2 MB/s  p50= 2756.88  p99= 9012.94  p999= 9447.55  max= 10826.41 us  丢包=  0.00%  CPU=1.44
+  pubsub_shm_1048576B_tput               1367 msg/s   1367.1 MB/s  p50=13092.39  p99=32137.26  p999=38342.06  max= 41376.64 us  丢包=  0.00%  CPU=1.49
+
+======================================================================
+  用例总数 : 2   失败 : 0
+  结果 CSV : /tmp/hotpath_gate/perf_1048576/results.csv
+  结果 JSON: /tmp/hotpath_gate/perf_1048576/results.json
+  硬件配置 : /tmp/hotpath_gate/perf_1048576/hardware.txt
+  时延样本 : /tmp/hotpath_gate/perf_1048576/samples/
+
+  绘图: python3 scripts/plot_dzipc_perf.py /tmp/hotpath_gate/perf_1048576
+======================================================================
+```
+## 第 2 次的门 2（邻接回归）
+```
+==> 门 2: 邻接回归
+  ✓ test_uf011_chunk_return                OK=1
+  ✓ test_chunk_hold                        OK=3
+  ✓ test_lap_safety                        OK=3
+  ✓ test_uf007_id_pool_double_release      OK=2
+  ✓ test_loan                              OK=10
+  ✓ test_dzflat_transport                  OK=9
+  ✓ test_dzflat_rx                         OK=8
+  ✓ test_dzflat_sercli                     OK=4
+过闸。
+```

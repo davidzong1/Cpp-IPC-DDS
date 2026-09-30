@@ -1,0 +1,724 @@
+// Copyright (c) 2026 Contributors to the Eclipse Foundation
+//
+// See the NOTICE file(s) distributed with this work for additional
+// information regarding copyright ownership.
+//
+// This program and the accompanying materials are made available under the
+// terms of the Apache Software License 2.0 which is available at
+// https://www.apache.org/licenses/LICENSE-2.0, or the MIT license
+// which is available at https://opensource.org/licenses/MIT.
+//
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+use crate::{
+    dynamic_storage::{
+        DynamicStorage, DynamicStorageBuilder, DynamicStorageCreateError, DynamicStorageOpenError,
+    },
+    event::{
+        DEFAULT_MAX_EVENT_ID, Event, EventId, Listener, ListenerBuilder, ListenerCreateError,
+        ListenerWaitError, NamedConcept, NamedConceptBuilder, NamedConceptMgmt, Notifier,
+        NotifierBuilder, NotifierNotifyError, NotifierOpenError,
+        event_state::{EventActivation, EventState},
+        trigger::{HandlerInterface, State, WaiterInterface, stub::Stub},
+    },
+    named_concept::NamedConceptConfiguration,
+};
+use alloc::vec::Vec;
+use core::fmt::Debug;
+use core::{marker::PhantomData, mem::MaybeUninit, ptr::NonNull, time::Duration};
+use iceoryx2_bb_concurrency::atomic::{AtomicU8, Ordering};
+use iceoryx2_bb_container::semantic_string::SemanticString;
+use iceoryx2_bb_elementary_traits::{
+    testing::abandonable::Abandonable, zero_copy_send::ZeroCopySend,
+};
+use iceoryx2_bb_posix::{
+    file::AccessMode, file_descriptor::FileDescriptorBased,
+    file_descriptor_set::SynchronousMultiplexing,
+};
+use iceoryx2_bb_system_types::file_name::FileName;
+use iceoryx2_bb_system_types::path::Path;
+use iceoryx2_log::{debug, fail};
+
+const NOTIFICATION_STATE_IDLE: u8 = 0;
+const NOTIFICATION_STATE_PENDING: u8 = 1;
+const NOTIFICATION_STATE_NOTIFIED: u8 = 2;
+
+#[derive(PartialEq, Eq, Debug)]
+pub struct Configuration<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+> {
+    value: Storage::Configuration,
+    _data_1: PhantomData<E>,
+    _data_2: PhantomData<Mgmt>,
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+> Clone for Configuration<E, Mgmt, Storage>
+{
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value.clone(),
+            _data_1: PhantomData,
+            _data_2: PhantomData,
+        }
+    }
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+> Default for Configuration<E, Mgmt, Storage>
+{
+    fn default() -> Self {
+        Self {
+            value: Storage::Configuration::default()
+                .path_hint(&EventImpl::<E, Mgmt, Storage, Stub, Stub>::default_path_hint())
+                .suffix(&EventImpl::<E, Mgmt, Storage, Stub, Stub>::default_suffix())
+                .prefix(&EventImpl::<E, Mgmt, Storage, Stub, Stub>::default_prefix()),
+            _data_1: PhantomData,
+            _data_2: PhantomData,
+        }
+    }
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+> Configuration<E, Mgmt, Storage>
+{
+    fn to_storage_config(&self) -> Storage::Configuration {
+        let mut suffix = *self.get_suffix();
+        suffix.push_bytes(b"_mgmt").unwrap();
+        self.value.clone().suffix(&suffix)
+    }
+
+    fn to_trigger_config(&self) -> super::trigger::Configuration {
+        super::trigger::Configuration {
+            suffix: *self.get_suffix(),
+            prefix: *self.get_prefix(),
+            path_hint: *self.get_path_hint(),
+        }
+    }
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+> NamedConceptConfiguration for Configuration<E, Mgmt, Storage>
+{
+    fn prefix(mut self, value: &FileName) -> Self {
+        self.value = self.value.prefix(value);
+        self
+    }
+
+    fn get_prefix(&self) -> &FileName {
+        self.value.get_prefix()
+    }
+
+    fn suffix(mut self, value: &FileName) -> Self {
+        self.value = self.value.suffix(value);
+        self
+    }
+
+    fn get_suffix(&self) -> &FileName {
+        self.value.get_suffix()
+    }
+
+    fn path_hint(mut self, value: &Path) -> Self {
+        self.value = self.value.path_hint(value);
+        self
+    }
+
+    fn get_path_hint(&self) -> &Path {
+        self.value.get_path_hint()
+    }
+}
+
+#[derive(Debug)]
+pub struct EventImpl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage>,
+    W: WaiterInterface<E, Mgmt, Storage>,
+> {
+    _data_1: PhantomData<E>,
+    _data_2: PhantomData<Mgmt>,
+    _data_3: PhantomData<Storage>,
+    _data_4: PhantomData<H>,
+    _data_5: PhantomData<W>,
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage>,
+    W: WaiterInterface<E, Mgmt, Storage>,
+> NamedConceptMgmt for EventImpl<E, Mgmt, Storage, H, W>
+{
+    type Configuration = Configuration<E, Mgmt, Storage>;
+
+    fn does_exist_cfg(
+        name: &FileName,
+        cfg: &Self::Configuration,
+    ) -> Result<bool, crate::named_concept::NamedConceptDoesExistError> {
+        Storage::does_exist_cfg(name, &cfg.to_storage_config())
+    }
+
+    fn list_cfg(
+        cfg: &Self::Configuration,
+    ) -> Result<Vec<FileName>, crate::named_concept::NamedConceptListError> {
+        Storage::list_cfg(&cfg.to_storage_config())
+    }
+
+    unsafe fn remove_cfg(
+        name: &FileName,
+        cfg: &Self::Configuration,
+    ) -> Result<bool, crate::named_concept::NamedConceptRemoveError> {
+        let origin = "EventImpl::remove_cfg()";
+        let msg = "Failed to remove event";
+        let result = unsafe { W::remove(name, &cfg.to_trigger_config()) }.inspect_err(|e| {
+            debug!(from origin, "{msg} since the trigger mechanism could not be removed. [{e:?}]");
+        });
+
+        match unsafe { Storage::remove_cfg(name, &cfg.to_storage_config()) }.inspect_err(|e| {
+            debug!(from origin, "{msg} since the management storage could not be removed. [{e:?}]");
+        }) {
+            Ok(true) => result,
+            Ok(false) => {
+                if result.is_err() {
+                    result
+                } else {
+                    Ok(false)
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn remove_path_hint(
+        value: &Path,
+    ) -> Result<(), crate::named_concept::NamedConceptPathHintRemoveError> {
+        let _ = Storage::remove_path_hint(value);
+        W::remove_path_hint(value)
+    }
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage>,
+    W: WaiterInterface<E, Mgmt, Storage>,
+> Event<E> for EventImpl<E, Mgmt, Storage, H, W>
+{
+    type Listener = Waiter<E, Mgmt, Storage, W>;
+    type ListenerBuilder = WaiterBuilder<E, Mgmt, Storage, H, W>;
+    type Notifier = Handle<E, Mgmt, Storage, H>;
+    type NotifierBuilder = HandleBuilder<E, Mgmt, Storage, H, W>;
+
+    fn does_support_persistency() -> bool {
+        Storage::does_support_persistency()
+    }
+}
+
+#[derive(Debug)]
+pub struct Handle<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage>,
+> {
+    handle: H,
+    storage: Storage,
+    fail_when_buffer_is_full: bool,
+    _data_1: PhantomData<E>,
+    _data_2: PhantomData<Mgmt>,
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage> + FileDescriptorBased,
+> FileDescriptorBased for Handle<E, Mgmt, Storage, H>
+{
+    fn file_descriptor(&self) -> &iceoryx2_bb_posix::file_descriptor::FileDescriptor {
+        self.handle.file_descriptor()
+    }
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage> + SynchronousMultiplexing,
+> SynchronousMultiplexing for Handle<E, Mgmt, Storage, H>
+{
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage>,
+> Abandonable for Handle<E, Mgmt, Storage, H>
+{
+    unsafe fn abandon_in_place(mut this: NonNull<Self>) {
+        let this = unsafe { this.as_mut() };
+        unsafe { H::abandon_in_place(NonNull::from_mut(&mut this.handle)) };
+        unsafe { Storage::abandon_in_place(NonNull::from_mut(&mut this.storage)) };
+    }
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage>,
+> NamedConcept for Handle<E, Mgmt, Storage, H>
+{
+    fn name(&self) -> &FileName {
+        self.storage.name()
+    }
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage>,
+> Notifier<E> for Handle<E, Mgmt, Storage, H>
+{
+    fn event_id_max(&self) -> EventId {
+        self.storage.get().event_id_max
+    }
+
+    fn max_event_count(&self) -> u64 {
+        self.storage.get().event.max_event_count()
+    }
+
+    fn notify(&self, event_id: EventId) -> Result<(), super::NotifierNotifyError> {
+        let msg = "Unable to notify";
+        let mgmt = self.storage.get();
+
+        fail!(from self,
+              when mgmt.event.activate(event_id),
+              "{msg} with {event_id:?} since the activation failed.");
+
+        let set_state_to_notified = || {
+            let _ = mgmt.notification_state.compare_exchange(
+                NOTIFICATION_STATE_PENDING,
+                NOTIFICATION_STATE_NOTIFIED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+        };
+        let notify = || -> Result<(), NotifierNotifyError> {
+            match self.handle.notify() {
+                Ok(()) => {
+                    set_state_to_notified();
+                    Ok(())
+                }
+                Err(NotifierNotifyError::BufferIsFull) => {
+                    if self.fail_when_buffer_is_full {
+                        fail!(from self, with NotifierNotifyError::BufferIsFull,
+                        "{msg} with {event_id:?} since the buffer is full.");
+                    } else {
+                        set_state_to_notified();
+                        Ok(())
+                    }
+                }
+                Err(e) => {
+                    fail!(from self, with e,
+                            "{msg} with {event_id:?} due to {e:?}.");
+                }
+            }
+        };
+
+        match mgmt.notification_state.compare_exchange(
+            NOTIFICATION_STATE_IDLE,
+            NOTIFICATION_STATE_PENDING,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Err(NOTIFICATION_STATE_NOTIFIED) => Ok(()),
+            Ok(_) | Err(_) => notify(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Waiter<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    W: WaiterInterface<E, Mgmt, Storage>,
+> {
+    waiter: W,
+    storage: Storage,
+    _data_1: PhantomData<E>,
+    _data_2: PhantomData<Mgmt>,
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    W: WaiterInterface<E, Mgmt, Storage> + FileDescriptorBased,
+> FileDescriptorBased for Waiter<E, Mgmt, Storage, W>
+{
+    fn file_descriptor(&self) -> &iceoryx2_bb_posix::file_descriptor::FileDescriptor {
+        self.waiter.file_descriptor()
+    }
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    W: WaiterInterface<E, Mgmt, Storage> + SynchronousMultiplexing,
+> SynchronousMultiplexing for Waiter<E, Mgmt, Storage, W>
+{
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    W: WaiterInterface<E, Mgmt, Storage>,
+> Abandonable for Waiter<E, Mgmt, Storage, W>
+{
+    unsafe fn abandon_in_place(mut this: NonNull<Self>) {
+        let this = unsafe { this.as_mut() };
+        unsafe { W::abandon_in_place(NonNull::from_mut(&mut this.waiter)) };
+        unsafe { Storage::abandon_in_place(NonNull::from_mut(&mut this.storage)) };
+    }
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    W: WaiterInterface<E, Mgmt, Storage>,
+> NamedConcept for Waiter<E, Mgmt, Storage, W>
+{
+    fn name(&self) -> &FileName {
+        self.storage.name()
+    }
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    W: WaiterInterface<E, Mgmt, Storage>,
+> Waiter<E, Mgmt, Storage, W>
+{
+    fn drain_events<F: FnMut(EventActivation), Fw: FnMut() -> Result<(), ListenerWaitError>>(
+        &self,
+        msg: &str,
+        mut callback: F,
+        mut wait_call: Fw,
+    ) -> Result<u64, ListenerWaitError> {
+        let mgmt = self.storage.get();
+
+        let mut drain = || -> Result<u64, ListenerWaitError> {
+            fail!(from self, when self.waiter.empty_buffer(),
+                "{msg} since the wait buffer could not be emptied.");
+            Ok(self.storage.get().event.drain(&mut callback))
+        };
+
+        if mgmt
+            .notification_state
+            .compare_exchange(
+                NOTIFICATION_STATE_NOTIFIED,
+                NOTIFICATION_STATE_IDLE,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            return drain();
+        }
+
+        fail!(from self, when wait_call(),
+            "{msg} since the underlying wait call failed.");
+        mgmt.notification_state
+            .store(NOTIFICATION_STATE_IDLE, Ordering::SeqCst);
+        drain()
+    }
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    W: WaiterInterface<E, Mgmt, Storage>,
+> Listener<E> for Waiter<E, Mgmt, Storage, W>
+{
+    const IS_FILE_DESCRIPTOR_BASED: bool = W::IS_FILE_DESCRIPTOR_BASED;
+
+    fn max_event_count(&self) -> u64 {
+        self.storage.get().event.max_event_count()
+    }
+
+    fn try_wait<F: FnMut(EventActivation)>(&self, callback: F) -> Result<u64, ListenerWaitError> {
+        let msg = "Failed to try wait and acquire all event notifications";
+        self.drain_events(msg, callback, || self.waiter.try_wait())
+    }
+
+    fn timed_wait<F: FnMut(EventActivation)>(
+        &self,
+        callback: F,
+        timeout: Duration,
+    ) -> Result<u64, ListenerWaitError> {
+        let msg = "Failed to wait with timeout and acquire all event notifications";
+        self.drain_events(msg, callback, || self.waiter.timed_wait(timeout))
+    }
+
+    fn blocking_wait<F: FnMut(EventActivation)>(
+        &self,
+        callback: F,
+    ) -> Result<u64, ListenerWaitError> {
+        let msg = "Failed to wait with timeout and acquire all event notifications";
+        self.drain_events(msg, callback, || self.waiter.blocking_wait())
+    }
+}
+
+#[derive(Debug)]
+pub struct HandleBuilder<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage>,
+    W: WaiterInterface<E, Mgmt, Storage>,
+> {
+    name: FileName,
+    config: Configuration<E, Mgmt, Storage>,
+    fail_when_buffer_is_full: bool,
+    timeout: Duration,
+    _data_1: PhantomData<H>,
+    _data_2: PhantomData<W>,
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage>,
+    W: WaiterInterface<E, Mgmt, Storage>,
+> NamedConceptBuilder<EventImpl<E, Mgmt, Storage, H, W>> for HandleBuilder<E, Mgmt, Storage, H, W>
+{
+    fn new(name: &FileName) -> Self {
+        Self {
+            name: *name,
+            timeout: Duration::ZERO,
+            fail_when_buffer_is_full: false,
+            config: Configuration::default(),
+            _data_1: PhantomData,
+            _data_2: PhantomData,
+        }
+    }
+
+    fn config(
+        mut self,
+        config: &<EventImpl<E, Mgmt, Storage, H, W> as NamedConceptMgmt>::Configuration,
+    ) -> Self {
+        self.config = config.clone();
+        self
+    }
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage>,
+    W: WaiterInterface<E, Mgmt, Storage>,
+> NotifierBuilder<E, EventImpl<E, Mgmt, Storage, H, W>> for HandleBuilder<E, Mgmt, Storage, H, W>
+{
+    fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    fn fail_when_buffer_is_full(mut self, value: bool) -> Self {
+        self.fail_when_buffer_is_full = value;
+        self
+    }
+
+    fn open(
+        self,
+    ) -> Result<<EventImpl<E, Mgmt, Storage, H, W> as Event<E>>::Notifier, NotifierOpenError> {
+        let msg = "Failed to open notifier";
+        let storage = match Storage::Builder::new(&self.name)
+            .config(&self.config.to_storage_config())
+            .has_ownership(false)
+            .timeout(self.timeout)
+            .open(AccessMode::ReadWrite)
+        {
+            Ok(storage) => storage,
+            Err(DynamicStorageOpenError::DoesNotExist) => {
+                fail!(from self, with NotifierOpenError::DoesNotExist,
+                    "{msg} since the corresponding listener does not exist.");
+            }
+            Err(DynamicStorageOpenError::InitializationNotYetFinalized) => {
+                fail!(from self, with NotifierOpenError::InitializationNotYetFinalized,
+                    "{msg} since the initialization of the listener is not yet finalized.");
+            }
+            Err(DynamicStorageOpenError::VersionMismatch) => {
+                fail!(from self, with NotifierOpenError::VersionMismatch,
+                    "{msg} since the iceoryx2 version of the listener does not match.");
+            }
+            Err(DynamicStorageOpenError::InternalError) => {
+                fail!(from self, with NotifierOpenError::InternalFailure,
+                    "{msg} due to an internal failure.");
+            }
+        };
+
+        let handle = H::open(&self.name, &self.config.to_trigger_config(), unsafe {
+            storage.get().handle.assume_init_ref()
+        })?;
+
+        Ok(Handle {
+            storage,
+            handle,
+            fail_when_buffer_is_full: self.fail_when_buffer_is_full,
+            _data_1: PhantomData,
+            _data_2: PhantomData,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct WaiterBuilder<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage>,
+    W: WaiterInterface<E, Mgmt, Storage>,
+> {
+    name: FileName,
+    event_id_max: EventId,
+    config: Configuration<E, Mgmt, Storage>,
+    _data_1: PhantomData<H>,
+    _data_2: PhantomData<W>,
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage>,
+    W: WaiterInterface<E, Mgmt, Storage>,
+> NamedConceptBuilder<EventImpl<E, Mgmt, Storage, H, W>> for WaiterBuilder<E, Mgmt, Storage, H, W>
+{
+    fn new(name: &FileName) -> Self {
+        Self {
+            name: *name,
+            event_id_max: DEFAULT_MAX_EVENT_ID,
+            config: Configuration::default(),
+            _data_1: PhantomData,
+            _data_2: PhantomData,
+        }
+    }
+
+    fn config(
+        mut self,
+        config: &<EventImpl<E, Mgmt, Storage, H, W> as NamedConceptMgmt>::Configuration,
+    ) -> Self {
+        self.config = config.clone();
+        self
+    }
+}
+
+impl<
+    E: EventState,
+    Mgmt: ZeroCopySend + Send + Sync + Debug,
+    Storage: DynamicStorage<State<E, Mgmt>>,
+    H: HandlerInterface<E, Mgmt, Storage>,
+    W: WaiterInterface<E, Mgmt, Storage>,
+> ListenerBuilder<E, EventImpl<E, Mgmt, Storage, H, W>> for WaiterBuilder<E, Mgmt, Storage, H, W>
+{
+    fn event_id_max(mut self, id: EventId) -> Self {
+        self.event_id_max = id;
+        self
+    }
+
+    fn create(
+        self,
+    ) -> Result<<EventImpl<E, Mgmt, Storage, H, W> as Event<E>>::Listener, ListenerCreateError>
+    {
+        let msg = "Failed to create listener";
+        let state_size = E::memory_size(self.event_id_max.as_value() + 1);
+        let mut waiter = None;
+        let storage = match Storage::Builder::new(&self.name)
+            .config(&self.config.to_storage_config())
+            .has_ownership(true)
+            .supplementary_size(state_size)
+            .initializer(|value, allocator| {
+                value.write(State {
+                    event: unsafe { E::new_uninit(self.event_id_max.as_value() + 1) },
+                    handle: MaybeUninit::uninit(),
+                    event_id_max: self.event_id_max,
+                    notification_state: AtomicU8::new(NOTIFICATION_STATE_IDLE)
+                });
+
+                unsafe { value.assume_init_mut().event.init(allocator).unwrap() };
+                match W::create(
+                    &self.name,
+                    &self.config.to_trigger_config(),
+                    &mut unsafe { value.assume_init_mut() }.handle,
+                ) {
+                    Ok(w) => waiter = Some(w),
+                    Err(e) => {
+                        debug!(from self, "{msg} since the underlying mechanism could not be initialized. [{e:?}]");
+                        return false;
+                    }
+                };
+
+                true
+            })
+            .create()
+        {
+            Ok(storage) => storage,
+            Err(DynamicStorageCreateError::AlreadyExists) => {
+                fail!(from self, with ListenerCreateError::AlreadyExists,
+                    "{msg} since it already exists.");
+            }
+            Err(DynamicStorageCreateError::RootDirectoryCreationFailure,) => {
+                fail!(from self, with ListenerCreateError::RootDirectoryCreationFailure,
+                    "{msg} since the creation of the underlying iceoryx2 root directory failed.");
+            }
+            Err(DynamicStorageCreateError::InsufficientPermissions) => {
+                fail!(from self, with ListenerCreateError::InsufficientPermissions,
+                    "{msg} due to insufficient permissions.");
+            }
+            Err(DynamicStorageCreateError::InitializationFailed) => {
+                fail!(from self, with ListenerCreateError::InternalFailure,
+                    "{msg} since the initialization of the underlying waiter failed.");
+            }
+            Err(DynamicStorageCreateError::InternalError) => {
+                fail!(from self, with ListenerCreateError::InternalFailure,
+                    "{msg} due to an internal error.");
+            }
+        };
+
+        Ok(Waiter {
+            storage,
+            waiter: waiter.unwrap(),
+            _data_1: PhantomData,
+            _data_2: PhantomData,
+        })
+    }
+}

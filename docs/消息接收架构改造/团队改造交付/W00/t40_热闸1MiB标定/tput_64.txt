@@ -1,0 +1,296 @@
+[33m[dzIPC][view_queue] queue_size = 1024 超过钉上限, 被钉到 10: chunk 池每尺寸档只有 40 块且全机共享(建 route 不带 prefix), 队列配得比池大就会把池吃干。两个钉面同用此上限: view 队列钉到 10; adopt 借样(schema-less 话题的 DZFlat 经 msg_queue_)配额同为 10, 配额满即自动物化拷贝 —— 零拷贝只在配额内生效, 超额每消息多一次拷贝。见 docs/shm_chunk_pool_occupancy_plan.md §3 步骤③与 UF-012; EnableViewQueuePin(false) 可恢复原值。[0m
+RecvWorker[0]: idle exit (no routes for >= 1000 ms)
+RecvWorker[3]: idle exit (no routes for >= 1000 ms)
+RecvWorker[6]: idle exit (no routes for >= 1000 ms)
+RecvWorker[5]: idle exit (no routes for >= 1000 ms)
+RecvWorker[4]: idle exit (no routes for >= 1000 ms)
+RecvWorker[8]: idle exit (no routes for >= 1000 ms)
+RecvWorker[9]: idle exit (no routes for >= 1000 ms)
+RecvWorker[10]: idle exit (no routes for >= 1000 ms)
+RecvWorker[11]: idle exit (no routes for >= 1000 ms)
+RecvWorker[12]: idle exit (no routes for >= 1000 ms)
+RecvWorker[7]: idle exit (no routes for >= 1000 ms)
+RecvWorker[2]: idle exit (no routes for >= 1000 ms)
+RecvWorker[1]: idle exit (no routes for >= 1000 ms)
+RecvWorker[18]: idle exit (no routes for >= 1000 ms)
+RecvWorker[19]: idle exit (no routes for >= 1000 ms)
+RecvWorker[20]: idle exit (no routes for >= 1000 ms)
+RecvWorker[22]: idle exit (no routes for >= 1000 ms)
+RecvWorker[23]: idle exit (no routes for >= 1000 ms)
+RecvWorker[16]: idle exit (no routes for >= 1000 ms)
+RecvWorker[25]: idle exit (no routes for >= 1000 ms)
+RecvWorker[26]: idle exit (no routes for >= 1000 ms)
+RecvWorker[27]: idle exit (no routes for >= 1000 ms)
+RecvWorker[28]: idle exit (no routes for >= 1000 ms)
+RecvWorker[24]: idle exit (no routes for >= 1000 ms)
+RecvWorker[15]: idle exit (no routes for >= 1000 ms)
+RecvWorker[29]: idle exit (no routes for >= 1000 ms)
+RecvWorker[31]: idle exit (no routes for >= 1000 ms)
+RecvWorker[17]: idle exit (no routes for >= 1000 ms)
+RecvWorker[13]: idle exit (no routes for >= 1000 ms)
+RecvWorker[14]: idle exit (no routes for >= 1000 ms)
+RecvWorker[21]: idle exit (no routes for >= 1000 ms)
+[33m[dzIPC][view_queue] queue_size = 1024 超过钉上限, 被钉到 10: chunk 池每尺寸档只有 40 块且全机共享(建 route 不带 prefix), 队列配得比池大就会把池吃干。两个钉面同用此上限: view 队列钉到 10; adopt 借样(schema-less 话题的 DZFlat 经 msg_queue_)配额同为 10, 配额满即自动物化拷贝 —— 零拷贝只在配额内生效, 超额每消息多一次拷贝。见 docs/shm_chunk_pool_occupancy_plan.md §3 步骤③与 UF-012; EnableViewQueuePin(false) 可恢复原值。[0m
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 1 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 1024 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 2048 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 3072 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 4096 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 5120 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 6144 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 7168 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 8192 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 9216 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 10240 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 11264 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 12288 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 13312 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 14336 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 15360 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 16384 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 17408 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 18432 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 19456 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 20480 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 21504 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 22528 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 23552 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 24576 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 25600 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 26624 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 27648 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 28672 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 29696 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 30720 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 31744 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 32768 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 33792 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 34816 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 35840 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 36864 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 37888 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 38912 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 39936 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 40960 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 41984 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 43008 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 44032 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 45056 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 46080 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 47104 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 48128 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 49152 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 50176 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 51200 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 52224 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 53248 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 54272 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 55296 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 56320 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 57344 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 58368 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 59392 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 60416 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 61440 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 62464 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 63488 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 64512 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 65536 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 66560 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 67584 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 68608 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 69632 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 70656 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 71680 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 72704 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 73728 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 74752 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 75776 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 76800 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 77824 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 78848 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 79872 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 80896 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 81920 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 82944 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 83968 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 84992 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 86016 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 87040 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 88064 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 89088 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 90112 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 91136 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 92160 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 93184 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 94208 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 95232 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 96256 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 97280 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 98304 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 99328 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 100352 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 101376 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 102400 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 103424 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 104448 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 105472 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 106496 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 107520 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 108544 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 109568 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 110592 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 111616 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 112640 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 113664 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 114688 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 115712 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 116736 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 117760 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 118784 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 119808 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 120832 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 121856 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 122880 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 123904 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 124928 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 125952 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 126976 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 128000 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 129024 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 130048 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 131072 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 132096 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 133120 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 134144 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 135168 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 136192 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 137216 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 138240 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 139264 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 140288 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 141312 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 142336 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 143360 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 144384 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 145408 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 146432 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 147456 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 148480 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 149504 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 150528 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 151552 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 152576 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 153600 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 154624 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 155648 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 156672 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 157696 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 158720 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 159744 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 160768 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 161792 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 162816 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 163840 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 164864 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 165888 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 166912 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 167936 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 168960 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 169984 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 171008 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 172032 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 173056 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 174080 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 175104 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 176128 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 177152 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 178176 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 179200 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 180224 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+chunk pool exhausted: kind = send, chunk_size = 1024, size = 121, pool capacity = 40, count = 181248 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+RecvWorker[3]: idle exit (no routes for >= 1000 ms)
+RecvWorker[2]: idle exit (no routes for >= 1000 ms)
+RecvWorker[27]: idle exit (no routes for >= 1000 ms)
+RecvWorker[31]: idle exit (no routes for >= 1000 ms)
+RecvWorker[26]: idle exit (no routes for >= 1000 ms)
+RecvWorker[0]: idle exit (no routes for >= 1000 ms)
+RecvWorker[21]: idle exit (no routes for >= 1000 ms)
+RecvWorker[19]: idle exit (no routes for >= 1000 ms)
+RecvWorker[30]: idle exit (no routes for >= 1000 ms)
+RecvWorker[1]: idle exit (no routes for >= 1000 ms)
+RecvWorker[23]: idle exit (no routes for >= 1000 ms)
+RecvWorker[24]: idle exit (no routes for >= 1000 ms)
+RecvWorker[25]: idle exit (no routes for >= 1000 ms)
+RecvWorker[17]: idle exit (no routes for >= 1000 ms)
+RecvWorker[20]: idle exit (no routes for >= 1000 ms)
+RecvWorker[29]: idle exit (no routes for >= 1000 ms)
+RecvWorker[18]: idle exit (no routes for >= 1000 ms)
+RecvWorker[16]: idle exit (no routes for >= 1000 ms)
+RecvWorker[10]: idle exit (no routes for >= 1000 ms)
+RecvWorker[14]: idle exit (no routes for >= 1000 ms)
+RecvWorker[28]: idle exit (no routes for >= 1000 ms)
+RecvWorker[15]: idle exit (no routes for >= 1000 ms)
+RecvWorker[9]: idle exit (no routes for >= 1000 ms)
+RecvWorker[8]: idle exit (no routes for >= 1000 ms)
+RecvWorker[6]: idle exit (no routes for >= 1000 ms)
+RecvWorker[5]: idle exit (no routes for >= 1000 ms)
+RecvWorker[4]: idle exit (no routes for >= 1000 ms)
+RecvWorker[13]: idle exit (no routes for >= 1000 ms)
+RecvWorker[12]: idle exit (no routes for >= 1000 ms)
+RecvWorker[11]: idle exit (no routes for >= 1000 ms)
+RecvWorker[7]: idle exit (no routes for >= 1000 ms)
+======================================================================
+ dzIPC 通信性能测试
+======================================================================
+  test_time             : 2026-09-30 04:49:12+0800
+  hostname              : zwc-leju
+  os                    : Linux
+  kernel                : 6.8.0-138-generic
+  arch                  : x86_64
+  distro                : Ubuntu 22.04.5 LTS
+  cpu_model             : Intel(R) Core(TM) i9-14900KF
+  cpu_vendor            : GenuineIntel
+  cpu_logical_cores     : 32
+  cpu_physical_cores    : 24
+  cpu_mhz_now           : 799.749
+  cpu_mhz_max           : 5700
+  cpu_governor          : powersave
+  cpu_cache             : L1d=48K, L1i=32K, L2=2048K, L3=36864K
+  cpu_flags             : sse4_2,avx,avx2,constant_tsc,nonstop_tsc,rdtscp
+  mem_total             : 65647728 kB
+  mem_available         : 35057592 kB
+  hugepages_thp         : always [madvise] never
+  dev_shm_size          : 31.30 GiB
+  net_rmem_max          : 536870912
+  net_wmem_max          : 536870912
+  net_rmem_default      : 536870912
+  net_netdev_backlog    : 1000
+  isolcpus              : no
+  loadavg_1min_at_start : 4.37
+  compiler              : 11.4.0
+  build_type            : release (NDEBUG, -O2)
+  cxx_standard          : 201703
+  nodelet_fast_path     : disabled
+  process_model         : multi-process (fork+exec), 收发分属不同进程
+----------------------------------------------------------------------
+  测量时长/用例        : 5 s
+  预热时长/用例        : 0.5 s
+  时延用例发送速率     : 1000 Hz
+  payload 扫描         : 64 B
+  输出目录             : /tmp/hotpath_gate/perf_64
+======================================================================
+
+---- pubsub_shm ----
+  pubsub_shm_64B_lat                     1000 msg/s      0.1 MB/s  p50=    5.13  p99=   12.12  p999= 1358.42  max=  2358.32 us  丢包=  0.00%  CPU=1.36
+  pubsub_shm_64B_tput                  163231 msg/s     10.0 MB/s  p50=  558.91  p99= 1008.81  p999= 4108.59  max=  9015.92 us  丢包= 68.16%  CPU=1.80
+
+======================================================================
+  用例总数 : 2   失败 : 0
+  结果 CSV : /tmp/hotpath_gate/perf_64/results.csv
+  结果 JSON: /tmp/hotpath_gate/perf_64/results.json
+  硬件配置 : /tmp/hotpath_gate/perf_64/hardware.txt
+  时延样本 : /tmp/hotpath_gate/perf_64/samples/
+
+  绘图: python3 scripts/plot_dzipc_perf.py /tmp/hotpath_gate/perf_64
+======================================================================

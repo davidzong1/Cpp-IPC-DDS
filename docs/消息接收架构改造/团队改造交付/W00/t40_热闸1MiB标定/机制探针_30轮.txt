@@ -1,0 +1,32 @@
+# 机制探针  开始 04:38:40
+queue1024_default  r1  lat=0/5s  tput: sent=7114   recv=7114   failed=0    cpu=1.496
+queue1024_default  r2  lat=5001/5s  tput: sent=6944   recv=6944   failed=0    cpu=1.499
+queue1024_default  r3  lat=5001/5s  tput: sent=7189   recv=7189   failed=0    cpu=1.506
+queue1024_default  r4  lat=5001/5s  tput: sent=7062   recv=7062   failed=0    cpu=1.504
+queue1024_default  r5  lat=5001/5s  tput: sent=2262   recv=2262   failed=34   cpu=1.307
+queue1024_default  r6  lat=5001/5s  tput: sent=2409   recv=2409   failed=33   cpu=1.306
+queue4096          r1  lat=5001/5s  tput: sent=7102   recv=7102   failed=0    cpu=1.503
+queue4096          r2  lat=5001/5s  tput: sent=7162   recv=7162   failed=0    cpu=1.499
+queue4096          r3  lat=5001/5s  tput: sent=6896   recv=6896   failed=0    cpu=1.494
+queue4096          r4  lat=5001/5s  tput: sent=3354   recv=3354   failed=27   cpu=1.343
+queue4096          r5  lat=0/5s  tput: sent=7048   recv=7048   failed=0    cpu=1.499
+queue4096          r6  lat=5001/5s  tput: sent=7094   recv=7094   failed=0    cpu=1.499
+pubtimeout5        r1  lat=0/5s  tput: sent=0      recv=0      failed=950  cpu=1.227
+pubtimeout5        r2  lat=5001/5s  tput: sent=0      recv=0      failed=972  cpu=1.225
+pubtimeout5        r3  lat=5001/5s  tput: sent=7325   recv=7325   failed=12   cpu=1.498
+pubtimeout5        r4  lat=5001/5s  tput: sent=5879   recv=5879   failed=20   cpu=1.497
+pubtimeout5        r5  lat=5001/5s  tput: sent=7046   recv=7046   failed=21   cpu=1.490
+pubtimeout5        r6  lat=5000/5s  tput: sent=1126   recv=1126   failed=763  cpu=1.284
+besteffort         r1  lat=5001/5s  tput: sent=29566  recv=5276   failed=0    cpu=2.205
+besteffort         r2  lat=5001/5s  tput: sent=29723  recv=5285   failed=0    cpu=2.205
+besteffort         r3  lat=5001/5s  tput: sent=28237  recv=5327   failed=0    cpu=2.205
+besteffort         r4  lat=5001/5s  tput: sent=28113  recv=5223   failed=0    cpu=2.205
+besteffort         r5  lat=5001/5s  tput: sent=29221  recv=5122   failed=0    cpu=2.205
+besteffort         r6  lat=5001/5s  tput: sent=29239  recv=5160   failed=0    cpu=2.205
+payload64          r1  lat=5001/5s  tput: sent=2471161 recv=843680 failed=0    cpu=1.798
+payload64          r2  lat=5001/5s  tput: sent=2554119 recv=845064 failed=0    cpu=1.799
+payload64          r3  lat=5001/5s  tput: sent=2569910 recv=854347 failed=0    cpu=1.798
+payload64          r4  lat=5001/5s  tput: sent=2587205 recv=855291 failed=0    cpu=1.802
+payload64          r5  lat=5001/5s  tput: sent=2538188 recv=817494 failed=0    cpu=1.791
+payload64          r6  lat=5001/5s  tput: sent=2618946 recv=824922 failed=0    cpu=1.796
+# 结束 04:44:45

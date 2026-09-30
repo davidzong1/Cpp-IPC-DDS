@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <climits>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -342,15 +343,29 @@ public:
 
         while (remaining_ms > 0)
         {
-            fd_set read_fds;
-            FD_ZERO(&read_fds);
-            FD_SET(server_fd, &read_fds);
+            /* W07: 这里等的是**一个** fd, 用 poll 而不是 select/FD_SET。
+             *
+             * select 的 fd_set 是定长位图: fd >= FD_SETSIZE(1024) 时 FD_SET 会走 glibc 的
+             * __fdelt_chk ⇒ "*** buffer overflow detected ***" + SIGABRT。socket 侧每个
+             * 订阅者约 2 个 fd, 千路订阅即 ~2000 个 fd, 实测在 fd=1024 处必崩
+             * (gdb 栈: __fdelt_chk ← UDPNode::receive ← recv_chunk_common_impl); 且本函数
+             * 无论后面有没有数据都会先填位图, 所以 worker 路径同样躲不掉。
+             * poll 无 fd 上限、无位图, 与本类 readable() 同一个原语(<poll.h> 已 include),
+             * 等待单 fd 时也不存在 O(n) 扫描面。
+             *
+             * 语义逐条对齐原 select 分支: 有事件 ⇒ 照旧走 recvfrom(含 EAGAIN 重试);
+             * 0 ⇒ 真超时返回空; <0 且 EINTR ⇒ 刷新剩余时间后重试(<5 次); 其余错误 ⇒ 返回空。
+             * poll 的 timeout 是 int 毫秒(原 timeval 能装更大的 tm), 故超 INT_MAX 时截断,
+             * 由下方 refresh_time 的剩余时间循环续等 —— 总等待时长不变。 */
+            pollfd pfd{};
+            pfd.fd = server_fd;
+            pfd.events = POLLIN;
+            pfd.revents = 0;
 
-            timeval timeout;
-            timeout.tv_sec = static_cast<long>(remaining_ms / 1'000);
-            timeout.tv_usec = static_cast<long>((remaining_ms % 1'000) * 1'000);
-
-            int ret = ::select(server_fd + 1, &read_fds, nullptr, nullptr, &timeout);
+            const int timeout_ms = (remaining_ms > static_cast<std::uint64_t>(INT_MAX))
+                                       ? INT_MAX
+                                       : static_cast<int>(remaining_ms);
+            int ret = ::poll(&pfd, 1, timeout_ms);
 
             if (ret > 0)
             {

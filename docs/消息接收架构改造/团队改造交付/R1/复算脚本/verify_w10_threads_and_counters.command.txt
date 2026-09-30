@@ -1,0 +1,10 @@
+# R1/t31 独立复算：线程数构成（反证 threads=34 的组成）与「无写入点计数」最小反例
+#
+# [1] 线程数构成 —— 两种创建顺序对照（谁先建，谁就是忙线程）
+#     源码见 verify_w10_threads.cpp（同一份代码按宏切换顺序）
+#     a) 池先起、调度器后取  ⇒ 忙线程是**最后创建**的 #34
+#     b) 调度器先取、池后起  ⇒ 忙线程是**第二个创建**的 #2（= 调度器）
+#     结论：threads=34 = 1 主线程 + 1 调度器 + 32 worker（RecvWorkerPool::start(32)）
+#
+# [2] 计数最小反例 —— 池被明确耗尽，而 §13.2#3 要求的 chunk_exhausted 仍未动
+#     ./build/t31/chunkprobe   （源码 verify_w10_chunk_counter.cpp）

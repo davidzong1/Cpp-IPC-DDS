@@ -1,0 +1,2 @@
+files=75 rows=67500 cells=269848 mismatches=0 skipped_rows=38
+skip 的空值组合: {('delivery_ns',): 38}

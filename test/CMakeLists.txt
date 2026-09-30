@@ -31,6 +31,11 @@ list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/dzflat_benchmark.cpp")
 list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/dzflat_tx_benchmark.cpp")
 list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/dzflat_py_publisher.cpp")
 list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/pool_attribution_benchmark.cpp")
+# W02 统一跨进程基准: 自带 main(), 同上必须在 GLOB 列表里剔除, 否则会与 gtest_main 冲突。
+list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/xproc_benchmark.cpp")
+# W02 自检用例也是显式 add_executable（要注入 W02_BENCH_BIN 与依赖基准 target），
+# 所以同样从 GLOB 里剔除，避免重复定义 target。
+list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/test_w02_xproc_benchmark.cpp")
 file(GLOB HEAD_FILES ${LIBIPC_PROJECT_DIR}/test/*.h)
 
 # 查找 pthread 库
@@ -357,3 +362,453 @@ if(UNIX AND NOT APPLE)
 endif()
 set_target_properties(dzflat_py_publisher PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 message(STATUS "Created helper executable: dzflat_py_publisher")
+
+# ================================================================
+# W03 测量口径与路径观测 (docs/消息接收架构改造/团队改造方案_性能证据闭环与SHM规模化.md §4 W03)
+# target 由上面的 file(GLOB) 自动生成, 无需 add_executable。命名规范同前。
+#
+# 用例覆盖: 单机跨进程单调时钟一致性、已知线程活动的上下文切换计入(且必须超过
+# /proc/<pid>/status 的主线程参考值)、新生/退出线程完整性标注、子进程 CPU/切换与
+# wait4 rusage 对照、低开销计数与诊断门控、三种空闲状态分类、相位与 >=60s 窗口判定、
+# 恢复首包延迟统计、路径证据不足标"未确认"、字段定义/JSON/CSV schema。
+# ================================================================
+add_test(NAME test_w03_measurement COMMAND test_w03_measurement)
+
+# ================================================================
+# W00 构建闸门补登记 (docs/消息接收架构改造/团队改造交付/基线与门槛.md §4.4)
+# ----------------------------------------------------------------
+# 缺口: test_dzflat_transport / test_dzflat_builder 此前只是 file(GLOB) 造出的
+# target, **未进 CTest**; 前者含跨进程 B 路径用例
+# (CrossProcessRoundTripProvesPositionIndependence, 见 W08/W00 复核),
+# 后者覆盖 chunk 内指针区间/超预算失败/借样归还/B 就地构造。两者不进 CTest
+# 意味着 **B 路径正确性从未被任何自动回归覆盖** —— 与方案 §10.6「假通过防线」
+# 冲突, 故补登记。target 由上方 file(GLOB) 自动生成, 无需 add_executable。
+#
+# 命名规范与前 15 项一致: 与 target 名相同, 不另起别名。
+# 时限 300s: 两者实测各约 3–4s(含 fork 与共享内存建段), 给足余量仅为让死锁
+# 时报超时而非永久挂住构建机, 不是性能判据。
+# 由架构负责人(W00)落地; socket与数据面负责人(W08)提出请求。
+# ================================================================
+add_test(NAME test_dzflat_transport COMMAND test_dzflat_transport)
+add_test(NAME test_dzflat_builder   COMMAND test_dzflat_builder)
+# ⚠️ 共享 chunk 池/DZFlat 段是**全机**资源(每尺寸档 40 块), 且 W08 的验收含
+#    `dzflat_fallback == 0` 与"该路径条数=N、另两条=0"——若邻居把池吃干, 贷款失败会
+#    表现为**假红**(fp 回退计数上升), 反之也可能掩盖真实回退。故三者串行化。
+#    ⛔ 用 RUN_SERIAL 而非 RESOURCE_LOCK: RESOURCE_LOCK 只串行化**同样声明该锁**的用例,
+#    挡不住未声明的邻居(该结论已由 W00 §4.4/D-10 实测确立并被队长采纳为团队判据)。
+set_tests_properties(test_dzflat_transport test_dzflat_builder PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
+
+# ================================================================
+# W04 SHM 接入契约复审 · 可执行竞态与容量偏斜判据
+# (docs/消息接收架构改造/团队改造交付/接口与生命周期.md §6/§9)
+# ----------------------------------------------------------------
+# target 由上面的 file(GLOB) 自动生成, 无需 add_executable。命名规范同前。
+#
+# 为什么必须进 CTest: W04 是 W05/W06 的**共同前置**, 而它守的失效方式全部静默 ——
+#   ① 固定哈希偏斜 ⇒ 某 worker 先满("127 × worker_count 只是上界", 方案 §10.5);
+#   ② 满载 failed 若不归还收包独占 ⇒ 重新注册永久 busy(症状是"某几个话题偶尔收不到");
+#   ③ 恒真 has_pending 无上限 ⇒ 一个坏宿主实现把整个 worker 钉死(饿死邻居不报错);
+#   ④ 一次耗时 recv_once 不可被 200µs 预算抢占 ⇒ 同 worker 邻居确定性延迟(方案 §10.3),
+#      它不是可被容量/线程数"修好"的性能抖动。
+# 手工跑 build/bin/test_lifecycle_contract 进不了任何自动回路。
+#
+# 用例内含真 pub/sub 与 127 条 route 的边界构造(全部落在同一 worker), 实测约 6s;
+# 给 120s 只为在死锁(本套件要抓的失败模式: 注销等 in-flight 自锁)时报超时而非永久
+# 阻塞构建机, 不是性能判据。
+# ================================================================
+add_test(NAME test_lifecycle_contract COMMAND test_lifecycle_contract)
+set_tests_properties(test_lifecycle_contract PROPERTIES TIMEOUT 120)
+
+# ================================================================
+# W07 socket 容量与高 fd (docs/消息接收架构改造/团队改造交付/W07/socket容量与高fd修复_交付.md)
+# target 由上面的 file(GLOB) 自动生成, 无需 add_executable。命名规范同前。
+#
+# 为什么必须进 CTest: 这三个用例守的是**既有缺陷的回归闸** ——
+#   ① select/FD_SET 在 fd 号 >= FD_SETSIZE(1024) 时 abort(实测 __fdelt_chk + SIGABRT),
+#      千路订阅必踩; 这与"订阅个数"无关, 判据是 **fd 号**;
+#   ② info_pool 注册表容量从 512 上调后, 旧/新布局共享段的混合挂载必须**显式拒绝**
+#      而不是静默错解(读到别人的槽位);
+#   ③ 容量/布局/版本三件事必须分别可验, 不能用一个总数掩盖。
+# 手工跑 build/bin/test_socket_high_fd 进不了任何自动回路。
+#
+# ⚠️ 池是全机共享段: test_ipc_info_pool_version 会在**生产段名**上短暂预置一个旧布局段
+#    (必须如此才测得到"拒绝而非静默错解"), 用例结束前已 unlink。故本组用例**不得并行**
+#    —— 对会碰共享段状态的用例用 RUN_SERIAL(见下方说明: 本组里 RESOURCE_LOCK 挡不住
+#    未声明邻居, 实测已复现 test_ipc_info_pool 并行必失败)。
+# ================================================================
+add_test(NAME test_ipc_info_pool COMMAND test_ipc_info_pool)   # 既有测试, 顺带登记(此前未入 ctest)
+add_test(NAME test_ipc_info_pool_layout  COMMAND test_ipc_info_pool_layout)
+add_test(NAME test_ipc_info_pool_version COMMAND test_ipc_info_pool_version)
+add_test(NAME test_socket_high_fd        COMMAND test_socket_high_fd)
+# ⚠️ 实测(2026-09-28, W00 登记复核): test_ipc_info_pool **必须 RUN_SERIAL**。
+# 它的不变式是「尝试前表必须恰好满 kMaxEntries 条」(test_ipc_info_pool.cpp:436 的
+# ASSERT_EQ(snapshot(false).size(), kMaxEntries)); 同机**任何**其他实例释放自己的槽,
+# 该断言就失败并判为"本用例不成立"。`ctest -j4` 全量跑时它被 22 项里的其他套件干扰,
+# 实测复现: Expected 3847 == 4096, 判 FAILED —— 而单独跑稳定 Passed(1.42s)。
+# RESOURCE_LOCK 不够用: 它只串行化**同样声明该锁**的用例, 挡不住未声明的邻居;
+# 用例自己就是为此写了"共享池被外部进程改动…请重跑"的断言, 属设计内可预见的干扰。
+# RUN_SERIAL 把该用例与其余所有测试排开, 只加时间约束、不改用例语义。
+set_tests_properties(test_ipc_info_pool PROPERTIES RUN_SERIAL TRUE)
+# version 用例在生产段名上短暂预置旧布局段(结束前 unlink), 与 layout 同属段级互斥。
+set_tests_properties(test_ipc_info_pool_version PROPERTIES RUN_SERIAL TRUE)
+set_tests_properties(test_socket_high_fd PROPERTIES TIMEOUT 300)   # 实测 ~3.4s(含千路+高 fd 子进程)
+
+# ================================================================
+# W02 统一跨进程基准（docs/消息接收架构改造/团队改造方案_性能证据闭环与SHM规模化.md §4 W02）
+# ----------------------------------------------------------------
+# 自带 main()，不是 gtest；因此必须同时在上面的 file(GLOB) 列表里 REMOVE_ITEM，
+# 否则会被 GLOB 收成 gtest 目标并与自带 main() 冲突（与 ipc_benchmark 同构）。
+#
+# 为什么目标名不叫 w02_benchmark：目录里已有的 w02_dds_types.{c,h} 是 idlc 生成的
+# DDS 类型（同一工作包），target 名前缀保持一致便于检索。
+#
+# CycloneDDS 是**可选**依赖：找不到头/库时只编 dzIPC 三档（TLV / DZFlat A / DZFlat B），
+# 并在配置输出里显式标注关闭（不做静默降级 —— 方案 §10.6 的假通过防线）。
+# 用法：
+#   cmake -S . -B build && cmake --build build --target xproc_benchmark
+#   build/bin/xproc_benchmark --smoke
+# 可选指定本机 CycloneDDS 前缀：
+#   -DW02_CYCLONEDDS_ROOT=/path/to/cyclonedds
+# ================================================================
+set(W02_CYCLONEDDS_ROOT "/home/zwc/branch/lejulab_platform/src/lejusdk/3rd_party/x86_64/cyclonedds-0.10.2"
+    CACHE PATH "W02 统一跨进程基准用的 CycloneDDS 前缀（包含 include/dds/dds.h 与 lib/libddsc.so）")
+find_path(W02_DDS_INCLUDE dds/dds.h HINTS "${W02_CYCLONEDDS_ROOT}/include")
+find_library(W02_DDS_LIB ddsc HINTS "${W02_CYCLONEDDS_ROOT}/lib")
+if(W02_DDS_INCLUDE AND W02_DDS_LIB)
+    add_executable(xproc_benchmark
+        ${LIBIPC_PROJECT_DIR}/test/xproc_benchmark.cpp
+        ${LIBIPC_PROJECT_DIR}/test/w02_dds_types.c)
+    target_compile_definitions(xproc_benchmark PRIVATE W02_HAVE_DDS=1
+        W02_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_include_directories(xproc_benchmark PRIVATE "${W02_DDS_INCLUDE}")
+    message(STATUS "W02 xproc_benchmark: CycloneDDS 已启用 (${W02_DDS_LIB})")
+else()
+    add_executable(xproc_benchmark ${LIBIPC_PROJECT_DIR}/test/xproc_benchmark.cpp)
+    target_compile_definitions(xproc_benchmark PRIVATE W02_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    message(STATUS "W02 xproc_benchmark: CycloneDDS 未找到 ⇒ 只编 TLV/DZFlat-A/DZFlat-B 三档 "
+                   "(设 -DW02_CYCLONEDDS_ROOT=... 启用)")
+endif()
+target_compile_options(xproc_benchmark PRIVATE
+    $<$<CONFIG:Release>:-O2>
+    $<$<CONFIG:RelWithDebInfo>:-O2>
+    $<$<CONFIG:MinSizeRel>:-O2>
+)
+target_compile_definitions(xproc_benchmark PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+target_link_libraries(xproc_benchmark ipc Threads::Threads)
+if(W02_DDS_INCLUDE AND W02_DDS_LIB)
+    target_link_libraries(xproc_benchmark "${W02_DDS_LIB}" m)
+    # DDS 只作为**可选后端**链接：固定 rpath 便于记录"实际加载库路径"（方案 §12）。
+    set_target_properties(xproc_benchmark PROPERTIES BUILD_RPATH "${W02_CYCLONEDDS_ROOT}/lib")
+endif()
+if(UNIX AND NOT APPLE)
+    target_link_libraries(xproc_benchmark rt)
+endif()
+set_target_properties(xproc_benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+message(STATUS "Created benchmark executable: xproc_benchmark")
+
+# 小规模正确性用例：**只在显式 -DW02_REGISTER_SMOKE_TEST=ON 时进 CTest**。
+# 理由：--smoke 会真实建 SHM 段与两个子进程，本身 ~40s，且它测的是"基准可用性"
+# 而不是产品行为；放进默认 ctest 会让其余用例的并行/段级隔离假设变复杂。
+# 需要时显式打开，或用 test/perf 下的脚本跑（见 w02_benchmark.sh/README）。
+# W02 小规模正确性用例（gtest）：它**自己**会拉起一次 0.3s 的跨进程基准运行，
+# 然后从落盘产物反证"身份可核验 / 计时边界一致 / 失败与丢失被计数"三条验收。
+# 依赖基准可执行文件路径 → 用 W02_BENCH_BIN 注入（绝对路径，不受 cwd 影响）。
+add_executable(test_w02_xproc_benchmark
+    ${LIBIPC_PROJECT_DIR}/test/test_w02_xproc_benchmark.cpp)
+target_compile_definitions(test_w02_xproc_benchmark PRIVATE
+    W02_BENCH_BIN="$<TARGET_FILE:xproc_benchmark>")
+target_compile_options(test_w02_xproc_benchmark PRIVATE
+    $<$<CONFIG:Release>:-O2>
+    $<$<CONFIG:RelWithDebInfo>:-O2>
+    $<$<CONFIG:MinSizeRel>:-O2>)
+target_compile_definitions(test_w02_xproc_benchmark PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+target_link_libraries(test_w02_xproc_benchmark ipc gtest gtest_main Threads::Threads)
+set_target_properties(test_w02_xproc_benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+add_dependencies(test_w02_xproc_benchmark xproc_benchmark)
+# 进 CTest 的理由：它守的三条正是 W02 的验收条件，而这些都是**静默失效**形态
+# （身份括号写错 → 读数仍存在但不可信；边界混用 → 数字变了却没人报错；
+#   失败被静默过滤 → 丢失看起来像"没有消息"）。实测约 2s；给 300s 只为在
+# 基准死锁时报超时，不是性能判据。RUN_SERIAL：它会真建 SHM 段与两个子进程。
+add_test(NAME test_w02_xproc_benchmark COMMAND test_w02_xproc_benchmark)
+set_tests_properties(test_w02_xproc_benchmark PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
+message(STATUS "Created W02 benchmark self-check: test_w02_xproc_benchmark")
+
+# W02 产物结构闸（t47）：`summary.csv` 表头列数 / `write_summary_csv` 格式串字段数 / 数据行列数
+# 三者必须相等。为什么必须进 CTest：t47 给 summary.csv 插了 6 列而**格式串没同步**，导致
+# `fprintf` 读越界 ⇒ 进程 SIGSEGV（rc=139）且 summary.csv 为 0 字节。那个缺陷是靠"跑一遍就崩"
+# 才发现的；本闸把它变成**每次 ctest 都能拦住的机械判据**（只查源码，毫秒级、无副作用）。
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    # 静态半（t47 原有，⛔ 未改动）：表头列数 == `write_summary_csv` 的格式串字段数。
+    add_test(NAME test_w02_summary_schema COMMAND ${Python3_EXECUTABLE}
+             ${LIBIPC_PROJECT_DIR}/test/w02_summary_schema_check.py --source-only)
+    set_tests_properties(test_w02_summary_schema PROPERTIES TIMEOUT 60)
+
+    # 动态半（t50/R-1 新增）：用**固化小样本**跑「逐行 gate ↔ failure_reasons」「gate 取值域」
+    # 「表头列数 ↔ 数据行列数」三条动态判据。
+    #   为什么必须单独登记：t48/R1 的独立注入证明——只登记静态半时，注入 F（`gate=0` 而名点空，
+    #   = 判定逻辑不一致）与注入 G（`gate=2` 越界取值会被读成「通过」）**都不会被自动拦住**。
+    #   fixture 目录：`test/fixtures/w02_summary_schema/`（1 个正控 + 3 条注入 F/G/A + README）。
+    #   ⛔ 不跑 75-case 矩阵（那是 `--smoke-dds`，不进 ctest）；本项只读 3 行固化 CSV。
+    #   自带三条注入 ⇒ 任一形态逃过闸即 rc≠0 ⇒ 「闸失效」会被它自己抓出来（不是自述式通过）。
+    #   无副作用：只读 fixture、不写仓库、不建 SHM 段 ⇒ **不需要 RUN_SERIAL**。
+    add_test(NAME test_w02_summary_schema_dynamic COMMAND ${Python3_EXECUTABLE}
+             ${LIBIPC_PROJECT_DIR}/test/w02_summary_schema_check.py --fixtures)
+    set_tests_properties(test_w02_summary_schema_dynamic PROPERTIES TIMEOUT 60)
+    message(STATUS "Created W02 summary schema gates: test_w02_summary_schema (+dynamic)")
+else()
+    message(STATUS "未找到 Python3 ⇒ 跳过 test_w02_summary_schema(_dynamic)（t47/t50 的结构闸）")
+endif()
+
+option(W02_REGISTER_SMOKE_TEST "把 W02 基准冒烟用例登记进 CTest（默认 OFF）" OFF)
+if(W02_REGISTER_SMOKE_TEST)
+    add_test(NAME w02_xproc_benchmark_smoke COMMAND xproc_benchmark --smoke
+             --out-dir=${CMAKE_BINARY_DIR}/w02_smoke)
+    set_tests_properties(w02_xproc_benchmark_smoke PROPERTIES RUN_SERIAL TRUE TIMEOUT 900)
+endif()
+
+# ================================================================
+# W08 DZFlat A/B 专项验证 (docs/消息接收架构改造/团队改造交付/W08/DZFlat_A推广与B专项验证_交付.md)
+# target 由上面的 file(GLOB) 自动生成, 无需 add_executable。命名规范同前。
+#
+# ⚠️ @note 关键: 该用例**自带落盘**, 且 run_id 是**硬编码**的六个
+#    (20260928-r05..r10-W08-*), repo_root() 由 /proc/self/exe 推回仓库根, 落盘一律
+#    fopen(...,"wb") **截断**。若不改变落点, 每跑一次 ctest 就会**静默覆盖仓库内的 W08
+#    原始证据**(实测: 跑两次后 r05/r06/r08 的 samples.csv 中位数已与交付文档记载不符,
+#    违反方案 §12「结果目录只追加、不覆盖旧日志」)。
+#    故此处用 ENVIRONMENT 把落点重定向到 build/ 下的 scratch(已 .gitignore):
+#      ① 该用例在本闸门里的职责是**正确性**(三路径可分、载荷全量校验、回退行为),
+#         不是性能证据 —— 性能证据必须按 §12 由显式运行生成**新 run_id**;
+#      ② W08_ARTIFACT_ROOT 是测试自带的官方覆盖点(test_w08_dzflat_ab.cpp:223)。
+#    ⛔ 不要删掉 ENVIRONMENT —— 删掉即恢复"每次 ctest 覆盖仓库证据"的行为。
+#
+# ⚠️ 为什么必须 RUN_SERIAL(t20 要求评估"是否天然隔离"—— 结论: **不隔离**, 三条实证):
+#    ① run_id 硬编码且**无 PID/时间戳**: 20260928-r05..r10-W08-*(test_w08_dzflat_ab.cpp:673-679);
+#    ② topic 由**进程内** static std::atomic<unsigned> serial 生成(同文件 :608-612),
+#       两个并发实例各自从 0 起 ⇒ 序列逐一对齐, 必然同名;
+#    ③ domain 固定 141(同文件 :74), 而 SHM 段名 = f(topic, domain)
+#       (src/dzIPC/shm_pub_sub_ipc.cc:33,182) ⇒ 段名/TopicControl 段亦同名。
+#    另有共享风险: chunk 池(每档 40 块)与 info_pool 注册表都是**全机共享**; 而 W08 的
+#    断言含 `dzflat_fallback == 0` 与"该路径条数=N、另两条=0" ⇒ 邻居并发会造**假红/假绿**
+#    (实测先例: test_ipc_info_pool 在 -j4 下报 3847≠4096 判 FAILED, 见 W00 §4.4/D-10)。
+#    故用 RUN_SERIAL(不用 RESOURCE_LOCK —— 它只串行化同样声明该锁的用例, 挡不住未声明邻居)。
+# TIMEOUT: 实测 5.81~5.86 s(5 次), 取 600 s 仅为死锁/挂起时报超时而非挂住构建机, 非性能判据。
+# ================================================================
+add_test(NAME test_w08_dzflat_ab COMMAND test_w08_dzflat_ab)
+set_tests_properties(test_w08_dzflat_ab PROPERTIES
+    TIMEOUT 600
+    RUN_SERIAL TRUE
+    ENVIRONMENT "W08_ARTIFACT_ROOT=${CMAKE_BINARY_DIR}/test-scratch/w08")
+
+# ================================================================
+# W09 chunk 容量 / 队列 / 背压联动 (docs/消息接收架构改造/团队改造交付/W09/容量与背压_交付.md)
+# ----------------------------------------------------------------
+# target 由上面的 file(GLOB) 自动生成, 无需 add_executable。命名规范同前。
+#
+# 为什么必须进 CTest: 既有四个用例(test_chunk_hold / test_adopt_loan_quota /
+# test_alloc_fault_inject / test_shm_ser_backpressure)覆盖的是**具体缺陷**,
+# 而容量模型的判据没有一个常驻回路 —— 它们的失效方式全部静默:
+#   ① 每档块数与"拒绝语义"若被改成阻塞/自动扩容, 功能用例照样全绿;
+#   ② 池的**共享范围**(同 prefix 跨话题共享 / 不同 prefix 独立)读错不会报错;
+#   ③ 尺寸档**双重取整**(loan 与 TLV 落不同档 ⇒ 同进程两个池)读错只会静默量错对象;
+#   ④ 广播共享 chunk 若按订阅者重复计数, 容量模型会把余量少算 N 倍而无人发现;
+#   ⑤ 「策略性回退」与「环覆写越界风险」混成一个"失败数" ⇒ 把内存安全问题当性能现象。
+# 手工跑 build/bin/test_chunk_capacity_backpressure 进不了任何自动回路。
+#
+# 用例各自使用**独立 prefix** ⇒ 段名不同 ⇒ 物理上是不同的池, 不占用默认池的任何一档,
+# 也不与并行跑的其它用例争抢(实测全套约 0.1s)。给 120s 只为死锁时报超时, 非性能判据。
+# ================================================================
+add_test(NAME test_chunk_capacity_backpressure COMMAND test_chunk_capacity_backpressure)
+set_tests_properties(test_chunk_capacity_backpressure PROPERTIES TIMEOUT 120)
+
+# ================================================================
+# D-13：共享段用例 RUN_SERIAL 补登记（可机械判断规则）
+# ----------------------------------------------------------------
+# 【判据（机械可判）】一个已登记用例是否需要 RUN_SERIAL，取决于它是否触碰
+#   **全机共享段**：
+#     · chunk 池 `__IPC_SHM__CHUNK_INFO__<size>__C40`（**空前缀 = 全机共享**）；
+#     · `dz_ipc_info_pool_v2`（进程级 4096 槽，但段是全机的）；
+#     · 等待段 / 话题控制段（`__IPC_SHM__*_WAITER_*`、`__IPC_SHM__AC/CA/CONN_*`）。
+#   判定命令（本案实际使用）：
+#     for t in $(ctest -N | grep -oE 'test_[a-z0-9_]+'); do
+#       grep -cE 'PublisherIPCPtrMake|SubscriberIPCPtrMake|shm::shm_(pub|sub)_ipc|IpcInfoPool|loan<|publish_loaned|RecvWorkerPool|SocketRecvWorkerPool|RouteSession|try_publish_dzflat' test/$t.cpp
+#     done    # >0 ⇒ 触碰共享段 ⇒ 需 RUN_SERIAL
+#
+# ⛔ **反例声明（必须保留）**：RUN_SERIAL **只降低**并发串扰概率，**不能消除**因共享池
+#    状态泄漏导致的失败。2026-09-28 实测（本机，25 项，`-j32` × 15 轮）：
+#      · `test_dzflat_builder` **自己已是 RUN_SERIAL TRUE** 却 12/15 轮失败；
+#      · `test_w08_dzflat_ab`（同为 RUN_SERIAL）11/15 轮失败；
+#      · 同一断言：`chunk pool exhausted: kind=loan, chunk_size=132096, prefix=''`
+#        （空前缀 = 全机共享）⇒ 失败源在**全机共享池状态**（含被 SIGKILL 进程遗留的
+#        未发布借样：`reclaim_dead_chunks` 明确跳过 `published==0` 的块），**不在测试间调度**。
+#      · 失败轮率 14/15（93%）。证据：build/test-scratch/t23_evidence/。
+#    **根治归 t22（W09 容量/归因 + 异常退出回收）**；本块只做概率收敛，
+#    使普通 `ctest -j4` 稳定（实测 6 轮 6/6 绿）。
+#
+# 名单（按上述机械判据 + 本轮实测受害者）：socket_recv_worker / lifecycle_contract /
+#   socket_high_fd / shm_sub_dtor_gate / wakeup_artifact / shm_ser_backpressure /
+#   shm_i5_pop_buffer / shm_ready_transition / shm_route_session / recv_worker /
+#   udp_port_boundary / w03_measurement / dzflat_fallback_semantics（#26，新增于 21:2x，
+#   同样消费默认共享池且断言 `fallback_total==0`，按同一机械判据纳入）。
+# 不列入的例外（有据）：`test_shm_control_scheduler` / `test_recv_wait_set` /
+#   `test_socket_wait_set` / `test_socket_readable` / `test_socket_ser_concurrency`
+#   —— 机械判据计数为 0（不建共享段、不借 chunk、不用共享池）；
+#   `test_chunk_capacity_backpressure` —— 各用例用**独立 prefix**（自有池，不占默认档）。
+# ================================================================
+set_tests_properties(
+    test_socket_recv_worker
+    test_lifecycle_contract
+    test_socket_high_fd
+    test_shm_sub_dtor_gate
+    test_wakeup_artifact
+    test_shm_ser_backpressure
+    test_shm_i5_pop_buffer
+    test_shm_ready_transition
+    test_shm_route_session
+    test_recv_worker
+    test_udp_port_boundary
+    test_w03_measurement
+    PROPERTIES RUN_SERIAL TRUE)
+# 注: `test_dzflat_fallback_semantics`（#26）同样命中本判据，但它的 add_test 位于本块**之后**，
+#     CMake 要求先 add_test 再 set_tests_properties ⇒ 其 RUN_SERIAL 在其自身登记处单独设置。
+
+# ================================================================
+# W09/t19：DZFlat 发布尝试的**三种语义互不混算**（方案 §4 W09 第 5 条 + 队长裁决 D-16）
+# (docs/消息接收架构改造/团队改造交付/W09/回退计数与三种语义分离.md)
+# ----------------------------------------------------------------
+# target 由上面的 file(GLOB) 自动生成, 无需 add_executable。命名规范同前。
+#
+# 为什么必须进 CTest: 判据全是**纯函数**层面的（classify_dzflat_attempt /
+# note_dzflat_borrow_failed），毫秒级、无共享内存、无 flaky —— 而它守的失效方式静默:
+#   ① `try_publish_dzflat()` 返回 bool, 从返回值看不出「路径选择 / 真回退 / B 借样失败」
+#      ⇒ W08 的 tlv 档出现 `fallback_total=0` 与 `DzFlatFallbackCount=120` 并存的歧义;
+#   ② 把「路径选择」计入 fallback ⇒ tlv 档凭空出现 N 次回退, W10 用假证据判规模;
+#   ③ 把「B 借样失败」并进 fallback ⇒ fallback/(dzflat+fallback) 比值失真;
+#   ④ 不可精确判定的原因若「猜一个」⇒ 报告给出不可复核的分解（本包强制落 *_reason_unknown）。
+# 实测全套 0 ms（6 条）; 给 120s 只为异常时报超时, 非性能判据。
+# ================================================================
+# ================================================================
+# `test_dzflat_rx` 登记（队长裁决，2026-09-28；Owner 转给架构负责人加行）
+# ----------------------------------------------------------------
+# 授权依据：W10 前置标定（验证与性能负责人）请求 + 队长书面批准。
+# ⛔ **登记 ≠ D-6/D-14 已解决**：本行只把既有用例纳入自动回路，**不改变**
+#    「共享池残留导致并发用例偶发失败」这一未关闭缺陷（见上方 D-13 块的反例声明）。
+#
+# 为什么最后才登记、且**不加 RUN_SERIAL**（三条实测理由均来自 W10 前置标定）：
+#   ① 它确实在 build/bin 且可跑：3 次全 rc=0，单次约 1.7 s；
+#   ② 有闸门价值：8 个用例覆盖「借样视图点进 chunk / 持样跨后续发布存活 /
+#      TLV 不进视图路径 / DZFlat 只进视图路径 / prebuilt 段收发 / 无接收者返回 false」，
+#      正是 W08 的 A/B 分流与 W06 接收侧语义的独立守门；
+#   ③ **无副作用、且不进 132096 档**：不写仓库（无 ofstream/fopen/create_directories），
+#      载荷最大 96×64×3 ≈ 18 KB（实测只落 `5120/6144/20480/58368/59392` 档），
+#      故不受本轮 chunk 池陈旧段问题影响 ⇒ 无需 RUN_SERIAL。
+# 复核（架构负责人）：单跑 8/8 PASSED（1.7 s）；与 builder/w08/socket_high_fd/recv_worker
+#   并发 ×4 轮均 rc=0（余量足够）。
+# 另注：它是**既有用例**（非本轮新增），此前一直只能手工跑。
+# ================================================================
+add_test(NAME test_dzflat_rx COMMAND test_dzflat_rx)
+set_tests_properties(test_dzflat_rx PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_dzflat_fallback_semantics COMMAND test_dzflat_fallback_semantics)
+# D-13（共享段用例 RUN_SERIAL 补登记）：本用例消费默认共享 chunk 池，且断言
+# `fallback_total == 0` / 各 fallback_* 口径 —— 邻居把池吃干会造**假红**，
+# 故与 D-13 名单同待遇。判据与反例声明见文件上方「D-13：共享段用例 RUN_SERIAL 补登记」块。
+set_tests_properties(test_dzflat_fallback_semantics PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+
+# ================================================================
+# W10 验收工装纳入构建图（t40 / 队长派单；依据 R0-A1 硬闸 ③d、t37 的
+# `团队改造交付/W10/R3_CMake登记需求.md`）
+# ----------------------------------------------------------------
+# 为什么必须进构建图（不是"顺手编一下"）：
+#   `RecvWorkerPool::stats()` **按值返回** `RecvWorkerStats`，W06/t30 在结构体
+#   **尾部追加**了 5 个 uint64。C++ 的 by-value 返回由**调用方**按它自己看到的
+#   `sizeof` 分配返回槽 ⇒ **陈旧调用方（手工 `g++` 的工装）+ 新库 = 越界写**。
+#   实测（t30 / t31-F4）：功能读数**全对**，退出时 `__libc_free ← Harness::run
+#   ← main` ⇒ `rc=139`。⇒ 库一变更而未重编工装，就会产出**不可重放的 run**。
+#   纳入 CMake 后「库变即重编」由**构建图**保证（根治）；t37 的
+#   `test/perf/w10/build_harnesses.sh`（重编 + mtime 配对）与
+#   `--require-lib-sha256/--require-bin-sha256`（运行时双指纹断言）**并存**，
+#   作为不经 CMake 的直接调用路径上的**运行时兜底**。
+#
+# ⛔ 本块**只 add_executable，不 add_test**：工装是长跑规模验收（千路建连、
+#    60 s+ 空闲窗口、故障注入），不是 CTest 用例。故本块**不适用** §4.4 的
+#    ③b（共享段 RUN_SERIAL）与 ③c（自带落盘用例默认不得写仓库）——二者约束的是
+#    **CTest 用例**；工装是**构建目标**，其证据落盘纪律由 t37 的
+#    `w10_run_matrix.sh`（输出目录独占、拒绝覆盖、run_id 校验）单独承担。
+#    ⛔ 不得据本块认为「W10 工装已进自动回路」——它们**不在** `ctest` 集内。
+#
+# 与 file(GLOB) 不冲突：上方 GLOB 是 `test/*.cpp`（**非递归**），不含 `test/perf/**`。
+# 命名规范与既有显式块一致：target 名 = 源文件 basename。
+# ================================================================
+set(W10_HARNESSES
+    w10_matrix w10_idle w10_scancost w10_threadscan w10_faults
+    w10_wakescan w10_mixwake w10_tickcost w10_portconflict
+    w10_portconflict_scope w10_rebuild_crash)
+foreach(h ${W10_HARNESSES})
+    add_executable(${h} ${LIBIPC_PROJECT_DIR}/test/perf/w10/${h}.cpp)
+    # 编译选项与既有非调试目标同款（Release → -O2 + NDEBUG），保证与库同配置。
+    target_compile_options(${h} PRIVATE
+        $<$<CONFIG:Release>:-O2>
+        $<$<CONFIG:RelWithDebInfo>:-O2>
+        $<$<CONFIG:MinSizeRel>:-O2>)
+    target_compile_definitions(${h} PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+    # 链接形态按本文件既有显式块（`Threads::Threads`），而不是 t37 需求书里的裸
+    # `pthread` —— 两者等价，但后者会在本项目的 CMake 版本告警。
+    target_link_libraries(${h} ipc Threads::Threads)
+    set_target_properties(${h} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    message(STATUS "Created W10 harness executable: ${h}")
+endforeach()
+
+# 纯对拍件：H1–H6/F4 的最小反例集合，**不链接 ipc**（刻意如此 —— 它必须能在
+# 「库与工装不同步」时照常运行，才谈得上对照）。故不随库 ABI 变化而失效。
+add_executable(w10_r3_counterexamples ${LIBIPC_PROJECT_DIR}/test/perf/w10/w10_r3_counterexamples.cpp)
+target_compile_options(w10_r3_counterexamples PRIVATE
+    $<$<CONFIG:Release>:-O2>
+    $<$<CONFIG:RelWithDebInfo>:-O2>
+    $<$<CONFIG:MinSizeRel>:-O2>)
+target_compile_definitions(w10_r3_counterexamples PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+set_target_properties(w10_r3_counterexamples PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+message(STATUS "Created W10 harness executable: w10_r3_counterexamples (no libipc dependency)")
+
+# ----------------------------------------------------------------
+# W10-R2/R4b/R5 阶段新增工装（队长 t14 追加授权，2026-09-30：**显式清单，⛔ 不用 GLOB**）
+# 所属任务号逐项记录，便于回溯：t42（R2 补齐 / §6.2 最小验证矩阵缺失四项）、
+# t43（R4b 计数闭环复验）、t38（R5 扫描与三态复验）。
+# ⛔ 仍只 add_executable / add_library，**不 add_test**（工装是构建目标，见上方归类声明）。
+# ----------------------------------------------------------------
+set(W10_HARNESSES_LATER
+    w10_r2_interval        # t42
+    w10_r2_minimal         # t42
+    w10_r4b_firstfail      # t43
+    w10_r4b_runtimetruth   # t43
+    w10_r5_matrix          # t38
+    w10_r5_minimal         # t38
+    )
+foreach(h ${W10_HARNESSES_LATER})
+    add_executable(${h} ${LIBIPC_PROJECT_DIR}/test/perf/w10/${h}.cpp)
+    target_compile_options(${h} PRIVATE
+        $<$<CONFIG:Release>:-O2>
+        $<$<CONFIG:RelWithDebInfo>:-O2>
+        $<$<CONFIG:MinSizeRel>:-O2>)
+    target_compile_definitions(${h} PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+    target_link_libraries(${h} ipc Threads::Threads)
+    set_target_properties(${h} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    message(STATUS "Created W10 harness executable: ${h} (later phase)")
+endforeach()
+
+# t42 的故障注入器：**共享库**（`LD_PRELOAD` 用），不是可执行文件 ⇒ 必须 SHARED。
+# 它**不链接 ipc**（自行声明被抢占的符号，见该文件头注释），故不随库 ABI 变化。
+add_library(force_backend_unavailable SHARED
+            ${LIBIPC_PROJECT_DIR}/test/perf/w10/force_backend_unavailable.cpp)
+target_compile_options(force_backend_unavailable PRIVATE
+    $<$<CONFIG:Release>:-O2>
+    $<$<CONFIG:RelWithDebInfo>:-O2>
+    $<$<CONFIG:MinSizeRel>:-O2>)
+target_compile_definitions(force_backend_unavailable PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+# 输出名与 t42 驱动脚本 `test/perf/w10/w10_r2_driver.sh` 里写死的 `build/bin/libforce_backend.so`
+# 保持一致 —— 否则脚本会去重新手工编译一份，构建图与实际加载的库再次分叉。
+set_target_properties(force_backend_unavailable PROPERTIES
+                      OUTPUT_NAME force_backend
+                      PREFIX "lib"
+                      LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+message(STATUS "Created W10 fault injector shared library: libforce_backend.so (t42)")

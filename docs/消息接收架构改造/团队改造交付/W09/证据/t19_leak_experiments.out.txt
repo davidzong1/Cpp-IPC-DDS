@@ -1,0 +1,14 @@
+# W09/t19 更正实验原始输出（队长 D-16 第 3 条）
+# 2026-09-28T21:42:02+08:00  库 cb19120de7380be8
+
+===== 条目 1：未发布借样的 chunk 占用（父进程用**不同 route 名**）=====
+N=1 :: CHILD_HELD=1 (published 全为 0) | PARENT_CAN_LOAN=39 (pool=40) | 40-N=39
+N=4 :: CHILD_HELD=4 (published 全为 0) | PARENT_CAN_LOAN=36 (pool=40) | 40-N=36
+N=20 :: CHILD_HELD=20 (published 全为 0) | PARENT_CAN_LOAN=20 (pool=40) | 40-N=20
+N=39 :: CHILD_HELD=39 (published 全为 0) | PARENT_CAN_LOAN=1 (pool=40) | 40-N=1
+N=40 :: CHILD_HELD=40 (published 全为 0) | PARENT_CAN_LOAN=0 (pool=40) | 40-N=0
+
+===== 条目 2：同一 route 名（sender flag 暴死泄漏 vs 正常退出对照）=====
+暴死 N=1 同 route :: CHILD_HELD=1 (published 全为 0) | PARENT_CAN_LOAN=0 (pool=40)
+暴死 N=4 同 route :: CHILD_HELD=0 (published 全为 0) | PARENT_CAN_LOAN=0 (pool=40)
+正常退出 N=1 同 route :: CHILD_HELD=1 | PARENT_CAN_LOAN=40 (pool=40)

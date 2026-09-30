@@ -1,0 +1,43 @@
+--- build/t41/before/include/dzIPC/shm_pub_sub_ipc.h	2026-09-30 04:28:03.219000766 +0800
++++ include/dzIPC/shm_pub_sub_ipc.h	2026-09-30 04:15:14.901723629 +0800
+@@ -19,6 +19,8 @@
+ #include "dzIPC/ipc_info_pool.h"
+ #include "dzIPC/shm_route_session.h"
+ #include "dzIPC/pub_sub_base.h"
++/* W09/t19: B 借样失败的分类计数落点（counters.h 为 header-only 测量库, 无 .so 符号/ABI 影响） */
++#include "dzIPC/measure/counters.h"
+ #include "dzIPC/threepools/shm_control_scheduler.h"
+ #include "libipc/count_sem.h"
+ #include "libipc/ipc.h"
+@@ -112,12 +114,17 @@
+     {
+         if (!lo.valid() || !publisher_)
+         {
++            /* W09/t19 (c)：借样对象无效 ⇒ 归 borrow_failed_*（⛔ 不碰 fallback_total）。 */
++            dzIPC::measure::note_dzflat_borrow_failed(
++                (publisher_ != nullptr) && (publisher_->recv_count() > 0), false, false);
+             return false;
+         }
+         if (!lo.finalize())
+         {
+-            /* 超出变长预算 —— lo 析构会归还 chunk。 */
++            /* 超出变长预算 —— lo 析构会归还 chunk。W09/t19 (c)：可精确判定。 */
+             dzIPC::detail::NoteDzFlatPublish(false);
++            dzIPC::measure::note_dzflat_borrow_failed(
++                (publisher_ != nullptr) && (publisher_->recv_count() > 0), false, false);
+             return false;
+         }
+         const auto handle = lo.loan();
+@@ -127,6 +134,12 @@
+         lo.release();
+         const bool ok = publisher_->publish_loan(handle, tm);
+         dzIPC::detail::NoteDzFlatPublish(ok);
++        /* W09/t19 (c)：B 借样失败单独成类, ⛔ 绝不进 fallback_total。 */
++        if (!ok)
++        {
++            dzIPC::measure::note_dzflat_borrow_failed(
++                (publisher_ != nullptr) && (publisher_->recv_count() > 0), true, false);
++        }
+         /* W08: 三路径分流计数(仅计数, 无行为变更)。B = 应用在借样内存里原地构造。
+          * ⛔ 失败**不**在这里记 tlv —— 按借样契约失败是常态, 应用回退到普通 publish
+          * 时会在 A/TLV 的调用点被记一次; 这里也记会把 dzflat/fallback 比值算歪。 */

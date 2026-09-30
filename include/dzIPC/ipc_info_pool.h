@@ -33,7 +33,53 @@ IPC_EXPORT std::string demangle(const char* mangled);
 constexpr std::size_t kMaxTopicName = 128;
 constexpr std::size_t kMaxTypeName = 64;
 constexpr std::size_t kMaxExtra = 64;
-constexpr std::size_t kMaxEntries = 512;
+
+/* ---------------------------------------------------------------------------
+ * W07 容量与共享布局契约（方案 §6.1 有效规模 1000 路 / §10.5 跨进程版本协商）
+ * ---------------------------------------------------------------------------
+ * 容量取值依据: 目标规模是 **1000 路独立话题**; 每个端点在池里占且只占 1 条,
+ * 1000 话题两端齐全 = 2000 条 ⇒ 取 4096 = 2000 × 2 + 96 余量。
+ *
+ * ⛔ 本值是**编译期常量**(属于启动配置), ⛔不随 worker 数/route 数在运行中变化。
+ * ⛔ 池是**全机共享**的: 4096 条是全机总预算, 不是"每进程 4096 条"。
+ * ⛔ 超限时**首个失败资源是池槽位**: 第 kMaxEntries+1 次 register_entry 返回 -1 并
+ *    打限流诊断(表满/回收后仍满), ⛔不是 fd 或内存耗尽。
+ *
+ * 内存对账(kPoolEntryBytes 由 .cc 的 static_assert 钉住, 见 segment_bytes()):
+ *   PoolEntry 296 B ⇒ 512 条 148 KiB / 4096 条 1.16 MiB(含段头 56 B)。
+ *   对 W00 冻结的 /dev/shm ≤ 2 GiB / RSS 增量 ≤ 1 GiB 可忽略。
+ * ------------------------------------------------------------------------- */
+constexpr std::size_t kMaxEntries = 4096;
+
+/* 共享布局的身份: **段名带版本后缀** + 段头自带 magic/version/max_entries。
+ *
+ * 为什么必须同时带版本(而不是只把 kMaxEntries 改大): 本仓 libipc 的
+ * `shm::handle::acquire(name, size)` 对**既有**段也会按调用方请求的 size 做
+ * ftruncate(见 src/libipc/platform/shm_posix.cpp 的 get_mem)。若新旧二进制共用
+ * 一个段名, 改容量后的新进程会把旧进程的段 resize 成自己的 size, 而两侧的引用
+ * 计数落在**各自 mapped 区间的末尾**(不同地址) ⇒ 一方 release 就可能把另一方还在
+ * 用的段 unlink 掉; 且新进程按 kMaxEntries 遍历旧段的 entries 数组会读越界。
+ * 因此: 布局一变就换段名后缀 + 升 kLayoutVersion, 旧段与新段物理隔离。
+ * 回滚/清理见 .cc 顶部「跨版本与旧段处置」。 */
+constexpr std::uint32_t kLayoutMagic = 0x5A'49'50'44u;   // 'DZIP'
+constexpr std::uint32_t kLayoutVersion = 2;
+/* PoolEntry 的字节数(与 .cc 的 offsetof/sizeof static_assert 同源)。 */
+constexpr std::size_t kPoolEntryBytes = 296;
+
+/* 本版本池段的总字节数 = sizeof(PoolHeader) + kMaxEntries * sizeof(PoolEntry)。
+ * 容量表(交付/W09)直接引用它, 不手抄数字。 */
+IPC_EXPORT std::size_t segment_bytes() noexcept;
+
+/* attach 时的**拒绝性**布局校验: 判定一个既有段是否属于本布局。
+ *
+ * 传入段首至少 16 字节的原始镜像(通常就是 mmap 基址)与已映射字节数。
+ * 返回 nullptr = 相容; 否则返回**静态**拒绝原因(可直接进日志/被用例断言)。
+ * 段头字段偏移是冻结契约: init_state@0, magic@4, version@8, max_entries@12
+ * (由 .cc 的 offsetof static_assert 钉住; ⛔两者必须同改)。
+ * ⛔ 调用方必须在**访问 entries 之前**用它做门禁 —— 旧布局的 entries 数组比本
+ *    版本的短, 按 kMaxEntries 遍历即读越界。 */
+IPC_EXPORT const char* layout_mismatch(const void* mapped, std::size_t mapped_bytes) noexcept;
+
 
 /* 注册时提交给池的元信息 */
 struct RegisterInfo

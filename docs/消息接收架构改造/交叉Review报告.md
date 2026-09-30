@@ -273,7 +273,9 @@ $ grep -n "receive_nowait|try_recv(" <三个模块>
 
 | 项 | 位置 | 归因 | 处置 |
 |---|---|---|---|
-| `select()+FD_SET` 当 fd 号 ≥ `FD_SETSIZE` 时 `__fdelt_chk` abort | `src/libipc/platform/posix/udp.h:346 FD_SET` / `:352 ::select`；win 侧 `:327/392/482` | **既有代码、非本波引入**：t6 只读准备用 `build_baseline` 与当前 HEAD 两库同探针对照，两库**同 exit=134**、归一化 gdb 帧 `FRAMES_IDENTICAL=yes`、两库均含 `__fdelt_chk@GLIBC_2.15` 未定义引用（证据 `.t6_probe/d9/`） | 登记为遗留项（归属 ipc-transport，本波不修）；**不计三模块扣分** |
+| `select()+FD_SET` 当 fd 号 ≥ `FD_SETSIZE` 时 `__fdelt_chk` abort | ~~`src/libipc/platform/posix/udp.h:346 FD_SET` / `:352 ::select`~~ → **【D-20 纠正】`src/libipc/platform/posix/udp.h:347 FD_SET` / `:353 ::select`**；win 侧 `:327/392/482`（原写法；win 侧未复核） | **既有代码、非本波引入**：t6 只读准备用 `build_baseline` 与当前 HEAD 两库同探针对照，两库**同 exit=134**、归一化 gdb 帧 `FRAMES_IDENTICAL=yes`、两库均含 `__fdelt_chk@GLIBC_2.15` 未定义引用（证据 `.t6_probe/d9/`） | 登记为遗留项（归属 ipc-transport，本波不修）；**不计三模块扣分** |
+
+> **D-20 行号纠正依据**（2026-09-28，队长裁决 D-20）：锚定提交 `e800ccc`（该文件 blob `19b6132687874c23a742fa7d0b216a1aaa58cef2`）逐行为 `:345 fd_set read_fds` / `:346 FD_ZERO(&read_fds)` / `:347 FD_SET(server_fd, &read_fds)` / `:349-351 timeval timeout` / `:353 ::select(...)`。原 `:346`/`:352` **恰好各小 1**，经**全历史扫描**（含该文件的全部 10 个提交：`:346=FD_SET` 出现 **0** 次、`:347=FD_SET` 出现 **1** 次）裁定为 **off-by-one 计数错误**，**不是**"多套行号口径"。⛔ 文档负责人早前"三套计数口径并存"的推论**已被该扫描否定**（两提交该文件为同一 blob，不可能同时有 `:346` 与 `:347` 为 `FD_SET`）。**只改行号定位，不改任何数值与结论。** 正确对照：`收尾验收报告.md:132`（本来就写 `:347`/`:353`）。
 | 共享层 `readable()`/`udp_node_readable`/`out_bytes` 追加 | `include/libipc/udp.h:111/`、`src/libipc/socket/udp.cpp`、`src/libipc/platform/*/udp.h`、`include/dzIPC/common/data_rev.h:150/153/327` | 裁定 B/C 的**共享层 owner 交付面**（t12，owner=ipc-transport） | 不作为跨模块耦合；只核"只加不改"（见 §7） |
 | `socket_recv_worker.{h,cc}` 新增 | 共享层 | 契约 §5 追加交付面（t2） | 同上 |
 | `test_sercli_auto_path.cpp:337` 的线程回落断言 | 既有测试 | 共享层**已实现空闲退出**（`recv_worker.h:250`，`idle_keep_alive=1000ms`），回落耗时约 1.1s ≪ 断言窗口 4000ms ⇒ 不预设为失败项 | t6 实测口径 |

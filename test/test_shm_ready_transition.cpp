@@ -47,6 +47,7 @@
 #include "dzIPC/common/wire_accept.h"
 #include "dzIPC/detail/shm_sub_seam.h"
 #include "dzIPC/shm_pub_sub_ipc.h"
+#include "dzIPC/threepools/recv_worker.h"
 #include "ipc_msg/std_msgs/std_image.hpp"
 #include "libipc/ipc.h"
 
@@ -123,6 +124,9 @@ std::shared_ptr<dzIPC::Msg::StdImage> make_image(std::uint32_t w, std::uint32_t 
 struct RecvTick
 {
     std::atomic<unsigned> n{0};
+    /* W06：本进程走的是哪条接收臂（方案 §13.2 条件 4：验收模式必须能检测回退）。 */
+    std::atomic<int> worker_path{0};
+    std::atomic<int> compat_path{0};
 
     static RecvTick*& instance()
     {
@@ -134,9 +138,22 @@ struct RecvTick
     {
         instance() = this;
         dzIPC::detail::SetSeamHook([](const dzIPC::detail::SeamEvent& ev) noexcept {
-            if (ev.point == dzIPC::detail::SeamPoint::kAfterRecvRelease && instance() != nullptr)
+            RecvTick* t = instance();
+            if (t == nullptr)
             {
-                instance()->n.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            if (ev.point == dzIPC::detail::SeamPoint::kAfterRecvRelease)
+            {
+                t->n.fetch_add(1, std::memory_order_relaxed);
+            }
+            else if (ev.point == dzIPC::detail::SeamPoint::kRecvPathWorker)
+            {
+                t->worker_path.fetch_add(1, std::memory_order_relaxed);
+            }
+            else if (ev.point == dzIPC::detail::SeamPoint::kRecvPathCompat)
+            {
+                t->compat_path.fetch_add(1, std::memory_order_relaxed);
             }
         });
     }
@@ -148,6 +165,8 @@ struct RecvTick
     }
 
     unsigned get() const { return n.load(std::memory_order_relaxed); }
+    bool worker_arm() const { return worker_path.load() > 0; }
+    std::size_t routed() const { return dzIPC::threepools::RecvWorkerPool::instance().route_count(); }
 };
 
 /* 有界排空：返回取到的条数（上限 cap 防止无界循环）。 */
@@ -274,6 +293,10 @@ TEST(ShmReadyTransition, NoPhantomMessageAcrossStateTransitions)
     TopicName tn{"phantom"};
     auto pub_td = make_td();
     auto sub_td = make_td();
+    /* ⛔ RecvTick 必须**在 InitChannel 之前**构造：接收路径的决策事件
+     * （kRecvPathWorker / kRecvPathCompat）只在**首次接入**那一刻发一次，装晚了就
+     * 观测不到 Arm，"按臂取值"的前提判据会静默退化到兼容臂分支（实测踩过）。 */
+    RecvTick ticks;
     dzIPC::shm::shm_pub_ipc pub{pub_td, tn.name, 0, /*verbose=*/false};
     dzIPC::shm::shm_sub_ipc sub{sub_td, tn.name, 0, /*queue_size=*/8, /*verbose=*/false};
     pub.InitChannel();
@@ -289,12 +312,29 @@ TEST(ShmReadyTransition, NoPhantomMessageAcrossStateTransitions)
     /* 两轮状态转换：离开 Ready → 新 generation Ready，再来一次。
      * 每轮推进前先等收包线程**确实在 recv 循环里**（kAfterRecvRelease 计数前进），
      * 否则 disconnect 可能落在两次 recv 之间 ⇒ 不产生伪影 ⇒ 正对照失败。 */
-    RecvTick ticks;
     for (int i = 0; i < 2; ++i)
     {
-        const unsigned before = ticks.get();
-        ASSERT_TRUE(wait_for([&] { return ticks.get() > before; }, 3000))
-            << "第 " << i << " 轮：收包线程未进入 recv 循环 —— 用例前提不成立";
+        /* ── 用例前提（**按臂取值**，W06）────────────────────────────────────
+         * 兼容臂：每 route 一条线程、阻塞 `recv(50)` ⇒ 心跳持续推进，"等到一次新的
+         *   完整 recv 返回"是可达且稳定的前提条件（原判据）。
+         * worker 臂：`recv_once()` 是 `recv(0)`（契约 §4.2），心跳**只在有活时**前进 ——
+         *   空闲时 worker 阻塞在 wait-set 里，本来就不会产生新心跳。因此"等到一次
+         *   新心跳"会把**空闲**误判成"前提不成立"。worker 臂的等价前提是
+         *   「本代 route 已在池中在册（固定 worker 持有等待项），且本用例全程确实
+         *   跑过收包循环（累计心跳 ≥ 1）」。 */
+        if (ticks.worker_arm())
+        {
+            ASSERT_TRUE(wait_for([&] { return ticks.routed() >= 1; }, 3000))
+                << "第 " << i << " 轮：route 未在共享 worker 池中在册 —— 用例前提不成立";
+            ASSERT_TRUE(wait_for([&] { return ticks.get() >= 1u; }, 3000))
+                << "worker 臂没有一次完整 recv_once —— 用例前提不成立";
+        }
+        else
+        {
+            const unsigned before = ticks.get();
+            ASSERT_TRUE(wait_for([&] { return ticks.get() > before; }, 3000))
+                << "第 " << i << " 轮：收包线程未进入 recv 循环 —— 用例前提不成立";
+        }
         cp.set_stopping();
         ASSERT_TRUE(wait_for([&] { return cp.peer_count() == 0; }, 3000)) << "第 " << i << " 轮离开 Ready 未回收";
         cp.begin_rebuild();
@@ -317,8 +357,27 @@ TEST(ShmReadyTransition, NoPhantomMessageAcrossStateTransitions)
     EXPECT_EQ(st.tlv_id_skipped, 0u) << "伪影被记成「msg_id 不符」—— 缺陷被伪装成正常过滤";
     EXPECT_EQ(st.defects(), 0u);
 
-    /* 主判据 C（正对照）：门确实被走到过，否则 A/B 是"没产生伪影"的伪绿。 */
-    EXPECT_GT(dzIPC::WakeupArtifactCount(), 0u)
-        << "两轮状态转换都没观测到叫醒伪影 ⇒ 本用例前提不成立（收包线程没卡在 recv 里），"
-           "主判据 A/B 因此没有牙";
+    /* 主判据 C（正对照）：门确实被走到过，否则 A/B 是"没产生伪影"的伪绿。
+     * ⛔ 按臂取值（W06）：伪影只可能产生于「收包线程正卡在 recv 里时被 disconnect」，
+     * 而 worker 臂的 recv_once 是 recv(0)（非阻塞）⇒ 该形态**结构上不存在**。
+     * worker 臂的等价正对照是：两轮转换确实各走了一次「注销旧的固定 worker 注册 →
+     * 新 generation 重新在册」，且收包循环全程跑过（心跳 ≥ 1）。 */
+    if (ticks.worker_arm())
+    {
+        EXPECT_EQ(ticks.compat_path.load(), 0)
+            << "worker 臂上出现 kRecvPathCompat ⇒ 固定线程目标被回退线程顶替（方案 §13.2 条件 4）";
+        EXPECT_GE(ticks.get(), 1u) << "worker 臂全程没有一次完整 recv_once 返回 —— A/B 没有牙";
+        EXPECT_GE(ticks.routed(), 1u) << "两轮转换后 route 未在册 —— 重建路径没把接收接回去";
+        EXPECT_EQ(dzIPC::WakeupArtifactCount(), 0u)
+            << "worker 臂的 recv(0) 不产生叫醒伪影；非零说明接收路径已不是固定 worker";
+    }
+    else
+    {
+        EXPECT_GT(dzIPC::WakeupArtifactCount(), 0u)
+            << "两轮状态转换都没观测到叫醒伪影 ⇒ 本用例前提不成立（收包线程没卡在 recv 里），"
+               "主判据 A/B 因此没有牙";
+    }
+    std::printf("[ready-transition] arm=%s worker_path=%d compat_path=%d ticks=%u artifacts=%llu\n",
+                ticks.worker_arm() ? "worker" : "compat", ticks.worker_path.load(), ticks.compat_path.load(),
+                ticks.get(), (unsigned long long)dzIPC::WakeupArtifactCount());
 }

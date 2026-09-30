@@ -1,0 +1,20 @@
+# 进程级 CPU（utime+stime 全线程），窗口 12.0s，每格 3 轮（state=3, n=1000）
+格                   轮     pool/route  threads  cpu(core)   wakes/s    ctx/s(工具)
+A 调度器ON  池ON   1 pool route_cou       34     0.4958    8624.6       8968.0
+A 调度器ON  池ON   2 pool route_cou       34     0.4967    8521.9       8866.2
+A 调度器ON  池ON   3 pool route_cou       34     0.5000    8538.6       8882.3
+B 调度器OFF 池ON   1 pool route_cou     2034     0.3758       0.0     120019.1
+B 调度器OFF 池ON   2 pool route_cou     2034     0.3208       0.0     119997.4
+B 调度器OFF 池ON   3 pool route_cou     2034     0.4033       0.0     120014.9
+C 调度器ON  池OFF  1 pool route_cou     1002     0.7633    8318.0      29823.7
+C 调度器ON  池OFF  2 pool route_cou     1002     0.7575    8297.7      30218.2
+C 调度器ON  池OFF  3 pool route_cou     1002     0.7783    8339.7      29749.9
+D 调度器OFF 池OFF  1 pool route_cou     3002     0.6800       0.0     141310.5
+D 调度器OFF 池OFF  2 pool route_cou     3002     0.6858       0.0     141065.5
+D 调度器OFF 池OFF  3 pool route_cou     3002     0.6725       0.0     141376.4
+
+格                      cpu中位      min      max      线程中位
+A 调度器ON  池ON          0.4967   0.4958   0.5000        34
+B 调度器OFF 池ON          0.3758   0.3208   0.4033      2034
+C 调度器ON  池OFF         0.7633   0.7575   0.7783      1002
+D 调度器OFF 池OFF         0.6800   0.6725   0.6858      3002

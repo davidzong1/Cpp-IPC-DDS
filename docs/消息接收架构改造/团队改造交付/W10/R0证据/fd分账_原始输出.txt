@@ -1,0 +1,55 @@
+# R0 fd 分账实测原始输出（架构负责人 t34；探针 fdbreak.cpp 同目录）
+# 编译: g++ -std=c++17 -O2 -DNDEBUG -I include -I src -I 3rdparty -o build/t34/fdbreak <此文件> -L build/lib -lipc -lpthread -Wl,-rpath,$PWD/build/lib
+
+## pub-only（每 pub = 2 fd）
+mode=pub n=10 dom=7310 | 建前 fds=4 max_fd=3 threads=1
+mode=pub n=10 | InitChannel 前 fds=4 (Δ=+0)
+mode=pub  n=10    | 建后 fds=23 max_fd=22 threads=11 | Δfd=+19  Δfd/端点=1.9000  pool_running=0 workers=0 routes=0
+mode=pub n=50 dom=7350 | 建前 fds=4 max_fd=3 threads=1
+mode=pub n=50 | InitChannel 前 fds=4 (Δ=+0)
+mode=pub  n=50    | 建后 fds=101 max_fd=100 threads=51 | Δfd=+97  Δfd/端点=1.9400  pool_running=0 workers=0 routes=0
+mode=pub n=100 dom=7400 | 建前 fds=4 max_fd=3 threads=1
+mode=pub n=100 | InitChannel 前 fds=4 (Δ=+0)
+mode=pub  n=100   | 建后 fds=203 max_fd=202 threads=101 | Δfd=+199  Δfd/端点=1.9900  pool_running=0 workers=0 routes=0
+mode=pub n=200 dom=7500 | 建前 fds=4 max_fd=3 threads=1
+mode=pub n=200 | InitChannel 前 fds=4 (Δ=+0)
+mode=pub  n=200   | 建后 fds=398 max_fd=397 threads=201 | Δfd=+394  Δfd/端点=1.9700  pool_running=0 workers=0 routes=0
+
+## sub-only（每 sub = 2 fd + 固定池开销）
+mode=sub n=10 dom=7510 | 建前 fds=4 max_fd=3 threads=1
+mode=sub n=10 | InitChannel 前 fds=4 (Δ=+0)
+mode=sub  n=10    | 建后 fds=88 max_fd=87 threads=12 | Δfd=+84  Δfd/端点=8.4000  pool_running=1 workers=32 routes=10
+mode=sub n=50 dom=7550 | 建前 fds=4 max_fd=3 threads=1
+mode=sub n=50 | InitChannel 前 fds=4 (Δ=+0)
+mode=sub  n=50    | 建后 fds=166 max_fd=165 threads=27 | Δfd=+162  Δfd/端点=3.2400  pool_running=1 workers=32 routes=49
+mode=sub n=100 dom=7600 | 建前 fds=4 max_fd=3 threads=1
+mode=sub n=100 | InitChannel 前 fds=4 (Δ=+0)
+mode=sub  n=100   | 建后 fds=266 max_fd=265 threads=33 | Δfd=+262  Δfd/端点=2.6200  pool_running=1 workers=32 routes=99
+mode=sub n=200 dom=7700 | 建前 fds=4 max_fd=3 threads=1
+mode=sub n=200 | InitChannel 前 fds=4 (Δ=+0)
+mode=sub  n=200   | 建后 fds=466 max_fd=465 threads=33 | Δfd=+462  Δfd/端点=2.3100  pool_running=1 workers=32 routes=199
+mode=sub n=500 dom=8000 | 建前 fds=4 max_fd=3 threads=1
+mode=sub n=500 | InitChannel 前 fds=4 (Δ=+0)
+mode=sub  n=500   | 建后 fds=1068 max_fd=1067 threads=33 | Δfd=+1064  Δfd/端点=2.1280  pool_running=1 workers=32 routes=500
+mode=sub n=1000 dom=8500 | 建前 fds=4 max_fd=3 threads=1
+mode=sub n=1000 | InitChannel 前 fds=4 (Δ=+0)
+mode=sub  n=1000  | 建后 fds=2062 max_fd=2061 threads=33 | Δfd=+2058  Δfd/端点=2.0580  pool_running=1 workers=32 routes=997
+
+## both（pub+sub，与 r25 工装同口径）
+mode=both n=100 dom=7910 | 建前 fds=4 max_fd=3 threads=1
+mode=both n=100 | InitChannel 前 fds=4 (Δ=+0)
+mode=both n=100   | 建后 fds=464 max_fd=463 threads=132 | Δfd=+460  Δfd/端点=2.3000  pool_running=1 workers=32 routes=98
+mode=both n=500 dom=7950 | 建前 fds=4 max_fd=3 threads=1
+mode=both n=500 | InitChannel 前 fds=4 (Δ=+0)
+mode=both n=500   | 建后 fds=2067 max_fd=2066 threads=533 | Δfd=+2063  Δfd/端点=2.0630  pool_running=1 workers=32 routes=500
+
+## both n=1000 三次尝试均被 EADDRINUSE 打断（R4 必须先做端口准入）
+2
+(上面数字 = 该次运行中建连失败的 sub 数)
+
+## both n=100 五次重复（验证与 r25 468 的一致性 + ACK 减项系数）
+mode=both n=100   | 建后 fds=468 max_fd=467 threads=133 | Δfd=+464  Δfd/端点=2.3200  pool_running=1 workers=32 routes=100
+mode=both n=100   | 建后 fds=468 max_fd=467 threads=133 | Δfd=+464  Δfd/端点=2.3200  pool_running=1 workers=32 routes=100
+mode=both n=100   | 建后 fds=468 max_fd=467 threads=131 | Δfd=+464  Δfd/端点=2.3200  pool_running=1 workers=32 routes=100
+mode=both n=100   | 建后 fds=468 max_fd=467 threads=133 | Δfd=+464  Δfd/端点=2.3200  pool_running=1 workers=32 routes=100
+mode=both n=100   | 建后 fds=466 max_fd=465 threads=133 | Δfd=+462  Δfd/端点=2.3100  pool_running=1 workers=32 routes=99

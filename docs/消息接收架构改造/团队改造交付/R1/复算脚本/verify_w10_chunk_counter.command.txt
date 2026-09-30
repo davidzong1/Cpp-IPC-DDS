@@ -1,0 +1,7 @@
+# R1/t31 独立复算：§13.2 第 3 条「独立计数」的最小反例
+# 编译（只读复算，不写仓库受管文件；输出到 build/）
+g++ -std=c++17 -O2 -DNDEBUG -I include -I src -I 3rdparty \
+    -o build/t31/chunkprobe docs/消息接收架构改造/团队改造交付/R1/复算脚本/verify_w10_chunk_counter.cpp \
+    -L build/lib -lipc -lpthread -Wl,-rpath,/home/zwc/cpp_ipc_dds/build/lib
+# 运行
+./build/t31/chunkprobe

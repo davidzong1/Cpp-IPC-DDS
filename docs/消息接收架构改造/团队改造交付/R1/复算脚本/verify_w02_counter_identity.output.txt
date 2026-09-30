@@ -1,0 +1,1 @@
+cases=45 |diff|<=8: 45/45 max|diff|=3 max|family-(dz+fb)|=3 family!=tlv+a+b: 0

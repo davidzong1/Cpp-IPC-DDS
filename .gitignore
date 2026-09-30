@@ -99,6 +99,14 @@ tmp/**
 t4build_tree/**
 .t8_**
 .t9_**
-
+.research/**
 # captain 注: test/perf/** **不得**加入忽略 —— 验收证据(D9 基线/fd 边界/t6 三臂日志)
 # 在那里; 忽略它会让证据静默不入库(本工作区已两次整体清空, 见 git log 8c6dd08 前后)。
+
+# ===== 本轮（W00–W12 性能证据闭环）提交范围控制 =====
+# 说明: 只排除「逐样本原始流」——体量主因(~300 MB)、可由工装重跑重建、非判据索引。
+# ⛔ 不排除 probe/ scratch/ bin/ 等目录: 其中混有证据留痕(如历史 run 的 .orig)与源码,
+#    整目录排除会静默丢证据(参见本文件上方 test/perf/** 的同源注释)。
+artifacts/**/*.jsonl
+artifacts/**/*.proc.log
+artifacts/**/samples/*.csv
