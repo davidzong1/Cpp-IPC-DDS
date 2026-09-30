@@ -1,0 +1,64 @@
+=== case 1：无 route (domain=8811) ===
+   1a 空表仍按轮扫描（scan_rounds>0）    PASS  Δscan_rounds=79（窗口 4.00 s）
+   1b 空表扫描 route 数恒为 0              PASS  Δscanned_routes_total=0
+   1c 空表无就绪轮（scan_ready_rounds 不增） PASS  Δscan_ready_rounds=0
+   1d route_count==0 且 deferred 深度为 0     PASS  route_count=0 deferred_depth_max=0
+   1e 不忙转（轮频率有上界）           PASS  rounds/s=19.749708 ≤ 上界 80.000000；Δrecv_once_calls=0（应为 0）
+   1f 无错误（wait_errors/recv_errors 不增） PASS  Δerrors=0
+   W10_R2_MIN_DONE case=1 name=无 route verdict=PASS failures=0
+   rc=0
+=== case 2：预算耗尽重入 deferred (domain=8812) ===
+   2a route 已进池（前提成立）           PASS  route_count=1
+   2b 积压已发出（> 每轮预算 1 条）   PASS  sent=8/8，每轮消息预算=1
+   2c 无新发布下全部排空（不得依赖新消息） PASS  收到 8/8（发布完成后未再 publish）
+   2d 逐条序号/载荷正确（无丢失、无重复、无乱序） PASS  M0..M7 逐条一致
+   2e 预算耗尽已重入（budget_yields/deferred_drains 增长） PASS  Δbudget_yields=8 Δdeferred_drains=8（≥ 重入次数；N-1=7）
+   2f deferred 深度有非零读数（按 worker 导出） PASS  deferred_depth_max=1 deferred_depth_last=0
+   2g 无错误                                   PASS  Δrecv_errors=0
+   W10_R2_MIN_DONE case=2 name=预算耗尽重入 deferred verdict=PASS failures=0
+   rc=0
+=== case 3：断开/注销 (domain=8813) ===
+   3a route 已进池（前提成立）           PASS  route_count=1
+   3b 发布者断开被可靠唤醒（wakeups↑ 且无超时） PASS  Δwait_wakeups=1 Δwait_timeouts=0 唤醒延迟≈10.47 ms（wait_timeout=5000 ms）
+   3b2 断开唤醒延迟 << wait_timeout         PASS  10.479 ms < 1000 ms（wait_timeout=5000 ms）
+   3b3 断开后重连、route 重新进池（注销用例的前提） PASS  route_count=1
+   3c 注销被可靠唤醒（wakeups↑ 且无超时） PASS  Δwait_wakeups=1 Δwait_timeouts=0 唤醒延迟≈0.414 ms
+   3d 注销后 route 归零                      PASS  route_count=0
+   3e 无错误（wait_errors/recv_errors 不增） PASS  Δwait_errors=0 Δrecv_errors=0
+   W10_R2_MIN_DONE case=3 name=断开/注销 verdict=PASS failures=0
+   rc=0
+=== case 4：后端错误（对照臂） (domain=8814) ===
+   4a 三条 route 全部收到消息（回退不是丢包） PASS  sent=3/3 rx=3/3 用时≈20.115 ms
+   4b 收到消息的耗时有界（无忙等死循环） PASS  rx 用时 20.115 ms < 15000 ms（上界判据）
+   4c 对照臂：走 worker、无回退（同一二进制，差异仅来自注入） PASS  seam worker=3/3 compat=0 Δfallback_total=0
+   4d 对照臂：池已接管（route_count==N、registration_ok==N） PASS  route_count=3 Δregistration_ok=3
+   4e 对照臂：backend_available 保持 true   PASS  backend_available=true（未探测到失败）
+   4f 对照臂：无错误（wait_errors 与 wait_timeouts 归零的语义对照） PASS  Δwait_errors=0 Δrecv_errors=0（⇒ 注入臂的 Δwait_errors>0 确由注入造成）
+   W10_R2_MIN_DONE case=4 name=后端错误 verdict=PASS failures=0
+   rc=0
+=== case 4：后端错误（注入臂 LD_PRELOAD=libforce_backend.so） ===
+   4a 三条 route 全部收到消息（回退不是丢包） PASS  sent=3/3 rx=3/3 用时≈20.098 ms
+   4b 收到消息的耗时有界（无忙等死循环） PASS  rx 用时 20.098 ms < 15000 ms（上界判据）
+   4c 注入臂：走**显式**回退，原因码恰为 kBackendUnavailable PASS  seam compat=3/3 backend_unavailable=3 worker=0 waitset_full=0 other=0
+   4d 注入臂：失败被计数（fallback_total==fallback_backend_unavailable==N，容量/token 计数为 0） PASS  Δfallback_total=3 Δfallback_backend_unavailable=3 Δfallback_capacity_full=0 Δwait_token_invalid=0
+   4e 注入臂：池未接管（route_count==0、registration_ok==0、backend_available==false） PASS  route_count=0 Δregistration_ok=0 Δregistration_attempts=1 backend_available=false（探测后永久置否）
+   4f 注入臂：⛔ 无静默降级（回退==route 数、未走 worker、等待层记为**错误**而非普通超时） PASS  compat=3 == 3；worker=0；Δwait_errors=16（>0 = 显式错误路径）、Δwait_timeouts=0（==0 = 未被当成普通空闲）
+   W10_R2_MIN_DONE case=4 name=后端错误 verdict=PASS failures=0
+   rc=0
+=== 缺口 3：scan_time_ns_total 观测区间拆分 ===
+   nop_ns=0.941
+   scope_only_diag_on_ns=41.283
+   scope_only_diag_off_ns=0.297
+   resident_twins_ns=10.176
+   interval_diag_on_ns=51.459  (= scope_only_on + resident_twins)
+   interval_diag_off_ns=10.473 (= scope_only_off + resident_twins)
+   PROBE_INTERVAL_DONE
+
+## 汇总
+失败项数=0
+case1.log                    verdict=PASS failures=0
+case2.log                    verdict=PASS failures=0
+case3.log                    verdict=PASS failures=0
+case4-inject.log             verdict=PASS failures=0
+case4.log                    verdict=PASS failures=0
+R2_MINIMAL_DRIVER_RESULT=PASS

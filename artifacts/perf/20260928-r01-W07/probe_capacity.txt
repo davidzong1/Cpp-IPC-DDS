@@ -1,0 +1,9 @@
+kMaxEntries=4096
+kPoolEntryBytes=296
+kLayoutMagic=0x5A495044
+kLayoutVersion=2
+segment_bytes()=1212472
+register_slot=0
+shm_file=/dev/shm/dz_ipc_info_pool_v2 size=1212476
+mapped_bytes_minus_segment=4
+pipe_headroom_entries=3096

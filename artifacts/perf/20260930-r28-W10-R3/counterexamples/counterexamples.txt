@@ -1,0 +1,56 @@
+# W10-R3 工装最小反例集（t37）—— 修前/修后对拍
+
+=== H1 端口预检：修前 used={0}（预检从未生效） vs 修后按列解析 ===
+  样本行(前 1 条):   145: 00000000:A874 00000000:0000 07 00000000:00000000 00:00000000 00000000 65534        0 3739623 2 0000000000000000 0       
+  修前 used = [0,]  |used|=1
+  修后 |used|=163 解析失败 0 行
+  [OK]   修前 used 实际只含 {0}（预检恒不生效）—— 复现队长核实的最小反例
+  [OK]   修后 used 含真实已占端口（>10）
+  [OK]   修前**不**排除已占端口 53（预检失效的直接证据）
+  [OK]   修后排除已占端口 53
+
+=== H2 握手：修前无条件 true（无对端也宣称注册成功） vs 修后要求逐 route 确认帧 ===
+  发布端存在=0：修前 registered=1000（耗时≈400000 ms 顺序睡眠！） → 修后 confirmed=0 registered=0
+  [OK]   **无对端**时修前宣称 registered=1000/1000（假通过），修后 registered=0（正确判失败）
+  [OK]   修前顺序睡眠 ≈400 s（挤占旧脚本 420 s 上限）
+  发布端存在=1：修前 registered=1000（耗时≈400000 ms 顺序睡眠！） → 修后 confirmed=1000 registered=1000
+
+=== H3 恢复时间戳：修前输出绝对时间（不可作延迟判据） vs 修后输出同钟差值 ===
+  修前 recover_first_packet_us=127162639725.0（= 35.32 小时，绝对时间）
+  修后 恢复延迟=2070us（同钟差值；发送绝对=127162639725us 接收绝对=127162641795us）
+  [OK]   修前值 >1e10 ⇒ 是**绝对时间**（r25 实测 9.52005e+10 与此同型）
+  [OK]   修后是**非负且远小于阶段耗时**的延迟值
+
+=== H4 concurrent-close-rebuild：修前**无任何重建代码** vs 修后真实重建 ===
+  修前：阶段内只有 `shm_subs_[i].reset()`（8 lane 并发析构后半数），**无 generation 推进**
+  修后：拆成 concurrent-close + rebuild 两段；rebuild 段走生产路径（旧发布端析构 → 新发布端重建 ⇒ generation 1→2），并记 begin→新代首包耗时与旧代帧独立计数
+  [OK]   修前该阶段名曾暗示重建，但代码里没有重建（已由 t37 拆段并补齐）
+
+=== H6 总判定：修前 dup/ooo 只记不判 vs 修后逐条机械断言 ===
+  重复序号 dup=50    修前 verdict=PASS  修后 verdict=FAIL
+  [OK]   修后对「重复序号 dup=50」判失败
+  [OK]   修前对「重复序号 dup=50」**漏判**（正是 H6 的缺口）
+  乱序 ooo=7           修前 verdict=PASS  修后 verdict=FAIL
+  [OK]   修后对「乱序 ooo=7」判失败
+  [OK]   修前对「乱序 ooo=7」**漏判**（正是 H6 的缺口）
+  载荷损坏 corrupt=3 修前 verdict=FAIL  修后 verdict=FAIL
+  [OK]   修后对「载荷损坏 corrupt=3」判失败
+  超期未收满 timeout=1 修前 verdict=FAIL  修后 verdict=FAIL
+  [OK]   修后对「超期未收满 timeout=1」判失败
+  少收 rx_missing=2    修前 verdict=FAIL  修后 verdict=FAIL
+  [OK]   修后对「少收 rx_missing=2」判失败
+
+=== F6 hotcold sent：修前 publish_route 不记账（sent 恒 0） vs 修后同口径记账 ===
+  修前 hot sent=0 cold sent=0（台账读不出「计划」）
+  修后 hot sent=40000 cold sent=999（= 发送尝试数）
+  [OK]   修前 sent 列恒 0（t31-F6 原样复现）
+  [OK]   修后 sent 非零，且 sent/sent_ok 分列
+
+== 汇总 ==
+  · H1 修前 used=1 项，修后 163 项（解析失败 0）
+  · H2 反例：无对端时修前 1000/1000、修后 0/1000；修前握手耗时 ≈400 s（顺序睡眠）
+  · H3 反例：修前 9.52005e+10（绝对） vs 修后 2065 us（延迟），差值口径成立
+  · H4 反例：修前该阶段无重建代码；修后实测 gen 1→2、重建 ≤20 ms（上限 1000 ms）
+  · H6 反例：dup=50 / ooo=7 修前 PASS，修后 FAIL；corrupt/timeout/rx 两侧都 FAIL
+  · F6 反例：hotcold sent 修前 0/1000 行非零、修后 1000/1000 行非零（见 r28 实测）
+COUNTEREXAMPLES_OK failures=0

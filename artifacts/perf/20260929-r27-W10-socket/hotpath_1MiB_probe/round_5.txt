@@ -1,0 +1,119 @@
+[33m[dzIPC][view_queue] queue_size = 1024 超过钉上限, 被钉到 10: chunk 池每尺寸档只有 40 块且全机共享(建 route 不带 prefix), 队列配得比池大就会把池吃干。两个钉面同用此上限: view 队列钉到 10; adopt 借样(schema-less 话题的 DZFlat 经 msg_queue_)配额同为 10, 配额满即自动物化拷贝 —— 零拷贝只在配额内生效, 超额每消息多一次拷贝。见 docs/shm_chunk_pool_occupancy_plan.md §3 步骤③与 UF-012; EnableViewQueuePin(false) 可恢复原值。[0m
+chunk pool exhausted: kind = send, chunk_size = 1057792, size = 1057249, pool capacity = 40, count = 1 (本进程), prefix = ''  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程
+RecvWorker[0]: idle exit (no routes for >= 1000 ms)
+RecvWorker[3]: idle exit (no routes for >= 1000 ms)
+RecvWorker[6]: idle exit (no routes for >= 1000 ms)
+RecvWorker[1]: idle exit (no routes for >= 1000 ms)
+RecvWorker[2]: idle exit (no routes for >= 1000 ms)
+RecvWorker[11]: idle exit (no routes for >= 1000 ms)
+RecvWorker[8]: idle exit (no routes for >= 1000 ms)
+RecvWorker[18]: idle exit (no routes for >= 1000 ms)
+RecvWorker[31]: idle exit (no routes for >= 1000 ms)
+RecvWorker[10]: idle exit (no routes for >= 1000 ms)
+RecvWorker[7]: idle exit (no routes for >= 1000 ms)
+RecvWorker[27]: idle exit (no routes for >= 1000 ms)
+RecvWorker[4]: idle exit (no routes for >= 1000 ms)
+RecvWorker[9]: idle exit (no routes for >= 1000 ms)
+RecvWorker[29]: idle exit (no routes for >= 1000 ms)
+RecvWorker[15]: idle exit (no routes for >= 1000 ms)
+RecvWorker[13]: idle exit (no routes for >= 1000 ms)
+RecvWorker[25]: idle exit (no routes for >= 1000 ms)
+RecvWorker[16]: idle exit (no routes for >= 1000 ms)
+RecvWorker[24]: idle exit (no routes for >= 1000 ms)
+RecvWorker[17]: idle exit (no routes for >= 1000 ms)
+RecvWorker[30]: idle exit (no routes for >= 1000 ms)
+RecvWorker[14]: idle exit (no routes for >= 1000 ms)
+RecvWorker[26]: idle exit (no routes for >= 1000 ms)
+RecvWorker[21]: idle exit (no routes for >= 1000 ms)
+RecvWorker[23]: idle exit (no routes for >= 1000 ms)
+RecvWorker[22]: idle exit (no routes for >= 1000 ms)
+RecvWorker[20]: idle exit (no routes for >= 1000 ms)
+RecvWorker[19]: idle exit (no routes for >= 1000 ms)
+RecvWorker[28]: idle exit (no routes for >= 1000 ms)
+RecvWorker[12]: idle exit (no routes for >= 1000 ms)
+[33m[dzIPC][view_queue] queue_size = 1024 超过钉上限, 被钉到 10: chunk 池每尺寸档只有 40 块且全机共享(建 route 不带 prefix), 队列配得比池大就会把池吃干。两个钉面同用此上限: view 队列钉到 10; adopt 借样(schema-less 话题的 DZFlat 经 msg_queue_)配额同为 10, 配额满即自动物化拷贝 —— 零拷贝只在配额内生效, 超额每消息多一次拷贝。见 docs/shm_chunk_pool_occupancy_plan.md §3 步骤③与 UF-012; EnableViewQueuePin(false) 可恢复原值。[0m
+RecvWorker[18]: idle exit (no routes for >= 1000 ms)
+RecvWorker[31]: idle exit (no routes for >= 1000 ms)
+RecvWorker[25]: idle exit (no routes for >= 1000 ms)
+RecvWorker[24]: idle exit (no routes for >= 1000 ms)
+RecvWorker[29]: idle exit (no routes for >= 1000 ms)
+RecvWorker[14]: idle exit (no routes for >= 1000 ms)
+RecvWorker[16]: idle exit (no routes for >= 1000 ms)
+RecvWorker[8]: idle exit (no routes for >= 1000 ms)
+RecvWorker[11]: idle exit (no routes for >= 1000 ms)
+RecvWorker[12]: idle exit (no routes for >= 1000 ms)
+RecvWorker[3]: idle exit (no routes for >= 1000 ms)
+RecvWorker[27]: idle exit (no routes for >= 1000 ms)
+RecvWorker[15]: idle exit (no routes for >= 1000 ms)
+RecvWorker[28]: idle exit (no routes for >= 1000 ms)
+RecvWorker[20]: idle exit (no routes for >= 1000 ms)
+RecvWorker[21]: idle exit (no routes for >= 1000 ms)
+RecvWorker[6]: idle exit (no routes for >= 1000 ms)
+RecvWorker[2]: idle exit (no routes for >= 1000 ms)
+RecvWorker[4]: idle exit (no routes for >= 1000 ms)
+RecvWorker[22]: idle exit (no routes for >= 1000 ms)
+RecvWorker[26]: idle exit (no routes for >= 1000 ms)
+RecvWorker[5]: idle exit (no routes for >= 1000 ms)
+RecvWorker[17]: idle exit (no routes for >= 1000 ms)
+RecvWorker[0]: idle exit (no routes for >= 1000 ms)
+RecvWorker[30]: idle exit (no routes for >= 1000 ms)
+RecvWorker[1]: idle exit (no routes for >= 1000 ms)
+RecvWorker[9]: idle exit (no routes for >= 1000 ms)
+RecvWorker[7]: idle exit (no routes for >= 1000 ms)
+RecvWorker[23]: idle exit (no routes for >= 1000 ms)
+RecvWorker[10]: idle exit (no routes for >= 1000 ms)
+RecvWorker[19]: idle exit (no routes for >= 1000 ms)
+======================================================================
+ dzIPC 通信性能测试
+======================================================================
+  test_time             : 2026-09-30 02:12:28+0800
+  hostname              : zwc-leju
+  os                    : Linux
+  kernel                : 6.8.0-138-generic
+  arch                  : x86_64
+  distro                : Ubuntu 22.04.5 LTS
+  cpu_model             : Intel(R) Core(TM) i9-14900KF
+  cpu_vendor            : GenuineIntel
+  cpu_logical_cores     : 32
+  cpu_physical_cores    : 24
+  cpu_mhz_now           : 2296.583
+  cpu_mhz_max           : 5700
+  cpu_governor          : powersave
+  cpu_cache             : L1d=48K, L1i=32K, L2=2048K, L3=36864K
+  cpu_flags             : sse4_2,avx,avx2,constant_tsc,nonstop_tsc,rdtscp
+  mem_total             : 65647728 kB
+  mem_available         : 35204836 kB
+  hugepages_thp         : always [madvise] never
+  dev_shm_size          : 31.30 GiB
+  net_rmem_max          : 536870912
+  net_wmem_max          : 536870912
+  net_rmem_default      : 536870912
+  net_netdev_backlog    : 1000
+  isolcpus              : no
+  loadavg_1min_at_start : 2.16
+  compiler              : 11.4.0
+  build_type            : release (NDEBUG, -O2)
+  cxx_standard          : 201703
+  nodelet_fast_path     : disabled
+  process_model         : multi-process (fork+exec), 收发分属不同进程
+----------------------------------------------------------------------
+  测量时长/用例        : 5 s
+  预热时长/用例        : 0.5 s
+  时延用例发送速率     : 1000 Hz
+  payload 扫描         : 1048576 B
+  输出目录             : /home/zwc/cpp_ipc_dds/artifacts/perf/20260929-r27-W10-socket/hotpath_1MiB_probe/perf_5
+======================================================================
+
+---- pubsub_shm ----
+  pubsub_shm_1048576B_lat                1000 msg/s   1000.2 MB/s  p50=  728.41  p99= 4896.92  p999= 5699.05  max=  6537.31 us  丢包=  0.00%  CPU=1.43
+  pubsub_shm_1048576B_tput               1428 msg/s   1427.8 MB/s  p50=12260.06  p99=32209.79  p999=36302.60  max= 38254.42 us  丢包=  0.00%  CPU=1.50
+
+======================================================================
+  用例总数 : 2   失败 : 0
+  结果 CSV : /home/zwc/cpp_ipc_dds/artifacts/perf/20260929-r27-W10-socket/hotpath_1MiB_probe/perf_5/results.csv
+  结果 JSON: /home/zwc/cpp_ipc_dds/artifacts/perf/20260929-r27-W10-socket/hotpath_1MiB_probe/perf_5/results.json
+  硬件配置 : /home/zwc/cpp_ipc_dds/artifacts/perf/20260929-r27-W10-socket/hotpath_1MiB_probe/perf_5/hardware.txt
+  时延样本 : /home/zwc/cpp_ipc_dds/artifacts/perf/20260929-r27-W10-socket/hotpath_1MiB_probe/perf_5/samples/
+
+  绘图: python3 scripts/plot_dzipc_perf.py /home/zwc/cpp_ipc_dds/artifacts/perf/20260929-r27-W10-socket/hotpath_1MiB_probe/perf_5
+======================================================================

@@ -1,0 +1,131 @@
+{
+  "run_id": "20260930-r49-W11",
+  "work_package": "W11",
+  "source_revision": "e800ccc496ac710b711c9346709e86a148c41241",
+  "working_tree_clean": false,
+  "build_dir": "/home/zwc/cpp_ipc_dds/build",
+  "binary_sha256": {
+    "library": "cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46",
+    "w10_r5_matrix": "7f65579eeaca7217851b3d54addb3d80563415348cadc8937bdf7c119376d9b9"
+  },
+  "loaded_library_paths": [
+    "/home/zwc/cpp_ipc_dds/build/lib/libipc.so"
+  ],
+  "transport": "shm",
+  "process_model": "cross-process",
+  "topic_count": null,
+  "unique_topic_count": null,
+  "worker_count": 32,
+  "fallback_count": 0,
+  "registered_count": null,
+  "valid_rx_count": null,
+  "sample_count": 0,
+  "config_hash": "18443358c2f7d09d3a3070f6d0623b9cf57bd021b34e50728aa5213d3f273596",
+  "result_files": [
+    "runs.tsv",
+    "fingerprint.txt",
+    "A_cpu_tickrate_normalized.md",
+    "B_scan_cost.md",
+    "<phase>/<sub>/{manifest.json,windows.csv,windows.jsonl,counters.json,threestate.json,phases.csv,verdict.md}"
+  ],
+  "generated_at": "2026-09-30T17:31:00.307943+08:00",
+  "measurement": "control-plane CPU（tick 率归一化）+ 扫描成本（§10.2）",
+  "caliber": {
+    "frozen_triple": {
+      "window": "--window-s 60 + --settle-s 4（窗口前静置，不含启动瞬态；外部采样器须完整落在窗口内）",
+      "entry_count": "**注册项数**：state2 = n（仅订阅）；state3 = 2n（订阅 + 发布）",
+      "tick_caliber": "ShmControlScheduler::stats().tick_count 的**同窗口差值 ÷ wall**（⛔ 不用公式、⛔ 不用 wakescan 推算）"
+    },
+    "cpu_normalized_form": "cpu ≈ k_态 × 注册项数 × tick_率；k = 每注册项每 tick 成本",
+    "two_calibers_must_not_be_swapped": {
+      "per_tick_cost_us": "cpu_cores ÷ tick_rate × 1e6        —— µs/tick",
+      "per_entry_ns": "cpu_cores ÷ (注册项数 × tick_rate) × 1e9  —— ns/项·tick",
+      "relation": "每注册项 = 每 tick 成本 × 1000 ÷ 注册项数（差一个「注册项数」因子 ⇒ 恒不相等）"
+    },
+    "reference_values_from_t51": {
+      "state2_n1000_ns_per_entry": 11.9,
+      "state3_n1000_ns_per_entry": 22.9,
+      "note": "⛔ t45 原表 45.2 是每 tick 成本（µs/tick），不得当每注册项用"
+    },
+    "state2_n1000_single_not_a_criterion": "该档双峰不可稳定测量；若保留取上界 0.18829 + 以最坏值为准",
+    "tool_version": {
+      "harness": "w10_r5_matrix (W10-R5/§6.2-§6.3/v1)",
+      "note": "W11 复用 W10 已验证工装以保证与 R5 可比；⛔ 不使用第二工装做对比"
+    }
+  },
+  "sub_runs": [
+    "cpu/cpu-st1-n1000-W32-diagoff-r1",
+    "cpu/cpu-st1-n1000-W32-diagoff-r2",
+    "cpu/cpu-st1-n1000-W32-diagoff-r3",
+    "cpu/cpu-st1-n1000-W32-diagoff-r4",
+    "cpu/cpu-st1-n1000-W32-diagoff-r5",
+    "cpu/cpu-st2-n100-W32-diagoff-r1",
+    "cpu/cpu-st2-n100-W32-diagoff-r2",
+    "cpu/cpu-st2-n100-W32-diagoff-r3",
+    "cpu/cpu-st2-n100-W32-diagoff-r4",
+    "cpu/cpu-st2-n100-W32-diagoff-r5",
+    "cpu/cpu-st2-n1000-W32-diagoff-r1",
+    "cpu/cpu-st2-n1000-W32-diagoff-r2",
+    "cpu/cpu-st2-n1000-W32-diagoff-r3",
+    "cpu/cpu-st2-n1000-W32-diagoff-r4",
+    "cpu/cpu-st2-n1000-W32-diagoff-r5",
+    "cpu/cpu-st2-n500-W32-diagoff-r1",
+    "cpu/cpu-st2-n500-W32-diagoff-r2",
+    "cpu/cpu-st2-n500-W32-diagoff-r3",
+    "cpu/cpu-st2-n500-W32-diagoff-r4",
+    "cpu/cpu-st2-n500-W32-diagoff-r5",
+    "cpu/cpu-st3-n100-W32-diagoff-r1",
+    "cpu/cpu-st3-n100-W32-diagoff-r2",
+    "cpu/cpu-st3-n100-W32-diagoff-r3",
+    "cpu/cpu-st3-n100-W32-diagoff-r4",
+    "cpu/cpu-st3-n100-W32-diagoff-r5",
+    "cpu/cpu-st3-n1000-W32-diagoff-r1",
+    "cpu/cpu-st3-n1000-W32-diagoff-r2",
+    "cpu/cpu-st3-n1000-W32-diagoff-r3",
+    "cpu/cpu-st3-n1000-W32-diagoff-r4",
+    "cpu/cpu-st3-n1000-W32-diagoff-r5",
+    "cpu/cpu-st3-n1000-W4-diagoff-r1",
+    "cpu/cpu-st3-n1000-W4-diagoff-r2",
+    "cpu/cpu-st3-n1000-W4-diagoff-r3",
+    "cpu/cpu-st3-n1000-W4-diagoff-r4",
+    "cpu/cpu-st3-n1000-W4-diagoff-r5",
+    "cpu/cpu-st3-n500-W32-diagoff-r1",
+    "cpu/cpu-st3-n500-W32-diagoff-r2",
+    "cpu/cpu-st3-n500-W32-diagoff-r3",
+    "cpu/cpu-st3-n500-W32-diagoff-r4",
+    "cpu/cpu-st3-n500-W32-diagoff-r5",
+    "recheck/recheck-r1",
+    "recheck/recheck-r2",
+    "recheck/recheck-r3",
+    "scan/scan-st3-n1-W32-diagon-r1",
+    "scan/scan-st3-n1-W32-diagon-r2",
+    "scan/scan-st3-n1-W32-diagon-r3",
+    "scan/scan-st3-n1-W32-diagon-r4",
+    "scan/scan-st3-n1-W32-diagon-r5",
+    "scan/scan-st3-n100-W32-diagon-r1",
+    "scan/scan-st3-n100-W32-diagon-r2",
+    "scan/scan-st3-n100-W32-diagon-r3",
+    "scan/scan-st3-n100-W32-diagon-r4",
+    "scan/scan-st3-n100-W32-diagon-r5",
+    "scan/scan-st3-n1000-W32-diagon-r1",
+    "scan/scan-st3-n1000-W32-diagon-r2",
+    "scan/scan-st3-n1000-W32-diagon-r3",
+    "scan/scan-st3-n1000-W32-diagon-r4",
+    "scan/scan-st3-n1000-W32-diagon-r5",
+    "scan/scan-st3-n500-W32-diagon-r1",
+    "scan/scan-st3-n500-W32-diagon-r2",
+    "scan/scan-st3-n500-W32-diagon-r3",
+    "scan/scan-st3-n500-W32-diagon-r4",
+    "scan/scan-st3-n500-W32-diagon-r5"
+  ],
+  "sub_run_count": 63,
+  "sub_run_fingerprints": {
+    "lib_sha256_set": [
+      "cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46"
+    ],
+    "tool_sha256_set": [
+      "7f65579eeaca7217851b3d54addb3d80563415348cadc8937bdf7c119376d9b9"
+    ],
+    "consistent": true
+  }
+}

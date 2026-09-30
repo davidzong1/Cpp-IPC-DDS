@@ -1,0 +1,9 @@
+
+## 汇总
+失败项数=0
+case1.log                    verdict=PASS failures=0
+case2.log                    verdict=PASS failures=0
+case3.log                    verdict=PASS failures=0
+case4-inject.log             verdict=PASS failures=0
+case4.log                    verdict=PASS failures=0
+R2_MINIMAL_DRIVER_RESULT=PASS

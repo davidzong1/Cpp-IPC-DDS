@@ -1,0 +1,2 @@
+route,registered,planned,sent,rx,dup,out_of_order,corrupt,timeout,rx_after_silence,first_packet_ok,first_packet_us
+w10_socket_independent_3101_0,1,8,8,8,0,0,0,0,5,1,95340210706

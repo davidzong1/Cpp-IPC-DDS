@@ -1,0 +1,70 @@
+{
+  "run_id": "20260930-r48-W03-W02Fields",
+  "work_package": "W03",
+  "task": "t52",
+  "title": "W02/R-5 新字段登记进 field_schema.json（登记≠拥有；owner 逐条标注）",
+  "source_revision": "e800ccc496ac710b711c9346709e86a148c41241",
+  "working_tree_clean": false,
+  "schema_document_json_sha256": "sha256:447817eabde9e034023c8d5ffc88386e731a640feb9c4dcb18d05519b2464aeb",
+  "schema_document_csv_sha256": "sha256:1dd6976f7d5a94d1218c8eba0537737bfdc053feb2e6dfdcb504c23227112628",
+  "field_schema_h_sha256": "sha256:d63df84743264726db87af242a90241714a77c14bc015d664ec51e6a16c1a935",
+  "run_level_fields_count": 13,
+  "owners": [
+    "W02"
+  ],
+  "registered_by": [
+    "W03"
+  ],
+  "summary_csv_extra_columns": "bad_header,late_ok,backlog_ok,send_blocked_ok,abnormal_ok,bad_header_ok",
+  "manifest_extension_keys": [
+    "failure_thresholds",
+    "currently_citable",
+    "run_identity",
+    "evidence_discipline",
+    "field_aliases"
+  ],
+  "registration_check": {
+    "bad_header": true,
+    "late_ok": true,
+    "backlog_ok": true,
+    "send_blocked_ok": true,
+    "abnormal_ok": true,
+    "bad_header_ok": true
+  },
+  "manifest_key_check": {
+    "failure_thresholds": true,
+    "currently_citable": true,
+    "run_identity": true,
+    "evidence_discipline": true,
+    "field_aliases": true
+  },
+  "zero_semantics": {
+    "bad_header": "measured_zero",
+    "late_ok": "decided_zero",
+    "backlog_ok": "decided_zero",
+    "send_blocked_ok": "decided_zero",
+    "abnormal_ok": "decided_zero",
+    "bad_header_ok": "decided_zero",
+    "cases[].bad_header": "measured_zero",
+    "cases[].gates": "decided_zero",
+    "failure_thresholds": "decided_zero",
+    "currently_citable": "uncollected_null",
+    "run_identity": "decided_zero",
+    "evidence_discipline": "decided_zero",
+    "field_aliases": "decided_zero"
+  },
+  "k_counter_count": 66,
+  "schema_csv_wellformed": {
+    "rows": 144,
+    "cols": 7,
+    "bad_rows": 0
+  },
+  "verdict": "PASS",
+  "notes": [
+    "登记≠拥有: owner 全部为 W02, registered_by 为 W03",
+    "6 个判定字段 nullable=false 且 zero_semantics=decided_zero (未触发也写 0/1, 0 不得读作未采集)",
+    "currently_citable 是唯一 nullable=true (uncollected_null)",
+    "本包只登记结构, 未改 W02 产物/代码",
+    "顺带修掉 schema.csv 的 RFC4180 转义缺陷(修复前 8 行/追加后 19 行列数不一致 -> 0)"
+  ]
+}

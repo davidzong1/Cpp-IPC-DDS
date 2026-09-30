@@ -1,0 +1,146 @@
+{
+  "run_id": "20260929-r32-W10-portfix",
+  "work_package": "W07/W10-D22 (t29)",
+  "task": "t29",
+  "attempt_id": "3c13e252-40a9-4387-b83d-393bd09ab573",
+  "source_revision": "e800ccc496ac710b711c9346709e86a148c41241",
+  "working_tree_clean": false,
+  "changed_paths_this_task": [
+    "src/dzIPC/socket_pub_sub_ipc.cc"
+  ],
+  "untouched_verified": {
+    "src/libipc/platform/posix/udp.h": "226950d437e71e7857cf4c7e938565e3c60960bf8b1ed70b79b4394254f27130"
+  },
+  "build_dir": "/home/zwc/cpp_ipc_dds/build",
+  "build_type": "Release",
+  "binary_sha256": {
+    "library": "e1c2a7e99f8bd2e8dd05b393c05d9fe00e35c640efccbe7a8dfbbf991dc174c4",
+    "socket_pub_sub_ipc.cc": "b1867d0f34101a395129d2a20ba99bc039af3ff74cf8855276fd83f2159c665c",
+    "libipc_udp.h": "226950d437e71e7857cf4c7e938565e3c60960bf8b1ed70b79b4394254f27130"
+  },
+  "pre_fix_fingerprints": {
+    "socket_pub_sub_ipc.cc": "169dd872fb093ed6319643518eddba574e5b0ed5219762193f3f441e129aacff",
+    "libipc.so.1.3.0": "dc2d5c5aa52a2b3b3fb3a5dc420a3775fc15a96bdadffde6742dd0d9db07649a"
+  },
+  "transport": "socket_pub_sub",
+  "process_model": "in-process (N routes, one process)",
+  "measurement_mode": "wall-clock (steady_clock)",
+  "topic_count": 1000,
+  "unique_topic_count": 1000,
+  "expected_count": 1000,
+  "valid_rx_count": 1000,
+  "routes_ok": 1000,
+  "routes_lost": 0,
+  "connect_retry": {
+    "default_max_attempts": 30,
+    "interval_ms": 1000,
+    "env": "DZIPC_SOCKET_CONNECT_MAX_ATTEMPTS",
+    "0_means": "unbounded (explicit legacy path)"
+  },
+  "hang_before": {
+    "scenario": "w10_matrix --transport socket --topology independent --n 1000",
+    "rc": 124,
+    "evidence": "01_baseline_n1000.log"
+  },
+  "hang_after": {
+    "rc": 1,
+    "bounded": true,
+    "diagnosed_routes": [
+      "38/48650",
+      "326/33539",
+      "418/48628"
+    ],
+    "evidence": "41_w10matrix_n1000_after_fix.log"
+  },
+  "ctest": {
+    "items": 27,
+    "passed": 27,
+    "log": "40_ctest_j4_after_fix.log"
+  },
+  "port_surface": {
+    "dzipc_window": [
+      11451,
+      65531
+    ],
+    "ip_local_port_range": [
+      32768,
+      60999
+    ],
+    "overlap_ratio": 0.522,
+    "clash_routes_domain3103": 14,
+    "evidence": "50_port_surface.txt"
+  },
+  "reported_not_fixed": [
+    "R-1 port window vs ip_local_port_range overlap (design-level, D-22 excluded)",
+    "R-2 socket publish-side O(N^2) discovery cost (~132 s at N=1000), pre-existing",
+    "R-3 w10_matrix w10_pick_socket_topics() parses the wrong column => port avoidance inert",
+    "R-4 InitChannel still returns void (no programmatic error surface)"
+  ],
+  "result_files": [
+    "01_baseline_n1000.log",
+    "02_baseline_n38.log",
+    "02_baseline_n39.log",
+    "03_picker_parse_check.txt",
+    "10_fixed_n39_default.log",
+    "11_fixed_n39_naive.log",
+    "12_fixed_n39_scanned.log",
+    "20_fixed_n1000_scanned.log",
+    "21_fixed_n500_scanned.log",
+    "22_fixed_n1000_scanned.log",
+    "22b_fixed_n1000_scanned_earlier.log",
+    "30_fixed_n1000_naive.log",
+    "31_legacy_unbounded_n39.log",
+    "32_maxattempts3_n39.log",
+    "33_error_surface.log",
+    "40_ctest_j4_after_fix.log",
+    "41_w10matrix_n1000_after_fix.log",
+    "50_port_surface.txt",
+    "binary-fingerprint.txt",
+    "build-config.txt",
+    "command.txt",
+    "counterfactual/60_prefix_n500_scanned.log",
+    "counterfactual/61_prefix_n1000_scanned.log",
+    "counterfactual/build_fix_restore.log",
+    "counterfactual/build_prefix.log",
+    "counterfactual/socket_pub_sub_ipc.cc.D22fix",
+    "counterfactual/socket_pub_sub_ipc.cc.HEAD",
+    "d22_error_surface",
+    "environment.txt",
+    "errno_preservation.txt",
+    "errno_survive",
+    "fingerprints_before.txt",
+    "manifest.json",
+    "picker_parse_check",
+    "port_surface",
+    "socket_pub_sub_ipc.cc.D22fix",
+    "socket_pub_sub_ipc.cc.HEAD",
+    "socket_scale_probe",
+    "source-status.txt",
+    "src/d22_error_surface.cpp",
+    "src/errno_survive.cpp",
+    "src/picker_parse_check.cpp",
+    "src/port_surface.cpp",
+    "src/socket_scale_probe.cpp",
+    "stdout/01_baseline_n1000.log",
+    "stdout/02_baseline_n38.log",
+    "stdout/02_baseline_n39.log",
+    "stdout/10_fixed_n39_default.log",
+    "stdout/11_fixed_n39_naive.log",
+    "stdout/12_fixed_n39_scanned.log",
+    "stdout/20_fixed_n1000_scanned.log",
+    "stdout/21_fixed_n500_scanned.log",
+    "stdout/22_fixed_n1000_scanned.log",
+    "stdout/22b_fixed_n1000_scanned_earlier.log",
+    "stdout/30_fixed_n1000_naive.log",
+    "stdout/31_legacy_unbounded_n39.log",
+    "stdout/32_maxattempts3_n39.log",
+    "stdout/33_error_surface.log",
+    "stdout/40_ctest_j4_after_fix.log",
+    "stdout/41_w10matrix_n1000_after_fix.log",
+    "stdout/60_prefix_n500_scanned.log",
+    "stdout/61_prefix_n1000_scanned.log",
+    "stdout/build_fix_restore.log",
+    "stdout/build_prefix.log",
+    "verdict.md"
+  ]
+}

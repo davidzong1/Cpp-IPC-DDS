@@ -1,0 +1,44 @@
+--- a/include/dzIPC/shm_pub_sub_ipc.h
++++ b/include/dzIPC/shm_pub_sub_ipc.h
+@@ -98,11 +98,40 @@
+     {
+         if (!dzIPC::IsDzFlatEnabled() || !publisher_)
+         {
++            /* (c) B 借样失败：开关未开 / 无发布端 ⇒ 与"无接收方"同类（拿不到更细证据）。
++             * ⛔ 不碰 fallback_total。 */
++            dzIPC::measure::note_dzflat_borrow_failed(false, false, false);
+             return {};
+         }
+-        auto lo = publisher_->loan(Flat::loan_size(varlen_budget));
++        /* t46：走带**原因出口**的重载，让「池耗尽 / 超尺寸 / 无接收方 / 未就绪」可分。
++         * ⛔ 两个 ID 都属 t19 冻结的 (c) B 贷款失败语义，⛔ 绝不并入 fallback_total。 */
++        ipc::loan_status why = ipc::loan_status::ok;
++        auto lo = publisher_->loan(Flat::loan_size(varlen_budget), why);
+         if (!lo.valid())
+         {
++            switch (why)
++            {
++            case ipc::loan_status::pool_exhausted:
++                /* 背压：该尺寸档 chunk 池耗尽（W03 ID 的**唯一**生产写入点）。 */
++                dzIPC::measure::CounterRegistry::instance().inc(
++                    dzIPC::measure::CounterId::borrow_failed_pool_exhausted);
++                break;
++            case ipc::loan_status::no_receiver:
++            case ipc::loan_status::not_ready:
++                dzIPC::measure::CounterRegistry::instance().inc(
++                    dzIPC::measure::CounterId::borrow_failed_no_receiver);
++                break;
++            /* ⛔ 这里**故意不**接 `borrow_failed_oversized`：实测本调用点**算术上
++             * 到不了** `size_too_large`（varlen_budget 是 uint32_t ⇒ 最大档位 ≈128 KiB
++             * ≪ 阈值；证据 shadow/reach_check + 交付 §3.2）。接了就是"有写入者但永不
++             * 触发"的假接线 —— 与 t35 修的漏计形态同族，⛔ 不做。
++             * 该 ID 的真实出口是 `publish_loaned` 的 `!finalize()`（超变长预算），
++             * 那里需要 W03 的落点改判（见 41_borrow_failed_oversized_需求.md）。 */
++            default:
++                dzIPC::measure::note_dzflat_borrow_failed(
++                    (publisher_ != nullptr) && (publisher_->recv_count() > 0), false, false);
++                break;
++            }
+             return {};
+         }
+         return LoanedMessage<Flat>{publisher_, lo, dzflat_msg_id()};

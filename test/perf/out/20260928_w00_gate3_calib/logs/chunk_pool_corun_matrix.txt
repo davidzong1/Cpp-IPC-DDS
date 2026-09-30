@@ -1,0 +1,13 @@
+== 单独跑（对照） ==
+  alone run1 rc=0
+  alone run2 rc=0
+  alone run3 rc=0
+== 与各并发邻居配对（builder 与邻居同时跑） ==
+test_dzflat_transport              builder_fail=2/6
+test_lifecycle_contract            builder_fail=6/6
+test_recv_worker                   builder_fail=6/6
+test_shm_ser_backpressure          builder_fail=6/6
+test_shm_i5_pop_buffer             builder_fail=6/6
+test_w08_dzflat_ab                 builder_fail=6/6
+test_dzflat_rx                     builder_fail=6/6
+DONE

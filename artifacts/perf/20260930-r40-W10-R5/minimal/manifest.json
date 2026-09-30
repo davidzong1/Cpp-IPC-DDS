@@ -1,0 +1,8 @@
+{
+  "run_id": "r5min",
+  "work_package": "W10-R5-minimal",
+  "criteria_version": "W10-R5/§6.2-minimal/v1",
+  "workers": 4,
+  "topic_count": 10,
+  "note": "SHM 侧；假就绪与后端错误两项如实登记为不适用/无法构成"
+}

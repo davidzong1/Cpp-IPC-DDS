@@ -1,0 +1,47 @@
+W07 socket 容量与高 fd 修复 —— 复现命令（run_id 20260928-r01-W07）
+工作目录 /home/zwc/cpp_ipc_dds, 基线 e800ccc496ac710b711c9346709e86a148c41241
+
+# 0) 改动面 = 3 个文件（补丁另存 ./w07.patch）
+#    src/libipc/platform/posix/udp.h            （select/FD_SET → poll）
+#    include/dzIPC/ipc_info_pool.h              （容量/版本常量 + 布局门禁声明）
+#    src/dzIPC/ipc_info_pool.cc                 （段名 v2 + attach 拒绝性校验 + 诊断）
+sha256sum src/libipc/platform/posix/udp.h include/dzIPC/ipc_info_pool.h src/dzIPC/ipc_info_pool.cc
+git diff -- src/libipc/platform/posix/udp.h include/dzIPC/ipc_info_pool.h src/dzIPC/ipc_info_pool.cc
+
+# 1) 构建
+cmake -S . -B build
+cmake --build build --target ipc test_socket_high_fd test_socket_wait_set \
+      test_socket_recv_worker test_socket_readable test_socket_ser_concurrency \
+      test_ipc_info_pool test_ipc_info_pool_layout test_ipc_info_pool_version -j"$(nproc)"
+
+# 2) 容量/布局对账（实测数字，见 probe_capacity.txt）
+g++ -std=c++17 -O2 -Iinclude -Ilocal/include probe_capacity.cpp -o probe_capacity \
+    -Lbuild/lib -lipc -pthread
+LD_LIBRARY_PATH=build/lib:build/bin ./probe_capacity
+
+# 3) W07 用例（逐个跑；test_ipc_info_pool_version 会临时占用生产段名, 勿与其他池用例并行）
+export LD_LIBRARY_PATH=build/lib:build/bin
+for t in test_socket_high_fd test_ipc_info_pool_layout test_ipc_info_pool_version \
+         test_ipc_info_pool test_socket_wait_set test_socket_recv_worker \
+         test_socket_readable test_socket_ser_concurrency ; do
+  timeout 600 ./build/bin/$t ; echo "$t rc=$?" ;
+done     # 逐项日志见 regression/*.log
+
+# 4) 反事实（证明用例承重）: 把 udp.h 还原成 HEAD 的 select 版 → 三个高 fd 用例必须 FAIL(SIGABRT)
+cp src/libipc/platform/posix/udp.h udp.h.w07_poll_patched
+git show HEAD:src/libipc/platform/posix/udp.h > src/libipc/platform/posix/udp.h
+cmake --build build --target ipc test_socket_high_fd -j"$(nproc)"
+LD_LIBRARY_PATH=build/lib:build/bin ./build/bin/test_socket_high_fd   # 见 test_socket_high_fd_baseline_mutation.log
+cp udp.h.w07_poll_patched src/libipc/platform/posix/udp.h            # 复原
+cmake --build build --target ipc test_socket_high_fd -j"$(nproc)"
+
+# 5) 热路径硬闸（include/libipc/** 改动必需；改前/改后各一次）
+bash docs/hotpath_gate.sh build    # 改写前读数 hotpath_gate_before.txt, 改后 hotpath_gate_after.txt
+
+# 6) 高 fd 崩溃点的 gdb 复现（既有探针, 与本次回归同一条链路）
+#    探针源码 test/perf/out/20260927_t6_probes/fdprobe.cpp; 基线读数与 backtrace 见
+#    test/perf/out/20260927_t6_fd/{w511_pub.log,w1000_pub.log,head_511_gdb.log}
+#    gdb 栈: __fdelt_chk ← ipc::socket::UDPNode::receive(unsigned long) ← recv_chunk_common_impl
+#    探针重建: g++ -std=c++17 -O2 -Iinclude -Ilocal/include -Itest \
+#              test/perf/out/20260927_t6_probes/fdprobe.cpp -o fdprobe -Lbuild/lib -lipc -pthread
+#    复现: LD_LIBRARY_PATH=build/lib:build/bin ./fdprobe --scale=511 --domain=111 --publish

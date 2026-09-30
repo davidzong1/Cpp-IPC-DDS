@@ -1,0 +1,33 @@
+{
+  "kind": "environment",
+  "platform": {
+  "hostname": "zwc-leju",
+  "kernel_release": "6.8.0-138-generic",
+  "kernel_version": "#138~22.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:43:15 UTC ",
+  "machine": "x86_64",
+  "cpu_model": "Intel(R) Core(TM) i9-14900KF",
+  "online_cpus": 32,
+  "configured_cpus": 32,
+  "smt_on": true,
+  "clock_ticks_per_sec": 100,
+  "page_size": 4096,
+  "numa_available": true,
+  "numa_nodes": 1,
+  "hypervisor": false,
+  "virtualization": "System Product Name",
+  "loadavg": [2.16, 2.07, 1.94],
+  "mem_total_kb": 6.56477e+07,
+  "mem_available_kb": 4.33941e+07,
+  "nofile_soft": 1048576,
+  "nofile_hard": 1048576,
+  "open_max_configured": 1048576,
+  "governors_unique": ["powersave"],
+  "governors_per_cpu": ["powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave", "powersave"],
+  "cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/vte-spawn-072a31bd-4ffa-4bae-be1c-e54c0f948b18.scope"
+}
+,
+  "compiler": "/usr/bin/c++ c++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+  "clock": {"source": "CLOCK_MONOTONIC", "cost_ns_per_call": 9.980640},
+  "dds_lib": "/home/zwc/branch/lejulab_platform/src/lejusdk/3rd_party/x86_64/cyclonedds-0.10.2/lib/libddsc.so.0.10.2",
+  "roudi_pid": 3
+}

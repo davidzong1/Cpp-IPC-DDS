@@ -1,0 +1,23 @@
+=== W02 统一跨进程基准 | run_id=rr ===
+  source_revision : e800ccc496ac710b711c9346709e86a148c41241
+  build_type      : Release
+  compiler        : /usr/bin/c++ c++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0
+  exe             : /home/zwc/cpp_ipc_dds/build/bin/xproc_benchmark  sha256=4f8d9f59b7603c7b76ffc065ec6852b45cc208518f7fe092862a452159144ebb
+  libipc          : /home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0  sha256=2af82d372fbacdd11ad6052260fcac7dfc31486d29574f3dfceb214c32d4ff95
+  clock           : vdso_ns_per_call=14.7211 syscall_ns_per_call=83.2191 vdso_in_use=true
+  config_hash     : a2986a86a5fe3f2e  (duration=1;warmup=0.3;rate=500;queue=256;view_queue_cap=64;domain=1;queue_wait_ms=100;workload=timestamp;wait=blocking;best_effort=0;nodelet=0;payloads=1024;smoke=0;sample_limit=500)
+  process_model   : cross-process（pub/sub 为 fork+exec 新映像）
+  out_dir         : tmp/w02_roudi
+
+  CycloneDDS      : 已编译进基准（libddsc=/home/zwc/branch/lejulab_platform/src/lejusdk/3rd_party/x86_64/cyclonedds-0.10.2/lib/libddsc.so.0.10.2）
+
+  dds precheck    : roudi_pid=80
+[0] path=cyclonedds-iox workload=timestamp wait=blocking payload=1024B(实际 989B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.033,2.198) cores=2.235
+       note: identity: parent_pid=88 pub_pid=120 sub_pid=119 | pub_ready_ns=15352623986971 in [15352602859291,15352635774081] | sub_ready_ns=15352624034504 in [15352602771405,15352635774062] | pub_starttime_ticks=1535260 sub_starttime_ticks=1535260 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=80 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.032514s, nvcsw 1809, nivcsw 6) sub=0(cpu 2.197611s, nvcsw 2244, nivcsw 19)
+       note: round=0
+
+=== 汇总: 1/1 用例通过 ===
+结果目录: tmp/w02_roudi

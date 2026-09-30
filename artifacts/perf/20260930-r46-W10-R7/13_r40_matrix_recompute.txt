@@ -1,0 +1,16 @@
+summary 数据行=80  run 目录=80  差集=set()
+按组: {'A': 40, 'B': 16, 'C': 16, 'D': 8}
+rc 非零=0  ok=0=0  verdict 非 PASS=0
+missing=none 行=80  非 none=[]
+distinct fingerprint 组合 = 1
+   lib_sha=558f47ede2419e14554766af55e53671e69d05d940b05351b1d4aa0e45d79031 tool_sha=25bef0abccf7532b96a39caeb5b5687eb375db72b960c3cf4d9844ed0cc98285
+matrix_summary 行=80  distinct lib_sha=1
+   558f47ede2419e14 x 80
+matrix_summary sub 唯一=80
+state3 中 confirm_ok!=1: 50 ['A-st3-n100-diagoff-r1', 'A-st3-n100-diagoff-r2', 'A-st3-n100-diagoff-r3']
+state3 中 recover_ok!=1: 50 ['A-st3-n100-diagoff-r1', 'A-st3-n100-diagoff-r2', 'A-st3-n100-diagoff-r3']
+
+# confirm/recover 逐格核对（列值是**计数**，不是布尔）
+state3 格数=64  不合规=0
+recover_arr_len == n 的格数=64/80
+gates 取值分布: Counter({'9/9': 36, '7/7': 28, '2/2': 8, '3/3': 8})

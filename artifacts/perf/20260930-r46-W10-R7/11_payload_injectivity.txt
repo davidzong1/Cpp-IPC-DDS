@@ -1,0 +1,5 @@
+r25 SHM        pairs=3005 distinct=3005 collisions=0  => 单射: 是
+r27 sock f1    pairs=1005 distinct=1005 collisions=0  => 单射: 是
+r28 sock       pairs=3005 distinct=3005 collisions=0  => 单射: 是
+r28 SHM#1      pairs=3006 distinct=3006 collisions=0  => 单射: 是
+r45 SHM 自跑     pairs=3006 distinct=3006 collisions=0  => 单射: 是

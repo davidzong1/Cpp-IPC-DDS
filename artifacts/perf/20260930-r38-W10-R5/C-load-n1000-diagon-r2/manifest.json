@@ -1,0 +1,40 @@
+{
+ "run_id": "C-load-n1000-diagon-r2",
+ "work_package": "W10-R5",
+ "round": 2,
+ "state": 3,
+ "phase": "load",
+ "topic_count": 1000,
+ "requested_workers": 32,
+ "effective_workers": 32,
+ "diagnostics_enabled": true,
+ "window_ms": 60000,
+ "window_s_min_required": 60,
+ "port_policy": "SHM（无端口）",
+ "criteria_version": "W10-R5/§6.2-§6.3/v1",
+ "deadlines": {
+  "wait_timeout_ms": 100,
+  "idle_keep_alive_ms": 1000,
+  "handshake_s": 120,
+  "recover_s": 30
+ },
+ "capacity_model": {
+  "per_worker_wait_set": 127,
+  "total": 4064,
+  "capacity_limited": false
+ },
+ "input_manifest_hash": "topics=r5_<state>_9448_0..999 sha256=pending",
+ "result_files": [
+  "manifest.json",
+  "phases.csv",
+  "windows.csv",
+  "windows.jsonl",
+  "counters.json",
+  "threestate.json",
+  "verdict.md"
+ ],
+ "lib_path": "/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0",
+ "lib_sha256": "558f47ede2419e14554766af55e53671e69d05d940b05351b1d4aa0e45d79031",
+ "tool_sha256": "a25c65114a30b2c39fc27a500c27427f2eacc67ef323efe43ec1f6f9beaae007",
+ "note_fingerprint_backfill": "本次采集未在工装内自检指纹；回填值来自采集后核对的库/工装 sha256（⛔ 仅为审计，不构成运行时自证）"
+}

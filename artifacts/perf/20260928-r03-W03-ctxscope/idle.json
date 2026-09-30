@@ -1,0 +1,16 @@
+{
+  "required_window_s": 2.000000,
+  "total_window_s": 2.910249,
+  "window_sufficient": true,
+  "diagnostics_enabled": true,
+  "phases": {
+    "startup_peak": {"covered": false, "samples": 0, "duration_s": 0.000000, "threads_mean": 0.000000, "threads_min": 0.000000, "threads_max": 0.000000, "threads_p95": 0.000000, "cpu_cores_mean": 0.000000, "cpu_cores_max": 0.000000, "ctx_switch_per_s_mean": 0.000000, "rss_kb_mean": 0.000000},
+    "steady_active": {"covered": true, "samples": 30, "duration_s": 2.910249, "threads_mean": 9.700000, "threads_min": 1.000000, "threads_max": 10.000000, "threads_p95": 10.000000, "cpu_cores_mean": 0.989833, "cpu_cores_max": 1.097290, "ctx_switch_per_s_mean": 7348.696254, "rss_kb_mean": 1169.066667},
+    "idle_fallback": {"covered": false, "samples": 0, "duration_s": 0.000000, "threads_mean": 0.000000, "threads_min": 0.000000, "threads_max": 0.000000, "threads_p95": 0.000000, "cpu_cores_mean": 0.000000, "cpu_cores_max": 0.000000, "ctx_switch_per_s_mean": 0.000000, "rss_kb_mean": 0.000000}
+  },
+  "periodic_task_coverage": {"configured": false, "ticks_observed": 0, "ticks_per_s": 0.000000, "source": ""},
+  "recovery_first_packet_us": {"count": 0, "min": 0.000000, "mean": 0.000000, "p50": 0.000000, "p99": 0.000000, "max": 0.000000, "reregistration_required": 0, "lost": 0, "failed": 0},
+  "thread_fallback_ratio": 0.000000,
+  "idle_fallback_observed": false,
+  "verdict": "缺启动峰值相位 => 未确认; 缺空闲回落相位 => 未确认; 未声明周期任务 => 空闲未覆盖周期任务, 未确认; "
+}

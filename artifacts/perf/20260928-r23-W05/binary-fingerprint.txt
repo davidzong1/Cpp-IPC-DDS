@@ -1,0 +1,3 @@
+216a4b0c914544acd00b0a2622aeb6f84dbd3512d821f60ffd5ed6adc620ac25  build/lib/libipc.so.1.3.0
+256bab86edf181ce84a3eae170e425bb78748ea1cf23d2d2560446504fba3057  src/dzIPC/shm_pub_sub_ipc.cc
+4148d65c6426bc84b88077bae2da4913ba9bfb74d8ed9479cd4c2c6e091a99f2  include/dzIPC/shm_pub_sub_ipc.h

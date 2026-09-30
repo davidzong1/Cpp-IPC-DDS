@@ -1,0 +1,144 @@
+section,field,type,unit,category,nullable,description
+sample,run_id,string,-,meta,0,"运行编号, 例如 20260928-r01-W02"
+sample,seq,u64,count,identity,0,"生产序号, 逐 route 单调递增"
+sample,route,string,-,identity,0,route 标识 (topic/domain/endpoint)
+sample,generation,u32,count,identity,0,"route generation, 用于识别旧 generation 投递"
+sample,path,enum,-,path,0,tlv | dzflat-a | dzflat-b | cyclonedds-iox | compat-fallback
+sample,produced_ns,u64,ns,ts,0,生产端: 生成本条消息数据之前 (CLOCK_MONOTONIC)
+sample,publish_enter_ns,u64,ns,ts,0,生产端: 发布 API 入口
+sample,transport_done_ns,u64,ns,ts,0,生产端: 发布 API 返回 (传输完成)
+sample,app_obtained_ns,u64,ns,ts,1,订阅端: 应用获得视图/对象
+sample,fully_consumed_ns,u64,ns,ts,1,订阅端: 完整载荷遍历与校验结束
+sample,transport_ns,u64,ns,derived,1,= transport_done_ns - publish_enter_ns (发布路径)
+sample,delivery_ns,u64,ns,derived,1,= app_obtained_ns - transport_done_ns (通知与交付)
+sample,app_read_ns,u64,ns,derived,1,= fully_consumed_ns - app_obtained_ns (应用完整读取)
+sample,e2e_ns,u64,ns,derived,1,= fully_consumed_ns - produced_ns (生产到消费)
+sample,payload_bytes,u64,byte,payload,0,应用逻辑载荷字节 (与 wire 字节分开)
+sample,wire_bytes,u64,byte,payload,1,实际传输字节 (含分片/头部)
+sample,payload_checksum_ok,bool,-,payload,1,"载荷校验结果 (序号相关模式, 防旧帧/损坏)"
+sample,retry_count,u32,count,flags,0,本消息重试次数 (重试不重复计 path)
+sample,evicted,bool,-,flags,0,本消息是否来自队列淘汰/回退样本
+sample,dropped,bool,-,flags,0,是否被判为丢失 (发送计划 vs 接收完成)
+manifest,run_id,string,-,manifest,0,运行编号 (日期-编号-工作包)
+manifest,work_package,string,-,manifest,0,"工作包编号, 本工作包为 W03"
+manifest,source_revision,string,-,manifest,0,git commit (基线 e800ccc...)
+manifest,working_tree_clean,bool,-,manifest,0,工作区是否干净 (false 时须列出差异)
+manifest,working_tree_diff,array,-,manifest,1,未提交差异清单 (git status --short)
+manifest,build_dir,string,-,manifest,0,构建目录绝对路径
+manifest,build_type,string,-,manifest,0,CMake 构建类型
+manifest,compiler,string,-,manifest,0,编译器与版本
+manifest,binary_sha256,object,-,manifest,0,publisher/subscriber/library 的 sha256
+manifest,loaded_library_paths,array,-,manifest,0,运行进程实际加载的库路径
+manifest,transport,enum,-,manifest,0,shm|tlv|dzflat-a|dzflat-b|cyclonedds-iox
+manifest,process_model,enum,-,manifest,0,cross-process|same-process
+manifest,measurement_mode,enum,-,manifest,0,rusage|proc_task_sample (上下文切换采集模式)
+manifest,diagnostics_enabled,bool,-,manifest,0,扫描级诊断计数是否开启 (§10.2)
+manifest,topic_count,u32,count,manifest,0,话题数
+manifest,unique_topic_count,u32,count,manifest,0,独立话题数
+manifest,worker_count,u32,count,manifest,0,固定 worker 数 (与池配置一致)
+manifest,registered_count,u32,count,manifest,0,注册成功端点数
+manifest,expected_count,u32,count,manifest,0,预期端点数
+manifest,valid_rx_count,u32,count,manifest,0,完成有效收发的端点数
+manifest,fallback_count,u32,count,manifest,0,兼容回退数 (目标规模要求 0)
+manifest,sample_count,u64,count,manifest,0,有效样本数
+manifest,window_s,f64,s,manifest,0,观测窗口秒数 (空闲建议 >= 60)
+manifest,config_hash,string,-,manifest,1,有效配置的 sha256
+manifest,clock_source,string,-,manifest,0,"时基, 固定 CLOCK_MONOTONIC"
+manifest,clock_cost_ns_per_call,f64,ns,manifest,0,计时本身成本 (每次 clock_gettime)
+manifest,collector_overhead_ns,object,ns,manifest,0,采集器观测开销 (见 observation_overhead_schema)
+manifest,result_files,array,-,manifest,0,结果文件清单
+manifest,path_evidence,object,-,manifest,0,路径证据登记册 (path_evidence.h)
+counter,tlv_messages,u64,count,path,0,TLV 物化路径交付消息数
+counter,dzflat_a_messages,u64,count,path,0,DZFlat A (对象->共享段一次复制) 交付消息数
+counter,dzflat_b_messages,u64,count,path,0,DZFlat B (应用原地构造借样) 交付消息数
+counter,tlv_bytes,u64,byte,path,0,TLV 应用逻辑载荷字节
+counter,dzflat_a_bytes,u64,byte,path,0,DZFlat A 应用逻辑载荷字节
+counter,dzflat_b_bytes,u64,byte,path,0,DZFlat B 应用逻辑载荷字节
+counter,tlv_wire_bytes,u64,byte,path,0,TLV 实际传输字节(含分片/头部)
+counter,dzflat_wire_bytes,u64,byte,path,0,DZFlat 实际传输字节
+counter,fallback_total,u64,count,fallback,0,兼容回退总次数
+counter,fallback_backend_unavailable,u64,count,fallback,0,wait-set 后端不可用导致的回退
+counter,fallback_capacity_full,u64,count,fallback,0,容量满导致的回退
+counter,fallback_type_incompatible,u64,count,fallback,0,类型/schema 不兼容回退
+counter,fallback_oversized,u64,count,fallback,0,超尺寸档/超预算回退
+counter,fallback_pool_exhausted,u64,count,fallback,0,chunk 池耗尽回退
+counter,registration_attempts,u64,count,registration,0,注册尝试次数
+counter,registration_ok,u64,count,registration,0,注册成功次数
+counter,registration_failed,u64,count,registration,0,注册失败总数
+counter,registration_rejected,u64,count,registration,0,注册被拒(首个失败资源)
+counter,registration_duplicate,u64,count,registration,0,同 worker 重复注册
+counter,registration_busy,u64,count,registration,0,兼容线程/其它 owner 占用
+counter,registration_stopped,u64,count,registration,0,worker 未启动/已停止
+counter,registration_invalid_token,u64,count,registration,0,读等待 token 无效
+counter,registration_invalid_route,u64,count,registration,0,route == nullptr
+counter,wait_set_full,u64,count,registration,0,每 worker wait token 容量满
+counter,wait_token_invalid,u64,count,registration,0,wait token 失效
+counter,fd_limit,u64,count,registration,0,fd 越界/EMFILE
+counter,capacity_first_failed_resource_recorded,u64,bool,registration,0,是否已登记首个失败资源(仪表)
+counter,chunk_exhausted,u64,count,capacity,0,chunk 池耗尽次数
+counter,chunk_alloc_failed,u64,count,capacity,0,chunk 申请失败次数
+counter,queue_evicted,u64,count,capacity,0,队列淘汰条数
+counter,queue_backpressure,u64,count,capacity,0,队列背压触发次数
+counter,generation_mismatch,u64,count,capacity,0,旧 generation token 被拒次数
+counter,publish_blocked,u64,count,capacity,0,publish 阻塞次数
+counter,publish_failed,u64,count,capacity,0,publish 失败次数
+counter,rx_timeout,u64,count,capacity,0,接收超时次数
+counter,scan_rounds,u64,count,scan,0,collect_pending 扫描轮数
+counter,scanned_routes_total,u64,count,scan,0,每轮扫描 route 数之和
+counter,scan_time_ns_total,u64,ns,scan,0,扫描耗时之和
+counter,wait_timeout_count,u64,count,scan,0,等待超时次数
+counter,ready_observed,u64,count,scan,0,观察到的就绪次数
+counter,deferred_depth_last,u64,count,scan,0,最近一轮 deferred 深度(仪表)
+counter,deferred_depth_max,u64,count,scan,0,deferred 深度最大值
+counter,deferred_drains,u64,count,scan,0,deferred FIFO 排空次数
+counter,budget_yields,u64,count,scan,0,预算耗尽让出次数
+counter,idle_exits,u64,count,scan,0,worker 空闲退出次数
+counter,thread_restarts,u64,count,scan,0,worker 线程按需拉起次数
+counter,recv_once_calls,u64,count,scan,0,recv_once 调用次数
+counter,recv_once_over_budget,u64,count,scan,0,单次 recv_once 超预算次数
+counter,seq_monotonic_ok,u64,count,integrity,0,序号连续的样本数
+counter,seq_out_of_order,u64,count,integrity,0,乱序样本数
+counter,seq_duplicate,u64,count,integrity,0,重复样本数
+counter,seq_lost,u64,count,integrity,0,丢失样本数
+counter,payload_checksum_ok,u64,count,integrity,0,载荷校验通过数
+counter,payload_checksum_bad,u64,count,integrity,0,载荷校验失败数
+counter,path_selection_dzflat_disabled,u64,count,path,0,(a) 路径选择: 开关关闭走 TLV(不是回退)
+counter,path_selection_type_unsupported,u64,count,path,0,"(a) 路径选择: 关闭且类型无平坦布局(开启亦无收益, 不是回退)"
+counter,fallback_reason_unknown,u64,count,fallback,0,(b) 确认回退但原因无法精确判定(不猜分)
+counter,borrow_failed_no_receiver,u64,count,borrow,0,(c) B 借样失败: 无接收方
+counter,borrow_failed_pool_exhausted,u64,count,borrow,0,(c) B 借样失败: chunk 池耗尽
+counter,borrow_failed_oversized,u64,count,borrow,0,(c) B 借样失败: 超变长预算
+counter,borrow_failed_publish,u64,count,borrow,0,(c) B 借样失败: publish_loan 失败
+counter,borrow_failed_reason_unknown,u64,count,borrow,0,(c) B 借样失败: 原因无法精确判定
+counter,scan_ready_routes_total,u64,count,scan,0,"Σ 每轮新入队 route 数(route 数); /scan_rounds = 平均每轮新入队 route 数; 量纲与 ready_observed(轮数)不同, 不得相加"
+counter,deferred_depth_after_last,u64,count,scan,0,最近一轮扫描后 deferred 深度(全局 gauge=任一 worker 最后写入者的值); 与 deferred_depth_last(入队前)语义不同、不得互相覆盖; 不得当全池总量
+counter,deferred_depth_after_max,u64,count,scan,0,扫描后 deferred 深度最大值(全局 gauge=任一 worker 的值); 不得当全池总量
+counter,deferred_depth_after_total,u64,count,scan,0,Σ 每轮扫描后深度(唯一可安全按 worker 相加的深度量); /scan_rounds = 平均扫描后深度
+idle_state,unconfirmed,enum,-,idle,0,证据不足: 不得作为空闲成绩
+idle_state,no_registered_route,enum,-,idle,0,keep-alive 到期后线程可退出; 下次注册按需拉起
+idle_state,registered_no_publisher,enum,-,idle,0,按模块生命周期契约决定是否已加入等待层; 记录对象/控制项/worker route 数
+idle_state,connected_silent,enum,-,idle,0,保留接收能力; 恢复发布不依赖重新注册; 记录恢复首包延迟与丢包
+idle_state,active_publishing,enum,-,idle,0,"非空闲状态, 不计入空闲回落"
+timestamp_point,produced,u64,ns,ts,0,生产端: 为本条消息生成新数据/载荷之前 (序号已分配)
+timestamp_point,publish_enter,u64,ns,ts,0,生产端: publish()/publish_loan() 入口
+timestamp_point,transport_done,u64,ns,ts,0,"生产端: 发布 API 返回, 数据已对订阅端可见"
+timestamp_point,app_obtained,u64,ns,ts,0,订阅端: 应用拿到可用视图/对象 (get()/try_get() 返回)
+timestamp_point,fully_consumed,u64,ns,ts,0,订阅端: 完整载荷遍历与校验结束
+timestamp_point,recv_once_enter,u64,ns,ts,0,诊断: worker 单次 recv_once 入口 (§10.2/§10.3)
+timestamp_point,recv_once_exit,u64,ns,ts,0,诊断: worker 单次 recv_once 出口
+timestamp_point,scan_enter,u64,ns,ts,0,诊断: collect_pending 一轮扫描入口 (§10.2)
+timestamp_point,scan_exit,u64,ns,ts,0,诊断: 一轮扫描出口
+timestamp_point,recovery_first_packet,u64,ns,ts,0,§10.1: 静默恢复后的首包到达时刻
+run_field:summary.csv,bad_header,u64,count,zero=measured_zero/owner=W02,0,订阅侧段头/对象结构自相矛盾次数(CheckOutcome.header_ok==false 或长度不符; 视图路径 !view.valid()/d2.size()<kHdrSlots)
+run_field:summary.csv,late_ok,bool01,-,zero=decided_zero/owner=W02,0,"迟发 gate 判定: 1=未超预算; 仅在 late>late_abs_max 且 late/attempts>late_rate_max 时为 0。【判定结果, 一律不写空: 未触发也写 1, 0 表示判定失败, ⛔ 不得读作未采集】"
+run_field:summary.csv,backlog_ok,bool01,-,zero=decided_zero/owner=W02,0,"积压 gate: backlog_max_ns/周期 > backlog_max_periods 时为 0。未触发写 1, 不写空"
+run_field:summary.csv,send_blocked_ok,bool01,-,zero=decided_zero/owner=W02,0,"send_blocked > send_blocked_max(默认 0) 时为 0。未触发写 1, 不写空"
+run_field:summary.csv,abnormal_ok,bool01,-,zero=decided_zero/owner=W02,0,"abnormal > abnormal_max(默认 0) 时为 0。未触发写 1, 不写空"
+run_field:summary.csv,bad_header_ok,bool01,-,zero=decided_zero/owner=W02,0,"bad_header > bad_header_max(默认 0) 时为 0。未触发写 1, 不写空"
+run_field:results.json,cases[].bad_header,number,count,zero=measured_zero/owner=W02,0,同 summary.csv:bad_header
+run_field:results.json,cases[].gates,object,-,zero=decided_zero/owner=W02,0,"{late_ok,backlog_ok,send_blocked_ok,abnormal_ok,bad_header_ok} 五个 bool, 与 summary.csv 的 0/1 一一对应"
+run_field:manifest.json,failure_thresholds,object,-,zero=decided_zero/owner=W02,0,"失败量判定预算: late_abs_max(u64,默认20)/late_rate_max(number,默认0.05)/backlog_max_periods(number,单位=发送周期数,0=不判仅信息)/send_blocked_max(u64,默认0)/abnormal_max(u64,默认0)/bad_header_max(u64,默认0); 另有 cli_overridden(bool)、gates(array<string>)、gates_in_judgement(object,逐 gate 本 run 触发计数)、informational_only(object,显式声明只作信息性保留的量及理由)"
+run_field:manifest.json,currently_citable,string|null,-,zero=uncollected_null/owner=W02,1,现行 run 的唯一权威指针; null=本轮未认领权威(缺 --purpose 或复核轮未给 --citation-authority)
+run_field:manifest.json,run_identity,object,-,zero=decided_zero/owner=W02,0,"this_run_id/purpose(evidence|verification|experiment,缺省 verification)/purpose_explicit(bool)/this_run_is_evidence(bool)/authority_undeclared(bool)/claims_authority(bool)/citation_authority(string|null)"
+run_field:manifest.json,evidence_discipline,object,-,zero=decided_zero/owner=W02,0,current_run_authority/authority_claim_rule(认领权威是显式动作: 仅 --purpose=evidence)/single_judgement_logic/zero_value_three_states(0|null|unwired)
+run_field:manifest.json,field_aliases,object,-,zero=decided_zero/owner=W02,0,"同一事实在不同产物里的列名映射(summary.csv:late <-> results.json:late_sends; late_ok 等 5 个 <-> gates.*); ⛔ 表示同一来源, 不是两个独立来源"

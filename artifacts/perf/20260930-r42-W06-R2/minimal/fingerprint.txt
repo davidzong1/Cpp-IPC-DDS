@@ -1,0 +1,13 @@
+# R2/t42 §6.2 最小验证矩阵（缺失 4 项）
+# 时间: 2026-09-30 04:46:18 +0800
+## git
+e800ccc496ac710b711c9346709e86a148c41241
+## 二进制与库指纹
+ff54df9a310ce81ef6b587d52b063cefa3b14144cffbd9c0229d413f9c4fc259  build/bin/w10_r2_minimal
+9a4ad5501a90caa736a4c78b42151f654287bafb2b22747ae60fbd11675c1c6c  build/bin/libforce_backend.so
+558f47ede2419e14554766af55e53671e69d05d940b05351b1d4aa0e45d79031  build/lib/libipc.so.1.3.0
+0dde3eabd02e23bafffa3142c20c525535f65b1da2635704c5b25458f742650c  src/dzIPC/threepools/recv_worker.cc
+## 实际加载库
+	libipc.so.3 => /home/zwc/cpp_ipc_dds/build/lib/libipc.so.3 (0x00007e032cf02000)
+## 环境变量清理
+DZIPC_SHM_RECV_COMPAT=<unset>

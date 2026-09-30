@@ -57,6 +57,7 @@
 #include "dzIPC/common/wire_accept.h"
 #include "dzIPC/detail/shm_sub_seam.h"
 #include "dzIPC/shm_pub_sub_ipc.h"
+#include "dzIPC/threepools/recv_worker.h"
 #include "ipc_msg/std_msgs/std_image.hpp"
 #include "libipc/ipc.h"
 
@@ -225,6 +226,15 @@ struct Recorder
     int woke_after_stop{0};           /* 见 kAfterRecv 分支 */
     int recv_after_stop{0};
     bool saw_stop{false};
+    /* ---- W06：接收臂（两条臂的"叫醒证据"形态不同，判据必须按臂取值）----
+     * 兼容臂：每 route 一条线程 + 阻塞 `recv(50)` ⇒ `disconnect` 必然叫醒在途 recv，
+     *   于是出现"connected_id()==0 的 recv 返回"（woke）与叫醒伪影（artifacts）。
+     * worker 臂：`recv_once()` 是 `recv(0)`（契约 §4.2，非阻塞）⇒ "卡在 recv 里被
+     *   disconnect 叫醒"这个形态**结构上不存在**；析构的叫醒落到
+     *   `RecvWorkerPool::remove_route`（契约 §4.4 第 3 步 adapter->stop_and_wake），
+     *   其可观测等价物是「析构期 route 确实从池中被摘除」。 */
+    int worker_path{0};
+    int compat_path{0};
 
     void on(const dzIPC::detail::SeamEvent& ev)
     {
@@ -246,6 +256,12 @@ struct Recorder
         case dzIPC::detail::SeamPoint::kDtorAfterStopAndWake:
             saw_stop = true;
             dtor_order.push_back(static_cast<int>(ev.point));
+            break;
+        case dzIPC::detail::SeamPoint::kRecvPathWorker:
+            ++worker_path;
+            break;
+        case dzIPC::detail::SeamPoint::kRecvPathCompat:
+            ++compat_path;
             break;
         case dzIPC::detail::SeamPoint::kDtorAfterUnregister:
         case dzIPC::detail::SeamPoint::kDtorAfterJoinSubscribe:
@@ -322,11 +338,40 @@ void child_body(int fd, std::uint32_t rounds)
         auto keeper_td = std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::Msg::StdImage>(), kMsgId);
         dzIPC::shm::shm_pub_ipc pub{pub_td, topic, 0, /*verbose=*/false};
         pub.InitChannel();
-        dzIPC::shm::shm_sub_ipc keeper{keeper_td, topic, 0, /*queue_size=*/8, /*verbose=*/false};
-        keeper.InitChannel();
-
         Recorder rec;
         Recorder::instance() = &rec;
+        /* 接收臂判定必须**等首次接入真正发生**：`InitChannel` 只是发起握手，路径决策
+         * 落在随后的一次控制面 tick / 兼容握手线程上（设计如此：决策只发生在"首次真的
+         * 拿到 route"那一刻）。因此先装钩子，再等"接收路径事件到达"或超时。
+         * ⛔ 不能在 InitChannel 刚返回时取样（那时必然还没决策，会把臂判反 —— 实测踩过）。 */
+        dzIPC::detail::SetSeamHook([](const dzIPC::detail::SeamEvent& ev) noexcept {
+            if (Recorder::instance() != nullptr)
+            {
+                Recorder::instance()->on(ev);
+            }
+        });
+        dzIPC::shm::shm_sub_ipc keeper{keeper_td, topic, 0, /*queue_size=*/8, /*verbose=*/false};
+        keeper.InitChannel();
+        for (int k = 0; k < 300; ++k)
+        {
+            std::size_t paths = 0;
+            {
+                std::lock_guard<std::mutex> lock(rec.m);
+                paths = static_cast<std::size_t>(rec.worker_path + rec.compat_path);
+            }
+            if (paths > 0)
+            {
+                break;
+            }
+            std::this_thread::sleep_for(10ms);
+        }
+        bool worker_arm = false;
+        std::size_t keeper_routes = 0;
+        {
+            std::lock_guard<std::mutex> lock(rec.m);
+            worker_arm = rec.worker_path > 0;
+        }
+        keeper_routes = worker_arm ? dzIPC::threepools::RecvWorkerPool::instance().route_count() : 0;
 
         /* 累计跨轮：每轮新建一个订阅者（**topic 名每轮相同**，与产品语义一致：
          * generation 重建是同一个 topic 上的事），析构它，再数一次。 */
@@ -334,11 +379,13 @@ void child_body(int fd, std::uint32_t rounds)
         int total_recv_after = 0;
         std::uint64_t total_artifacts = 0;
         int rounds_with_stop = 0;
+        int rounds_worker_unregistered = 0;   /* worker 臂：析构期 route 被摘除的轮数 */
         std::string order_report;
 
         for (std::uint32_t i = 0; i < rounds; ++i)
         {
             const std::string& t = topic;
+            std::size_t routes_before = 0;
             {
                 auto sub_td = std::make_shared<dzIPC::TopicData>(
                     std::make_shared<dzIPC::Msg::StdImage>(), kMsgId);
@@ -389,7 +436,18 @@ void child_body(int fd, std::uint32_t rounds)
                     }
                 });
 
-                /* ---- 被观测的那一步：析构 ---- */
+                routes_before = dzIPC::threepools::RecvWorkerPool::instance().route_count();
+                (void)routes_before;
+                /* ---- 被观测的那一步：析构 ----
+                 * worker 臂的可观测等价物：池中在册 route 数在析构前后必须从 1 变 0
+                 * （`remove_route` 同步完成契约 §4.4 的 1–6 步）。 */
+            }
+            const std::size_t routes_after = dzIPC::threepools::RecvWorkerPool::instance().route_count();
+            /* worker 臂的"析构自己摘除了本条 route"= 在册数恰好减 1（keeper 仍在 ⇒
+             * 归零不是正确判据）。 */
+            if (routes_before == routes_after + 1)
+            {
+                ++rounds_worker_unregistered;
             }
             dzIPC::detail::SetSeamHook(nullptr);
 
@@ -444,6 +502,11 @@ void child_body(int fd, std::uint32_t rounds)
                std::to_string(rounds) + "\n";
         report(fd, line.c_str());
         line = "artifacts=" + std::to_string(total_artifacts) + " peers=" + std::to_string(peers) + "\n";
+        report(fd, line.c_str());
+        line = std::string("arm=") + (worker_arm ? "worker" : "compat") +
+               " keeper_routes=" + std::to_string(keeper_routes) +
+               " worker_unregister_rounds=" + std::to_string(rounds_worker_unregistered) +
+               " rounds=" + std::to_string(rounds) + "\n";
         report(fd, line.c_str());
         report(fd, "ok\n");
     }
@@ -546,15 +609,35 @@ TEST(ShmSubDtorGate, DtorWakesInflightRecvInOrder)
     ASSERT_GE(rounds_with_stop, 0L);
     EXPECT_EQ(rounds_with_stop, static_cast<long>(kRounds))
         << "有轮次里 stop_and_wake 阶段点根本没到 —— 析构路径被改坏了。 log=" << log;
-    EXPECT_GT(woke, 0L)
-        << "析构期间没有任何一次「connected_id()==0 的 recv 返回」⇒ 收包线程不是被 disconnect "
-           "叫醒的（删掉 stop_and_wake 就会这样）。 log=" << log;
     EXPECT_GE(recv_after, woke) << "统计口径异常";
 
-    /* ---- 判据 ③：计数面（与 ② 互为独立证据） ---- */
+    /* ---- W06：判据 ②/③ **按接收臂取值** ----
+     * 两条臂的"叫醒证据"形态结构性不同（见 Recorder 注释）：兼容臂看"disconnect 叫醒
+     * 在途 recv 产生的伪影"，worker 臂看"析构把本条 route 从共享池的等待集合里摘掉"。
+     * ⛔ 不能用"把 worker 臂也倒回兼容线程"来让这两条变绿 —— 那正是 §13.2 条件 4 禁止的
+     * 掩盖手法；worker 臂另有独立判据（每轮在册数恰好减 1 + 全轮无 recv_errors）。 */
+    const bool worker_arm = log.find("arm=worker") != std::string::npos;
+    const long unregister_rounds = parse_field(log, "worker_unregister_rounds=");
     const long artifacts = parse_field(log, "artifacts=");
-    EXPECT_GT(artifacts, 0L)
-        << "析构期没有产生过叫醒伪影 ⇒ 上层守门没被走到（与判据②指向同一件事的另一面）。 log=" << log;
+    if (worker_arm)
+    {
+        EXPECT_EQ(parse_field(log, "keeper_routes="), 1L)
+            << "worker 臂下 keeper 未在册 ⇒ 前提不成立（池没接上）。 log=" << log;
+        EXPECT_EQ(unregister_rounds, static_cast<long>(kRounds))
+            << "有轮次里析构**没有**把本条 route 从共享池摘除（在册数未恰好减 1）⇒ 析构期"
+               "没有发生「停止并叫醒」（worker 臂的 stop_and_wake 等价物）。 log=" << log;
+        EXPECT_EQ(artifacts, 0L)
+            << "worker 臂的 recv(0) 不产生叫醒伪影；非零说明接收路径已不是固定 worker。 log=" << log;
+    }
+    else
+    {
+        EXPECT_GT(woke, 0L)
+            << "析构期间没有任何一次「connected_id()==0 的 recv 返回」⇒ 收包线程不是被 disconnect "
+               "叫醒的（删掉 stop_and_wake 就会这样）。 log=" << log;
+        EXPECT_GT(artifacts, 0L)
+            << "析构期没有产生过叫醒伪影 ⇒ 上层守门没被走到（与判据②指向同一件事的另一面）。 log=" << log;
+    }
+    std::printf("[dtor-gate] arm=%s unregister_rounds=%ld\n", worker_arm ? "worker" : "compat", unregister_rounds);
 
     /* ---- 顺带：析构后 peer 必须被回收（keeper 仍在 ⇒ 期望值 1） ---- */
     const long peers = parse_field(log, "peers=");

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -31,12 +32,21 @@
 namespace dzIPC {
 namespace info_pool {
 namespace {
-constexpr char kShmName[] = "dz_ipc_info_pool_v1";
+/* ---- W07 容量与跨版本（共享布局/版本兼容说明见头文件同名段）--------------------
+ * 容量: kMaxEntries 512 → 4096（依据: 1000 路独立话题 × 两端 = 2000 条, 见头文件）。
+ * 版本: 段名 → dz_ipc_info_pool_v2, kLayoutVersion → 2。**必须同时换名** —— 本仓
+ *   libipc 的 shm acquire 对既有段也会按调用方请求的 size 做 ftruncate, 同名段在新旧
+ *   二进制之间会互相 resize/截断, 且引用计数落在各自 mapped 区间末尾(不同地址)。
+ * 旧段处置: 新二进制只认 v2, 旧二进制只认 v1 ⇒ 不可能互相错解; 滚动升级期间观测面
+ *   短暂分成两代(各自的 dzipc info 只看到自己那一代)。v1 段在最后一个使用它的进程退出
+ *   时按既有引用计数 unlink; 确认无进程映射后可 `rm -f /dev/shm/dz_ipc_info_pool_v1`
+ *   或调 IpcInfoPool::reset_storage() 清本代段。回滚 = 还原本文件与头文件, 之后重新
+ *   使用 v1, v2 段在无映射后同样可清。
+ * ⛔ 语义保持: 表满 → 同锁内回收死条目 + 一次重试 → 仍失败返回 -1 并限流诊断。 */
+constexpr char kShmName[] = "dz_ipc_info_pool_v2";
 #if defined(_WIN32)
-constexpr char kMutexName[] = "Global\\dz_ipc_info_pool_v1_mtx";
+constexpr char kMutexName[] = "Global\\dz_ipc_info_pool_v2_mtx";
 #endif
-constexpr uint32_t kMagic = 0x5A'49'50'44u;   // 'DZIP'
-constexpr uint32_t kVersion = 1;
 
 constexpr uint32_t kInitUninit = 0;
 constexpr uint32_t kInitInProgress = 1;
@@ -86,6 +96,18 @@ static_assert(std::is_trivially_copyable<PoolEntry>::value || std::is_standard_l
               "PoolEntry must be standard layout for shm mapping");
 
 constexpr std::size_t kRegionSize = sizeof(PoolHeader) + sizeof(PoolEntry) * kMaxEntries;
+
+/* W07: 把共享布局钉成**编译期事实**。段头字段偏移或 PoolEntry 大小一变, 同机的新旧
+ * 二进制就会按各自的 size 解释同一段 ⇒ 必须同步改头文件的 kLayoutVersion/段名后缀与
+ * 容量表(kPoolEntryBytes)。这些断言就是"改了却忘了同步"的兜底。 */
+static_assert(offsetof(PoolHeader, init_state) == 0, "PoolHeader.init_state 偏移变化 ⇒ 共享布局变更");
+static_assert(offsetof(PoolHeader, magic) == 4, "PoolHeader.magic 偏移变化 ⇒ 共享布局变更");
+static_assert(offsetof(PoolHeader, version) == 8, "PoolHeader.version 偏移变化 ⇒ 共享布局变更");
+static_assert(offsetof(PoolHeader, max_entries) == 12, "PoolHeader.max_entries 偏移变化 ⇒ 共享布局变更");
+static_assert(sizeof(PoolEntry) == kPoolEntryBytes,
+              "PoolEntry 大小变化 ⇒ 必须同步 kLayoutVersion/段名后缀与容量表");
+static_assert(kMaxEntries >= 1000, "W07 验收要求 ≥1000 路有效注册");
+static_assert(kRegionSize < (4u << 20), "段大小预算: 必须远小于 /dev/shm 限额(W00 冻结 ≤2 GiB)");
 
 int64_t now_ns() noexcept
 {
@@ -226,7 +248,10 @@ enum DiagReason : int
     kDiagFullNoDead = 2,
     kDiagFullThrottled = 3,
     kDiagFullAfterReap = 4,
-    kDiagCount = 5,
+    /* W07: attach 到的既有段属于别的布局/容量 —— 已拒绝使用(不再笼统报"池未就绪"),
+     * 详细原因由构造期那条一次性错误给出。 */
+    kDiagLayoutMismatch = 5,
+    kDiagCount = 6,
 };
 const char* const kDiagText[kDiagCount] = {
     "池未就绪(共享段不可用或 header 未 ready)",
@@ -234,6 +259,7 @@ const char* const kDiagText[kDiagCount] = {
     "表满且本轮整表回收未找到死条目",
     "表满且本轮整表回收被空扫节流跳过",
     "表满且回收出空槽后仍认领失败(持锁内理论上不可达)",
+    "既有段布局/容量与本版本不符(已拒绝使用, 详见启动时那条红色诊断)",
 };
 std::atomic<int64_t> g_diag_last_ns[kDiagCount]{};   /* 0 = 从未输出过 */
 std::atomic<uint64_t> g_diag_suppressed[kDiagCount]{};
@@ -352,6 +378,47 @@ struct ScopedShmLock
 
 }   // namespace
 
+/* ------------------------------------------------------------------------------------
+ * W07: 容量/布局的公开对账与门禁(声明见 include/dzIPC/ipc_info_pool.h)
+ * ---------------------------------------------------------------------------------- */
+
+std::size_t segment_bytes() noexcept
+{
+    return kRegionSize;
+}
+
+const char* layout_mismatch(const void* mapped, std::size_t mapped_bytes) noexcept
+{
+    if (mapped == nullptr)
+    {
+        return "段不可映射";
+    }
+    /* ⛔ 顺序即门禁: 先确认**整段装得下本布局**, 再看段头字段。
+     * 否则读 header->max_entries 之后就按旧段的长短解释数组 ⇒ 读越界。 */
+    if (mapped_bytes < sizeof(PoolHeader))
+    {
+        return "段太小, 连段头都放不下";
+    }
+    if (mapped_bytes < kRegionSize)
+    {
+        return "段小于本版本 kRegionSize(旧布局或旧容量)";
+    }
+    const auto* h = static_cast<const PoolHeader*>(mapped);
+    if (h->magic != kLayoutMagic)
+    {
+        return "段头 magic 不符(非本池或已损坏)";
+    }
+    if (h->version != kLayoutVersion)
+    {
+        return "段头 layout_ver 与本版本不符";
+    }
+    if (h->max_entries != kMaxEntries)
+    {
+        return "段头 max_entries 与本版本不符";
+    }
+    return nullptr;
+}
+
 const char* get_type_from_kind(EntryKind kind) noexcept
 {
     switch (kind)
@@ -427,6 +494,9 @@ struct IpcInfoPool::Impl
     PoolHeader* header{nullptr};
     PoolEntry* entries{nullptr};
     bool ready{false};
+    /* W07: 不可用时的**具体**原因(供 register_entry 报出)。默认 = 未就绪;
+     * 布局/容量不符时置 kDiagLayoutMismatch, ⛔不再笼统报"池未就绪"。 */
+    int reject_reason{kDiagPoolNotReady};
 
     Impl()
     {
@@ -451,8 +521,8 @@ struct IpcInfoPool::Impl
         uint32_t expect = kInitUninit;
         if (header->init_state.compare_exchange_strong(expect, kInitInProgress, std::memory_order_acq_rel))
         {
-            header->magic = kMagic;
-            header->version = kVersion;
+            header->magic = kLayoutMagic;
+            header->version = kLayoutVersion;
             header->max_entries = static_cast<uint32_t>(kMaxEntries);
 
 #if !defined(_WIN32)
@@ -480,8 +550,25 @@ struct IpcInfoPool::Impl
                     break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            if (header->init_state.load(std::memory_order_acquire) != kInitReady || header->magic != kMagic)
-                return;
+            if (header->init_state.load(std::memory_order_acquire) != kInitReady)
+                return;   /* 池未就绪(保持 reject_reason 默认值) */
+        }
+
+        /* W07: 布局/容量门禁 —— ⛔ 必须在**首次访问 entries 之前**。
+         * 旧布局/旧容量的段上 entries 数组比本版本短, 按 kMaxEntries 遍历即读越界。
+         * ⛔ 校验不过就整池拒绝(ready 保持 false, header/entries 置空), 由
+         * register_entry 报出具体原因; ⛔绝不"按旧 size 静默使用"。 */
+        if (const char* why = layout_mismatch(base, shm.size()))
+        {
+            reject_reason = kDiagLayoutMismatch;
+            std::cerr << "\033[31m[dzIPC][info_pool] 拒绝使用既有段 " << kShmName << ": " << why
+                      << " (本版本 layout_ver=" << kLayoutVersion << " max_entries=" << kMaxEntries
+                      << "; 段头 layout_ver=" << header->version
+                      << " max_entries=" << header->max_entries << ")"
+                      << " —— 旧段处置见 ipc_info_pool.cc 顶部「旧段处置」\033[0m" << std::endl;
+            header = nullptr;
+            entries = nullptr;
+            return;
         }
         ready = true;
     }
@@ -506,7 +593,9 @@ int32_t IpcInfoPool::register_entry(const RegisterInfo& info)
 {
     if (!impl_ || !impl_->ok())
     {
-        diag_register_failure(kDiagPoolNotReady);   /* 此处未持锁, 可直接输出 */
+        /* 此处未持锁, 可直接输出。W07: 报**具体**原因(未就绪 / 布局容量不符),
+         * ⛔不再把"段布局不符"笼统算作"池未就绪"。 */
+        diag_register_failure(impl_ ? impl_->reject_reason : kDiagPoolNotReady);
         return -1;
     }
 

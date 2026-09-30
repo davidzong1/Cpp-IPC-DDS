@@ -1,0 +1,15 @@
+# W04 探针：socket 侧「假就绪兜底」的实际循环速率（构造性证据）
+2026-09-28T20:02:39+08:00
+P10: 恒返回 0 的 LT 可读通道：1s 内 recv_once=1302599 次（1302599/s）
+P10: 忙转期间同 worker 真邻居 got=2（不饿死判据 >=1）
+P10: remove_route returned; owner=0 calls_total=1569256
+rc=0
+P10: 恒返回 0 的 LT 可读通道：1s 内 recv_once=1326816 次（1326816/s）
+P10: 忙转期间同 worker 真邻居 got=2（不饿死判据 >=1）
+P10: remove_route returned; owner=0 calls_total=1596745
+rc=0
+P10: 恒返回 0 的 LT 可读通道：1s 内 recv_once=1314465 次（1314465/s）
+P10: 忙转期间同 worker 真邻居 got=2（不饿死判据 >=1）
+P10: remove_route returned; owner=0 calls_total=1576862
+rc=0
+2026-09-28T20:02:43+08:00

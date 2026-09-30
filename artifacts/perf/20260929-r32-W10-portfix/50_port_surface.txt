@@ -1,0 +1,6 @@
+dzipc_window=[11451,65531] slots=54081
+ip_local_port_range=[32768,60999]
+overlap=[32768,60999] slots=28232  overlap_ratio=0.5220
+occupied_udp4=162 occupied_udp6=5 occupied_in_window=154 (0.0028 of window)
+domain=3103 routes=1000 clash_routes=14 clash_ratio=0.0140 clash_slots=14
+clashed=38:48650 153:36251 159:42451 282:53483 321:58815 326:33539 338:41128 342:36255 418:48628 442:53484 486:50845 604:43777 697:53484 737:58384 

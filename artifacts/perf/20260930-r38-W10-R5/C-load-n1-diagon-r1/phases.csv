@@ -1,0 +1,9 @@
+phase,ms,note
+pool_start,0,"workers=32 diag=on"
+register,1,"state=3 pubs=1 subs=1"
+handshake,15,"attached=1/1"
+confirm,1,"confirmed=1/1"
+state_settle,0,"state=3 routes=1"
+window,60047,"state=3 phase=load"
+load,0,"sent=11925 rx=11924"
+recover,1,"ok=1/1 lost=0 threads_before=3"

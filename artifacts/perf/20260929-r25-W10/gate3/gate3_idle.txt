@@ -1,0 +1,69 @@
+# W10 门槛 3（空闲 CPU/切换）实测 — 三态分列 + 唤醒率标定
+# 采集 2026-09-29 19:52:21 +0800  governor=powersave
+
+## A. 三态空闲（n=1000, 60 s 窗口, 逐 TID ctx 聚合）
+--- state 3 ---
+state=3 n=1000 domain=6203 pool running=1 workers=32 route_count=1000 threads=34
+0,3,60.000,34,0.58333,9101.1,9.1011,0,0,19196,0,0,0,0
+   scheduler entries=2000 tick_delta=525772 tick_wakes_per_s=8762.9 tick_max_us=1493.00 overruns=0
+--- state 2 ---
+state=2 n=1000 domain=6202 pool running=0 workers=0 route_count=0 threads=2
+0,2,60.000,2,0.12167,5032.6,5.0326,0,0,0,0,0,0,0
+   scheduler entries=1000 tick_delta=301549 tick_wakes_per_s=5025.8 tick_max_us=9372.65 overruns=0
+--- state 1 ---
+state=1 n=1000 domain=6201 pool running=0 workers=0 route_count=0 threads=2
+0,1,60.000,2,0.00000,0.0,0.0000,0,0,0,0,0,0,0
+   scheduler entries=0 tick_delta=0 tick_wakes_per_s=0.0 tick_max_us=1111.45 overruns=0
+state1_after_destroy route_count=0 threads=2 idle_exits=0 restarts=0
+
+## B. 去掉观测器成本后的纯 CPU（--cpu-only, 30 s）
+--- state 3 ---
+state=3 n=1000 domain=6213 pool running=1 workers=32 route_count=1000 threads=34
+0,3,30.000,34,0.58200,0.0,0.0000,0,0,9600,0,0,0,0
+   scheduler entries=2000 tick_delta=263746 tick_wakes_per_s=8791.5 tick_max_us=1625.53 overruns=0
+--- state 2 ---
+state=2 n=1000 domain=6212 pool running=0 workers=0 route_count=0 threads=2
+0,2,30.000,2,0.29433,0.0,0.0000,0,0,0,0,0,0,0
+   scheduler entries=1000 tick_delta=433426 tick_wakes_per_s=14447.4 tick_max_us=444.98 overruns=0
+--- state 1 ---
+state=1 n=1000 domain=6211 pool running=0 workers=0 route_count=0 threads=2
+0,1,30.000,2,0.00000,0.0,0.0000,0,0,0,0,0,0,0
+   scheduler entries=0 tick_delta=0 tick_wakes_per_s=0.0 tick_max_us=4317.38 overruns=0
+
+## D. 空闲 CPU 归因（把 0.58 core 拆到「控制面」与「worker 池」两半）
+
+# D1 纯控制面：`w10_tickcost <pairs> <win>`（sub 10ms + pub 50ms，回调空）
+entries=2     wakes=100.0/s cpu=0.00067 core  ⇒ mean_tick=6.7 us  tick_max=137.5 us  overruns=0
+entries=200   wakes=100.9/s cpu=0.00333 core  ⇒ mean_tick=33.0 us  tick_max=176.3 us  overruns=0
+entries=1000  wakes=650.5/s cpu=0.00800 core  ⇒ mean_tick=12.3 us  tick_max=115.7 us  overruns=0
+entries=2000  wakes=4431.3/s cpu=0.06867 core  ⇒ mean_tick=15.5 us  tick_max=163.0 us  overruns=0
+
+# D2 完整 state3（1000 订阅+发布，CPU-only，话题数扫描）：`w10_idle --state 3 --cpu-only`
+state=3 n=1 domain=8101 pool running=1 workers=32 route_count=1 threads=34
+0,3,10.000,3,0.00200,0.0,0.0000,0,0,100,0,0,0,0
+state=3 n=10 domain=8110 pool running=1 workers=32 route_count=10 threads=34
+0,3,10.000,12,0.00400,0.0,0.0000,0,0,1000,0,0,0,0
+state=3 n=100 domain=8200 pool running=1 workers=32 route_count=100 threads=34
+0,3,10.000,34,0.04200,0.0,0.0000,0,0,3200,0,0,0,0
+state=3 n=500 domain=8600 pool running=1 workers=32 route_count=500 threads=34
+0,3,10.000,34,0.32600,0.0,0.0000,0,0,3200,0,0,0,0
+state=3 n=1000 domain=9100 pool running=1 workers=32 route_count=1000 threads=34
+0,3,10.000,34,0.58600,0.0,0.0000,0,0,3200,0,0,0,0
+
+# D3 worker 数不变、话题数变化时的总 CPU（`w10_threadscan`，窗口内无新建/退出线程）
+workers=4 n=100 win=10s total_cpu=0.03900 core (39 ticks)  threads=6  pid=222 main_tid=222  tids_new_in_window=0 tids_gone_in_window=0
+workers=8 n=100 win=10s total_cpu=0.04100 core (41 ticks)  threads=10  pid=228 main_tid=228  tids_new_in_window=0 tids_gone_in_window=0
+workers=16 n=100 win=10s total_cpu=0.04000 core (40 ticks)  threads=18  pid=238 main_tid=238  tids_new_in_window=0 tids_gone_in_window=0
+workers=32 n=100 win=10s total_cpu=0.04300 core (43 ticks)  threads=34  pid=256 main_tid=256  tids_new_in_window=0 tids_gone_in_window=0
+workers=4 n=1000 win=10s total_cpu=0.52700 core (527 ticks)  threads=498  pid=290 main_tid=290  tids_new_in_window=0 tids_gone_in_window=0
+workers=8 n=1000 win=10s total_cpu=0.51200 core (512 ticks)  threads=10  pid=788 main_tid=788  tids_new_in_window=0 tids_gone_in_window=0
+workers=16 n=1000 win=10s total_cpu=0.50800 core (508 ticks)  threads=18  pid=798 main_tid=798  tids_new_in_window=0 tids_gone_in_window=0
+workers=32 n=1000 win=10s total_cpu=0.51200 core (512 ticks)  threads=34  pid=816 main_tid=816  tids_new_in_window=0 tids_gone_in_window=0
+
+# 结论（归因）：
+#   · 控制面 cpu ≈ 0.019 core @1000 项 / 0.069 core @2000 项（mean_tick 10–16 us，tick 粒度为项级分组）
+#   · 完整 state3 0.51–0.58 core 中，**其余 ~0.5 core 来自 RecvWorker 池**：
+#     32 worker 每 100 ms 超时唤醒一次（wait_timeouts=320/10s），每次唤醒做一次
+#     `collect_pending()` **O(route) 全扫** ⇒ 1000 route × 320 次/10s 是主成本。
+#   · 该成本与 N_worker 几乎无关（4/8/16/32 worker 全部 ≈0.51–0.52 core）
+#     ⇒ 与「每 worker 的 route 数」无关，只与「route 总数 × 唤醒次数」有关（§10.2 的口径）。

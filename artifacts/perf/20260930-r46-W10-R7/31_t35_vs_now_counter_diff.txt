@@ -1,0 +1,8 @@
+t35 接后 vs 现在（同一只读脚本 audit_counter_wiring.py，我本轮重跑）:
+  变化项 3 个（t41 激活）
+    borrow_failed_no_receiver          table_only → potential_used
+    borrow_failed_publish              table_only → potential_used
+    borrow_failed_reason_unknown       table_only → potential_used
+
+  t35: {'wired': 29, 'potential_used': 4, 'selftest_only': 2, 'table_only': 27}
+  现在: {'wired': 29, 'potential_used': 7, 'selftest_only': 2, 'table_only': 24}

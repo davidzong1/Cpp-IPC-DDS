@@ -1,0 +1,42 @@
+# 证据配对核对：每次引用的 run 是否同时给出「库 + 工装」指纹
+r25（t11 原 run）               artifacts/perf/20260929-r25-W10            lib 指纹=有  逐run指纹文件=0  64hex 个数=3
+r27（t33 收口复跑）                artifacts/perf/20260929-r27-W10-socket     lib 指纹=有  逐run指纹文件=0  64hex 个数=5
+r28（t37 R3 修正）               artifacts/perf/20260930-r28-W10-R3         lib 指纹=有  逐run指纹文件=0  64hex 个数=14
+(不存在)                        artifacts/perf/20260929-r29-W10 目录不存在
+r38（R5 第一代）                  artifacts/perf/20260930-r38-W10-R5         lib 指纹=有  逐run指纹文件=0  64hex 个数=3
+r40（R5 定版）                   artifacts/perf/20260930-r40-W10-R5         lib 指纹=有  逐run指纹文件=72  64hex 个数=5
+r41（t41 R2b）                 artifacts/perf/20260929-r41-W10-R2b        lib 指纹=有  逐run指纹文件=0  64hex 个数=7
+r42（t42 R2 补齐）               artifacts/perf/20260930-r42-W06-R2         lib 指纹=有  逐run指纹文件=0  64hex 个数=15
+r44（R2 自包含复跑）                artifacts/perf/20260930-r44-W06-R2-replay  lib 指纹=有  逐run指纹文件=0  64hex 个数=4
+r45（R2 负控重跑）                 artifacts/perf/20260930-r45-W06-R2-negctl  lib 指纹=**无**  逐run指纹文件=0  64hex 个数=0
+r46（本次 R7 复核，我）              artifacts/perf/20260930-r46-W10-R7         lib 指纹=有  逐run指纹文件=0  64hex 个数=2
+
+# 逐 run 的「库+工装」配对是否**成对**（两者都在同一文件/目录内）
+
+artifacts/perf/20260929-r25-W10
+   fingerprint.txt                                            hex=4 工装指纹=有
+   repro/00_fingerprint.txt                                   hex=1 工装指纹=**无**
+
+artifacts/perf/20260929-r27-W10-socket
+
+artifacts/perf/20260930-r28-W10-R3
+   acceptance/A/fingerprint.txt                               hex=3 工装指纹=有
+   batch/fingerprint.txt                                      hex=3 工装指纹=有
+   fingerprint_harness.txt                                    hex=13 工装指纹=有
+
+artifacts/perf/20260930-r44-W06-R2-replay
+   fingerprint.txt                                            hex=4 工装指纹=有
+
+artifacts/perf/20260930-r42-W06-R2
+   delivery_fingerprint.txt                                   hex=16 工装指纹=有
+   minimal/fingerprint.txt                                    hex=4 工装指纹=有
+   minimal/round2/fingerprint.txt                             hex=4 工装指纹=有
+   minimal/round3/fingerprint.txt                             hex=4 工装指纹=有
+
+artifacts/perf/20260930-r45-W06-R2-negctl
+
+artifacts/perf/20260930-r40-W10-R5
+   A-st3-n1-diagoff-r1.fingerprint                            hex=2 工装指纹=有
+   A-st3-n1-diagoff-r2.fingerprint                            hex=2 工装指纹=有
+   A-st3-n1-diagoff-r3.fingerprint                            hex=2 工装指纹=有
+   A-st3-n1-diagoff-r4.fingerprint                            hex=2 工装指纹=有

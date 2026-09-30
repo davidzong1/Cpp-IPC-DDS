@@ -1,0 +1,13 @@
+{
+  "kind": "topology",
+  "process_model": "cross-process",
+  "roles": [
+    {"role": "collector", "pid": 13, "exe": "/home/zwc/cpp_ipc_dds/build/bin/xproc_benchmark"},
+    {"role": "publisher", "transport": "fork+exec --role=pub"},
+    {"role": "subscriber", "transport": "fork+exec --role=sub"}
+,
+    {"role": "roudi", "pid": 3, "note": "CycloneDDS+iceoryx 守护进程"}
+  ],
+  "topic": "",
+  "domain": 1
+}

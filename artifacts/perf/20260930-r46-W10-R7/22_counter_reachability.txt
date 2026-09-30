@@ -1,0 +1,72 @@
+CounterId（元数据表）= 62   [元数据表区间 6261..13050]
+  A  生产面(src/include 非测量头)有落计数调用 = 6
+  B1 仅 counters.h 落点函数/分类器里出现（间接可达，须验调用方） = 12
+  B2 既无生产写入、也不在任何落点函数里 ⇒ **0 不可读作「未发生」** = 44
+
+A:
+    dzflat_a_messages
+    dzflat_b_messages
+    dzflat_wire_bytes
+    fallback_backend_unavailable
+    fallback_total
+    tlv_wire_bytes
+
+B1:
+    borrow_failed_no_receiver
+    borrow_failed_oversized
+    borrow_failed_publish
+    borrow_failed_reason_unknown
+    deferred_depth_last
+    fallback_capacity_full
+    fallback_oversized
+    fallback_reason_unknown
+    fallback_type_incompatible
+    ready_observed
+    scan_time_ns_total
+    scanned_routes_total
+
+B2（必须登记）:
+    borrow_failed_pool_exhausted
+    budget_yields
+    capacity_first_failed_resource_recorded
+    chunk_alloc_failed
+    chunk_exhausted
+    deferred_depth_max
+    deferred_drains
+    dzflat_a_bytes
+    dzflat_b_bytes
+    fallback_pool_exhausted
+    fd_limit
+    generation_mismatch
+    idle_exits
+    path_selection_dzflat_disabled
+    path_selection_type_unsupported
+    payload_checksum_bad
+    payload_checksum_ok
+    publish_blocked
+    publish_failed
+    queue_backpressure
+    queue_evicted
+    recv_once_calls
+    recv_once_over_budget
+    registration_attempts
+    registration_busy
+    registration_duplicate
+    registration_failed
+    registration_invalid_route
+    registration_invalid_token
+    registration_ok
+    registration_rejected
+    registration_stopped
+    rx_timeout
+    scan_rounds
+    seq_duplicate
+    seq_lost
+    seq_monotonic_ok
+    seq_out_of_order
+    thread_restarts
+    tlv_bytes
+    tlv_messages
+    wait_set_full
+    wait_timeout_count
+    wait_token_invalid

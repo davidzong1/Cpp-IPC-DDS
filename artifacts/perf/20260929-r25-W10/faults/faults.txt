@@ -1,0 +1,3 @@
+run_id=20260929-r25-W10-faults domain=6001
+failures=0
+NOTE: F4 池耗尽触发，loan 显式拒绝 ⇒ 策略性回退可识别（非崩溃）

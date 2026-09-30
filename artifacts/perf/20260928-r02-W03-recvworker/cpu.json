@@ -1,0 +1,32 @@
+{
+  "kind": "cpu_and_ctx_switch",
+  "window_s": 3.30825,
+  "orchestrator": {"pid": 47, "note": "采集器自身; 观测开销见 observation_overhead.json"},
+  "processes": [
+    {
+      "label": "test_recv_worker",
+      "role": "other",
+      "pid": 56,
+      "cmdline": "./build/w03/w03_collector evidence --out-dir=artifacts/perf/20260928-r02-W03-recvworker --run-id=20260928-r02-W03 --window-s=30 --required-window-s=60 --sample-ms=100 --transport=recv-worker-pool-regression --build-dir=/home/zwc/cpp_ipc_dds/build --diagnos",
+      "rusage_valid": true,
+      "rusage_user_s": 0.009547,
+      "rusage_sys_s": 0.025779,
+      "rusage_total_cpu_s": 0.035326,
+      "proc_stat_cpu_s_sampled_lower_bound": 0.02,
+      "ctx_switch_rusage_lifetime": {"voluntary": 2224, "nonvoluntary": 6, "complete": true},
+      "ctx_switch_proc_task_sample": {"voluntary": 2201, "nonvoluntary": 4, "complete": false, "voluntary_undercount_bound": 863, "nonvoluntary_undercount_bound": 10, "tids_seen": 10, "tids_present_first_sample": 0, "tids_born_mid_window": 10, "tids_starttime_boundary": 0, "tids_starttime_unknown": 0, "tids_exited": 9, "samples": 34, "method": "proc_task_sample", "main_thread_only_voluntary_reference": 2168, "note": "threads exited inside the window: last partial interval is unobservable; value is a lower bound"},
+      "cpu_integrity": {"proc_pid_stat_last_sample_s": 0.02, "rusage_total_cpu_s": 0.035326, "ratio": 0.566155, "judgement": "一致(差值 = 最后一次采样到进程退出之间的区间)"},
+      "threads_max": 2,
+      "cpu_scope_check": {"valid": true, "proc_pid_stat_cpu_s": 0, "task_group_sum_cpu_s": 0, "ratio": 0, "tids": 2, "judgement": "逐 TID 之和偏小: 线程若以短于一个 tick(1/CLK_TCK=10ms) 的片段运行, tick 记账不会把该片段计入其 utime/stime, 而线程组口径的 cputime_adjust 会用 sum_exec_runtime 补回。=> CPU 结论一律以 /proc/<pid>/stat 或 rusage 为准, 逐 TID 之和只作长片段线程的交叉检查; 不是解析错误"},
+      "max_fd_seen": 2
+    }
+  ],
+  "totals": {"rusage_total_cpu_s": 0.035326, "rusage_ctx_voluntary": 2224, "rusage_ctx_nonvoluntary": 6, "sampled_ctx_voluntary": 2201, "sampled_ctx_nonvoluntary": 4},
+  "cpu_cores_of_total": 0.0106781,
+  "notes": [
+    "上下文切换完整口径 = rusage ru_nvcsw/ru_nivcsw, 覆盖整个线程组生命周期",
+    "proc_task_sample 为逐 TID 采样口径; complete=false 表示窗口内有读不到的区间",
+    "/proc/<pid>/status 的主线程值只作参考(main_thread_only_*_reference), 不是全进程合计",
+    "daemon 角色的服务进程成本必须单独列行; 未声明则为 0 且 verdict 标注未确认"
+  ]
+}

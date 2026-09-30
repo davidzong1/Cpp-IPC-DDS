@@ -1,0 +1,4 @@
+job=w03_thread_workload role=other bin=/home/zwc/cpp_ipc_dds/build/w03/w03_thread_workload sha256=c9aa9eb89f6c4a8e699ff81f1642a262037174d40080a312cd19d2dfed6cb9d6
+    stat=/home/zwc/cpp_ipc_dds/build/w03/w03_thread_workload size=41328 mtime=1790595845
+collector_sha256=2254ae8a3629397425dda96789958e4ced86d6ad89760e75f6e34aa26067854c
+libipc_sha256=dcbf207183d655790b618462bca0a08a191ae490ac086b4386f97e0edf466087

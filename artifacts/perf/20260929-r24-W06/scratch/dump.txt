@@ -1,0 +1,55 @@
+Running main() from /home/zwc/cpp_ipc_dds/3rdparty/gtest/src/gtest_main.cc
+Note: Google Test filter = *RealMessagesSurviveGenerationRebuild*
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from WakeupArtifactGate
+[ RUN      ] WakeupArtifactGate.RealMessagesSurviveGenerationRebuild
+RecvWorker[1]: idle exit (no routes for >= 1000 ms)
+RecvWorker[6]: idle exit (no routes for >= 1000 ms)
+RecvWorker[5]: idle exit (no routes for >= 1000 ms)
+RecvWorker[2]: idle exit (no routes for >= 1000 ms)
+RecvWorker[0]: idle exit (no routes for >= 1000 ms)
+RecvWorker[3]: idle exit (no routes for >= 1000 ms)
+RecvWorker[8]: idle exit (no routes for >= 1000 ms)
+RecvWorker[4]: idle exit (no routes for >= 1000 ms)
+RecvWorker[11]: idle exit (no routes for >= 1000 ms)
+RecvWorker[7]: idle exit (no routes for >= 1000 ms)
+RecvWorker[9]: idle exit (no routes for >= 1000 ms)
+RecvWorker[15]: idle exit (no routes for >= 1000 ms)
+RecvWorker[13]: idle exit (no routes for >= 1000 ms)
+RecvWorker[17]: idle exit (no routes for >= 1000 ms)
+RecvWorker[14]: idle exit (no routes for >= 1000 ms)
+RecvWorker[18]: idle exit (no routes for >= 1000 ms)
+RecvWorker[20]: idle exit (no routes for >= 1000 ms)
+RecvWorker[10]: idle exit (no routes for >= 1000 ms)
+RecvWorker[12]: idle exit (no routes for >= 1000 ms)
+RecvWorker[16]: idle exit (no routes for >= 1000 ms)
+RecvWorker[21]: idle exit (no routes for >= 1000 ms)
+RecvWorker[22]: idle exit (no routes for >= 1000 ms)
+RecvWorker[23]: idle exit (no routes for >= 1000 ms)
+RecvWorker[25]: idle exit (no routes for >= 1000 ms)
+RecvWorker[26]: idle exit (no routes for >= 1000 ms)
+RecvWorker[27]: idle exit (no routes for >= 1000 ms)
+RecvWorker[24]: idle exit (no routes for >= 1000 ms)
+RecvWorker[28]: idle exit (no routes for >= 1000 ms)
+RecvWorker[29]: idle exit (no routes for >= 1000 ms)
+RecvWorker[30]: idle exit (no routes for >= 1000 ms)
+RecvWorker[31]: idle exit (no routes for >= 1000 ms)
+RecvWorker[19]: idle exit (no routes for >= 1000 ms)
+/home/zwc/cpp_ipc_dds/test/test_wakeup_artifact.cpp:492: Failure
+Expected: (seen.find("BEFORE_REBUILD")) != (std::string::npos), actual: 18446744073709551615 vs 18446744073709551615
+重建前发出的真消息丢了（seen=[]）—— 守门不得按 generation 丢弃已弹出的字节
+/home/zwc/cpp_ipc_dds/test/test_wakeup_artifact.cpp:494: Failure
+Expected: (seen.find("AFTER_REBUILD")) != (std::string::npos), actual: 18446744073709551615 vs 18446744073709551615
+重建后发出的真消息丢了（seen=[]）
+[wakeup-artifact] seen=[] artifacts=0
+[  FAILED  ] WakeupArtifactGate.RealMessagesSurviveGenerationRebuild (2424 ms)
+[----------] 1 test from WakeupArtifactGate (2424 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (2424 ms total)
+[  PASSED  ] 0 tests.
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] WakeupArtifactGate.RealMessagesSurviveGenerationRebuild
+
+ 1 FAILED TEST

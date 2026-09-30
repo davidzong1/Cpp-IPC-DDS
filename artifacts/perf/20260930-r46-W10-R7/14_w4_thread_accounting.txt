@@ -1,0 +1,12 @@
+D-W4 容量受限档（state3, n=1000, W=4, diag=on）:
+  容量模型 127×4 = 508；溢出应为 1000-508 = 492
+  window routes        = 508
+  worker_route_counts  = {'total': 508, 'workers': 4}
+  wait_set_full        = 492
+  fallback_total       = 492
+  window_idle_exits    = 0  thread_restarts = 0
+  threads_final        = 498
+  溢出 = 1000 - window_routes = 492
+  线程分账: W(4) + 主(1) + 调度器(1) + 回退线程(overflow=492) = 498  vs threads_final=498  => 逐值吻合
+  residual==overflow==wait_set_full: True
+  recover_ok_routes    = 1000 /1000  ⇒ 规模语义未被容量边界破坏

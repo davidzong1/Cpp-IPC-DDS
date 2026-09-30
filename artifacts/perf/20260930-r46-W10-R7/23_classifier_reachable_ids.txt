@@ -1,0 +1,19 @@
+classify_dzflat_attempt 可返回的 CounterId（11）:
+    borrow_failed_no_receiver
+    borrow_failed_oversized
+    borrow_failed_publish
+    borrow_failed_reason_unknown
+    dzflat_a_messages
+    fallback_capacity_full
+    fallback_oversized
+    fallback_reason_unknown
+    fallback_type_incompatible
+    path_selection_dzflat_disabled
+    path_selection_type_unsupported
+
+note_dzflat_borrow_failed 可写的 CounterId（3）:
+    borrow_failed_no_receiver
+    borrow_failed_publish
+    borrow_failed_reason_unknown
+
+并集 = 11 个（分类器路径可写）

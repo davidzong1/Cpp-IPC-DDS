@@ -1,0 +1,27 @@
+# W10/t36 判定性标定 #2：state 2（接收池完全不参与）CPU vs 在册控制项数
+# 采样：外部逐 TID 读 /proc/<pid>/task/<tid>/stat（win=10s）
+
+### n=100（在册订阅项=100，发布端未建 ⇒ 池未启动）
+  state2 行：    state=2 n=100 domain=29200 pool running=0 workers=0 route_count=0 threads=2
+  主线程 tid=10
+      PID=10 窗口内可见线程=2 总tick=3 => 0.0030 core  非零CPU线程=1
+         tid=13      w10_idle                      3 tick  0.0030 core
+    调度器:    scheduler entries=100 tick_delta=7806 tick_wakes_per_s=557.6 tick_max_us=1127.42 overruns=0
+
+### n=500（在册订阅项=500，发布端未建 ⇒ 池未启动）
+  state2 行：    state=2 n=500 domain=29600 pool running=0 workers=0 route_count=0 threads=2
+  主线程 tid=67
+      PID=67 窗口内可见线程=2 总tick=66 => 0.0660 core  非零CPU线程=1
+         tid=70      w10_idle                     66 tick  0.0660 core
+    调度器:    scheduler entries=500 tick_delta=78055 tick_wakes_per_s=5575.3 tick_max_us=4024.77 overruns=0
+
+### n=1000（在册订阅项=1000，发布端未建 ⇒ 池未启动）
+  state2 行：    state=2 n=1000 domain=30100 pool running=0 workers=0 route_count=0 threads=2
+  主线程 tid=124
+      PID=124 窗口内可见线程=2 总tick=293 => 0.2930 core  非零CPU线程=1
+         tid=128     w10_idle                    293 tick  0.2930 core
+    调度器:    scheduler entries=1000 tick_delta=201604 tick_wakes_per_s=14400.2 tick_max_us=2483.04 overruns=0
+
+# 判定：state 2 下全进程仅 2 条线程，CPU 随在册控制项线性增长 ⇒
+#       state 3（entries=2000）的成本 ≈ state2(n=1000) × 2，与「控制项 × 每项成本」逐值吻合；
+#       而 state 3 的池侧 32 条 worker 线程在该窗口内 CPU 增量应 ≈ 0。

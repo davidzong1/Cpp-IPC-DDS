@@ -1,0 +1,75 @@
+# W10 independent / socket — 判定
+
+- run_id: `20260929-r27-W10-socket-ind-1000`
+- 拓扑: `independent`（1000 个话题，每 route 1 条，载荷 64 B）
+- 判定: **规模试验失败**
+
+## §13.2 六条
+
+| # | 条件 | 实测 | 判定 |
+|---|---|---|---|
+| 1 | registered_count == expected | 1000/1000 | ✅ |
+| 2 | valid_rx_count == expected（逐 route 序号+载荷校验） | 1000/1000 | ✅ |
+| 3 | fallback_count == 0 | 0 | ✅ |
+| 4 | worker/控制线程符合冻结配置（⛔ 无 per-route 补齐） | socket_pool_routes_alive=1000（池内归属，socket 无 seam） threads=1033（create 后） / 1（reclaim 后） | ✅ |
+| 5 | 关闭/恢复在冻结超时内且旧 generation 无投递 | recover_ok=1 lost=0 | ✅ |
+| 6 | 结束时 route/token/fd/队列/chunk 回基线（±5%） | routes 500→0，fd 4068→68，**token（代理：存活期池内在册数→销毁后 0）** 500→0；queue/chunk 见下 | 部分测量 |
+
+> §13.2 #6 的**逐类结论**（⛔ 不接受把未测项打成 ✅）：
+
+| 资源 | 实测 | 判定 |
+|---|---|---|
+| route | 500→0 | ✅ 已测 |
+| token | 池内在册 **500→0**（与 token 一一对应：add_route 取 token、remove_route 同步摘除） | ✅ 已测（代理） |
+| fd | 4068→68 | ✅ 已测 |
+| queue（view/adopt 深度） | ⛔ **无公开读数 API** | **未测（不可判定）** |
+| chunk（池内占用） | ⛔ **无公开读数 API** | **未测（不可判定）** |
+
+## 失败清单（42 条）
+
+- route w10_socket_independent_32130_940 载荷校验失败 1 条
+- route w10_socket_independent_32130_944 载荷校验失败 1 条
+- route w10_socket_independent_32130_945 载荷校验失败 1 条
+- route w10_socket_independent_32130_946 载荷校验失败 1 条
+- route w10_socket_independent_32130_948 载荷校验失败 1 条
+- route w10_socket_independent_32130_949 载荷校验失败 1 条
+- route w10_socket_independent_32130_953 载荷校验失败 1 条
+- route w10_socket_independent_32130_957 载荷校验失败 1 条
+- route w10_socket_independent_32130_959 载荷校验失败 1 条
+- route w10_socket_independent_32130_963 载荷校验失败 1 条
+- route w10_socket_independent_32130_966 载荷校验失败 1 条
+- route w10_socket_independent_32130_967 载荷校验失败 1 条
+- route w10_socket_independent_32130_969 载荷校验失败 1 条
+- route w10_socket_independent_32130_971 载荷校验失败 1 条
+- route w10_socket_independent_32130_974 载荷校验失败 1 条
+- route w10_socket_independent_32130_975 载荷校验失败 1 条
+- route w10_socket_independent_32130_977 载荷校验失败 1 条
+- route w10_socket_independent_32130_980 载荷校验失败 1 条
+- route w10_socket_independent_32130_984 载荷校验失败 1 条
+- route w10_socket_independent_32130_990 载荷校验失败 1 条
+- route w10_socket_independent_32130_996 载荷校验失败 1 条
+- route w10_socket_independent_32130_940 载荷校验失败 1 条
+- route w10_socket_independent_32130_944 载荷校验失败 1 条
+- route w10_socket_independent_32130_945 载荷校验失败 1 条
+- route w10_socket_independent_32130_946 载荷校验失败 1 条
+- route w10_socket_independent_32130_948 载荷校验失败 1 条
+- route w10_socket_independent_32130_949 载荷校验失败 1 条
+- route w10_socket_independent_32130_953 载荷校验失败 1 条
+- route w10_socket_independent_32130_957 载荷校验失败 1 条
+- route w10_socket_independent_32130_959 载荷校验失败 1 条
+- route w10_socket_independent_32130_963 载荷校验失败 1 条
+- route w10_socket_independent_32130_966 载荷校验失败 1 条
+- route w10_socket_independent_32130_967 载荷校验失败 1 条
+- route w10_socket_independent_32130_969 载荷校验失败 1 条
+- route w10_socket_independent_32130_971 载荷校验失败 1 条
+- route w10_socket_independent_32130_974 载荷校验失败 1 条
+- route w10_socket_independent_32130_975 载荷校验失败 1 条
+- route w10_socket_independent_32130_977 载荷校验失败 1 条
+- route w10_socket_independent_32130_980 载荷校验失败 1 条
+- route w10_socket_independent_32130_984 载荷校验失败 1 条
+- route w10_socket_independent_32130_990 载荷校验失败 1 条
+- route w10_socket_independent_32130_996 载荷校验失败 1 条
+
+## 既有缺陷侦察（⛔ 与本轮改造引入的回归分开登记）
+
+（本次未触发）

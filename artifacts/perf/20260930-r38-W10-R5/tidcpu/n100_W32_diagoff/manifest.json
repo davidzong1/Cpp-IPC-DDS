@@ -1,0 +1,22 @@
+{
+  "run_id": "tid-n100_W32_diagoff",
+  "work_package": "W10-R5",
+  "round": 1,
+  "state": 3,
+  "phase": "idle",
+  "topic_count": 100,
+  "requested_workers": 32,
+  "effective_workers": 32,
+  "diagnostics_enabled": false,
+  "window_ms": 75000,
+  "window_s_min_required": 60,
+  "port_policy": "SHM（无端口）",
+  "criteria_version": "W10-R5/§6.2-§6.3/v1",
+  "lib_path": "/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0",
+  "lib_sha256": "558f47ede2419e14554766af55e53671e69d05d940b05351b1d4aa0e45d79031",
+  "tool_sha256": "a24a9072f6973352b5ae1eb306b22b61dbe78ec3afb06cb7f7d82f89c41f6ab4",
+  "deadlines": {"wait_timeout_ms": 100, "idle_keep_alive_ms": 1000, "handshake_s": 120, "recover_s": 30},
+  "capacity_model": {"per_worker_wait_set": 127, "total": 4064, "capacity_limited": false},
+  "input_manifest_hash": "topics=r5_<state>_9932_0..99 sha256=pending",
+  "result_files": ["manifest.json","phases.csv","windows.csv","windows.jsonl","counters.json","threestate.json","verdict.md"]
+}

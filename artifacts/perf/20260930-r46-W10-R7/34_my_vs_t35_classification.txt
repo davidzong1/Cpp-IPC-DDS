@@ -1,0 +1,15 @@
+# 我的三分类 vs t35 只读脚本（口径差异说明）
+# 数据来源：21_counter_inventory_now.txt（我的复算）与 30_counter_audit_now.tsv（t35 脚本当前树原样重跑）
+#
+# 我  ：① 生产面有落计数调用 = 31
+#       ② 仅 counters.h 落点函数/分类器可写（间接可达，须验调用点）= 13
+#       ③ 全仓无任何写入路径 = 18
+# t35 ：wired 29 / potential_used 7 / selftest_only 2 / table_only 24
+#
+# 差异 1：我① − t35 wired = {scan_rounds, scanned_routes_total}
+#         （t35 把这两项判为 selftest_only，因它们另有 proc_sampler.h 的自测写入点）
+# 差异 2：我③(18) ⊂ t43/R4b 的 unwired_ids(27)
+#         差集 = ② 中的 9 项（4×borrow_failed_* + 3×fallback_* + 2×path_selection_*）
+#         原因：这 9 项经 `r.inc(c.detail)` 间接写，静态审计看不到 detail 的取值；
+#         我按「分类器 return 块可达」归 ② 并要求验调用点，t43 按「字面 ID 未出现」留在未采集。
+# ⇒ 联合口径：未采集集合 = 静态清单 − 运行期实测非零项（t43 表述），引用时两者并给。

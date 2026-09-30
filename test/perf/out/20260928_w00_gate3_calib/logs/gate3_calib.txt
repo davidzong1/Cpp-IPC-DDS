@@ -1,0 +1,133 @@
+# W00 门槛3（空闲 CPU/切换）可达性标定 — 原始日志
+# 采集：2026-09-28 19:50:23 +0800  本机 32 逻辑核 governor=powersave
+
+## 1) 裸 epoll_wait 空闲线程（与 SocketRecvWorker 空闲等待同形）
+$ ./epcal <N> <slice_ms> <window_s>
+EPOLL threads=32 slice=100ms wall=10.00s ctx_total=320.5/s per_thread=10.02/s
+EPOLL threads=32 slice=1000ms wall=10.00s ctx_total=29.0/s per_thread=0.91/s
+
+## 2) 产品 socket 池真实空闲（1000 独立话题，无发布者）
+$ ./idlepool 1000 <domain> 10
+mode=socket_pub_sub_independent_topics n=1000 domain=702
+info_pool_snapshot_size=1000 in_use=1000 (expect n+1=1001 if registry unbounded)
+pool_running=1 workers=32 route_count=1000 threads_now=33 fds_open=2068 max_fd=2067
+window_s=10.010 cpu_cores=0.00300 ctx_per_s=323.7 ctx_per_route_per_s=0.324
+threads_min=33 threads_max=33 route_count=1000 idle_exits=0 wait_timeouts=3200
+DONE
+
+## 3) 控制面 tick（mutex+cv 10ms 周期）
+$ ./tickcal 1 <period_ms> 10
+cv_tick threads=1 period=10ms : ctx=99.5/s  per_thread=99.50/s
+cv_tick threads=1 period=50ms : ctx=20.1/s  per_thread=20.10/s
+
+## 4) CPU 口径交叉核对（/proc/self/stat 覆盖全部线程）
+hz=100
+N=32 wall=3.00s  /proc/self/stat=30.87608 cores    sum(task/*/stat)=30.84942 cores   ratio=1.00
+
+## 5) ≥60s 窗口（与门槛3的窗口要求一致）复核
+# 结构性下限 = N_worker × (1000 / wait_timeout_ms) + 控制面 tick，与窗口长度无关
+$ ./epcal 32 100 60
+EPOLL threads=32 slice=100ms wall=60.00s ctx_total=320.2/s per_thread=10.01/s
+$ ./epcal 32 1000 60
+EPOLL threads=32 slice=1000ms wall=60.00s ctx_total=31.6/s per_thread=0.99/s
+$ ./idlepool 1000 703 60
+0
+pool_running=1 workers=32 route_count=1000 threads_now=33 fds_open=2068 max_fd=2067
+window_s=60.039 cpu_cores=0.00450 ctx_per_s=324.3 ctx_per_route_per_s=0.324
+threads_min=33 threads_max=33 route_count=1000 idle_exits=0 wait_timeouts=19193
+DONE
+
+## 6) wait_timeout 与 ctx 实测对应表
+N_worker=32  slice=100  ms ticks=1@10ms : cpu=0.00200 core  ctx=420.3/s  (per worker 13.13/s)
+N_worker=32  slice=200  ms ticks=1@10ms : cpu=0.00100 core  ctx=258.4/s  (per worker 8.07/s)
+N_worker=32  slice=500  ms ticks=1@10ms : cpu=0.00100 core  ctx=160.7/s  (per worker 5.02/s)
+N_worker=32  slice=640  ms ticks=1@10ms : cpu=0.00100 core  ctx=150.6/s  (per worker 4.71/s)
+N_worker=32  slice=1000 ms ticks=1@10ms : cpu=0.00100 core  ctx=129.5/s  (per worker 4.05/s)
+
+## 7) 真实 ShmControlScheduler 的空闲唤醒成本（注册 N 项，sub_heartbeat=10ms，60s 窗口）
+$ ./ctrlprobe <N_entries> <window_s> <sub_heartbeat_ms>
+n=1 sub_heartbeat=10ms entry_count=1 invalid=0 threads=2
+window_s=60.000 cpu_cores=0.00067 ctx_total_per_s=100.0 (budget 50)
+tick_count=6200 tick_overrun=0 entry_count=1 ticks_sample=6200 tick_wakes_per_s=103.3 tick_last_us=1.73 tick_max_us=29.05
+n=32 sub_heartbeat=10ms entry_count=32 invalid=0 threads=2
+window_s=60.000 cpu_cores=0.00100 ctx_total_per_s=100.2 (budget 50)
+tick_count=6213 tick_overrun=0 entry_count=32 ticks_sample=6200 tick_wakes_per_s=103.5 tick_last_us=2.37 tick_max_us=28.58
+n=100 sub_heartbeat=10ms entry_count=100 invalid=0 threads=2
+window_s=60.000 cpu_cores=0.00217 ctx_total_per_s=199.7 (budget 50)
+tick_count=12376 tick_overrun=0 entry_count=100 ticks_sample=6200 tick_wakes_per_s=206.3 tick_last_us=0.88 tick_max_us=66.08
+n=250 sub_heartbeat=10ms entry_count=250 invalid=0 threads=2
+window_s=60.000 cpu_cores=0.00317 ctx_total_per_s=293.5 (budget 50)
+tick_count=18038 tick_overrun=0 entry_count=250 ticks_sample=6200 tick_wakes_per_s=300.6 tick_last_us=4.34 tick_max_us=55.33
+n=1000 sub_heartbeat=10ms entry_count=1000 invalid=0 threads=2
+window_s=60.000 cpu_cores=0.01633 ctx_total_per_s=1603.0 (budget 50)
+tick_count=99289 tick_overrun=0 entry_count=1000 ticks_sample=6200 tick_wakes_per_s=1654.8 tick_last_us=3.18 tick_max_us=123.80
+
+## 8) D-6 追加归因：RUN_SERIAL 生效后仍失败 + 未发布借样泄漏反事实（2026-09-28 20:45–20:55）
+
+### 8.1 RUN_SERIAL 生效后的 15 轮 -j32（当前 23 项）
+1	rc=0	
+2	rc=0	
+3	rc=0	
+4	rc=0	
+5	rc=8	17 - test_dzflat_builder (Failed)|23 - test_w08_dzflat_ab (Failed)|
+6	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|23 - test_w08_dzflat_ab (Failed)|
+7	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|22 - test_socket_high_fd (Failed)|23 - test_w08_dzflat_ab (Failed)|
+8	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|22 - test_socket_high_fd (Failed)|23 - test_w08_dzflat_ab (Failed)|
+9	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|18 - test_lifecycle_contract (Failed)|23 - test_w08_dzflat_ab (Failed)|
+10	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|23 - test_w08_dzflat_ab (Failed)|
+11	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|23 - test_w08_dzflat_ab (Failed)|
+12	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|23 - test_w08_dzflat_ab (Failed)|
+13	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|23 - test_w08_dzflat_ab (Failed)|
+14	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|23 - test_w08_dzflat_ab (Failed)|
+15	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|22 - test_socket_high_fd (BAD_COMMAND)|23 - test_w08_dzflat_ab (Failed)|
+DONE
+
+### 8.2 builder 纯单跑 x20（当前环境）
+1	rc=0 2	rc=0 3	rc=0 4	rc=0 5	rc=0 6	rc=0 7	rc=0 8	rc=0 9	rc=0 10	rc=0 11	rc=0 12	rc=0 13	rc=0 14	rc=0 15	rc=0 16	rc=0 17	rc=0 18	rc=0 19	rc=0 20	rc=0 
+
+### 8.3 反事实：同尺寸档 132096、借满 40 块后被 SIGKILL
+A = 借满后【发布】再被杀；B = 借满后【不发布】被杀（每轮先清理本探针自己创建的段）
+round1  A builder_rc=0 exhausted=0 | B builder_rc=1 exhausted=1
+round2  A builder_rc=0 exhausted=0 | B builder_rc=1 exhausted=1
+round3  A builder_rc=0 exhausted=0 | B builder_rc=1 exhausted=1
+
+### 8.4 忠实复现（并发 + 死持有者）与串行链对照
+并发(leaker 未发布 + builder 同时跑, 中途 kill leaker) x3: builder_rc=1/1/1, exhausted=1/1/1
+串行链(w08 跑完再 builder) x3: builder_rc=0/0/0, exhausted=0/0/0
+
+## 9) D-13 追加：持续性与不可自愈性受控实验（2026-09-28 21:00–21:10）
+
+### 9.1 不可自愈性（同一 shell 窗口，池段 132096 被死进程的 40 块未发布借样占满）
+步骤: leaker132(40, unpublished) 运行中 → SIGKILL → builder 连跑 5 次 → 仅删池段后再连跑 3 次
+builder 连跑 5 次: rc=1/1/1/1/1, chunk pool exhausted=1/1/1/1/1  ⇒ 5 次均失败，池占用不随时间自愈
+仅删【池段 __IPC_SHM__CHUNK_INFO__132096__C40】后: rc=0/0/0, exhausted=0/0/0  ⇒ 失败源就是该段内的位图占用（不是环境噪声）
+
+### 9.2 谁能替死 route 清扫（同话题 vs 不同话题）
+A(话题 /dzflat_b/shared_topic) 借满 40 块未发布 → SIGKILL
+  B 用【同一话题名】再借 40 块 → loaned=0 + chunk pool exhausted  ⇒ 同路由的新发布者也救不回（owner 位仍在）
+A(话题 /dzflat_b/topic_a) 借满 40 块未发布 → SIGKILL
+  D 用【不同话题名】再借 40 块 → loaned=0 + chunk pool exhausted  ⇒ 跨路由完全不可见（route_tag 不同 ⇒ 无人清扫）
+
+### 9.3 段存活规则（本实验的边界条件）
+leaker 进程存活期间池段与 topic 段都在 /dev/shm；SIGKILL 后段仍存在（由其它持有者/使用者维持），故位图占用随之持续。
+⇒ 队长 D-13 §一 的观察（'/dev/shm 现为空'）与本节不矛盾：段文件消失后位图消失，所以跨会话不累积；持续性只发生在【段仍存活】的窗口内（正是 ctest 并发窗口）。
+
+## 10) 【重要修正·跨运行陈旧段判定】D-13/架构负责人 t23 实验的可复现核对（2026-09-28 22:20–22:35）
+背景：架构负责人报告「失败后单跑仍失败、清理未被映射的 __IPC_SHM__CHUNK_INFO__* 段后立刻全绿」⇒ 判定为【跨运行/跨进程的段状态】。
+我此前的措辞是「跨会话不累积」。经重跑核对，**架构负责人的判定成立，我的措辞需修正为更精确的一条**：
+
+本机实测：同一个 bash 沙箱调用内的多个子进程共享同一 /dev/shm（mnt_ns=mnt:[4026533235] 恒定、dev=128 ino=13 恒定、写 marker 后计数=1）；
+但【相邻两次 bash 工具调用】之间 /dev/shm 不可见（marker 写入后下一次调用计数=0），mnt_ns 编号虽同 —— 属本会话执行环境的隔离特性，不是产品行为。
+
+### 10.1 陈旧段判定的受控实验（同一调用内，全新进程）
+步骤1: A 借满 40 块未发布（132096 档）
+  结果: loaned=40 mode=unpublished
+步骤2: 外部 SIGKILL A（跳过析构 ⇒ 无 shm_unlink）
+  池段遗留=1、/dev/shm 段数=15
+步骤3: 全新进程 B 用【另一话题名】借 40 块（不清理任何段）
+  结果: chunk pool exhausted + loaned=0  ⇒ 陈旧段对新进程可见，池显示『已被用掉』
+步骤4: 只删池段后全新进程 C
+  结果: loaned=40  ⇒ 失败源确为陈旧段内的已分配块
+
+⇒ 修正后的准确表述：泄漏【跨进程、跨运行】持续，只要池段仍存活（无人 unlink 该段）；它【不跨『段被清理/重组』的边界】。
+   我此前写的『跨会话不累积』只在本会话沙箱的调用隔离下成立，不应作为产品语义陈述；架构负责人 r2/r3 的判定更准确，t22 靶心三项（陈旧段识别 / 异常退出回收 / 归因前缀）据此成立。

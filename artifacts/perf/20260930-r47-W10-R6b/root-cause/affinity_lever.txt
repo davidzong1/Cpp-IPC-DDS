@@ -1,0 +1,14 @@
+# 亲和性杠杆原始数据（win=15 s；probe2 同二进制；逐次清 /dev/shm）
+mode cpus ticks
+unpinned cpu=0.10067 tick/s=8637 
+unpinned cpu=0.10533 tick/s=9826 
+unpinned cpu=0.12400 tick/s=10845 
+core0 cpu=0.03600 tick/s=3543 
+core0 cpu=0.03533 tick/s=3551 
+core0 cpu=0.03467 tick/s=3461 
+core6 cpu=0.04400 tick/s=4226 
+core6 cpu=0.04200 tick/s=4058 
+core6 cpu=0.06200 tick/s=5870 
+core12 cpu=0.05067 tick/s=5044 
+core12 cpu=0.05733 tick/s=5687 
+core12 cpu=0.03667 tick/s=3432 

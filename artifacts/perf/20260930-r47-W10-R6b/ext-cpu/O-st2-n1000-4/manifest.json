@@ -1,0 +1,22 @@
+{
+  "run_id": "O-st2-n1000-4",
+  "work_package": "W10-R5",
+  "round": 1,
+  "state": 2,
+  "phase": "idle",
+  "topic_count": 1000,
+  "requested_workers": 32,
+  "effective_workers": 32,
+  "diagnostics_enabled": false,
+  "window_ms": 60000,
+  "window_s_min_required": 60,
+  "port_policy": "SHM（无端口）",
+  "criteria_version": "W10-R5/§6.2-§6.3/v1",
+  "lib_path": "/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0",
+  "lib_sha256": "cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46",
+  "tool_sha256": "275e2328f878306392f28b54618adfaa8df5741a19e870eeeeb0d417d41f4b2f",
+  "deadlines": {"wait_timeout_ms": 100, "idle_keep_alive_ms": 1000, "handshake_s": 120, "recover_s": 30},
+  "capacity_model": {"per_worker_wait_set": 127, "total": 4064, "capacity_limited": false},
+  "input_manifest_hash": "topics=r5_<state>_72980_0..999 sha256=pending",
+  "result_files": ["manifest.json","phases.csv","windows.csv","windows.jsonl","counters.json","threestate.json","verdict.md"]
+}

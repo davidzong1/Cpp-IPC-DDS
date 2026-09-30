@@ -1,0 +1,63 @@
+# D-22 (t29) 复现命令 —— run_id 20260929-r32-W10-portfix
+# 工作目录 /home/zwc/cpp_ipc_dds   基线 e800ccc496ac710b711c9346709e86a148c41241
+
+# 0) 开工前指纹（修复前）
+sha256sum src/dzIPC/socket_pub_sub_ipc.cc src/libipc/platform/posix/udp.h build/lib/libipc.so.1.3.0 | tee fingerprints_before.txt
+#   socket_pub_sub_ipc.cc = 169dd872…  udp.h = 226950d4…  libipc.so = dc2d5c5a…
+
+# 1) 修复前复现（最小件 n=39 = 含 topic#38/port48650）
+timeout 25 ./build/bin/w10_matrix --transport socket --topology independent --n 39 --domain 3103 --msgs 1 --payload 64
+#   ⇒ rc=124，日志持续 "Failed to connect subscriber"（见 02_baseline_n39.log）
+timeout 600 ./build/bin/w10_matrix --transport socket --topology independent --n 1000 --domain 3103 --msgs 1 --payload 64 --handshake-timeout-ms 60000
+#   ⇒ rc=124（见 01_baseline_n1000.log）
+
+# 2) 构建修复版
+cmake -S . -B build && make -C build -j16
+
+# 3) 探针（只读；可独立重编复核）
+g++ -std=c++17 -O2 -Iinclude -Ilocal/include src/socket_scale_probe.cpp -o socket_scale_probe -Lbuild/lib -lipc -pthread
+g++ -std=c++17 -O2 -Iinclude -Ilocal/include src/d22_error_surface.cpp -o d22_error_surface -Lbuild/lib -lipc -pthread
+g++ -std=c++17 -O2 -Iinclude -o port_surface src/port_surface.cpp -Lbuild/lib -lipc -pthread
+g++ -std=c++17 -O2 -Iinclude -o picker_parse_check src/picker_parse_check.cpp -Lbuild/lib -lipc -pthread
+g++ -std=c++17 -O2 -Iinclude -o errno_survive src/errno_survive.cpp -Lbuild/lib -lipc -pthread
+export LD_LIBRARY_PATH=$PWD/build/lib:$PWD/build/bin
+
+# 4) 修复后 A/B（naive = 原命名含真实碰撞；scanned = 端口段避让）
+./socket_scale_probe 39 3103 1 naive     # rc=1, routes_ok=38/39（唯一丢失 = 被诊断的 #38）
+./socket_scale_probe 39 3103 1 scanned   # rc=0, 39/39
+./socket_scale_probe 1000 3103 1 scanned # rc=0, 1000/1000 逐 route OK  ← 验收主臂
+./socket_scale_probe 1000 3103 1 naive   # 有界结束, routes_ok=994/1000（6 条丢失 = 6 条诊断）
+
+# 5) 可配置上限 + 兼容路径
+DZIPC_SOCKET_CONNECT_MAX_ATTEMPTS=3 timeout 120 ./socket_scale_probe 39 3103 1 naive  # attempts=3 elapsed_ms=2001
+DZIPC_SOCKET_CONNECT_MAX_ATTEMPTS=0 timeout 20  ./socket_scale_probe 39 3103 1 naive  # rc=124：无界语义保留
+
+# 6) 显式失败的外部可判定面
+./d22_error_surface 3103 d22_good_topic w10_socket_independent_3103_38
+
+# 7) 运维动作可行性：换 domain 即绕开（不改端口公式）
+./socket_scale_probe 39 7 1 naive        # rc=0, 39/39
+
+# 8) 碰撞面复算 + 工装解析复核
+./port_surface 3103 1000 | tee 50_port_surface.txt
+./picker_parse_check | tee 03_picker_parse_check.txt
+./errno_survive 47777 | tee errno_preservation.txt
+
+# 9) 原报告场景（修复库）
+timeout 2400 ./build/bin/w10_matrix --transport socket --topology independent --n 1000 --domain 3103 \
+    --msgs 1 --payload 64 --handshake-timeout-ms 60000 > 41_w10matrix_n1000_after_fix.log 2>&1
+#   ⇒ rc=1（不再是 124）；valid_rx_count=997/1000，丢的 3 路正是被诊断的 38/326/418
+#   ⛔ 该工装 socket 分支 wait_handshake() 无条件返回 true，且其 picker 恒不生效（见 03_*.txt）
+#      ⇒ "千路有效收发"只由 socket_scale_probe 主张
+
+# 10) 全量回归
+ctest --test-dir build -j4     # 27/27 Passed
+
+# 11) 反事实：修复前库的同场景对照（两版源码都已留档）
+git show HEAD:src/dzIPC/socket_pub_sub_ipc.cc > counterfactual/socket_pub_sub_ipc.cc.HEAD   # = 169dd872…
+cp src/dzIPC/socket_pub_sub_ipc.cc counterfactual/socket_pub_sub_ipc.cc.D22fix
+cp counterfactual/socket_pub_sub_ipc.cc.HEAD src/dzIPC/socket_pub_sub_ipc.cc
+make -C build -j16   # libipc.so = dc2d5c5a…
+./socket_scale_probe 500 3103 1 scanned   # create_ms=9831 subs_ms=97 pubs_ms=9734（与修复版同档）
+./socket_scale_probe 1000 3103 1 scanned  # create_ms=138488 subs_ms=149 pubs_ms=138339（与修复版同档）
+cp counterfactual/socket_pub_sub_ipc.cc.D22fix src/dzIPC/socket_pub_sub_ipc.cc && make -C build -j16

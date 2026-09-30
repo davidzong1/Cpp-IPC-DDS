@@ -1,0 +1,7 @@
+case,name,result,detail
+4,"4a 三条 route 全部收到消息（回退不是丢包）",PASS,"sent=3/3 rx=3/3 用时≈20.090 ms"
+4,"4b 收到消息的耗时有界（无忙等死循环）",PASS,"rx 用时 20.090 ms < 15000 ms（上界判据）"
+4,"4c 对照臂：走 worker、无回退（同一二进制，差异仅来自注入）",PASS,"seam worker=3/3 compat=0 Δfallback_total=0"
+4,"4d 对照臂：池已接管（route_count==N、registration_ok==N）",PASS,"route_count=3 Δregistration_ok=3"
+4,"4e 对照臂：backend_available 保持 true",PASS,"backend_available=true（未探测到失败）"
+4,"4f 对照臂：无错误（wait_errors 与 wait_timeouts 归零的语义对照）",PASS,"Δwait_errors=0 Δrecv_errors=0（⇒ 注入臂的 Δwait_errors>0 确由注入造成）"

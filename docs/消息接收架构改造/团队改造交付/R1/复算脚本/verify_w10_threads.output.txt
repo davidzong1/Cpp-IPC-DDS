@@ -1,0 +1,69 @@
+### 臂①：池先起（worker 2..33，调度器 34）—— 期望忙线程 = #34
+PID=16（主线程 tid 必等于 PID）；进程内线程数=34
+窗口 5.0s：总 tick=269 ⇒ 0.5380 core
+   #1   tid=16      thr_a                  cputick=    0  0.0000 core  <== 主线程
+   #2   tid=18      thr_a                  cputick=    0  0.0000 core
+   #3   tid=19      thr_a                  cputick=    0  0.0000 core
+   #4   tid=20      thr_a                  cputick=    0  0.0000 core
+   #5   tid=21      thr_a                  cputick=    0  0.0000 core
+   #6   tid=22      thr_a                  cputick=    0  0.0000 core
+   #7   tid=23      thr_a                  cputick=    0  0.0000 core
+   #8   tid=24      thr_a                  cputick=    0  0.0000 core
+   #9   tid=25      thr_a                  cputick=    0  0.0000 core
+   #10  tid=26      thr_a                  cputick=    0  0.0000 core
+   #11  tid=27      thr_a                  cputick=    0  0.0000 core
+   #12  tid=28      thr_a                  cputick=    0  0.0000 core
+   #13  tid=29      thr_a                  cputick=    0  0.0000 core
+   #14  tid=30      thr_a                  cputick=    0  0.0000 core
+   #15  tid=31      thr_a                  cputick=    0  0.0000 core
+   #16  tid=32      thr_a                  cputick=    0  0.0000 core
+   #17  tid=33      thr_a                  cputick=    0  0.0000 core
+   #18  tid=34      thr_a                  cputick=    0  0.0000 core
+   #19  tid=35      thr_a                  cputick=    0  0.0000 core
+   #20  tid=36      thr_a                  cputick=    0  0.0000 core
+   #21  tid=37      thr_a                  cputick=    0  0.0000 core
+   #22  tid=38      thr_a                  cputick=    0  0.0000 core
+   #23  tid=39      thr_a                  cputick=    0  0.0000 core
+   #24  tid=40      thr_a                  cputick=    0  0.0000 core
+   #25  tid=41      thr_a                  cputick=    0  0.0000 core
+   #26  tid=42      thr_a                  cputick=    0  0.0000 core
+   #27  tid=43      thr_a                  cputick=    0  0.0000 core
+   #28  tid=44      thr_a                  cputick=    0  0.0000 core
+   #29  tid=45      thr_a                  cputick=    0  0.0000 core
+   #30  tid=46      thr_a                  cputick=    0  0.0000 core
+   #31  tid=47      thr_a                  cputick=    0  0.0000 core
+   #32  tid=48      thr_a                  cputick=    0  0.0000 core
+   #33  tid=49      thr_a                  cputick=    0  0.0000 core
+   #34  tid=50      thr_a                  cputick=  269  0.5380 core
+bash: 第 4 行：    16 已杀死               ./build/t31/thr_a > build/t31/thr_a.log 2>&1
+
+### 臂②：调度器先取（调度器 2，worker 3..34）—— 期望忙线程 = #2
+PID=94（主线程 tid 必等于 PID）；进程内线程数=27
+窗口 5.0s：总 tick=17 ⇒ 0.0340 core
+   #1   tid=94      thr_b                  cputick=    2  0.0040 core  <== 主线程
+   #2   tid=96      thr_b                  cputick=   15  0.0300 core
+   #3   tid=101     thr_b                  cputick=    0  0.0000 core
+   #4   tid=104     thr_b                  cputick=    0  0.0000 core
+   #5   tid=107     thr_b                  cputick=    0  0.0000 core
+   #6   tid=110     thr_b                  cputick=    0  0.0000 core
+   #7   tid=129     thr_b                  cputick=    0  0.0000 core
+   #8   tid=130     thr_b                  cputick=    0  0.0000 core
+   #9   tid=131     thr_b                  cputick=    0  0.0000 core
+   #10  tid=132     thr_b                  cputick=    0  0.0000 core
+   #11  tid=133     thr_b                  cputick=    0  0.0000 core
+   #12  tid=134     thr_b                  cputick=    0  0.0000 core
+   #13  tid=135     thr_b                  cputick=    0  0.0000 core
+   #14  tid=136     thr_b                  cputick=    0  0.0000 core
+   #15  tid=137     thr_b                  cputick=    0  0.0000 core
+   #16  tid=138     thr_b                  cputick=    0  0.0000 core
+   #17  tid=139     thr_b                  cputick=    0  0.0000 core
+   #18  tid=140     thr_b                  cputick=    0  0.0000 core
+   #19  tid=141     thr_b                  cputick=    0  0.0000 core
+   #20  tid=142     thr_b                  cputick=    0  0.0000 core
+   #21  tid=143     thr_b                  cputick=    0  0.0000 core
+   #22  tid=144     thr_b                  cputick=    0  0.0000 core
+   #23  tid=145     thr_b                  cputick=    0  0.0000 core
+   #24  tid=146     thr_b                  cputick=    0  0.0000 core
+   #25  tid=147     thr_b                  cputick=    0  0.0000 core
+   #26  tid=148     thr_b                  cputick=    0  0.0000 core
+   #27  tid=149     thr_b                  cputick=    0  0.0000 core

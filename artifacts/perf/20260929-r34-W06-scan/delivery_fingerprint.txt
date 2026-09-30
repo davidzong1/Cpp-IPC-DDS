@@ -1,0 +1,62 @@
+# t30 交付指纹与树状态（本 run 的读数与这些对象同源）
+
+## 本任务改动文件（写入归属内）
+0dde3eabd02e23bafffa3142c20c525535f65b1da2635704c5b25458f742650c  src/dzIPC/threepools/recv_worker.cc
+3c2913b9ef08b6d1ab2a81c9fa9d51032fcfe472c9eb866981a1061f69ab0502  include/dzIPC/threepools/recv_worker.h
+4fbc9058dfbe794c25bf396d1906ca8e2b1700536c740bcac48b54ba671094aa  test/perf/w10/w10_scancost.cpp
+362c22e3bb2bec3f86084dfabe598c114a28a1495f484b30465407ccec4da2af  test/perf/w10/w10_scancost_sweep.sh
+
+## 边界声明（区分「本任务改动」与「他人 WP 的既有/并发改动」）
+
+### counters.h —— 本任务**未改**（只读引用）
+`include/dzIPC/measure/` 是 W03 的**未跟踪新目录**（`git status` 显示 `?? include/dzIPC/measure/`），
+故 `git diff` 为空是**平凡真**、不足以证明"未改"。以下给出可机械核对的三条：
+1. **mtime**：`counters.h` = **09-28 21:38**（W03 落库时间，`stat` 实测），
+   而本任务工作窗口是 **09-29 21:1x 起** ⇒ 本任务期间该文件**未被写**；
+2. **内容指纹**：`sha256sum include/dzIPC/measure/counters.h`（见下）—— 与本次交付前一致；
+3. **枚举核对**：`kCounterCount` 仍为 `CounterId::count` 派生、`CounterId` 枚举值无新增
+   （接线只引用既有 ID：`scan_rounds`/`scanned_routes_total`/`scan_time_ns_total`/
+   `ready_observed`/`deferred_depth_last`/`deferred_depth_max`/`wait_timeout_count`/
+   `budget_yields`/`deferred_drains`/`idle_exits`/`thread_restarts`/`recv_once_calls`/`recv_once_over_budget`）。
+
+### 以下文件在 `git diff` 里有差异，但**不是本任务改的**（均属他人 WP 的既有/并发改动）
+```
+ src/dzIPC/shm_pub_sub_ipc.cc    | 1745 +++++++++++++++++++++++++++++++++------
+ src/libipc/ipc.cpp              |  216 +++-
+ src/libipc/platform/posix/udp.h |   33 +-
+ src/libipc/utility/id_pool.h    |   18 +
+ 4 files changed, 1741 insertions(+), 271 deletions(-)
+```
+判别方式：本任务的可核对改动面 = 上面「本任务改动文件」的 4 个 sha256
+（`recv_worker.{cc,h}` + 新工装 `w10_scancost.cpp` / `w10_scancost_sweep.sh`）。
+⛔ 本任务未写 `src/libipc/**`、未写 `shm_pub_sub_ipc.*`、未写 `counters.h`、未写他人 WP。
+
+### counters.h 指纹（供下一位复核者逐字比对）
+1f9c2bd0b9419aea1332c9c295e032ef8e5889e40bf48ebdbf79d8659530b6ae  include/dzIPC/measure/counters.h
+
+## 构建对象
+38ac85480ab8e2fa5f1df6f1d94cc2a8c8f44c96013c99aa9c421f0ec680cca8  build/lib/libipc.so.1.3.0
+21ad0d413ad1244234fbc3ae4463742493dd3f84aba353ca3090eeed38e08a00  build/bin/w10_scancost
+1876ad2c538ebc2183703ed3f0508fae31151874ce2809013a3290adeec5e13a  build/bin/w10_matrix
+
+## 调试残留自查（应为 0）
+0
+
+## 接线点（可机械核对）
+184:     * `ScanRoundScope` 提供（W03 实测：关 0.176 ns/轮、开 29.3 ns/轮）。两者在
+219:     * 观测量的口径（与 W03 `ScanRoundScope` 及字段定义逐条对齐）：
+223:     *   · `deferred.size()`（**入队前**取，与 W03 样例 `ScanRoundScope(n, deferred.size())`
+233:    dzIPC::measure::ScanRoundScope scan(scanned, depth_in);
+254:     * 原子加法与一次 CAS 最大值，**不取时钟**（唯一的时钟开销在 `ScanRoundScope`，
+379:                DZIPC_MEASURE_DIAG_INC(dzIPC::measure::CounterId::recv_once_over_budget);
+382:            DZIPC_MEASURE_DIAG_INC(dzIPC::measure::CounterId::recv_once_calls);
+431:        DZIPC_MEASURE_DIAG_INC(dzIPC::measure::CounterId::budget_yields);
+432:        DZIPC_MEASURE_DIAG_INC(dzIPC::measure::CounterId::deferred_drains);
+452:        DZIPC_MEASURE_DIAG_INC(dzIPC::measure::CounterId::wait_timeout_count);
+514:            DZIPC_MEASURE_DIAG_INC(dzIPC::measure::CounterId::idle_exits);
+631:            DZIPC_MEASURE_DIAG_INC(dzIPC::measure::CounterId::thread_restarts);
+
+## 全量闸门
+100% tests passed, 0 tests failed out of 27
+
+Total Test time (real) =  55.74 sec

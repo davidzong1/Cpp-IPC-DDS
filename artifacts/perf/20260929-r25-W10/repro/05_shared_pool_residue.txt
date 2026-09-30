@@ -1,0 +1,1 @@
+见 tmp/w00_verify/leaker.cpp 与 test/perf/out/20260928_w00_gate3_calib/logs/gate3_calib.txt §8–§10

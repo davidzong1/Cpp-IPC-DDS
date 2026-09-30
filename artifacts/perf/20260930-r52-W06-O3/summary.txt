@@ -1,0 +1,14 @@
+
+## 汇总
+失败档数=0
+gauge.log                verdict=PASS failures=0
+conserve.log             verdict=PASS failures=0
+n1000-diagoff.log        verdict=PASS failures=0
+n1000-diagon.log         verdict=PASS failures=0
+n100-diagoff.log         verdict=PASS failures=0
+n100-diagon.log          verdict=PASS failures=0
+n1-diagoff.log           verdict=PASS failures=0
+n1-diagon.log            verdict=PASS failures=0
+n500-diagoff.log         verdict=PASS failures=0
+n500-diagon.log          verdict=PASS failures=0
+W10_O3_DRIVER_RESULT=PASS

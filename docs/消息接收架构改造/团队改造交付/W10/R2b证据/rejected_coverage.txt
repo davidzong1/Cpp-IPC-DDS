@@ -1,0 +1,13 @@
+RecvRegisterStatus 取值（8 个）→ RecvPathReason → 计数 ID
+RecvRegisterStatus   RecvPathReason         计数 ID
+------------------------------------------------------------------------------------------------
+ok                   (无映射)                  —（不记计数：ok）
+backend_unavailable  kBackendUnavailable    fallback_total, fallback_backend_unavailable
+duplicate            kDuplicate             registration_duplicate
+busy                 kBusy                  registration_busy
+stopped              kStopped               registration_stopped
+invalid_token        kInvalidToken          wait_token_invalid, registration_invalid_token
+invalid_route        kInvalidRoute          registration_invalid_route
+wait_set_full        kWaitSetFull           fallback_total, fallback_capacity_full, wait_set_full
+
+未映射到任何计数的取值: ['ok']

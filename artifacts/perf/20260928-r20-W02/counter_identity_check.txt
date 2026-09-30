@@ -1,0 +1,84 @@
+W02 路径计数单写入者自检（D-17 修复后，run 20260928-r20-W02）
+恒等式: family := tlv_messages + dzflat_a_messages + dzflat_b_messages
+       期望 family == pub_dzflat + pub_fallback（容差 8：进程退出前最后几条钩子计数可能未被读窗口覆盖）
+写入者声明: counters.json:counter_scope.path_message_counts.harness_writes == false
+
+case_id, path, sent_ok, dz, fb, tlv, a, b, family, diff
+r0_tlv_timestamp_blocking_64B_1000Hz, tlv, 1000, 0, 2212, 2212, 0, 0, 2212, 0
+r10_tlv_crc_blocking_65536B_1000Hz, tlv, 1000, 0, 2126, 2124, 0, 0, 2124, -2
+r11_tlv_full_blocking_65536B_1000Hz, tlv, 1000, 0, 2136, 2134, 0, 0, 2134, -2
+r12_tlv_timestamp_blocking_1048576B_500Hz, tlv, 500, 0, 1112, 1110, 0, 0, 1110, -2
+r13_tlv_crc_blocking_1048576B_500Hz, tlv, 500, 0, 1074, 1072, 0, 0, 1072, -2
+r14_tlv_full_blocking_1048576B_500Hz, tlv, 500, 0, 1087, 1085, 0, 0, 1085, -2
+r15_dzflat-a_timestamp_blocking_64B_1000Hz, dzflat-a, 1000, 2222, 2, 2, 2222, 0, 2224, 0
+r16_dzflat-a_crc_blocking_64B_1000Hz, dzflat-a, 1000, 2214, 2, 2, 2214, 0, 2216, 0
+r17_dzflat-a_full_blocking_64B_1000Hz, dzflat-a, 1000, 2214, 2, 2, 2214, 0, 2216, 0
+r18_dzflat-a_timestamp_blocking_1024B_1000Hz, dzflat-a, 1000, 2216, 3, 3, 2216, 0, 2219, 0
+r19_dzflat-a_timestamp_busy_1024B_1000Hz, dzflat-a, 1000, 2214, 2, 2, 2214, 0, 2216, 0
+r1_tlv_crc_blocking_64B_1000Hz, tlv, 1000, 0, 2213, 2213, 0, 0, 2213, 0
+r20_dzflat-a_crc_blocking_1024B_1000Hz, dzflat-a, 1000, 2211, 3, 3, 2211, 0, 2214, 0
+r21_dzflat-a_crc_busy_1024B_1000Hz, dzflat-a, 1000, 2215, 3, 3, 2215, 0, 2218, 0
+r22_dzflat-a_full_blocking_1024B_1000Hz, dzflat-a, 1000, 2213, 3, 3, 2213, 0, 2216, 0
+r23_dzflat-a_full_busy_1024B_1000Hz, dzflat-a, 1000, 2217, 2, 2, 2217, 0, 2219, 0
+r24_dzflat-a_timestamp_blocking_65536B_1000Hz, dzflat-a, 1000, 2155, 2, 0, 2155, 0, 2155, -2
+r25_dzflat-a_crc_blocking_65536B_1000Hz, dzflat-a, 1000, 2159, 2, 0, 2159, 0, 2159, -2
+r26_dzflat-a_full_blocking_65536B_1000Hz, dzflat-a, 1000, 2137, 2, 0, 2137, 0, 2137, -2
+r27_dzflat-a_timestamp_blocking_1048576B_500Hz, dzflat-a, 500, 1178, 2, 0, 1178, 0, 1178, -2
+r28_dzflat-a_crc_blocking_1048576B_500Hz, dzflat-a, 500, 1182, 3, 0, 1182, 0, 1182, -3
+r29_dzflat-a_full_blocking_1048576B_500Hz, dzflat-a, 500, 1169, 2, 0, 1169, 0, 1169, -2
+r2_tlv_full_blocking_64B_1000Hz, tlv, 1000, 0, 2212, 2212, 0, 0, 2212, 0
+r30_dzflat-b_timestamp_blocking_64B_1000Hz, dzflat-b, 1000, 2216, 2, 2, 11, 2205, 2218, 0
+r31_dzflat-b_crc_blocking_64B_1000Hz, dzflat-b, 1000, 2217, 2, 2, 11, 2206, 2219, 0
+r32_dzflat-b_full_blocking_64B_1000Hz, dzflat-b, 1000, 2215, 2, 2, 11, 2204, 2217, 0
+r33_dzflat-b_timestamp_blocking_1024B_1000Hz, dzflat-b, 1000, 2220, 3, 3, 10, 2210, 2223, 0
+r34_dzflat-b_timestamp_busy_1024B_1000Hz, dzflat-b, 1000, 2215, 2, 2, 11, 2204, 2217, 0
+r35_dzflat-b_crc_blocking_1024B_1000Hz, dzflat-b, 1000, 2213, 2, 2, 11, 2202, 2215, 0
+r36_dzflat-b_crc_busy_1024B_1000Hz, dzflat-b, 1000, 2217, 2, 2, 11, 2206, 2219, 0
+r37_dzflat-b_full_blocking_1024B_1000Hz, dzflat-b, 1000, 2217, 3, 3, 10, 2207, 2220, 0
+r38_dzflat-b_full_busy_1024B_1000Hz, dzflat-b, 1000, 2213, 2, 2, 11, 2202, 2215, 0
+r39_dzflat-b_timestamp_blocking_65536B_1000Hz, dzflat-b, 1000, 2148, 3, 0, 10, 2138, 2148, -3
+r3_tlv_timestamp_blocking_1024B_1000Hz, tlv, 1000, 0, 2213, 2213, 0, 0, 2213, 0
+r40_dzflat-b_crc_blocking_65536B_1000Hz, dzflat-b, 1000, 2131, 2, 0, 11, 2120, 2131, -2
+r41_dzflat-b_full_blocking_65536B_1000Hz, dzflat-b, 1000, 2146, 2, 0, 11, 2135, 2146, -2
+r42_dzflat-b_timestamp_blocking_1048576B_500Hz, dzflat-b, 500, 1217, 2, 0, 11, 1206, 1217, -2
+r43_dzflat-b_crc_blocking_1048576B_500Hz, dzflat-b, 500, 1232, 2, 0, 11, 1221, 1232, -2
+r44_dzflat-b_full_blocking_1048576B_500Hz, dzflat-b, 500, 1219, 2, 0, 11, 1208, 1219, -2
+r45_cyclonedds-udp_timestamp_blocking_64B_1000Hz, cyclonedds-udp(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r46_cyclonedds-udp_crc_blocking_64B_1000Hz, cyclonedds-udp(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r47_cyclonedds-udp_full_blocking_64B_1000Hz, cyclonedds-udp(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r48_cyclonedds-udp_timestamp_blocking_1024B_1000Hz, cyclonedds-udp(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r49_cyclonedds-udp_timestamp_busy_1024B_1000Hz, cyclonedds-udp(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r4_tlv_timestamp_busy_1024B_1000Hz, tlv, 1000, 0, 2212, 2212, 0, 0, 2212, 0
+r50_cyclonedds-udp_crc_blocking_1024B_1000Hz, cyclonedds-udp(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r51_cyclonedds-udp_crc_busy_1024B_1000Hz, cyclonedds-udp(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r52_cyclonedds-udp_full_blocking_1024B_1000Hz, cyclonedds-udp(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r53_cyclonedds-udp_full_busy_1024B_1000Hz, cyclonedds-udp(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r54_cyclonedds-udp_timestamp_blocking_65536B_1000Hz, cyclonedds-udp(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r55_cyclonedds-udp_crc_blocking_65536B_1000Hz, cyclonedds-udp(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r56_cyclonedds-udp_full_blocking_65536B_1000Hz, cyclonedds-udp(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r57_cyclonedds-udp_timestamp_blocking_1048576B_500Hz, cyclonedds-udp(DDS), sent=500, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r58_cyclonedds-udp_crc_blocking_1048576B_500Hz, cyclonedds-udp(DDS), sent=500, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r59_cyclonedds-udp_full_blocking_1048576B_500Hz, cyclonedds-udp(DDS), sent=500, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r5_tlv_crc_blocking_1024B_1000Hz, tlv, 1000, 0, 2213, 2213, 0, 0, 2213, 0
+r60_cyclonedds-iox_timestamp_blocking_64B_1000Hz, cyclonedds-iox(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r61_cyclonedds-iox_crc_blocking_64B_1000Hz, cyclonedds-iox(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r62_cyclonedds-iox_full_blocking_64B_1000Hz, cyclonedds-iox(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r63_cyclonedds-iox_timestamp_blocking_1024B_1000Hz, cyclonedds-iox(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r64_cyclonedds-iox_timestamp_busy_1024B_1000Hz, cyclonedds-iox(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r65_cyclonedds-iox_crc_blocking_1024B_1000Hz, cyclonedds-iox(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r66_cyclonedds-iox_crc_busy_1024B_1000Hz, cyclonedds-iox(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r67_cyclonedds-iox_full_blocking_1024B_1000Hz, cyclonedds-iox(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r68_cyclonedds-iox_full_busy_1024B_1000Hz, cyclonedds-iox(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r69_cyclonedds-iox_timestamp_blocking_65536B_1000Hz, cyclonedds-iox(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r6_tlv_crc_busy_1024B_1000Hz, tlv, 1000, 0, 2212, 2212, 0, 0, 2212, 0
+r70_cyclonedds-iox_crc_blocking_65536B_1000Hz, cyclonedds-iox(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r71_cyclonedds-iox_full_blocking_65536B_1000Hz, cyclonedds-iox(DDS), sent=1000, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r72_cyclonedds-iox_timestamp_blocking_1048576B_500Hz, cyclonedds-iox(DDS), sent=500, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r73_cyclonedds-iox_crc_blocking_1048576B_500Hz, cyclonedds-iox(DDS), sent=500, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r74_cyclonedds-iox_full_blocking_1048576B_500Hz, cyclonedds-iox(DDS), sent=500, tlv=0 a=0 b=0 -> family=0 (必须为 0 且不借用 dzflat_*)
+r7_tlv_full_blocking_1024B_1000Hz, tlv, 1000, 0, 2212, 2212, 0, 0, 2212, 0
+r8_tlv_full_busy_1024B_1000Hz, tlv, 1000, 0, 2213, 2213, 0, 0, 2213, 0
+r9_tlv_timestamp_blocking_65536B_1000Hz, tlv, 1000, 0, 2108, 2106, 0, 0, 2106, -2
+
+结论: 通过 75 / 未通过 0
+dzIPC 档 diff 分布: min=-3 max=0  绝对值>=100 的 case 数=0（双写会带来 sent_ok 量级偏差）

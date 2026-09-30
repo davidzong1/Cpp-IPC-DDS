@@ -1,0 +1,24 @@
+# W04 复现矩阵（本机 Linux 6.8 / i9-14900KF / Release / build/lib 重编产物）
+# mode 1 = 不安全顺序A（先换对端 → 再 rebuild）
+# mode 2 = 不安全顺序B（先 rebuild → 再换对端）
+# mode 9 = 安全顺序（remove_route → rebuild → add_route）
+2026-09-28T20:00:22+08:00
+mode=1 run=1 rc=139 | REPRO[mode=1]: warmup received=1 timeout: 被监视的命令已核心转储 
+mode=1 run=2 rc=139 | REPRO[mode=1]: warmup received=1 timeout: 被监视的命令已核心转储 
+mode=1 run=3 rc=139 | REPRO[mode=1]: warmup received=1 timeout: 被监视的命令已核心转储 
+mode=1 run=4 rc=139 | REPRO[mode=1]: warmup received=1 timeout: 被监视的命令已核心转储 
+mode=1 run=5 rc=139 | REPRO[mode=1]: warmup received=1 timeout: 被监视的命令已核心转储 
+mode=1 run=6 rc=139 | REPRO[mode=1]: warmup received=1 timeout: 被监视的命令已核心转储 
+mode=2 run=1 rc=139 | REPRO[mode=2]: warmup received=1 timeout: 被监视的命令已核心转储 
+mode=2 run=2 rc=0 | REPRO[mode=2]: warmup received=1 REPRO[mode=2]: survived; received=2 
+mode=2 run=3 rc=139 | REPRO[mode=2]: warmup received=1 timeout: 被监视的命令已核心转储 
+mode=2 run=4 rc=0 | REPRO[mode=2]: warmup received=1 REPRO[mode=2]: survived; received=2 
+mode=2 run=5 rc=139 | REPRO[mode=2]: warmup received=1 timeout: 被监视的命令已核心转储 
+mode=2 run=6 rc=139 | REPRO[mode=2]: warmup received=1 timeout: 被监视的命令已核心转储 
+mode=9 run=1 rc=0 | REPRO[mode=9]: warmup received=1 REPRO: re-add status=0 REPRO[mode=9]: survived; received=2 
+mode=9 run=2 rc=0 | REPRO[mode=9]: warmup received=1 REPRO: re-add status=0 REPRO[mode=9]: survived; received=2 
+mode=9 run=3 rc=0 | REPRO[mode=9]: warmup received=1 REPRO: re-add status=0 REPRO[mode=9]: survived; received=2 
+mode=9 run=4 rc=0 | REPRO[mode=9]: warmup received=1 REPRO: re-add status=0 REPRO[mode=9]: survived; received=2 
+mode=9 run=5 rc=0 | REPRO[mode=9]: warmup received=1 REPRO: re-add status=0 REPRO[mode=9]: survived; received=2 
+mode=9 run=6 rc=0 | REPRO[mode=9]: warmup received=1 REPRO: re-add status=0 REPRO[mode=9]: survived; received=2 
+2026-09-28T20:00:41+08:00

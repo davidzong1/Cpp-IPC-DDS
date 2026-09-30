@@ -1,0 +1,31 @@
+/* W02 统一跨进程基准 · CycloneDDS 侧逻辑载荷定义
+ * ==========================================================================
+ * 与 dzIPC 侧的 dzIPC::Msg::TestMsg **同一逻辑载荷**: 同一批字段、同一批
+ * 序号相关模式字节。DDS 类型额外内联了 W02 的时间戳头 (seq/idx/produced/
+ * enter/prev_done), 因为 DDS 没有"segment 头"可以搭车 —— 而 dzIPC 侧把这些
+ * 放在 TestMsg.data2 的固定槽位里(见 xproc_benchmark.cpp 的 HeaderSlot)。
+ *
+ * 生成命令(与仓库内 commit 的 .h/.c 完全一致, 由 CMake 直接编译生成物):
+ *   idlc -l c test/w02_dds_types.idl
+ *   # CycloneDDS: V0.10.2 (Eclipse Cyclone DDS IDL to C Translator)
+ */
+module w02 {
+
+  struct Sample {
+    /* --- W02 时间戳头 (与 dzIPC 侧 HeaderSlot 槽位一一对应) --- */
+    long long seq;
+    long      idx_flags;      /* idx | flags<<16 */
+    long long produced_ns;
+    long long enter_ns;
+    long      hdr_xor;
+    long long prev_seq;
+    long long prev_done_ns;
+
+    /* --- 逻辑载荷 (与 TestMsg 的 data1/data2/data3/data4 同构) --- */
+    sequence<double> data1;
+    sequence<long>   data2;
+    sequence<string> data3;
+    boolean          data4;
+  };
+
+};

@@ -1,0 +1,39 @@
+{
+  "run_id": "20260930-r46-W03-EndValue",
+  "work_package": "W03",
+  "task": "t44",
+  "title": "R0-9/R0-10 结束值接口落地（finish 出参 + 4 个新 ID + 每 worker 出参）",
+  "source_revision": "e800ccc496ac710b711c9346709e86a148c41241",
+  "working_tree_clean": false,
+  "build_dir": "/home/zwc/cpp_ipc_dds/build",
+  "binary_sha256": {
+    "libipc": "sha256:17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f",
+    "w03_collector": "sha256:32dca7be8673ba503776aadb76605e4b913d3e866a6b57864de77bf674cf5ac5",
+    "test_w03_measurement": "sha256:824ff088942103b710f7907d2ba4c01a5769d8207daabc6b74dff3c4b4f884a8",
+    "w10_matrix": "sha256:d277fd8f84d633cf542be7f5645dc54a5ed5462a3a7ddc17b3b06ef226d93ace",
+    "counters_h": "sha256:4810b53408d7687298a679a395eb3cefc55b76b49f701b289bc4a6aa1fdae393",
+    "field_schema_h": "sha256:3924b9077adcf4881e19ab13348587f602f62255a551320f701eb6d1be8d8900",
+    "proc_sampler_h": "sha256:d6d5e85c490d92a29d37254bbcd819229808c80cc8f32b28dc69bffcf2a7a0d4",
+    "recv_worker_cc_unchanged": "sha256:0dde3eabd02e23bafffa3142c20c525535f65b1da2635704c5b25458f742650c"
+  },
+  "transport": "n/a (接口自测, 非数据面实验)",
+  "process_model": "same-process",
+  "measurement_mode": "counter_registry_selftest",
+  "diagnostics_enabled": "both (off/on 两档断言)",
+  "k_counter_count": 66,
+  "result_files": [
+    "interface_selftest.json",
+    "gtest_w03_measurement.log",
+    "ctest_27.log",
+    "binary-fingerprint.txt",
+    "command.txt",
+    "source-status.txt",
+    "manifest.json",
+    "verdict.md"
+  ],
+  "created_utc": "2026-09-30T01:19:10Z",
+  "notes": [
+    "本目录只承载 R0-9/R0-10 接口落地的机器可读证据, 不是数据面性能 run",
+    "接线由 W06/t42 owner 完成 (recv_worker.cc 写入权归共享层负责人, R0-11)"
+  ]
+}

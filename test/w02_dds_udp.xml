@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  W02 统一跨进程基准 · CycloneDDS 对照档 A：本机 UDP（关闭 iceoryx 共享内存）
+
+  存在的理由：方案 §4 W02 要求"CycloneDDS + iceoryx 配置组合"可比，而"组合包加载
+  成功"只证明依赖存在，**不证明每条消息走了共享内存**。所以本基准把 CycloneDDS 拆成
+  两档分别采集：
+
+    cyc-udp  ← 本文件（SharedMemory/Enable = false）—— 纯 UDP 组播/回环
+    cyc-iox  ← w02_dds_iox.xml（SharedMemory/Enable = true）—— 走 iceoryx/RouDi
+
+  两档用的是**同一份 IDL 类型、同一份逻辑载荷、同一套计时边界**，唯一变量是
+  SharedMemory 开关（与 RouDi 是否存在）。这样"iceoryx 是否真的生效"才是可对照的
+  实验变量，而不是一段自述。
+
+  用法：
+    CYCLONEDDS_URI=file://<repo>/test/w02_dds_udp.xml build/bin/xproc_benchmark --path=cyc-udp ...
+  基准默认已指向本文件（可用 --dds-uri-udp= 覆盖）。
+-->
+<CycloneDDS>
+  <Domain Id="any">
+    <SharedMemory>
+      <Enable>false</Enable>
+    </SharedMemory>
+    <General>
+      <Interfaces>
+        <NetworkInterface name="lo" multicast="true" />
+      </Interfaces>
+      <AllowMulticast>true</AllowMulticast>
+      <EnableMulticastLoopback>true</EnableMulticastLoopback>
+    </General>
+    <Discovery>
+      <EnableTopicDiscoveryEndpoints>true</EnableTopicDiscoveryEndpoints>
+      <Peers>
+        <Peer Address="127.0.0.1"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

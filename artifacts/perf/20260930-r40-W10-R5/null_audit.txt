@@ -1,0 +1,9 @@
+# null 审计（⛔ 零分母/未采集不得写 0）
+
+avg_ns_per_entry: 8 次，原因 routes=0 ⇒ 该态无 route 归属池、无扫描轮 ⇒ 分母为 0
+avg_ns_per_entry: 36 次，原因 诊断关闭 ⇒ **未采集**（⛔ 非零成本）
+avg_ns_per_round: 8 次，原因 routes=0 ⇒ 该态无 route 归属池、无扫描轮 ⇒ 分母为 0
+avg_ns_per_round: 36 次，原因 诊断关闭 ⇒ **未采集**（⛔ 非零成本）
+avg_scanned_per_round: 16 次，原因 routes=0 ⇒ 该态无 route 归属池、无扫描轮 ⇒ 分母为 0
+ready_round_ratio: 16 次，原因 routes=0 ⇒ 该态无 route 归属池、无扫描轮 ⇒ 分母为 0
+wait_timeouts_per_s: 36 次，原因 诊断关闭 ⇒ 门控 `wait_timeout_count` **未采集**（⛔ 非零成本；常驻孪生见 resident_wait_timeouts_per_s）

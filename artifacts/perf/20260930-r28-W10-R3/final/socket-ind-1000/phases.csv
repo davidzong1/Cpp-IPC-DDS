@@ -1,0 +1,12 @@
+phase,ms,note
+prepare,1,"话题名与台账预置"
+register,284659,"建通道 + InitChannel"
+handshake,49,"registered=1000/1000 confirmed=1000 pool=1000"
+warmup,200,"控制面稳定"
+fixed-rate,145,"定速发布"
+drain-verify,1,"valid_rx=1000/1000"
+silence,3000,"state=connected_silent window_s=3.045 cpu_cores=1.27425 ctx_per_s=5216.9 threads=1033 peak=1033 unreadable_tids=0"
+recover,2,"silence_ms=3000 resume_msgs=5 rx_after=5 ok=1 恢复延迟=2148us 发送绝对=126717993512us 接收绝对=126717995660us 阶段耗时=2151us lost=0 new_seq_only=1"
+concurrent-close,37907,"并发析构后半数订阅 closed=500 ms=37907"
+rebuild,-1,"n/a（socket 无 generation 概念）"
+reclaim,111829,"routes=500->0"

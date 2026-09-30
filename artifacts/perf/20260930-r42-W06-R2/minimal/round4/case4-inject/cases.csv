@@ -1,0 +1,7 @@
+case,name,result,detail
+4,"4a 三条 route 全部收到消息（回退不是丢包）",PASS,"sent=3/3 rx=3/3 用时≈20.098 ms"
+4,"4b 收到消息的耗时有界（无忙等死循环）",PASS,"rx 用时 20.098 ms < 15000 ms（上界判据）"
+4,"4c 注入臂：走**显式**回退，原因码恰为 kBackendUnavailable",PASS,"seam compat=3/3 backend_unavailable=3 worker=0 waitset_full=0 other=0"
+4,"4d 注入臂：失败被计数（fallback_total==fallback_backend_unavailable==N，容量/token 计数为 0）",PASS,"Δfallback_total=3 Δfallback_backend_unavailable=3 Δfallback_capacity_full=0 Δwait_token_invalid=0"
+4,"4e 注入臂：池未接管（route_count==0、registration_ok==0、backend_available==false）",PASS,"route_count=0 Δregistration_ok=0 Δregistration_attempts=1 backend_available=false（探测后永久置否）"
+4,"4f 注入臂：⛔ 无静默降级（回退==route 数、未走 worker、等待层记为**错误**而非普通超时）",PASS,"compat=3 == 3；worker=0；Δwait_errors=16（>0 = 显式错误路径）、Δwait_timeouts=0（==0 = 未被当成普通空闲）"

@@ -1,0 +1,11 @@
+# H3：ledger.first_packet_us 是否为「同钟差值」（r25 为绝对时间，r28/r46 应为延迟）
+  r25（T37 修前）          first_packet_us: min=95200476310  max=95200477455   >1e10 的行=1000/1000
+  r28 SHM              first_packet_us: min=125977862453 max=125977863577  >1e10 的行=1000/1000
+  r28 sock             first_packet_us: min=126714877911 max=126714878962  >1e10 的行=1000/1000
+  r46(我) SHM           first_packet_us: min=140769706446 max=140769707549  >1e10 的行=1000/1000
+
+# sent_ok 列语义核查（ledger.csv）
+  independent SHM    Σsent=3007    Σsent_ok=0       Σrx=3006     ⇒ sent_ok 折叠? **是（恒 0）**
+  independent sock   Σsent=8       Σsent_ok=0       Σrx=8        ⇒ sent_ok 折叠? **是（恒 0）**
+  broadcast          Σsent=8       Σsent_ok=0       Σrx=101      ⇒ sent_ok 折叠? **是（恒 0）**
+  hotcold            Σsent=21001   Σsent_ok=20999   Σrx=1064     ⇒ sent_ok 折叠? 否

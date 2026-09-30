@@ -1,0 +1,65 @@
+### r25 SHM  (artifacts/perf/20260929-r25-W10/shm-ind-1000)
+  ledger rows=1000 unique=1000
+  双向 1:1（名→idx / idx→名）: True ; route_idx 连续 0..999: True
+  逐 route tx集合==rx集合 且 rx==planned 且 |rx|==planned : 1000/1000
+  Σregistered=1000 Σplanned=3005 Σrx=3005 dup=0 ooo=0 corrupt=0 timeout=0  rx_after_silence=5
+  确认帧 routes=0  旧代帧 routes=0
+
+### r27 sock f1  (artifacts/perf/20260929-r27-W10-socket/final-1)
+  ledger rows=1000 unique=1000
+  双向 1:1（名→idx / idx→名）: True ; route_idx 连续 0..999: True
+  逐 route tx集合==rx集合 且 rx==planned 且 |rx|==planned : 1000/1000
+  Σregistered=1000 Σplanned=1005 Σrx=1005 dup=0 ooo=0 corrupt=0 timeout=0  rx_after_silence=5
+  确认帧 routes=0  旧代帧 routes=0
+
+### r27 sock f2  (artifacts/perf/20260929-r27-W10-socket/final-2)
+  ledger rows=1000 unique=1000
+  双向 1:1（名→idx / idx→名）: True ; route_idx 连续 0..999: True
+  逐 route tx集合==rx集合 且 rx==planned 且 |rx|==planned : 1000/1000
+  Σregistered=1000 Σplanned=1005 Σrx=1005 dup=0 ooo=0 corrupt=0 timeout=0  rx_after_silence=5
+  确认帧 routes=0  旧代帧 routes=0
+
+### r27 sock f3  (artifacts/perf/20260929-r27-W10-socket/final-3)
+  ledger rows=1000 unique=1000
+  双向 1:1（名→idx / idx→名）: True ; route_idx 连续 0..999: True
+  逐 route tx集合==rx集合 且 rx==planned 且 |rx|==planned : 1000/1000
+  Σregistered=1000 Σplanned=1005 Σrx=1005 dup=0 ooo=0 corrupt=0 timeout=0  rx_after_silence=5
+  确认帧 routes=0  旧代帧 routes=0
+
+### r28 SHM#1  (artifacts/perf/20260930-r28-W10-R3/final/shm-ind-1000-1)
+  ledger rows=1000 unique=1000
+  双向 1:1（名→idx / idx→名）: True ; route_idx 连续 0..999: True
+  逐 route tx集合==rx集合 且 rx==planned 且 |rx|==planned : 1000/1000
+  Σregistered=1000 Σplanned=3006 Σrx=3006 dup=0 ooo=0 corrupt=0 timeout=0  rx_after_silence=5
+  确认帧 routes=1000  旧代帧 routes=1
+
+### r28 SHM#2  (artifacts/perf/20260930-r28-W10-R3/final/shm-ind-1000-2)
+  ledger rows=1000 unique=1000
+  双向 1:1（名→idx / idx→名）: True ; route_idx 连续 0..999: True
+  逐 route tx集合==rx集合 且 rx==planned 且 |rx|==planned : 1000/1000
+  Σregistered=1000 Σplanned=3006 Σrx=3006 dup=0 ooo=0 corrupt=0 timeout=0  rx_after_silence=5
+  确认帧 routes=1000  旧代帧 routes=1
+
+### r28 sock  (artifacts/perf/20260930-r28-W10-R3/final/socket-ind-1000)
+  ledger rows=1000 unique=1000
+  双向 1:1（名→idx / idx→名）: True ; route_idx 连续 0..999: True
+  逐 route tx集合==rx集合 且 rx==planned 且 |rx|==planned : 1000/1000
+  Σregistered=1000 Σplanned=3005 Σrx=3005 dup=0 ooo=0 corrupt=0 timeout=0  rx_after_silence=5
+  确认帧 routes=1000  旧代帧 routes=0
+
+### r46 my SHM  (artifacts/perf/20260930-r46-W10-R7/myrun/shm-ind-1000)
+  ledger rows=1000 unique=1000
+  双向 1:1（名→idx / idx→名）: True ; route_idx 连续 0..999: True
+  逐 route tx集合==rx集合 且 rx==planned 且 |rx|==planned : 1000/1000
+  Σregistered=1000 Σplanned=3006 Σrx=3006 dup=0 ooo=0 corrupt=0 timeout=0  rx_after_silence=5
+  确认帧 routes=1000  旧代帧 routes=1
+
+### r46 my sock  (artifacts/perf/20260930-r46-W10-R7/myrun/socket-ind-1000)
+  ledger rows=1000 unique=1000
+  双向 1:1（名→idx / idx→名）: True ; route_idx 连续 0..999: True
+  逐 route tx集合==rx集合 且 rx==planned 且 |rx|==planned : 1000/1000
+  Σregistered=1000 Σplanned=3005 Σrx=3005 dup=0 ooo=0 corrupt=0 timeout=0  rx_after_silence=5
+  确认帧 routes=1000  旧代帧 routes=0
+
+# 方法：以 ledger.csv 为台账、samples.jsonl 的 direction 为序号集合来源，逐 route 集合相等判定；
+#       seq>=1e9 归确认帧、>=2e9 归旧代标记帧，均不计入规模帧（与工装内分区一致）。

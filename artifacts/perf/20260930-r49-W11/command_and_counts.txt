@@ -1,0 +1,21 @@
+# W11 串行配对实验 —— 运行记录
+run_root=artifacts/perf/20260930-r49-W11
+
+## 命令
+```
+bash test/perf/w11/w11_cpu_scan_sweep.sh artifacts/perf/20260930-r49-W11 --repeats 5 --window-s 60 --settle-s 4
+# 复核补充（异常轮复跑）：
+for r in 1 2 3; do ./build/bin/w10_r5_matrix --n 1000 --workers 32 --diag on --state 3 --domain $((660000+r)) --window-s 60 --settle-s 4 --load-msgs 0 --round 1 --run-id recheck-r$r --out artifacts/perf/20260930-r49-W11/recheck/recheck-r$r --require-lib-sha256 cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46; done
+# 聚合：
+python3 test/perf/w11/w11_aggregate.py artifacts/perf/20260930-r49-W11
+python3 test/perf/w11/w11_manifest.py cpu artifacts/perf/20260930-r49-W11
+```
+
+## 计数
+- 组 1（控制面 CPU，diag=off）：40 run = 三态/项数分档 × 5 轮
+- 组 2（扫描成本，diag=on）：20 run = n(1/100/500/1000) × 5 轮
+- 复核：3 run
+- 合计 **63 run**，其中 1 个（scan-st3-n1000-W32-diagon-r5）内部自洽门禁失败并已如实登记
+
+## 独占窗口
+- 单进程串行（无并发基准）；逐 run 记录前/后 loadavg，见 runs.tsv

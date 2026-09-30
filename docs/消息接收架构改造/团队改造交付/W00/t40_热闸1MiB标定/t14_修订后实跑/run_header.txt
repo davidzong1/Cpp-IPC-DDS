@@ -1,0 +1,7 @@
+run_id=t14-arch
+时间=2026-09-30 09:23:56 +0800
+构建目录=build
+git_HEAD=e800ccc496ac710b711c9346709e86a148c41241
+governor=powersave
+nproc=32
+loadavg=2.98 3.21 2.70 2/10219 57

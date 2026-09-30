@@ -1,0 +1,20 @@
+# t37 最终验收（一次性复跑）
+# 时间 2026-09-30 04:11:52 +0800
+
+## [A] 修前/修后对拍件（H1/H2/H3/H4/H6/F6）
+  · H6 反例：dup=50 / ooo=7 修前 PASS，修后 FAIL；corrupt/timeout/rx 两侧都 FAIL
+  · F6 反例：hotcold sent 修前 0/1000 行非零、修后 1000/1000 行非零（见 r28 实测）
+COUNTEREXAMPLES_OK failures=0
+
+## [B] 批跑失败传播验收（H5）
+  [OK]   注入失败使批次非零退出（rc=1）
+  [OK]   批次汇总行明确列出失败子项
+  [OK]   已从 w10_run_matrix.sh 抽出 record_and_tally（27 行）
+  [OK]   rc=124 / rc=139 / verdict=FAIL / 缺文件 五类边界**全部**判失败（5 条）
+  [OK]   输出目录被占 ⇒ 单运行非零退出（rc=1）
+  [OK]   诊断可识别（ARTIFACT_DIR_NOT_EMPTY）
+BATCH_ACCEPTANCE_OK
+
+## [C] 库/工装配对检查（F4）
+== 配对检查（check-only）==
+  PAIRING: OK（无需重编）

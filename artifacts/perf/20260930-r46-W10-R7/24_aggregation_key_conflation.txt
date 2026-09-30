@@ -1,0 +1,10 @@
+聚合键 (state,phase,n,diag,W) = (3, 'idle', 1000, True, 32)  ⇒ 成员 7 个（**含不同实验组**）:
+    A-st3-n1000-diagon-r1          avg_ns_per_round=1487.317515
+    A-st3-n1000-diagon-r2          avg_ns_per_round=1656.606567
+    A-st3-n1000-diagon-r3          avg_ns_per_round=1597.760960
+    A-st3-n1000-diagon-r4          avg_ns_per_round=1762.242473
+    A-st3-n1000-diagon-r5          avg_ns_per_round=1742.118577
+    D-W32-n1000-diagon-r1          avg_ns_per_round=1621.934420
+    D-W32-n1000-diagon-r2          avg_ns_per_round=1633.000473
+    该键 7 行均值 = 1642.9973  |  仅 A 档 5 行均值 = 1649.2092  |  差 = -6.2119
+    ⇒ 正文「5 轮均值 1649.2 ns」与 derived_summary「7 行 1642.9973 ns」的差即由此产生

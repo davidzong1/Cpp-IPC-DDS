@@ -1,0 +1,16 @@
+1	rc=0	
+2	rc=0	
+3	rc=0	
+4	rc=0	
+5	rc=8	17 - test_dzflat_builder (Failed)|23 - test_w08_dzflat_ab (Failed)|
+6	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|23 - test_w08_dzflat_ab (Failed)|
+7	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|22 - test_socket_high_fd (Failed)|23 - test_w08_dzflat_ab (Failed)|
+8	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|22 - test_socket_high_fd (Failed)|23 - test_w08_dzflat_ab (Failed)|
+9	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|18 - test_lifecycle_contract (Failed)|23 - test_w08_dzflat_ab (Failed)|
+10	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|23 - test_w08_dzflat_ab (Failed)|
+11	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|23 - test_w08_dzflat_ab (Failed)|
+12	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|23 - test_w08_dzflat_ab (Failed)|
+13	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|23 - test_w08_dzflat_ab (Failed)|
+14	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|23 - test_w08_dzflat_ab (Failed)|
+15	rc=8	11 - test_socket_recv_worker (Subprocess aborted)|17 - test_dzflat_builder (Failed)|22 - test_socket_high_fd (BAD_COMMAND)|23 - test_w08_dzflat_ab (Failed)|
+DONE

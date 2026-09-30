@@ -1,0 +1,18 @@
+=== W08 改动面指纹 ===
+--- 基线 HEAD e800ccc ---
+e6e53db8ea5891336d1bb1aac4fcbc857315cf7ff6fda9822a0dbdaac2d24634  src/dzIPC/shm_pub_sub_ipc.cc
+b9ae81ce44c8b420e7734110371f4b88f471a1e979813cacc1da0ee3c08bad42  include/dzIPC/shm_pub_sub_ipc.h
+cfa2e76a25082c5f02e839ae7b37032db0d53472d4e368f56ea214f9214116b0  src/dzIPC/common/nodelet_config.cc
+10746e06c693e1ba333094a6fd16ae6738190a988fb4bf8e9f30c03330d61084  include/dzIPC/common/nodelet_config.h
+--- 改动后 ---
+de8ab534c8ab261ae00a9c1670adee074101283159173e9b2a405aee3cd50ebc  src/dzIPC/shm_pub_sub_ipc.cc
+df08aff972f993565bb64efd2efabc80a930c5b9fd6c0b2e522085effe8fc908  include/dzIPC/shm_pub_sub_ipc.h
+2ac20889b17334890031ad4fc73b47dff8e2cc4c15594821cc71f2a206836f6c  src/dzIPC/common/nodelet_config.cc
+ff8fbaf264e2dab5069d9915ae4802795537477c4f8bccb666fe4c7c312f959f  include/dzIPC/common/nodelet_config.h
+
+=== diffstat ===
+ include/dzIPC/common/nodelet_config.h | 46 +++++++++++++++++++++++++++++++++++
+ include/dzIPC/shm_pub_sub_ipc.h       |  9 +++++++
+ src/dzIPC/common/nodelet_config.cc    | 46 +++++++++++++++++++++++++++++++++++
+ src/dzIPC/shm_pub_sub_ipc.cc          | 30 ++++++++++++++++++++---
+ 4 files changed, 127 insertions(+), 4 deletions(-)

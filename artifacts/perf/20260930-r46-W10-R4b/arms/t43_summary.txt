@@ -1,0 +1,15 @@
+  [A] BEFORE-ArmA chunk_exhausted=0 chunk_alloc_failed=0 queue_evicted=0 wait_set_full=0 wait_token_invalid=0 first_failed_resource=none
+  [A] ArmA dzflat_off=true subscriber_never_pops=true publish_calls=200 publish_ok=200 (期望 200：池空后 send 降级为 64 B 分片, 仍返回 true)
+  [A] AFTER-ArmA chunk_exhausted=3 chunk_alloc_failed=0 queue_evicted=0 wait_set_full=0 wait_token_invalid=0 first_failed_resource=chunk_exhausted
+  [B] BEFORE-ArmB chunk_exhausted=0 chunk_alloc_failed=0 queue_evicted=0 wait_set_full=0 wait_token_invalid=0 first_failed_resource=none
+  [B] ArmB loaned=40 rejected=80 (池 40 块/档 ⇒ 拒绝即 chunk_alloc_failed)
+  [B] AFTER-ArmB chunk_exhausted=0 chunk_alloc_failed=80 queue_evicted=0 wait_set_full=0 wait_token_invalid=0 first_failed_resource=none
+  [C] BEFORE-ArmC chunk_exhausted=0 chunk_alloc_failed=0 queue_evicted=0 wait_set_full=0 wait_token_invalid=0 first_failed_resource=none
+  [C] ArmC pushed=100 capacity=2 remaining=2 (期望 2) evicted_expected=98
+  [C] AFTER-ArmC chunk_exhausted=0 chunk_alloc_failed=0 queue_evicted=98 wait_set_full=0 wait_token_invalid=0 first_failed_resource=none
+  [C] BEFORE-ArmC2 chunk_exhausted=0 chunk_alloc_failed=0 queue_evicted=98 wait_set_full=0 wait_token_invalid=0 first_failed_resource=none
+  [C] AFTER-ArmC2 chunk_exhausted=0 chunk_alloc_failed=0 queue_evicted=451 wait_set_full=0 wait_token_invalid=0 first_failed_resource=none
+  [D] BEFORE-ArmD wait_set_full=0 wait_token_invalid=0 fallback_total=0 fallback_capacity_full=0 registration_failed=0 registration_ok=0
+  [D] AFTER-ArmD wait_set_full=13 wait_token_invalid=0 fallback_total=13 fallback_capacity_full=13 registration_failed=13 registration_ok=127
+  [E2] BEFORE-ArmE2 wait_token_invalid=0 registration_invalid_token=0 fallback_total=0 registration_failed=0 registration_attempts=0 registration_ok=0
+  [E2] AFTER-ArmE2 wait_token_invalid=1 registration_invalid_token=1 fallback_total=0 registration_failed=1 registration_attempts=1 registration_ok=0

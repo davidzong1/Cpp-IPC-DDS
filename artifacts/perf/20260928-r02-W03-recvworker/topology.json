@@ -1,0 +1,10 @@
+{
+  "online_cpus": 32,
+  "configured_cpus": 32,
+  "smt_on": true,
+  "numa_nodes": 1,
+  "governors_unique": ["powersave"],
+  "jobs": [
+    {"label": "test_recv_worker", "role": "other", "pid": 56, "watched_only": false}
+  ]
+}

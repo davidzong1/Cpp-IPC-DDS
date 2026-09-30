@@ -1,0 +1,18 @@
+{
+  "kind": "observation_overhead",
+  "iterations": 200000,
+  "counter_inc_ns": 3.18709,
+  "counter_inc_cached_ns": 3.17767,
+  "diagnostics_inc_enabled_ns": 3.16494,
+  "diagnostics_inc_disabled_ns": 0.176,
+  "scan_scope_enabled_ns": 29.3125,
+  "scan_scope_disabled_ns": 0.26504,
+  "clock_now_ns": 10.2997,
+  "clock_vdso_ns_per_call": 15.3367,
+  "clock_syscall_ns_per_call": 87.2918,
+  "proc_self_stat_read_ns": 4796.39,
+  "proc_task_status_all_ns": 8900.66,
+  "collector_sampling_cost_ns_per_interval": 13697.1,
+  "notes": ["逐 TID 采样每区间成本 = proc_self_stat_read_ns + proc_task_status_all_ns",
+             "ScanRoundScope 关闭诊断时每个扫描轮只多一次 relaxed 布尔读"]
+}

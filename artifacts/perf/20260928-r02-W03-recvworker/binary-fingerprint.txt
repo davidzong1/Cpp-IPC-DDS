@@ -1,0 +1,4 @@
+job=test_recv_worker role=other bin=/home/zwc/cpp_ipc_dds/build/bin/test_recv_worker sha256=7394ecc74607ac388a6d057968ca93992d1565b4ab40f0b27f072aefffedd64f
+    stat=/home/zwc/cpp_ipc_dds/build/bin/test_recv_worker size=634248 mtime=1790563226
+collector_sha256=2254ae8a3629397425dda96789958e4ced86d6ad89760e75f6e34aa26067854c
+libipc_sha256=97504a74138ada6d818b268d5bb64506bc671de6af8800dda3382879d5f4c537

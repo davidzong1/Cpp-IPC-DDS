@@ -1,0 +1,129 @@
+{
+  "run_id": "20260929-r33-W03-counterwiring",
+  "work_package": "W03/W10-F1 (t35)",
+  "task": "t35",
+  "attempt_id": "1d7dc0ca-6605-44de-9d15-2b280b01027e",
+  "source_revision": "e800ccc496ac710b711c9346709e86a148c41241",
+  "working_tree_clean": false,
+  "changed_paths_this_task": [
+    "src/libipc/ipc.cpp",
+    "include/dzIPC/common/circularqueue.h"
+  ],
+  "untouched_verified": {
+    "include/dzIPC/measure/counters.h": "1f9c2bd0b9419aea1332c9c295e032ef8e5889e40bf48ebdbf79d8659530b6ae",
+    "src/dzIPC/shm_pub_sub_ipc.cc": "12131d8c354b868faca61204ceb21600a4888109a1dd059442f230358000586f"
+  },
+  "binary_sha256": {
+    "library": "81fe91ffa14ee00a9ebfeb8eee23cd1bfae71956545ee79e686919a8e6f8d4c9",
+    "ipc.cpp": "379918b9f6a24da928bda1c843adb29a7bd8367d5e0e14ca3a25dfa2873d0d59",
+    "circularqueue.h": "4fb899810d83466b60a6b44336c6104076bb4aca5f83fba064844ae74280754e"
+  },
+  "counter_ids_total": 62,
+  "wiring_before": {
+    "wired": 28,
+    "potential_used": 4,
+    "table_only": 30
+  },
+  "wiring_after": {
+    "wired": 29,
+    "potential_used": 4,
+    "selftest_only": 2,
+    "table_only": 27
+  },
+  "four_targets_wired": [
+    "chunk_exhausted",
+    "chunk_alloc_failed",
+    "queue_evicted",
+    "wait_set_full",
+    "wait_token_invalid"
+  ],
+  "same_arm_deltas": {
+    "chunk_exhausted": "0→1 (ARM-A: send/no_member_send 池空)",
+    "chunk_alloc_failed": "0→80 (ARM-B: loan 池空)",
+    "queue_evicted": "0→104 (ARM-A 内队列满) / 98→494 (ARM-C)",
+    "wait_set_full": "13→13 (ARM-D; 修复前后一致, 证明原接线未破坏)",
+    "wait_token_invalid": "1→1 (ARM-E2; 同上)",
+    "cross_binary_evict": "0→396 (ARM-C2: 队列在 libipc.so 内 push, 探针二进制读)"
+  },
+  "first_failed_resource": "chunk_exhausted (ARM-A, §13.3 十类顺序)",
+  "odr_unification": "UNIFIED (实测: 库内写入可被库外读到)",
+  "ctest": {
+    "items": 27,
+    "passed": 27,
+    "log": "30_ctest_j4_after_wiring.log"
+  },
+  "not_wired_registered": 27,
+  "result_files": [
+    "10_counter_wiring_audit.tsv",
+    "11_counter_wiring_audit_after.tsv",
+    "12_write_uniqueness.tsv",
+    "13_counter_inventory.tsv",
+    "20_f1_wiring_postfix.log",
+    "21_armA_chunk_exhausted.log",
+    "22_f1_all_arms_postfix.log",
+    "23_armD_waitset_full.log",
+    "25_armC_evict.log",
+    "26_armD2_token_invalid.log",
+    "27_armE2_cond.log",
+    "27_armE2_lock.log",
+    "27_armE2_state.log",
+    "30_ctest_j4_after_wiring.log",
+    "31_ctest_final.log",
+    "40_undeclared_zero_evidence.log",
+    "armD_waitset_full",
+    "armE2_token_invalid",
+    "armE_token_invalid",
+    "command.txt",
+    "counterfactual/50_prefix_same_arm.log",
+    "counterfactual/51_prefix_legacy_arm.log",
+    "counterfactual/build_fix_restore.log",
+    "counterfactual/build_prefix.log",
+    "counterfactual/circularqueue.h.FIX",
+    "counterfactual/circularqueue.h.HEAD",
+    "counterfactual/ipc.cpp.FIX",
+    "counterfactual/ipc.cpp.HEAD",
+    "counterfactual/lib_prefix.sha256",
+    "counterfactual/pre_armA.log",
+    "counterfactual/pre_armB.log",
+    "counterfactual/pre_armC.log",
+    "counterfactual/pre_armD.log",
+    "counterfactual/pre_armE2.log",
+    "f1_wiring_probe",
+    "fingerprints_after.txt",
+    "fingerprints_before.txt",
+    "legacy_decl",
+    "manifest.json",
+    "odr_unification_probe",
+    "post_armA.log",
+    "post_armB.log",
+    "post_armC.log",
+    "post_armD.log",
+    "post_armE2.log",
+    "postfix_chunk_counter",
+    "prefix_chunk_counter",
+    "src/armD_waitset_full.cpp",
+    "src/armE2_token_invalid.cpp",
+    "src/armE_token_invalid.cpp",
+    "src/audit_counter_wiring.py",
+    "src/f1_wiring_probe.cpp",
+    "src/legacy_decl.cpp",
+    "src/odr_unification_probe.cpp",
+    "src/run_all_arms.sh",
+    "src/undeclared_probe.cpp",
+    "src/uniqueness_check.py",
+    "undeclared_probe"
+  ],
+  "unwired_before_34_matches_task": true,
+  "diagnostics_gated_ids": [
+    "scan_time_ns_total",
+    "ready_observed",
+    "deferred_depth_last",
+    "deferred_depth_max"
+  ],
+  "ctest_final": "31_ctest_final.log",
+  "pruned_intermediate": [
+    "counterfactual_ipc.cpp.FIX(临时拷贝)",
+    "_ids.txt(枚举提取中间件)",
+    "24_armE_rlimit_*.log / 24_armE_fd_*.log / 24_armE_soft*.log(无效构造尝试: tmpfs尺寸不匹配不致 shm_open 失败; 结论已写入交付 §3.3)"
+  ]
+}

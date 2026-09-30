@@ -1,0 +1,11 @@
+# counters.tlv_messages 与逐 route 分账的独立对账（tlv_messages 应 = 规模帧 + 确认帧 + 旧代标记帧）
+r25 SHM      tlv_messages=3005   规模=3005 确认=0 旧代=0 合计=3005  ✅ 逐值吻合
+r28 SHM#1    tlv_messages=4007   规模=3006 确认=1000 旧代=1 合计=4007  ✅ 逐值吻合
+r28 SHM#2    tlv_messages=4007   规模=3006 确认=1000 旧代=1 合计=4007  ✅ 逐值吻合
+r46 my SHM   tlv_messages=4007   规模=3006 确认=1000 旧代=1 合计=4007  ✅ 逐值吻合
+
+⇒ 发布侧路径计数与逐 route 台账**三方对账成立**（规模帧+握手确认帧+旧代标记帧各记各的）
+
+# socket 侧对账（注意：socket 臂的 tlv_messages 恒 0，因为不经 SHM 路径）
+r28 sock     tlv_messages=0 (socket 不经 dzIPC SHM ⇒ 恒 0，属正确) Σrx=3005 confirm=1000
+r46 my sock  tlv_messages=0 (socket 不经 dzIPC SHM ⇒ 恒 0，属正确) Σrx=3005 confirm=1000

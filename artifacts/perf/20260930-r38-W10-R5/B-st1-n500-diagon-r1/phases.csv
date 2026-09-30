@@ -1,0 +1,6 @@
+phase,ms,note
+pool_start,0,"workers=32 diag=on"
+register,194,"state=1 pubs=500 subs=500"
+handshake,50,"attached=500/500"
+state_settle,1652,"state=1 routes=0"
+window,60048,"state=1 phase=idle"

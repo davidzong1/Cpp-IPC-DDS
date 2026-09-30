@@ -1,0 +1,224 @@
+diff --git a/include/dzIPC/common/nodelet_config.h b/include/dzIPC/common/nodelet_config.h
+index 4e92d40..f2d3c22 100644
+--- a/include/dzIPC/common/nodelet_config.h
++++ b/include/dzIPC/common/nodelet_config.h
+@@ -44,6 +44,49 @@ IPC_EXPORT std::uint64_t DzFlatPublishCount();
+ IPC_EXPORT std::uint64_t DzFlatFallbackCount();
+ IPC_EXPORT void ResetDzFlatCounters();
+ 
++// ---------------------------------------------------------------------------
++// W08: DZFlat **路径分流**计数（追加口；上面 dzflat/fallback 两个计数器的语义与取值
++// 一律不变）。
++//
++// 为什么必须分流: 既有 NoteDzFlatPublish 只分"走了 DZFlat / 回落整包", 而 A 级
++// (publish(shared_ptr) 就地写 chunk, 见 src/dzIPC/shm_pub_sub_ipc.cc)与 B 级
++// (应用 loan + 原地构造 + publish_loaned, 见 shm_pub_sub_ipc.h)共用同一支计数
++// ⇒ 报告无法证明"B 路径真的被执行", 也无法把 W03 的
++// tlv_messages / dzflat_a_messages / dzflat_b_messages 分开填 —— 而
++// dzIPC/measure/path_evidence.h 要求三路径计数必须分开, 否则该路径只能标"未确认"。
++//
++// 本钩子是**转发层**: 实现在 nodelet_config.cc, 把 W03 的
++// measure::CounterRegistry 同名 ID 直接 +1(热路径一次 relaxed fetch_add, 无锁无分配);
++// 头文件侧不引入测量层依赖。
++//
++// 口径(§10.7: 每成功交付一条消息恰好 +1 一次, 不重记):
++//   Tlv             —— 整包序列化那条成功交给底层(含 DZFlat 失败后的回退)
++//   DzFlatA         —— try_publish_dzflat 成功(对象 → 共享段一次复制)
++//   DzFlatB         —— publish_loaned 成功(应用在借样内存里原地构造)
++//   PrebuiltSegment —— publish_prebuilt_segment 成功(段已在调用方地址空间 → chunk
++//                      一次 memcpy)。⛔它既不是 A 也不是 B, 单列, 不并进 A/B。
++//
++// B 级**失败**不在这里记 tlv: 按借样契约(loaned_message.h 顶部三条), 失败是常态、
++// 由应用回退到普通 publish, 那一次回退已在 A/TLV 的调用点被记一次 —— 这里再记会把
++// 比值算歪。
++//
++// wire_bytes 累加**实际传输字节**(TLV = 序列化包大小; DZFlat = 段大小)。
++// ⛔逻辑载荷字节(应用字节)本层拿不到(TLV 侧无通用 API), 对应计数器留 0 并在 W08
++// 交付里登记为"未接线" —— 不以 0 冒充已测。
++// ---------------------------------------------------------------------------
++enum class DzFlatPath : std::uint32_t
++{
++    Tlv = 0,              ///< 整包序列化(含 DZFlat 失败后的回退)
++    DzFlatA = 1,          ///< 对象 → 共享段一次复制
++    DzFlatB = 2,          ///< 应用在借样内存里原地构造
++    PrebuiltSegment = 3,  ///< 预构造段 → chunk 一次 memcpy
++    kCount = 4,
++};
++/// 预构造段入口的条数(W03 三路径 ID 未定义该入口, 故记在本模块; 其余三路径的条数
++/// 直接读 measure::CounterRegistry 的快照)。埋点函数 NoteDzFlatPathDelivered 在
++/// detail 里(见下), 与既有 NoteDzFlatPublish 同一口径。
++IPC_EXPORT std::uint64_t DzFlatPrebuiltSegmentCount() noexcept;
++
+ // ---------------------------------------------------------------------------
+ // view 队列容量钉(进程级, 默认 ON)。设计见 docs/shm_chunk_pool_occupancy_plan.md §3 步骤③。
+ //
+@@ -84,6 +127,9 @@ IPC_EXPORT std::size_t ViewQueueCap();
+ namespace detail {
+ /// 传输层内部埋点: 每条 SHM 发布记一次(true = 走了 DZFlat, false = 回退整包)。
+ IPC_EXPORT void NoteDzFlatPublish(bool used_dzflat);
++/// W08: 传输层内部埋点 —— 三路径分流(见上方 DzFlatPath 段的口径与理由)。
++/// ⛔只计数, 不读消息内容、不改任何发布/接收行为。
++IPC_EXPORT void NoteDzFlatPathDelivered(DzFlatPath path, std::uint64_t wire_bytes) noexcept;
+ }   // namespace detail
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/include/dzIPC/shm_pub_sub_ipc.h b/include/dzIPC/shm_pub_sub_ipc.h
+index 1a31cc4..c39fe05 100644
+--- a/include/dzIPC/shm_pub_sub_ipc.h
++++ b/include/dzIPC/shm_pub_sub_ipc.h
+@@ -104,10 +104,19 @@ public:
+             return false;
+         }
+         const auto handle = lo.loan();
++        /* W08: 封口后的段字节数必须在 release 之前取(release 后 size() 返回 0)。 */
++        const std::uint64_t seg_bytes = static_cast<std::uint64_t>(lo.size());
+         /* publish_loan 接管所有权(成功与否都不再由 lo 归还): 失败时它自己 discard。 */
+         lo.release();
+         const bool ok = publisher_->publish_loan(handle, tm);
+         dzIPC::detail::NoteDzFlatPublish(ok);
++        /* W08: 三路径分流计数(仅计数, 无行为变更)。B = 应用在借样内存里原地构造。
++         * ⛔ 失败**不**在这里记 tlv —— 按借样契约失败是常态, 应用回退到普通 publish
++         * 时会在 A/TLV 的调用点被记一次; 这里也记会把 dzflat/fallback 比值算歪。 */
++        if (ok)
++        {
++            dzIPC::detail::NoteDzFlatPathDelivered(dzIPC::DzFlatPath::DzFlatB, seg_bytes);
++        }
+         return ok;
+     }
+ 
+diff --git a/src/dzIPC/common/nodelet_config.cc b/src/dzIPC/common/nodelet_config.cc
+index 0c43a9b..4dbff35 100644
+--- a/src/dzIPC/common/nodelet_config.cc
++++ b/src/dzIPC/common/nodelet_config.cc
+@@ -4,6 +4,7 @@
+ #include <cstddef>
+ #include <cstdint>
+ 
++#include "dzIPC/measure/counters.h"   /* W08: 路径分流计数直接落到 W03 的注册表 */
+ #include "libipc/def.h"
+ 
+ namespace dzIPC {
+@@ -13,6 +14,10 @@ std::atomic<bool> g_nodelet_enabled{false};
+ std::atomic<bool> g_dzflat_enabled{false};
+ std::atomic<std::uint64_t> g_dzflat_published{0};
+ std::atomic<std::uint64_t> g_dzflat_fallback{0};
++/* W08: 预构造段入口(publish_prebuilt_segment)的成功条数。W03 的三路径 ID 只定义了
++ * tlv / dzflat-a / dzflat-b, 没有这一入口, 故记在本模块(⛔不并进 A/B —— 它既不是
++ * "对象→共享段"也不是"应用原地构造")。 */
++std::atomic<std::uint64_t> g_dzflat_prebuilt{0};
+ 
+ /* 步骤③ 的 view 队列容量钉。默认 ON —— 理由见 nodelet_config.h 的 ⚠️ 段:
+  * 默认 OFF 等于"池会被队列吃干"这个已知缺陷仍然出厂。 */
+@@ -49,6 +54,47 @@ IPC_EXPORT void ResetDzFlatCounters()
+ {
+     g_dzflat_published.store(0, std::memory_order_relaxed);
+     g_dzflat_fallback.store(0, std::memory_order_relaxed);
++    /* W08: 追加口一并复位(否则按配置逐轮采数时上一轮会把这一轮算歪)。 */
++    g_dzflat_prebuilt.store(0, std::memory_order_relaxed);
++}
++
++/* ---------------------------------------------------------------------------
++ * W08 路径分流(实现见头文件同名段的说明)。⛔本函数**只做计数**, 不读消息内容、
++ * 不改任何发布/接收行为; 热路径上就是一次 relaxed fetch_add(无锁、无分配、无日志)。
++ * ------------------------------------------------------------------------- */
++namespace detail {
++IPC_EXPORT void NoteDzFlatPathDelivered(DzFlatPath path, std::uint64_t wire_bytes) noexcept
++{
++    using measure::CounterId;
++    switch (path)
++    {
++    case DzFlatPath::Tlv:
++        DZIPC_MEASURE_INC(CounterId::tlv_messages);
++        DZIPC_MEASURE_ADD(CounterId::tlv_wire_bytes, wire_bytes);
++        break;
++    case DzFlatPath::DzFlatA:
++        DZIPC_MEASURE_INC(CounterId::dzflat_a_messages);
++        DZIPC_MEASURE_ADD(CounterId::dzflat_wire_bytes, wire_bytes);
++        break;
++    case DzFlatPath::DzFlatB:
++        DZIPC_MEASURE_INC(CounterId::dzflat_b_messages);
++        DZIPC_MEASURE_ADD(CounterId::dzflat_wire_bytes, wire_bytes);
++        break;
++    case DzFlatPath::PrebuiltSegment:
++        /* W03 的三路径 ID 未定义这一入口 ⇒ 条数记在本模块; 传输字节仍归入
++         * dzflat_wire_bytes(它确实是 DZFlat 段)。交付里已登记该 ID 缺口。 */
++        g_dzflat_prebuilt.fetch_add(1, std::memory_order_relaxed);
++        DZIPC_MEASURE_ADD(CounterId::dzflat_wire_bytes, wire_bytes);
++        break;
++    case DzFlatPath::kCount:
++        break;
++    }
++}
++}   // namespace detail
++
++IPC_EXPORT std::uint64_t DzFlatPrebuiltSegmentCount() noexcept
++{
++    return g_dzflat_prebuilt.load(std::memory_order_relaxed);
+ }
+ 
+ IPC_EXPORT void EnableViewQueuePin(bool enabled)
+diff --git a/src/dzIPC/shm_pub_sub_ipc.cc b/src/dzIPC/shm_pub_sub_ipc.cc
+index 9fc4014..b3a98a0 100644
+--- a/src/dzIPC/shm_pub_sub_ipc.cc
++++ b/src/dzIPC/shm_pub_sub_ipc.cc
+@@ -425,15 +425,24 @@ bool shm_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_
+         if (try_publish_dzflat(msg, tm))
+         {
+             dzIPC::detail::NoteDzFlatPublish(true);
++            /* W08: 三路径分流计数(仅计数, 无行为变更)。A = 对象→共享段一次复制;
++             * wire = 段字节数。 */
++            dzIPC::detail::NoteDzFlatPathDelivered(
++                dzIPC::DzFlatPath::DzFlatA, static_cast<std::uint64_t>(msg->dzflat_size()));
+             return true;
+         }
+         dzIPC::detail::NoteDzFlatPublish(false);
+         ipc::buffer response_data(std::move(msg->serialize()));
+-        if (publisher_->recv_count() == 0)
++        /* W08: 为计数把原两个 return 收敛成一个局部 sent —— 控制流与返回值逐位不变。 */
++        const bool sent = (publisher_->recv_count() == 0)
++                              ? publisher_->no_member_try_send(response_data.data(), response_data.size(), 0)
++                              : publisher_->try_send(response_data.data(), response_data.size(), tm);
++        if (sent)
+         {
+-            return publisher_->no_member_try_send(response_data.data(), response_data.size(), 0);
++            dzIPC::detail::NoteDzFlatPathDelivered(
++                dzIPC::DzFlatPath::Tlv, static_cast<std::uint64_t>(response_data.size()));
+         }
+-        return publisher_->try_send(response_data.data(), response_data.size(), tm);
++        return sent;
+     }
+     catch (const std::exception& e)
+     {
+@@ -532,6 +541,10 @@ bool shm_pub_ipc::publish_prebuilt_segment(const void* seg, std::size_t len)
+     if (ok)
+     {
+         dzIPC::detail::NoteDzFlatPublish(true);
++        /* W08: 预构造段入口**单列**计数 —— ⛔不并进 A/B(既非"对象→段"也非"应用原地
++         * 构造"; W03 的三路径 ID 未定义该入口, 已在交付里登记缺口)。 */
++        dzIPC::detail::NoteDzFlatPathDelivered(
++            dzIPC::DzFlatPath::PrebuiltSegment, static_cast<std::uint64_t>(h.total_size));
+     }
+     /* 失败不在这里计数: 调用方随后那次 TLV publish() 会记一次回退。两边各记一次会把
+      * fallback/(dzflat+fallback) 这个比值算歪 —— 那个比值是判断"收益有没有生效"的唯一
+@@ -552,11 +565,20 @@ bool shm_pub_ipc::publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg)
+         if (try_publish_dzflat(msg, 0))
+         {
+             dzIPC::detail::NoteDzFlatPublish(true);
++            /* W08: 三路径分流计数(仅计数)。 */
++            dzIPC::detail::NoteDzFlatPathDelivered(
++                dzIPC::DzFlatPath::DzFlatA, static_cast<std::uint64_t>(msg->dzflat_size()));
+             return true;
+         }
+         dzIPC::detail::NoteDzFlatPublish(false);
+         ipc::buffer response_data(std::move(msg->serialize()));
+-        return publisher_->no_member_try_send(response_data.data(), response_data.size(), 0);
++        const bool sent = publisher_->no_member_try_send(response_data.data(), response_data.size(), 0);
++        if (sent)
++        {
++            dzIPC::detail::NoteDzFlatPathDelivered(
++                dzIPC::DzFlatPath::Tlv, static_cast<std::uint64_t>(response_data.size()));
++        }
++        return sent;
+     }
+     catch (const std::exception& e)
+     {

@@ -1,0 +1,20 @@
+# t48 独立注入结果留痕（结构闸 test_w02_summary_schema）
+# 注入在 build/t48/inject/ 的**副本**上做（⛔ 未改仓库内他人文件）
+# 闸脚本: test/w02_summary_schema_check.py  (sha 10d4a38a6ef871fa)
+# xproc_benchmark.cpp: test/xproc_benchmark.cpp (sha 2f3c070d91c38c71)
+
+| # | 注入内容 | 期望 | 实测 exit | 结果 |
+|---|---|---|---|---|
+| 正控 | 未改动的 r30 现行 run | 通过 | 0 | ✅ |
+| A | 表头加 1 列('injected_col')、格式串不变 | 转红 | 1 | ✅ FAIL: 表头列数 94 != 格式串字段数 93 |
+| B | 数据行格式串多加 1 个 %llu、表头不变 | 转红 | 1 | ✅ FAIL: 表头列数 93 != 格式串字段数 94 |
+| C | 必需列 late_ok 改名 latex_ok | 转红 | 1 | ✅ FAIL: 表头缺必需列 ['late_ok'] |
+| D | summary.csv 首数据行少 1 列 | 转红 | 1 | ✅ FAIL: 1/75 行列数与表头(93)不符 [(2, 92)] |
+| E | summary.csv 为 0 字节（= t47 的崩溃形态） | 转红 | 1 | ✅ FAIL: 为空（0 字节 ⇒ 可能是格式串越界崩溃） |
+| F | gate=0 且 failure_reasons 为空 | 转红 | 1 | ✅ FAIL: 1 行出现「gate=0 但 failure_reasons 为空」 |
+| G | gate 取非 0/1 值 (=2) | 转红 | 1 | ✅ FAIL: 同上（走 gate∉{0,1} 分支）|
+| 负控 | r23（F3 修前一代，缺 6 列） | 转红 | 1 | ✅ FAIL: 缺必需列 ['bad_header','late_ok',...] |
+
+⚠️ **覆盖边界**：ctest 里登记的是 `--source-only`（静态半：表头列数/格式串字段数/必需列）。
+   注入 F/G（逐行 gate↔名点一致性）属**动态半**，⛔ **不在自动回路内**（须显式传 run_dir 才执行）。
+   ⇒ 建议（归 t47/基准负责人）：把动态半也接上（例如自检用例跑完后调一次 check_run）。

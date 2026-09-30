@@ -1,0 +1,16 @@
+{
+  "kind": "scan_end_values_selftest",
+  "A_diag_off_uncollected": true,
+  "A_diag_off_elapsed_uncollected": true,
+  "A_diag_off_no_counter_write": true,
+  "B_sums_match_global": true,
+  "B_pool_depth_is_sum_of_workers": true,
+  "B_gauge_is_not_pool_total": true,
+  "B_ready_routes_delta": 3,
+  "B_deferred_after_total_delta": 29,
+  "B_pool_current_depth": 12,
+  "B_gauge_after_last_at_that_moment": 7,
+  "B_gauge_before_last_at_that_moment": 7,
+  "C_before_after_gauges_distinct": true,
+  "verdict": "PASS"
+}

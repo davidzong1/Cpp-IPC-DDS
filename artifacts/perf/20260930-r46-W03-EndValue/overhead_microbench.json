@@ -1,0 +1,16 @@
+{
+  "counter_inc_ns": 4.17694,
+  "counter_inc_cached_ns": 4.24894,
+  "diagnostics_inc_enabled_ns": 4.18601,
+  "diagnostics_inc_disabled_ns": 0.46807,
+  "scan_scope_enabled_ns": 51.9249,  /* 当前接线形态: 构造->finish->set_ready->析构 */
+  "scan_scope_disabled_ns": 1.85778,
+  "scan_scope_enabled_no_finish_ns": 44.5632,  /* 历史口径: 构造->析构, 与旧读数可比 */
+  "scan_scope_disabled_no_finish_ns": 1.30096,
+  "scan_scope_finish_delta_enabled_ns": 7.3617,
+  "clock_now_ns": 10.2795,
+  "clock_vdso_ns_per_call": 9.94906,
+  "clock_syscall_ns_per_call": 89.4076,
+  "proc_self_stat_read_ns": 5887.64,
+  "proc_task_status_all_ns": 10383.8
+}

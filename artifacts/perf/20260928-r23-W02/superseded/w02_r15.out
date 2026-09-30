@@ -1,0 +1,452 @@
+=== W02 统一跨进程基准 | run_id=20260928-r15-W02 ===
+  source_revision : e800ccc496ac710b711c9346709e86a148c41241
+  build_type      : Release
+  compiler        : /usr/bin/c++ c++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0
+  exe             : /home/zwc/cpp_ipc_dds/build/bin/xproc_benchmark  sha256=401495d358860147e17f3c21d4a8186759198af3207edd7372149698607181fb
+  libipc          : /home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0  sha256=cb19120de7380be8f1f46abbfb1fb958ab1c653622b57d1f750eac3f2dfbd907
+  clock           : vdso_ns_per_call=15.3049 syscall_ns_per_call=87.4627 vdso_in_use=true
+  config_hash     : 19c46fe0c69ac096  (duration=1;warmup=0.3;rate=1000;queue=256;view_queue_cap=64;domain=1;queue_wait_ms=100;workload=full;wait=blocking;best_effort=0;nodelet=0;payloads=64/1024/65536/1048576;smoke=1;sample_limit=20000)
+  process_model   : cross-process（pub/sub 为 fork+exec 新映像）
+  out_dir         : artifacts/perf/20260928-r15-W02
+
+  CycloneDDS      : 已编译进基准（libddsc=/home/zwc/branch/lejulab_platform/src/lejusdk/3rd_party/x86_64/cyclonedds-0.10.2/lib/libddsc.so.0.10.2）
+
+  dds precheck    : roudi_pid=37
+[0] path=tlv workload=timestamp wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2213 cpu=(0.046,0.049) cores=0.094
+       note: identity: parent_pid=47 pub_pid=84 sub_pid=83 | pub_ready_ns=17096129646591 in [17096125101604,17096180660997] | sub_ready_ns=17096128689848 in [17096124991034,17096180660925] | pub_starttime_ticks=1709612 sub_starttime_ticks=1709612 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.045504s, nvcsw 2255, nivcsw 1) sub=0(cpu 0.048865s, nvcsw 4662, nivcsw 5)
+       note: round=0
+[1] path=tlv workload=crc wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2213 cpu=(0.046,0.048) cores=0.094
+       note: identity: parent_pid=47 pub_pid=90 sub_pid=89 | pub_ready_ns=17097957302926 in [17097952555389,17098008074270] | sub_ready_ns=17097956303899 in [17097952429498,17098008074030] | pub_starttime_ticks=1709795 sub_starttime_ticks=1709795 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.046059s, nvcsw 2255, nivcsw 2) sub=0(cpu 0.048076s, nvcsw 4666, nivcsw 7)
+       note: round=0
+[2] path=tlv workload=full wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2209 cpu=(0.046,0.051) cores=0.097
+       note: identity: parent_pid=47 pub_pid=96 sub_pid=95 | pub_ready_ns=17099783447758 in [17099778783213,17099834275750] | sub_ready_ns=17099782502264 in [17099778706098,17099834275704] | pub_starttime_ticks=1709977 sub_starttime_ticks=1709977 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.045851s, nvcsw 2250, nivcsw 4) sub=0(cpu 0.051352s, nvcsw 4652, nivcsw 8)
+       note: round=0
+[3] path=tlv workload=timestamp wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2212 cpu=(0.048,0.051) cores=0.098
+       note: identity: parent_pid=47 pub_pid=102 sub_pid=101 | pub_ready_ns=17101608173524 in [17101603172052,17101658638845] | sub_ready_ns=17101607065642 in [17101603089300,17101658638809] | pub_starttime_ticks=1710160 sub_starttime_ticks=1710160 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.047782s, nvcsw 2254, nivcsw 3) sub=0(cpu 0.050562s, nvcsw 4673, nivcsw 4)
+       note: round=0
+[4] path=tlv workload=timestamp wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2210 cpu=(0.048,1.850) cores=1.899
+       note: identity: parent_pid=47 pub_pid=108 sub_pid=107 | pub_ready_ns=17103434254753 in [17103429433717,17103484865169] | sub_ready_ns=17103433346205 in [17103429356320,17103484865130] | pub_starttime_ticks=1710342 sub_starttime_ticks=1710342 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.047832s, nvcsw 2254, nivcsw 1) sub=0(cpu 1.849586s, nvcsw 2419, nivcsw 17)
+       note: round=0
+[5] path=tlv workload=crc wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2209 cpu=(0.046,0.055) cores=0.101
+       note: identity: parent_pid=47 pub_pid=114 sub_pid=113 | pub_ready_ns=17105261534313 in [17105257801961,17105313338814] | sub_ready_ns=17105261459743 in [17105257684858,17105313338746] | pub_starttime_ticks=1710525 sub_starttime_ticks=1710525 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.046309s, nvcsw 2251, nivcsw 2) sub=0(cpu 0.055025s, nvcsw 4665, nivcsw 7)
+       note: round=0
+[6] path=tlv workload=crc wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2213 cpu=(0.059,1.861) cores=1.923
+       note: identity: parent_pid=47 pub_pid=120 sub_pid=119 | pub_ready_ns=17107087011013 in [17107082210734,17107137698736] | sub_ready_ns=17107086020954 in [17107082126977,17107137698714] | pub_starttime_ticks=1710708 sub_starttime_ticks=1710708 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.059347s, nvcsw 2256, nivcsw 5) sub=0(cpu 1.861374s, nvcsw 2457, nivcsw 13)
+       note: round=0
+[7] path=tlv workload=full wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2210 cpu=(0.047,0.053) cores=0.101
+       note: identity: parent_pid=47 pub_pid=126 sub_pid=125 | pub_ready_ns=17108911561554 in [17108906643762,17108962112414] | sub_ready_ns=17108910611059 in [17108906562946,17108962112353] | pub_starttime_ticks=1710890 sub_starttime_ticks=1710890 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.047432s, nvcsw 2254, nivcsw 4) sub=0(cpu 0.053048s, nvcsw 4671, nivcsw 8)
+       note: round=0
+[8] path=tlv workload=full wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2210 cpu=(0.047,1.851) cores=1.900
+       note: identity: parent_pid=47 pub_pid=132 sub_pid=131 | pub_ready_ns=17110739494257 in [17110734685662,17110790242685] | sub_ready_ns=17110738523159 in [17110734570630,17110790242626] | pub_starttime_ticks=1711073 sub_starttime_ticks=1711073 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.047246s, nvcsw 2254, nivcsw 4) sub=0(cpu 1.851210s, nvcsw 2430, nivcsw 12)
+       note: round=0
+[9] path=tlv workload=timestamp wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2123 cpu=(0.096,0.091) cores=0.187
+       note: identity: parent_pid=47 pub_pid=138 sub_pid=137 | pub_ready_ns=17112565669906 in [17112560817837,17112616280359] | sub_ready_ns=17112564677042 in [17112560738882,17112616280338] | pub_starttime_ticks=1711256 sub_starttime_ticks=1711256 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.095674s, nvcsw 2165, nivcsw 4) sub=0(cpu 0.091351s, nvcsw 4493, nivcsw 13)
+       note: round=0
+[10] path=tlv workload=crc wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2091 cpu=(0.111,0.083) cores=0.194
+       note: identity: parent_pid=47 pub_pid=144 sub_pid=143 | pub_ready_ns=17114390983773 in [17114387467304,17114440929098] | sub_ready_ns=17114390370061 in [17114387353500,17114440929074] | pub_starttime_ticks=1711438 sub_starttime_ticks=1711438 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.111063s, nvcsw 2131, nivcsw 5) sub=0(cpu 0.083030s, nvcsw 4419, nivcsw 7)
+       note: round=0
+[11] path=tlv workload=full wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=2114 cpu=(0.092,0.124) cores=0.216
+       note: identity: parent_pid=47 pub_pid=150 sub_pid=149 | pub_ready_ns=17116216725699 in [17116213199886,17116266630476] | sub_ready_ns=17116216179879 in [17116213091253,17116266630453] | pub_starttime_ticks=1711621 sub_starttime_ticks=1711621 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.092235s, nvcsw 2154, nivcsw 3) sub=0(cpu 0.123556s, nvcsw 4476, nivcsw 4)
+       note: round=0
+[12] path=tlv workload=timestamp wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=1129 cpu=(0.324,0.191) cores=0.516
+       note: identity: parent_pid=47 pub_pid=156 sub_pid=155 | pub_ready_ns=17118045464918 in [17118039840436,17118095409866] | sub_ready_ns=17118043679079 in [17118039715037,17118095409841] | pub_starttime_ticks=1711803 sub_starttime_ticks=1711803 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.323568s, nvcsw 1172, nivcsw 9) sub=0(cpu 0.191082s, nvcsw 2500, nivcsw 8)
+       note: round=0
+[13] path=tlv workload=crc wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=1039 cpu=(0.390,0.265) cores=0.656
+       note: identity: parent_pid=47 pub_pid=162 sub_pid=161 | pub_ready_ns=17119870057046 in [17119864091323,17119919685730] | sub_ready_ns=17119868310207 in [17119863931945,17119919685693] | pub_starttime_ticks=1711986 sub_starttime_ticks=1711986 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.390237s, nvcsw 1085, nivcsw 14) sub=0(cpu 0.264782s, nvcsw 2324, nivcsw 9)
+       note: round=0
+[14] path=tlv workload=full wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=1108 cpu=(0.411,0.388) cores=0.801
+       note: identity: parent_pid=47 pub_pid=168 sub_pid=167 | pub_ready_ns=17121697231588 in [17121692509374,17121747942871] | sub_ready_ns=17121696282353 in [17121692424153,17121747942696] | pub_starttime_ticks=1712169 sub_starttime_ticks=1712169 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.411466s, nvcsw 1151, nivcsw 5) sub=0(cpu 0.388206s, nvcsw 2461, nivcsw 8)
+       note: round=0
+[15] path=dzflat-a workload=timestamp wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2206 fallback=2 cpu=(0.047,0.049) cores=0.096
+       note: identity: parent_pid=47 pub_pid=174 sub_pid=173 | pub_ready_ns=17123523458772 in [17123519739882,17123575218009] | sub_ready_ns=17123523414166 in [17123519651660,17123575217972] | pub_starttime_ticks=1712351 sub_starttime_ticks=1712351 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.047151s, nvcsw 2255, nivcsw 1) sub=0(cpu 0.049007s, nvcsw 4662, nivcsw 9)
+       note: round=0
+[16] path=dzflat-a workload=crc wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2209 fallback=2 cpu=(0.048,0.050) cores=0.098
+       note: identity: parent_pid=47 pub_pid=180 sub_pid=179 | pub_ready_ns=17125371392899 in [17125366562122,17125422004838] | sub_ready_ns=17125370471501 in [17125366443099,17125422004771] | pub_starttime_ticks=1712536 sub_starttime_ticks=1712536 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.047610s, nvcsw 2257, nivcsw 3) sub=0(cpu 0.050133s, nvcsw 4668, nivcsw 66)
+       note: round=0
+[17] path=dzflat-a workload=full wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2212 fallback=2 cpu=(0.076,0.052) cores=0.128
+       note: identity: parent_pid=47 pub_pid=186 sub_pid=185 | pub_ready_ns=17127218092175 in [17127213198194,17127268733884] | sub_ready_ns=17127217070134 in [17127213068784,17127268733827] | pub_starttime_ticks=1712721 sub_starttime_ticks=1712721 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.076277s, nvcsw 2261, nivcsw 53) sub=0(cpu 0.051919s, nvcsw 4668, nivcsw 43)
+       note: round=0
+[18] path=dzflat-a workload=timestamp wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2209 fallback=2 cpu=(0.048,0.050) cores=0.098
+       note: identity: parent_pid=47 pub_pid=192 sub_pid=191 | pub_ready_ns=17129062810585 in [17129058016012,17129113497977] | sub_ready_ns=17129061841413 in [17129057918683,17129113497937] | pub_starttime_ticks=1712905 sub_starttime_ticks=1712905 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.047605s, nvcsw 2256, nivcsw 8) sub=0(cpu 0.049819s, nvcsw 4669, nivcsw 77)
+       note: round=0
+[19] path=dzflat-a workload=timestamp wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2207 fallback=2 cpu=(0.073,1.849) cores=1.924
+       note: identity: parent_pid=47 pub_pid=198 sub_pid=197 | pub_ready_ns=17130908235906 in [17130904751116,17130958126988] | sub_ready_ns=17130907135447 in [17130904653456,17130958126955] | pub_starttime_ticks=1713090 sub_starttime_ticks=1713090 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.073047s, nvcsw 2249, nivcsw 26) sub=0(cpu 1.848545s, nvcsw 2413, nivcsw 33)
+       note: round=0
+[20] path=dzflat-a workload=crc wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2209 fallback=3 cpu=(0.047,0.046) cores=0.094
+       note: identity: parent_pid=47 pub_pid=204 sub_pid=203 | pub_ready_ns=17132730825962 in [17132728463500,17132781774005] | sub_ready_ns=17132730858764 in [17132728373262,17132781773952] | pub_starttime_ticks=1713272 sub_starttime_ticks=1713272 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.047261s, nvcsw 2257, nivcsw 4) sub=0(cpu 0.046199s, nvcsw 4669, nivcsw 5)
+       note: round=0
+[21] path=dzflat-a workload=crc wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2211 fallback=2 cpu=(0.048,1.847) cores=1.897
+       note: identity: parent_pid=47 pub_pid=210 sub_pid=209 | pub_ready_ns=17134577047088 in [17134572191837,17134627645342] | sub_ready_ns=17134576137465 in [17134572094166,17134627645262] | pub_starttime_ticks=1713457 sub_starttime_ticks=1713457 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.047517s, nvcsw 2257, nivcsw 1) sub=0(cpu 1.847277s, nvcsw 2419, nivcsw 19)
+       note: round=0
+[22] path=dzflat-a workload=full wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2211 fallback=2 cpu=(0.046,0.047) cores=0.092
+       note: identity: parent_pid=47 pub_pid=216 sub_pid=215 | pub_ready_ns=17136402607331 in [17136399089796,17136452553108] | sub_ready_ns=17136401719983 in [17136398955728,17136452553033] | pub_starttime_ticks=1713639 sub_starttime_ticks=1713639 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.045530s, nvcsw 2257, nivcsw 2) sub=0(cpu 0.046732s, nvcsw 4671, nivcsw 5)
+       note: round=0
+[23] path=dzflat-a workload=full wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2208 fallback=2 cpu=(0.048,1.849) cores=1.899
+       note: identity: parent_pid=47 pub_pid=222 sub_pid=221 | pub_ready_ns=17138249719244 in [17138244872947,17138300376722] | sub_ready_ns=17138248799059 in [17138244743527,17138300376662] | pub_starttime_ticks=1713824 sub_starttime_ticks=1713824 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.048065s, nvcsw 2251, nivcsw 3) sub=0(cpu 1.848776s, nvcsw 2418, nivcsw 12)
+       note: round=0
+[24] path=dzflat-a workload=timestamp wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2145 fallback=2 cpu=(0.079,0.050) cores=0.129
+       note: identity: parent_pid=47 pub_pid=228 sub_pid=227 | pub_ready_ns=17140077338027 in [17140072386120,17140127938903] | sub_ready_ns=17140076291247 in [17140072257454,17140127938832] | pub_starttime_ticks=1714007 sub_starttime_ticks=1714007 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.078780s, nvcsw 2196, nivcsw 2) sub=0(cpu 0.049674s, nvcsw 4543, nivcsw 1)
+       note: round=0
+[25] path=dzflat-a workload=crc wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2133 fallback=2 cpu=(0.087,0.062) cores=0.150
+       note: identity: parent_pid=47 pub_pid=234 sub_pid=233 | pub_ready_ns=17141925215922 in [17141920306397,17141975757239] | sub_ready_ns=17141924250413 in [17141920168921,17141975757167] | pub_starttime_ticks=1714192 sub_starttime_ticks=1714192 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.087340s, nvcsw 2183, nivcsw 6) sub=0(cpu 0.062191s, nvcsw 4518, nivcsw 5)
+       note: round=0
+[26] path=dzflat-a workload=full wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2114 fallback=2 cpu=(0.088,0.088) cores=0.177
+       note: identity: parent_pid=47 pub_pid=240 sub_pid=239 | pub_ready_ns=17143771275105 in [17143766454295,17143821918720] | sub_ready_ns=17143770306240 in [17143766366049,17143821918511] | pub_starttime_ticks=1714376 sub_starttime_ticks=1714376 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.088394s, nvcsw 2161, nivcsw 5) sub=0(cpu 0.088325s, nvcsw 4478, nivcsw 1)
+       note: round=0
+[27] path=dzflat-a workload=timestamp wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=1184 fallback=2 cpu=(0.266,0.043) cores=0.310
+       note: identity: parent_pid=47 pub_pid=246 sub_pid=245 | pub_ready_ns=17145618874908 in [17145613214625,17145668636022] | sub_ready_ns=17145617175474 in [17145613116435,17145668635982] | pub_starttime_ticks=1714561 sub_starttime_ticks=1714561 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.266119s, nvcsw 1235, nivcsw 9) sub=0(cpu 0.042933s, nvcsw 2620, nivcsw 5)
+       note: round=0
+[28] path=dzflat-a workload=crc wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=1192 fallback=2 cpu=(0.393,0.145) cores=0.539
+       note: identity: parent_pid=47 pub_pid=252 sub_pid=251 | pub_ready_ns=17147462250833 in [17147456819530,17147512272451] | sub_ready_ns=17147460618939 in [17147456731756,17147512272401] | pub_starttime_ticks=1714745 sub_starttime_ticks=1714745 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.393233s, nvcsw 1240, nivcsw 5) sub=0(cpu 0.145332s, nvcsw 2633, nivcsw 7)
+       note: round=0
+[29] path=dzflat-a workload=full wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=1176 fallback=2 cpu=(0.284,0.322) cores=0.606
+       note: identity: parent_pid=47 pub_pid=258 sub_pid=257 | pub_ready_ns=17149310218738 in [17149305967992,17149361430311] | sub_ready_ns=17149309084623 in [17149305867522,17149361430282] | pub_starttime_ticks=1714930 sub_starttime_ticks=1714930 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.283672s, nvcsw 1222, nivcsw 6) sub=0(cpu 0.321714s, nvcsw 2600, nivcsw 4)
+       note: round=0
+[30] path=dzflat-b workload=timestamp wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2207 fallback=2 cpu=(0.046,0.062) cores=0.108
+       note: identity: parent_pid=47 pub_pid=264 sub_pid=263 | pub_ready_ns=17151155208510 in [17151150375125,17151205966627] | sub_ready_ns=17151154226870 in [17151150237018,17151205966559] | pub_starttime_ticks=1715115 sub_starttime_ticks=1715115 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.046241s, nvcsw 2255, nivcsw 8) sub=0(cpu 0.061648s, nvcsw 4663, nivcsw 7)
+       note: round=0
+[31] path=dzflat-b workload=crc wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2210 fallback=2 cpu=(0.045,0.056) cores=0.100
+       note: identity: parent_pid=47 pub_pid=270 sub_pid=269 | pub_ready_ns=17153002873202 in [17152998087149,17153053612398] | sub_ready_ns=17153001941521 in [17152997954322,17153053612354] | pub_starttime_ticks=1715299 sub_starttime_ticks=1715299 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.044678s, nvcsw 2259, nivcsw 2) sub=0(cpu 0.055692s, nvcsw 4670, nivcsw 7)
+       note: round=0
+[32] path=dzflat-b workload=full wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2209 fallback=2 cpu=(0.073,0.050) cores=0.123
+       note: identity: parent_pid=47 pub_pid=276 sub_pid=275 | pub_ready_ns=17154846133587 in [17154842739707,17154896235669] | sub_ready_ns=17154845526714 in [17154842648520,17154896235638] | pub_starttime_ticks=1715484 sub_starttime_ticks=1715484 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.073064s, nvcsw 2255, nivcsw 12) sub=0(cpu 0.050009s, nvcsw 4666, nivcsw 6)
+       note: round=0
+[33] path=dzflat-b workload=timestamp wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2206 fallback=3 cpu=(0.047,0.047) cores=0.094
+       note: identity: parent_pid=47 pub_pid=282 sub_pid=281 | pub_ready_ns=17156691263138 in [17156687526813,17156743004801] | sub_ready_ns=17156691278632 in [17156687437085,17156743004751] | pub_starttime_ticks=1715668 sub_starttime_ticks=1715668 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.046985s, nvcsw 2254, nivcsw 3) sub=0(cpu 0.047217s, nvcsw 4665, nivcsw 7)
+       note: round=0
+[34] path=dzflat-b workload=timestamp wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2209 fallback=2 cpu=(0.046,1.847) cores=1.895
+       note: identity: parent_pid=47 pub_pid=288 sub_pid=287 | pub_ready_ns=17158538794233 in [17158534069742,17158589617450] | sub_ready_ns=17158537840235 in [17158533935820,17158589617385] | pub_starttime_ticks=1715853 sub_starttime_ticks=1715853 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.045943s, nvcsw 2253, nivcsw 2) sub=0(cpu 1.847230s, nvcsw 2416, nivcsw 28)
+       note: round=0
+[35] path=dzflat-b workload=crc wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2204 fallback=2 cpu=(0.047,0.046) cores=0.092
+       note: identity: parent_pid=47 pub_pid=294 sub_pid=293 | pub_ready_ns=17160365872058 in [17160360959568,17160416490301] | sub_ready_ns=17160364940742 in [17160360821571,17160416490275] | pub_starttime_ticks=1716036 sub_starttime_ticks=1716036 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.046643s, nvcsw 2256, nivcsw 4) sub=0(cpu 0.045534s, nvcsw 4658, nivcsw 10)
+       note: round=0
+[36] path=dzflat-b workload=crc wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2210 fallback=2 cpu=(0.046,1.846) cores=1.894
+       note: identity: parent_pid=47 pub_pid=300 sub_pid=299 | pub_ready_ns=17162211698518 in [17162207121063,17162262616194] | sub_ready_ns=17162210808451 in [17162207024602,17162262616159] | pub_starttime_ticks=1716220 sub_starttime_ticks=1716220 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.045652s, nvcsw 2253, nivcsw 3) sub=0(cpu 1.846489s, nvcsw 2417, nivcsw 9)
+       note: round=0
+[37] path=dzflat-b workload=full wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2209 fallback=2 cpu=(0.084,0.045) cores=0.130
+       note: identity: parent_pid=47 pub_pid=306 sub_pid=305 | pub_ready_ns=17164038217258 in [17164033513524,17164089276341] | sub_ready_ns=17164037272753 in [17164033426071,17164089276295] | pub_starttime_ticks=1716403 sub_starttime_ticks=1716403 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.084311s, nvcsw 2258, nivcsw 8) sub=0(cpu 0.045095s, nvcsw 4671, nivcsw 3)
+       note: round=0
+[38] path=dzflat-b workload=full wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2210 fallback=2 cpu=(0.046,1.854) cores=1.901
+       note: identity: parent_pid=47 pub_pid=312 sub_pid=311 | pub_ready_ns=17165884487150 in [17165879848484,17165935459771] | sub_ready_ns=17165883568800 in [17165879748579,17165935459604] | pub_starttime_ticks=1716587 sub_starttime_ticks=1716587 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.045832s, nvcsw 2254, nivcsw 3) sub=0(cpu 1.853619s, nvcsw 2418, nivcsw 43)
+       note: round=0
+[39] path=dzflat-b workload=timestamp wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2149 fallback=2 cpu=(0.077,0.045) cores=0.121
+       note: identity: parent_pid=47 pub_pid=318 sub_pid=317 | pub_ready_ns=17167707358337 in [17167703714341,17167759115227] | sub_ready_ns=17167707271638 in [17167703622548,17167759115207] | pub_starttime_ticks=1716770 sub_starttime_ticks=1716770 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.076540s, nvcsw 2196, nivcsw 2) sub=0(cpu 0.044681s, nvcsw 4553, nivcsw 2)
+       note: round=0
+[40] path=dzflat-b workload=crc wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2153 fallback=2 cpu=(0.083,0.064) cores=0.148
+       note: identity: parent_pid=47 pub_pid=324 sub_pid=323 | pub_ready_ns=17169552593275 in [17169547884341,17169603383415] | sub_ready_ns=17169551617788 in [17169547794974,17169603383372] | pub_starttime_ticks=1716954 sub_starttime_ticks=1716954 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.083110s, nvcsw 2200, nivcsw 3) sub=0(cpu 0.064457s, nvcsw 4555, nivcsw 34)
+       note: round=0
+[41] path=dzflat-b workload=full wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=2139 fallback=2 cpu=(0.094,0.074) cores=0.168
+       note: identity: parent_pid=47 pub_pid=330 sub_pid=329 | pub_ready_ns=17171398952258 in [17171394248824,17171449705700] | sub_ready_ns=17171397994341 in [17171394151999,17171449705646] | pub_starttime_ticks=1717139 sub_starttime_ticks=1717139 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.094425s, nvcsw 2187, nivcsw 11) sub=0(cpu 0.073574s, nvcsw 4528, nivcsw 3)
+       note: round=0
+[42] path=dzflat-b workload=timestamp wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=1208 fallback=2 cpu=(0.252,0.029) cores=0.281
+       note: identity: parent_pid=47 pub_pid=336 sub_pid=335 | pub_ready_ns=17173245879166 in [17173241333154,17173296856955] | sub_ready_ns=17173244838979 in [17173241193740,17173296856899] | pub_starttime_ticks=1717324 sub_starttime_ticks=1717324 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.252209s, nvcsw 1256, nivcsw 11) sub=0(cpu 0.028746s, nvcsw 2670, nivcsw 5)
+       note: round=0
+[43] path=dzflat-b workload=crc wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=1238 fallback=2 cpu=(0.304,0.074) cores=0.379
+       note: identity: parent_pid=47 pub_pid=342 sub_pid=341 | pub_ready_ns=17175088032963 in [17175085033910,17175138481506] | sub_ready_ns=17175088086708 in [17175084931414,17175138481459] | pub_starttime_ticks=1717508 sub_starttime_ticks=1717508 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.303950s, nvcsw 1284, nivcsw 4) sub=0(cpu 0.074368s, nvcsw 2726, nivcsw 1)
+       note: round=0
+[44] path=dzflat-b workload=full wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=1217 fallback=2 cpu=(0.239,0.125) cores=0.365
+       note: identity: parent_pid=47 pub_pid=348 sub_pid=347 | pub_ready_ns=17176935456912 in [17176931266342,17176984649557] | sub_ready_ns=17176933847038 in [17176931127043,17176984649526] | pub_starttime_ticks=1717693 sub_starttime_ticks=1717693 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: child_exit pub=0(cpu 0.239390s, nvcsw 1263, nivcsw 3) sub=0(cpu 0.124752s, nvcsw 2685, nivcsw 2)
+       note: round=0
+[45] path=cyclonedds-udp workload=timestamp wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.065,2.206) cores=2.273
+       note: identity: parent_pid=47 pub_pid=357 sub_pid=356 | pub_ready_ns=17178784893629 in [17178777117791,17178795699796] | sub_ready_ns=17178784336090 in [17178776966549,17178795699743] | pub_starttime_ticks=1717877 sub_starttime_ticks=1717877 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.064952s, nvcsw 2279, nivcsw 4) sub=0(cpu 2.205537s, nvcsw 3335, nivcsw 21)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[46] path=cyclonedds-udp workload=crc wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.066,2.207) cores=2.276
+       note: identity: parent_pid=47 pub_pid=376 sub_pid=375 | pub_ready_ns=17180980379666 in [17180974084337,17180990621481] | sub_ready_ns=17180980305063 in [17180973908247,17180990621427] | pub_starttime_ticks=1718097 sub_starttime_ticks=1718097 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.066061s, nvcsw 2288, nivcsw 4) sub=0(cpu 2.207451s, nvcsw 3102, nivcsw 12)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[47] path=cyclonedds-udp workload=full wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.063,2.203) cores=2.279
+       note: identity: parent_pid=47 pub_pid=395 sub_pid=394 | pub_ready_ns=17183176226225 in [17183170643275,17183187105919] | sub_ready_ns=17183176654327 in [17183170513565,17183187105875] | pub_starttime_ticks=1718317 sub_starttime_ticks=1718317 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.010000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.063354s, nvcsw 2276, nivcsw 5) sub=0(cpu 2.202998s, nvcsw 3049, nivcsw 11)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[48] path=cyclonedds-udp workload=timestamp wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.064,2.202) cores=2.268
+       note: identity: parent_pid=47 pub_pid=414 sub_pid=413 | pub_ready_ns=17185374031365 in [17185368091956,17185384606899] | sub_ready_ns=17185373650484 in [17185367955320,17185384606865] | pub_starttime_ticks=1718536 sub_starttime_ticks=1718536 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.063928s, nvcsw 2291, nivcsw 3) sub=0(cpu 2.201849s, nvcsw 3146, nivcsw 8)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[49] path=cyclonedds-udp workload=timestamp wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.068,2.203) cores=2.274
+       note: identity: parent_pid=47 pub_pid=433 sub_pid=432 | pub_ready_ns=17187571123924 in [17187564810277,17187581296792] | sub_ready_ns=17187570955722 in [17187564720620,17187581296772] | pub_starttime_ticks=1718756 sub_starttime_ticks=1718756 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.068032s, nvcsw 2316, nivcsw 2) sub=0(cpu 2.203259s, nvcsw 3666, nivcsw 16)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[50] path=cyclonedds-udp workload=crc wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.068,2.203) cores=2.273
+       note: identity: parent_pid=47 pub_pid=452 sub_pid=451 | pub_ready_ns=17189767131125 in [17189761425039,17189777918359] | sub_ready_ns=17189765970964 in [17189761322187,17189777918204] | pub_starttime_ticks=1718976 sub_starttime_ticks=1718976 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.068352s, nvcsw 2260, nivcsw 3) sub=0(cpu 2.202777s, nvcsw 3315, nivcsw 11)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[51] path=cyclonedds-udp workload=crc wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.060,2.203) cores=2.265
+       note: identity: parent_pid=47 pub_pid=471 sub_pid=470 | pub_ready_ns=17191959122733 in [17191955671791,17191970111616] | sub_ready_ns=17191960522724 in [17191955524062,17191970111558] | pub_starttime_ticks=1719195 sub_starttime_ticks=1719195 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.059549s, nvcsw 2299, nivcsw 5) sub=0(cpu 2.202804s, nvcsw 2981, nivcsw 10)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[52] path=cyclonedds-udp workload=full wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.062,2.204) cores=2.268
+       note: identity: parent_pid=47 pub_pid=490 sub_pid=489 | pub_ready_ns=17194153653202 in [17194148912126,17194165443760] | sub_ready_ns=17194154620077 in [17194148770543,17194165443629] | pub_starttime_ticks=1719414 sub_starttime_ticks=1719414 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.062300s, nvcsw 2287, nivcsw 6) sub=0(cpu 2.203789s, nvcsw 3016, nivcsw 6)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[53] path=cyclonedds-udp workload=full wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.062,2.204) cores=2.269
+       note: identity: parent_pid=47 pub_pid=509 sub_pid=508 | pub_ready_ns=17196350960958 in [17196343375060,17196361966439] | sub_ready_ns=17196350961702 in [17196343244927,17196361966320] | pub_starttime_ticks=1719634 sub_starttime_ticks=1719634 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.062279s, nvcsw 2295, nivcsw 2) sub=0(cpu 2.204272s, nvcsw 2805, nivcsw 17)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[54] path=cyclonedds-udp workload=timestamp wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.177,2.251) cores=2.431
+       note: identity: parent_pid=47 pub_pid=528 sub_pid=527 | pub_ready_ns=17198549577393 in [17198542283314,17198560819044] | sub_ready_ns=17198549572356 in [17198542131875,17198560818989] | pub_starttime_ticks=1719854 sub_starttime_ticks=1719854 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.177325s, nvcsw 2095, nivcsw 15) sub=0(cpu 2.251214s, nvcsw 6774, nivcsw 45)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[55] path=cyclonedds-udp workload=crc wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.196,2.258) cores=2.457
+       note: identity: parent_pid=47 pub_pid=547 sub_pid=546 | pub_ready_ns=17200745126804 in [17200740029709,17200756527317] | sub_ready_ns=17200745731543 in [17200739937633,17200756527282] | pub_starttime_ticks=1720074 sub_starttime_ticks=1720074 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.196044s, nvcsw 2032, nivcsw 15) sub=0(cpu 2.258450s, nvcsw 7477, nivcsw 52)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[56] path=cyclonedds-udp workload=full wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.170,2.259) cores=2.431
+       note: identity: parent_pid=47 pub_pid=566 sub_pid=565 | pub_ready_ns=17202941434427 in [17202935777744,17202952276379] | sub_ready_ns=17202943402210 in [17202935638618,17202952276346] | pub_starttime_ticks=1720293 sub_starttime_ticks=1720293 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.170089s, nvcsw 2084, nivcsw 19) sub=0(cpu 2.258838s, nvcsw 5448, nivcsw 20)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[57] path=cyclonedds-udp workload=timestamp wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.720,2.562) cores=3.286
+       note: identity: parent_pid=47 pub_pid=585 sub_pid=584 | pub_ready_ns=17205139980177 in [17205133346157,17205149826692] | sub_ready_ns=17205138159864 in [17205133243269,17205149826656] | pub_starttime_ticks=1720513 sub_starttime_ticks=1720513 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.720086s, nvcsw 873, nivcsw 15) sub=0(cpu 2.562051s, nvcsw 29265, nivcsw 24)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[58] path=cyclonedds-udp workload=crc wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.672,2.536) cores=3.222
+       note: identity: parent_pid=47 pub_pid=604 sub_pid=603 | pub_ready_ns=17207330729743 in [17207323689785,17207344337832] | sub_ready_ns=17207331103275 in [17207323546099,17207344337779] | pub_starttime_ticks=1720732 sub_starttime_ticks=1720732 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.010000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.671647s, nvcsw 873, nivcsw 12) sub=0(cpu 2.536175s, nvcsw 34214, nivcsw 29)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[59] path=cyclonedds-udp workload=full wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.666,2.468) cores=3.136
+       note: identity: parent_pid=47 pub_pid=623 sub_pid=622 | pub_ready_ns=17209528675194 in [17209522592774,17209543116824] | sub_ready_ns=17209528557879 in [17209522491423,17209543116605] | pub_starttime_ticks=1720952 sub_starttime_ticks=1720952 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.665636s, nvcsw 906, nivcsw 9) sub=0(cpu 2.468474s, nvcsw 38638, nivcsw 67)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[60] path=cyclonedds-iox workload=timestamp wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.048,2.199) cores=2.250
+       note: identity: parent_pid=47 pub_pid=642 sub_pid=641 | pub_ready_ns=17211737011367 in [17211723957662,17211748713956] | sub_ready_ns=17211735764181 in [17211723810957,17211748713915] | pub_starttime_ticks=1721172 sub_starttime_ticks=1721172 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.048170s, nvcsw 2310, nivcsw 1) sub=0(cpu 2.199240s, nvcsw 2856, nivcsw 23)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[61] path=cyclonedds-iox workload=crc wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.051,2.201) cores=2.254
+       note: identity: parent_pid=47 pub_pid=665 sub_pid=664 | pub_ready_ns=17213940221684 in [17213928397845,17213951049314] | sub_ready_ns=17213940876424 in [17213928258132,17213951049097] | pub_starttime_ticks=1721392 sub_starttime_ticks=1721392 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.050760s, nvcsw 2303, nivcsw 2) sub=0(cpu 2.200782s, nvcsw 3498, nivcsw 22)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[62] path=cyclonedds-iox workload=full wait=blocking payload=64B(实际 32B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.049,2.199) cores=2.250
+       note: identity: parent_pid=47 pub_pid=688 sub_pid=687 | pub_ready_ns=17216143059846 in [17216130479078,17216155172930] | sub_ready_ns=17216143096713 in [17216130390720,17216155172889] | pub_starttime_ticks=1721613 sub_starttime_ticks=1721613 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.048717s, nvcsw 2311, nivcsw 0) sub=0(cpu 2.199404s, nvcsw 2816, nivcsw 25)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[63] path=cyclonedds-iox workload=timestamp wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.052,2.201) cores=2.255
+       note: identity: parent_pid=47 pub_pid=711 sub_pid=710 | pub_ready_ns=17218348188189 in [17218335626118,17218360326869] | sub_ready_ns=17218347423594 in [17218335485952,17218360326848] | pub_starttime_ticks=1721833 sub_starttime_ticks=1721833 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.051802s, nvcsw 2305, nivcsw 5) sub=0(cpu 2.201374s, nvcsw 3256, nivcsw 20)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[64] path=cyclonedds-iox workload=timestamp wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.054,2.203) cores=2.269
+       note: identity: parent_pid=47 pub_pid=734 sub_pid=733 | pub_ready_ns=17220552228051 in [17220539057782,17220563808058] | sub_ready_ns=17220552276454 in [17220538916760,17220563807864] | pub_starttime_ticks=1722053 sub_starttime_ticks=1722053 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.010000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.053933s, nvcsw 2305, nivcsw 3) sub=0(cpu 2.202989s, nvcsw 4101, nivcsw 6)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[65] path=cyclonedds-iox workload=crc wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.052,2.201) cores=2.255
+       note: identity: parent_pid=47 pub_pid=757 sub_pid=756 | pub_ready_ns=17222756512085 in [17222743888557,17222768601995] | sub_ready_ns=17222755565678 in [17222743744694,17222768601943] | pub_starttime_ticks=1722274 sub_starttime_ticks=1722274 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.051874s, nvcsw 2317, nivcsw 1) sub=0(cpu 2.201320s, nvcsw 2993, nivcsw 12)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[66] path=cyclonedds-iox workload=crc wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.051,2.204) cores=2.257
+       note: identity: parent_pid=47 pub_pid=780 sub_pid=779 | pub_ready_ns=17224955908684 in [17224946903856,17224967470468] | sub_ready_ns=17224955329261 in [17224946751181,17224967470416] | pub_starttime_ticks=1722494 sub_starttime_ticks=1722494 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.051168s, nvcsw 2302, nivcsw 5) sub=0(cpu 2.203650s, nvcsw 3717, nivcsw 9)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[67] path=cyclonedds-iox workload=full wait=blocking payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.053,2.202) cores=2.257
+       note: identity: parent_pid=47 pub_pid=803 sub_pid=802 | pub_ready_ns=17227157511800 in [17227147186120,17227167816256] | sub_ready_ns=17227156229445 in [17227147030265,17227167816201] | pub_starttime_ticks=1722714 sub_starttime_ticks=1722714 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.053391s, nvcsw 2296, nivcsw 1) sub=0(cpu 2.201543s, nvcsw 3044, nivcsw 12)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[68] path=cyclonedds-iox workload=full wait=busy payload=1024B(实际 989B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.051,2.201) cores=2.255
+       note: identity: parent_pid=47 pub_pid=826 sub_pid=825 | pub_ready_ns=17229358189569 in [17229348662111,17229369278235] | sub_ready_ns=17229356823019 in [17229348517384,17229369278181] | pub_starttime_ticks=1722934 sub_starttime_ticks=1722934 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.051188s, nvcsw 2304, nivcsw 4) sub=0(cpu 2.201375s, nvcsw 3254, nivcsw 9)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[69] path=cyclonedds-iox workload=timestamp wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.114,2.201) cores=2.317
+       note: identity: parent_pid=47 pub_pid=849 sub_pid=848 | pub_ready_ns=17231559786321 in [17231549012896,17231571701088] | sub_ready_ns=17231559816411 in [17231548863894,17231571701032] | pub_starttime_ticks=1723154 sub_starttime_ticks=1723154 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.113845s, nvcsw 2205, nivcsw 5) sub=0(cpu 2.201460s, nvcsw 3126, nivcsw 6)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[70] path=cyclonedds-iox workload=crc wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.087,2.198) cores=2.297
+       note: identity: parent_pid=47 pub_pid=872 sub_pid=871 | pub_ready_ns=17233759527964 in [17233751733211,17233770230192] | sub_ready_ns=17233761791208 in [17233751590064,17233770230139] | pub_starttime_ticks=1723375 sub_starttime_ticks=1723375 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.010000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.087113s, nvcsw 2224, nivcsw 4) sub=0(cpu 2.197718s, nvcsw 3123, nivcsw 13)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[71] path=cyclonedds-iox workload=full wait=blocking payload=65536B(实际 65501B) rate=1000
+    -> PASS plan=1000 attempts=1000 ok=1000 recv=1000 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.117,2.204) cores=2.323
+       note: identity: parent_pid=47 pub_pid=895 sub_pid=894 | pub_ready_ns=17235962412736 in [17235949550774,17235974279730] | sub_ready_ns=17235962447284 in [17235949402718,17235974279681] | pub_starttime_ticks=1723594 sub_starttime_ticks=1723594 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.117406s, nvcsw 2181, nivcsw 7) sub=0(cpu 2.203647s, nvcsw 3545, nivcsw 16)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[72] path=cyclonedds-iox workload=timestamp wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.312,2.193) cores=2.509
+       note: identity: parent_pid=47 pub_pid=918 sub_pid=917 | pub_ready_ns=17238162841049 in [17238152603712,17238175315427] | sub_ready_ns=17238164289700 in [17238152452195,17238175315388] | pub_starttime_ticks=1723815 sub_starttime_ticks=1723815 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.311994s, nvcsw 1187, nivcsw 8) sub=0(cpu 2.193136s, nvcsw 1348, nivcsw 14)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[73] path=cyclonedds-iox workload=crc wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.322,2.186) cores=2.522
+       note: identity: parent_pid=47 pub_pid=941 sub_pid=940 | pub_ready_ns=17240365017473 in [17240353805644,17240368220406] | sub_ready_ns=17240363876600 in [17240353648346,17240368220360] | pub_starttime_ticks=1724035 sub_starttime_ticks=1724035 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.010000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.321686s, nvcsw 1217, nivcsw 8) sub=0(cpu 2.186187s, nvcsw 1773, nivcsw 14)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+[74] path=cyclonedds-iox workload=full wait=blocking payload=1048576B(实际 1048541B) rate=500
+    -> PASS plan=500 attempts=500 ok=500 recv=500 missing=0 dup=0 ooo=0 crc_bad=0 dzflat=0 fallback=0 cpu=(0.410,2.189) cores=2.603
+       note: identity: parent_pid=47 pub_pid=964 sub_pid=963 | pub_ready_ns=17242557095505 in [17242544183152,17242560706783] | sub_ready_ns=17242556428196 in [17242544023468,17242560706763] | pub_starttime_ticks=1724254 sub_starttime_ticks=1724254 | pub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0 | sub_lib=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+       note: roudi: pid=37 cpu_window_s=0.000000 (DDS 档把守护进程成本单列; null = 读不到，不冒充 0)
+       note: child_exit pub=0(cpu 0.410295s, nvcsw 1173, nivcsw 5) sub=0(cpu 2.188593s, nvcsw 1504, nivcsw 11)
+       note: dropped.txt 缺失(pub=0, sub=0) —— 截断行数未确认
+       note: round=0
+
+=== 汇总: 75/75 用例通过 ===
+结果目录: artifacts/perf/20260928-r15-W02

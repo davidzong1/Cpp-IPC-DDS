@@ -1,0 +1,10 @@
+# 逐 TID CPU 归因（外部读 /proc/9/task/*/stat）
+# 目标: n=1000 domain=28900 state=3 window=10s
+# 进程内线程数（采样时刻）: 34
+  pid=9 窗口=10.0s 快照A线程=34 快照B线程=34 窗口内退出=0 新建=0
+  两快照共同TID的总tick=582 => 0.5820 core  非零=2
+     tid=12     w10_idle                 581 0.5810 core
+     tid=37     w10_idle                   1 0.0010 core
+state=3 n=1000 domain=28900 pool running=1 workers=32 route_count=1000 threads=34
+0,3,19.000,34,0.59421,0.0,0.0000,0,0,6080,0,0,0,0
+   scheduler entries=2000 tick_delta=162747 tick_wakes_per_s=8565.6 tick_max_us=1323.75 overruns=0

@@ -1,0 +1,1 @@
+./build/bin/xproc_benchmark --smoke-dds --run-id=20260928-r23-W02 --out-dir=artifacts/perf/20260928-r23-W02 --dds-uri-udp=file:///home/zwc/cpp_ipc_dds/test/w02_dds_udp.xml --dds-uri-iox=file:///home/zwc/cpp_ipc_dds/test/w02_dds_iox.xml

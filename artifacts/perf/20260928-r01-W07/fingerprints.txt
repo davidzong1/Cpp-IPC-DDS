@@ -1,0 +1,15 @@
+=== W07 改动面指纹 (after) ===
+226950d437e71e7857cf4c7e938565e3c60960bf8b1ed70b79b4394254f27130  src/libipc/platform/posix/udp.h
+3e2825645bf3a32d63caf99d17d96dca8a9ebcb0929a23dd2bf2544579e12da3  include/dzIPC/ipc_info_pool.h
+7bbb15e86010f1820b400a9d14f9b6cd017aa5f9cc39d192685fa49a3bf1ab4e  src/dzIPC/ipc_info_pool.cc
+
+=== 基线 (HEAD e800ccc) 指纹 ===
+c66aae49b238581b54218e204a41a468cc219b3665ec326ce46d536a2825aedf  src/libipc/platform/posix/udp.h
+f7461f8a698219f66cec192e1e49b577f3b0eb62d2d2cdca7d3038c0a65d4822  include/dzIPC/ipc_info_pool.h
+b366901e1ac106ec3db941acad89b4653e69913c6b4b04474756f6d0a38da2ab  src/dzIPC/ipc_info_pool.cc
+
+=== diffstat (W07 三个文件) ===
+ include/dzIPC/ipc_info_pool.h   |  48 +++++++++++++++++-
+ src/dzIPC/ipc_info_pool.cc      | 109 ++++++++++++++++++++++++++++++++++++----
+ src/libipc/platform/posix/udp.h |  33 ++++++++----
+ 3 files changed, 170 insertions(+), 20 deletions(-)

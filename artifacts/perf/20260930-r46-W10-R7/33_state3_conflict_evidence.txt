@@ -1,0 +1,17 @@
+# R-2b 冻结锚点「state3: threads=34 + idle_exits_delta=0 + ctx + CPU 同窗同进程」在 r40 的可得性
+  n=1     threads_final=3   window_idle_exits=0   thread_restarts=0   ctx/s=150.0     cpu=0.00233
+  n=100   threads_final=34  window_idle_exits=0   thread_restarts=0   ctx/s=2565.9    cpu=0.01800
+  n=500   threads_final=34  window_idle_exits=0   thread_restarts=0   ctx/s=7160.9    cpu=0.11513
+  n=1000  threads_final=34  window_idle_exits=0   thread_restarts=0   ctx/s=6848.6    cpu=0.25093
+
+# R-1b 冻结判据的池项：wait_timeouts 是否 ≈320/s
+  n=1     wait_timeouts_per_s=0.009983 resident=0.009983
+  n=100   wait_timeouts_per_s=0.319797 resident=0.319797
+  n=500   wait_timeouts_per_s=0.319921 resident=0.319921
+  n=1000  wait_timeouts_per_s=0.320043 resident=0.320043
+
+# state3 的 ctx 分解：tick_per_s（控制面）vs ctx_per_s
+  n=1     tick/s=120        ctx/s=150        差=30.0
+  n=100   tick/s=2223.99    ctx/s=2565.91    差=341.9200000000001
+  n=500   tick/s=6814.55    ctx/s=7160.86    差=346.3099999999995
+  n=1000  tick/s=6496.82    ctx/s=6848.63    差=351.8100000000004

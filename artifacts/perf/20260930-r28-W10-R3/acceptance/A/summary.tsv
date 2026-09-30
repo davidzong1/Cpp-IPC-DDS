@@ -1,0 +1,2 @@
+shm-ind-1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+shm-ind-100	rc=1	ok=0	verdict=FAIL failures=1	missing=none

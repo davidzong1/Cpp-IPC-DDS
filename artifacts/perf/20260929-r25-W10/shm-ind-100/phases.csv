@@ -1,0 +1,11 @@
+phase,ms,note
+prepare,0,"话题名与台账预置"
+register,27,"建通道 + InitChannel"
+handshake,17,"registered=100/100"
+warmup,200,"控制面稳定"
+fixed-rate,0,"定速发布"
+drain-verify,0,"valid_rx=100/100"
+silence,3000,"state=connected_silent window_s=3.006 cpu_cores=0.01996 ctx_per_s=3135.3 threads=34 peak=34 unreadable_tids=0"
+recover,2,"silence_ms=3000 resume_msgs=5 rx_after=5 first_packet_ok=1 first_packet_us=95195498677.0 lost=0"
+concurrent-close-rebuild,2,"并发析构后半数订阅"
+reclaim,1008,"routes=50->0"

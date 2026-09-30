@@ -1,0 +1,15 @@
+==> 构建
+==> 门 1: DZIPC 层高速 pub/sub 吞吐(A′ 就是死在这里)
+  ✓ payload=1048576  pubsub_shm_1048576B_tput               1367 msg/s   1367.1 MB/s  p50=13092.39  p99=32137.26  p999=38342.06  max= 41376.64 us  丢包=  0.00%  CPU=1.49
+  ✓ payload=64       pubsub_shm_64B_tput                  163231 msg/s     10.0 MB/s  p50=  558.91  p99= 1008.81  p999= 4108.59  max=  9015.92 us  丢包= 68.16%  CPU=1.80
+==> 门 2: 邻接回归
+  ✓ test_uf011_chunk_return                OK=1
+  ✓ test_chunk_hold                        OK=3
+  ✓ test_lap_safety                        OK=3
+  ✓ test_uf007_id_pool_double_release      OK=2
+  ✓ test_loan                              OK=10
+  ✓ test_dzflat_transport                  OK=9
+  ✓ test_dzflat_rx                         OK=8
+  ✓ test_dzflat_sercli                     OK=4
+
+过闸。

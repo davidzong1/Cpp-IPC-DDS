@@ -1,0 +1,17 @@
+
+## 汇总
+失败项数=0
+case1.log                    
+case2.log                    
+case3.log                    
+case4-inject.log             
+case4.log                    
+R2_MINIMAL_DRIVER_RESULT=PASS
+
+## round1 逐例判定（由 matrix_summary.md 汇总，脚本首版汇总行的 verdict 正则已修正）
+case1.log            verdict=PASS failures=0
+case2.log            verdict=PASS failures=0
+case3.log            verdict=PASS failures=0
+case4-inject.log     verdict=PASS failures=0
+case4.log            verdict=PASS failures=0
+（round2..round5 见各自目录与 matrix_summary.md）

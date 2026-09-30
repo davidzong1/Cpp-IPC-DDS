@@ -1,0 +1,12 @@
+{
+  "run_id": "t43-firstfail",
+  "criteria_version": "t43/§13.3/v1",
+  "stage1_no_construction": "none",
+  "stage2_send_leg_exhausted": "chunk_exhausted",
+  "publish_ok_stage2": 200,
+  "chunk_exhausted": 1,
+  "chunk_alloc_failed": 0,
+  "locatable": true,
+  "table_order": "§13.3 十类，与 w10_matrix.cpp 同一枚举顺序（取第一个非零）",
+  "note": "stage1 用真实 pub/sub 收发但不打干池；stage2 用 DZFlat=off + 订阅者不消费 ⇒ send 腿池空"
+}

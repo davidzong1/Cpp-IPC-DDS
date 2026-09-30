@@ -1,0 +1,8 @@
+case,name,result,detail
+3,"3a route 已进池（前提成立）",PASS,"route_count=1"
+3,"3b 发布者断开被可靠唤醒（wakeups↑ 且无超时）",PASS,"Δwait_wakeups=1 Δwait_timeouts=0 唤醒延迟≈10.46 ms（wait_timeout=5000 ms）"
+3,"3b2 断开唤醒延迟 << wait_timeout",PASS,"10.469 ms < 1000 ms（wait_timeout=5000 ms）"
+3,"3b3 断开后重连、route 重新进池（注销用例的前提）",PASS,"route_count=1"
+3,"3c 注销被可靠唤醒（wakeups↑ 且无超时）",PASS,"Δwait_wakeups=1 Δwait_timeouts=0 唤醒延迟≈0.420 ms"
+3,"3d 注销后 route 归零",PASS,"route_count=0"
+3,"3e 无错误（wait_errors/recv_errors 不增）",PASS,"Δwait_errors=0 Δrecv_errors=0"

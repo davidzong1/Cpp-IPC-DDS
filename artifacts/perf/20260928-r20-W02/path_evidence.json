@@ -1,0 +1,63 @@
+{
+  "kind": "path_evidence",
+  "paths": [
+  {
+    "path": "tlv",
+    "level": "S3",
+    "status": "已确认",
+    "experiment_id": "20260928-r20-W02",
+    "samples": 2000,
+    "fallback_count": 4424,
+    "call_sites": ["src/dzIPC/shm_pub_sub_ipc.cc:publish_blocking → msg->serialize() (TLV 整包)"],
+    "runtime_evidence": ["case r2_tlv_full_blocking_64B_1000Hz: recv=1000 dzflat=0 fallback=2212 via_view=0 (samples/r2_tlv_full_blocking_64B_1000Hz.samples.csv)", "case r0_tlv_timestamp_blocking_64B_1000Hz: recv=1000 dzflat=0 fallback=2212 via_view=0 (samples/r0_tlv_timestamp_blocking_64B_1000Hz.samples.csv)"],
+    "binary_fingerprints": ["collector_sha256=096b77d67b947b21946d5f6b17e7ba9d54cd48a9bba6688b5db50430cd202f51", "libipc_sha256=acde21e630e4c8f3ad4e44c930314ab524d0ba701f7c6a9f7f3ddcbcdd2850d3"],
+    "counters": ["tlv_messages", "tlv_bytes", "tlv_wire_bytes", "tlv_accepted"],
+    "experiment_groups": ["full-read", "transport"],
+    "missing": []
+  },
+  {
+    "path": "dzflat-a",
+    "level": "S3",
+    "status": "已确认",
+    "experiment_id": "20260928-r20-W02",
+    "samples": 2000,
+    "fallback_count": 4,
+    "call_sites": ["src/dzIPC/shm_pub_sub_ipc.cc:try_publish_dzflat → publisher_->loan + msg->dzflat_write"],
+    "runtime_evidence": ["case r17_dzflat-a_full_blocking_64B_1000Hz: recv=1000 dzflat=2214 fallback=2 via_view=1000 (samples/r17_dzflat-a_full_blocking_64B_1000Hz.samples.csv)", "case r15_dzflat-a_timestamp_blocking_64B_1000Hz: recv=1000 dzflat=2222 fallback=2 via_view=1000 (samples/r15_dzflat-a_timestamp_blocking_64B_1000Hz.samples.csv)"],
+    "binary_fingerprints": ["collector_sha256=096b77d67b947b21946d5f6b17e7ba9d54cd48a9bba6688b5db50430cd202f51", "libipc_sha256=acde21e630e4c8f3ad4e44c930314ab524d0ba701f7c6a9f7f3ddcbcdd2850d3"],
+    "counters": ["dzflat_a_messages", "dzflat_a_bytes", "dzflat_wire_bytes", "dzflat_accepted"],
+    "experiment_groups": ["full-read", "transport"],
+    "missing": []
+  },
+  {
+    "path": "dzflat-b",
+    "level": "S3",
+    "status": "已确认",
+    "experiment_id": "20260928-r20-W02",
+    "samples": 2000,
+    "fallback_count": 4,
+    "call_sites": ["test/xproc_benchmark.cpp:run_pub_dzipc → pub->loan<TestMsgFlat>() → alloc_*/set_* → pub->publish_loaned()"],
+    "runtime_evidence": ["case r32_dzflat-b_full_blocking_64B_1000Hz: recv=1000 dzflat=2215 fallback=2 via_view=1000 (samples/r32_dzflat-b_full_blocking_64B_1000Hz.samples.csv)", "case r31_dzflat-b_crc_blocking_64B_1000Hz: recv=1000 dzflat=2217 fallback=2 via_view=1000 (samples/r31_dzflat-b_crc_blocking_64B_1000Hz.samples.csv)"],
+    "binary_fingerprints": ["collector_sha256=096b77d67b947b21946d5f6b17e7ba9d54cd48a9bba6688b5db50430cd202f51", "libipc_sha256=acde21e630e4c8f3ad4e44c930314ab524d0ba701f7c6a9f7f3ddcbcdd2850d3"],
+    "counters": ["dzflat_b_messages", "dzflat_b_bytes", "dzflat_accepted"],
+    "experiment_groups": ["full-read", "full-read"],
+    "missing": []
+  },
+  {
+    "path": "cyclonedds-iox",
+    "level": "S3",
+    "status": "未确认",
+    "experiment_id": "20260928-r20-W02",
+    "samples": 2000,
+    "fallback_count": 0,
+    "call_sites": ["test/xproc_benchmark.cpp:run_pub_dds → dds_write() (CycloneDDS 0.10.2)"],
+    "runtime_evidence": ["case r47_cyclonedds-udp_full_blocking_64B_1000Hz: recv=1000 dzflat=0 fallback=0 via_view=0 (samples/r47_cyclonedds-udp_full_blocking_64B_1000Hz.samples.csv)", "case r62_cyclonedds-iox_full_blocking_64B_1000Hz: recv=1000 dzflat=0 fallback=0 via_view=0 (samples/r62_cyclonedds-iox_full_blocking_64B_1000Hz.samples.csv)"],
+    "binary_fingerprints": ["collector_sha256=096b77d67b947b21946d5f6b17e7ba9d54cd48a9bba6688b5db50430cd202f51", "libipc_sha256=acde21e630e4c8f3ad4e44c930314ab524d0ba701f7c6a9f7f3ddcbcdd2850d3"],
+    "counters": [],
+    "experiment_groups": ["full-read", "full-read"],
+    "missing": ["缺该路径独立计数"]
+  }
+  ],
+  "confirmed": ["tlv", "dzflat-a", "dzflat-b"],
+  "unconfirmed": ["cyclonedds-iox"]
+}

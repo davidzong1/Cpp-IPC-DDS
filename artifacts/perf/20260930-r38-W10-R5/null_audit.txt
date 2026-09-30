@@ -1,0 +1,10 @@
+# null 审计（⛔ 零分母/未采集不得写 0）
+
+avg_ns_per_entry: 8 次，原因 routes=0 ⇒ 该态无 route 归属池、无扫描轮 ⇒ 分母为 0
+avg_ns_per_entry: 37 次，原因 诊断关闭 ⇒ **未采集**（⛔ 非零成本）
+avg_ns_per_round: 4 次，原因 routes=0 ⇒ 该态无 route 归属池、无扫描轮 ⇒ 分母为 0
+avg_ns_per_round: 37 次，原因 诊断关闭 ⇒ **未采集**（⛔ 非零成本）
+avg_scanned_per_round: 4 次，原因 routes=0 ⇒ 该态无 route 归属池、无扫描轮 ⇒ 分母为 0
+avg_scanned_per_round: 1 次，原因 Δscan_rounds=0 ⇒ 窗口内无扫描轮
+ready_round_ratio: 4 次，原因 routes=0 ⇒ 该态无 route 归属池、无扫描轮 ⇒ 分母为 0
+ready_round_ratio: 1 次，原因 Δscan_rounds=0 ⇒ 窗口内无扫描轮

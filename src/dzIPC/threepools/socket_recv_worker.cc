@@ -1,5 +1,6 @@
 #include "dzIPC/threepools/socket_recv_worker.h"
 
+#include <cassert>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -61,9 +62,40 @@ std::atomic<int>& backend_state() noexcept
 constexpr std::size_t kMaxWorkerCount = 128;
 /* has_pending() 恒真的防饥饿上限（与 SHM 侧同名常量同值）。 */
 constexpr std::size_t kMaxEmptyPollsPerBudget = 4;
-/* 连续"被内核报告就绪却读不到东西"的次数上限。超过它就把该 token 从等待集合里
- * 摘掉再放回（清掉 SocketWaitSet 用户态 ready 残留），并重置计数 —— 见 collect 注释。 */
+/* 连续"被内核报告就绪却读不到东西"的次数上限。达到它即进入**退避**（见 Entry 的
+ * backoff_until 与 rearm_backoffs 的说明）—— 修复前这里只做 remove+add 重挂并
+ * 清零计数，而 fd 仍是 LT 可读 ⇒ wait(0) 立刻再报就绪 ⇒ 实测 1.31M 次/s 忙转
+ * （W04-F3）。 */
 constexpr std::size_t kMaxFruitlessReadiness = 4;
+/* 假就绪退避的**上限**。取 10ms 而不是 wait_timeout(100ms)：
+ *   · 病理通道的循环速率收敛到 ≤ 100 次/s（修复前实测 1.31M 次/s，见 W04-F3）；
+ *   · 真数据到达后的最坏重新检查延迟 ≤ 10ms ≪ wait_timeout(100ms)，也不影响
+ *     "消息/断开/注销都有可靠唤醒"这条契约（方案 §10.2 明令不得为降 CPU 牺牲恢复延迟）。
+ * 首档只有 1ms：偶发的瞬时假就绪（坏校验包被内核丢弃）几乎不付代价。 */
+constexpr std::chrono::milliseconds kFruitlessBackoffMax{50};
+constexpr std::chrono::milliseconds kFruitlessBackoffFirst{1};
+
+/* 按"退避级数"指数增长：4 → 1ms, 5 → 2ms, 6 → 4ms, 7 → 8ms, 8 → 16ms, 9 → 32ms,
+ * ≥10 → 50ms 封顶。每个退避周期最多 kMaxFruitlessReadiness(4) 次 recv_once + 1 次重挂
+ * ⇒ 稳态循环速率上界 ≈ 5 / 50ms = **100 次/s**（修复前实测 1.31M 次/s）。 */
+std::chrono::milliseconds backoff_delay(std::size_t fruitless) noexcept
+{
+    auto d = kFruitlessBackoffFirst;
+    for (std::size_t i = kMaxFruitlessReadiness; i < fruitless && d < kFruitlessBackoffMax; ++i)
+    {
+        d *= 2;
+    }
+    return d < kFruitlessBackoffMax ? d : kFruitlessBackoffMax;
+}
+
+std::uint64_t steady_now_ns() noexcept
+{
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
 constexpr std::chrono::milliseconds kQuiesceTimeout{2000};
 
 bool quiesce_or_timeout(const std::atomic<std::size_t>& in_flight) noexcept
@@ -108,10 +140,25 @@ struct SocketRecvWorker::Impl
 
         /* 连续"报告就绪却没读到数据"的轮数（读到数据即清零）。socket 侧没有 SHM 的
          * sequence 字可做事实判据，唯一可用的事实是"内核说可读"，而它可能因为
-         * 坏校验包被内核丢弃等原因出现瞬时假就绪。计数超过 kMaxFruitlessReadiness
-         * 时该 token 会被摘除再放回（清用户态 ready 残留），计数归零 —— 于是病理
-         * 情形下的循环速率有界，而真数据到达时第一轮就能读到并清零。 */
+         * 坏校验包被内核丢弃等原因出现瞬时假就绪。
+         *
+         * W04-F3 修复：达到 kMaxFruitlessReadiness 后**不再**只做 remove+add 重挂
+         * （那样 fd 仍 LT 可读 ⇒ wait(0) 立刻再报就绪 ⇒ 实测 1.31M 次/s 忙转），而是
+         * 把该 token 从等待集合**摘出**并记下重新挂载时刻（backoff_until_ns），
+         * 退避时长按连续假就绪次数指数增长（1→2→4→10 ms 封顶）。退避期内 wait 不再
+         * 被这个 fd 唤醒 ⇒ 循环速率有界；真数据到达后的最坏重新检查延迟 ≤ 10ms。 */
         std::atomic<std::size_t> fruitless{0};
+        /* 退避截止时刻（steady_clock 的 ns 计数）；0 = 未处于退避。 */
+        std::atomic<std::uint64_t> backoff_until_ns{0};
+        /* 退避**级数**：只增（读到真数据才清零）。它决定退避时长，而 `fruitless` 在每次
+         * 到期重挂时清零 —— 两者必须分开：
+         *   · 若重挂时不清 `fruitless`，重挂后第一次上报就再次 ≥ 阈值 ⇒ 立刻又被摘出，
+         *     该通道**永远轮不到一次 recv_once** ⇒ 真数据到达也收不到（实测：恢复延迟
+         *     2000ms 超时，正是 W04-F3 修复的第一版）；
+         *   · 若清 `fruitless` 但用同一个计数做时长，则时长永远停在首档 ⇒ 速率不再下降。
+         * 分开后每轮退避周期的成本 = 最多 kMaxFruitlessReadiness 次 recv_once + 一次
+         * 到期重挂，而周期长度按级数指数增长 ⇒ 循环速率有界且随病理持续下降。 */
+        std::atomic<std::size_t> backoff_level{0};
 
         /* 预算轮窗口计数。**整个 run_budget 都在窗口内**（上界 = 三项预算 + 一次
          * recv_once），而不是只有 recv_once 那一瞬 —— 否则 remove_route 等到 0 之后，
@@ -165,11 +212,17 @@ struct SocketRecvWorker::Impl
     std::atomic<std::uint64_t> recv_errors{0};
     std::atomic<std::uint64_t> idle_exits{0};
     std::atomic<std::uint64_t> thread_restarts{0};
+    /* W04-F3 追加：假就绪退避的进入次数与到期重挂次数。诊断/验收用 ——
+     * 两者都只增不减；"进入次数持续增长"说明确有病理性假就绪通道（真信号），
+     * 而修复后 CPU 不再被它吃满（循环速率由 backoff 限制）。 */
+    std::atomic<std::uint64_t> fruitless_backoffs{0};
+    std::atomic<std::uint64_t> rearm_events{0};
 
     void loop();
     void thread_main(std::uint64_t epoch) noexcept;
     void wait_once(std::chrono::milliseconds timeout);
     void collect_pending();
+    bool rearm_backoffs(std::chrono::milliseconds* next_due);
     void requeue_ready(std::vector<SocketWaitToken>&& ready);
     bool ensure_thread_alive();
     bool requeue(const std::shared_ptr<Entry>& entry);
@@ -187,10 +240,14 @@ struct SocketRecvWorker::Impl
  *   2. **去重**（Entry::queued CAS）：同一个 token 在一次 wait 里可能被报告多次，
  *      也可能上一轮已经被 drain 排进 queue；重复入队会让同一条 route 在 FIFO 里
  *      占多个位置，破坏"固定 FIFO 不饿死冷 route"的前提。
- *   3. **病理假就绪的兜底**：连续 kMaxFruitlessReadiness 轮"报告就绪但读不到数据"
- *      的 token 会被摘掉再放回（清 SocketWaitSet 的用户态 ready 残留），并重置计数。
- *      没有这一条，一个永远报就绪却没有数据的 fd 会让 worker 空转吃满 CPU（阶段 5 的
- *      第一红线是忙轮询）；有了它，循环速率有界，而真数据到达时第一轮就读到并清零。 */
+ *   3. **病理假就绪的兜底（W04-F3 修复）**：连续 kMaxFruitlessReadiness 轮"报告就绪
+ *      但读不到数据"的 token 会被从等待集合**摘出**并退避（1→2→4→10 ms 指数增长，
+ *      见 backoff_delay），到期后由 loop() 重新挂载。
+ *      ⛔ 修复前这里是"摘掉再立刻放回 + 清零计数"，而 fd 仍是 LT 可读 ⇒ 下一轮
+ *      `wait(0)` 立刻又报就绪 ⇒ 实测 1.31M 次/s 忙转（W04-F3，方案 §4.5 明令
+ *      "⛔ 不得忙轮询"）。把退避做成"摘出 + 到期重挂"之后，退避期内核事件不再唤醒
+ *      本 worker ⇒ 循环速率有界（≤ 100 次/s），而真数据到达后的最坏重新检查延迟
+ *      ≤ kFruitlessBackoffMax(10ms)，**没有**用恢复延迟换 CPU。 */
 void SocketRecvWorker::Impl::requeue_ready(std::vector<SocketWaitToken>&& ready)
 {
     std::vector<SocketWaitToken> rearm;
@@ -209,19 +266,79 @@ void SocketRecvWorker::Impl::requeue_ready(std::vector<SocketWaitToken>&& ready)
             if (entry->fruitless.load(std::memory_order_relaxed) >= kMaxFruitlessReadiness)
             {
                 entry->queued.store(false, std::memory_order_release);
+                /* 退避时长按**级数**增长（级数只增到读到真数据为止）；同时把
+                 * `fruitless` 清零，让重挂后有一次完整的服务机会（见 Entry::backoff_level
+                 * 的说明 —— 不清零会让该通道永久失聪）。 */
+                const std::size_t level = entry->backoff_level.load(std::memory_order_relaxed);
+                const auto need = backoff_delay(kMaxFruitlessReadiness + level);
+                const std::uint64_t until = steady_now_ns()
+                    + static_cast<std::uint64_t>(
+                          std::chrono::duration_cast<std::chrono::nanoseconds>(need).count());
                 entry->fruitless.store(0, std::memory_order_relaxed);
-                rearm.push_back(token);
+                entry->backoff_level.fetch_add(1, std::memory_order_relaxed);
+                if (entry->backoff_until_ns.exchange(until, std::memory_order_acq_rel) == 0)
+                {
+                    /* 只在**进入**退避那一次计数（重复上报不重复计）。计数点必须在这里、
+                     * 不能放 run_budget：达到阈值的那一刻 token 就被摘出等待集合。 */
+                    fruitless_backoffs.fetch_add(1, std::memory_order_relaxed);
+                }
+                rearm.push_back(token);   // 摘出等待集合，到期由 loop() 重挂
                 continue;
             }
             deferred.push_back(entry);
         }
     }
-    /* 重挂载在锁外做：SocketWaitSet 内部自锁，且 remove 会敲唤醒通道。 */
+    /* 摘出在锁外做：SocketWaitSet 内部自锁，且 remove 会敲唤醒通道。 */
     for (const auto& token : rearm)
     {
         wait_set.remove(token);
-        wait_set.add(token);
     }
+}
+
+/* W04-F3：把退避到期的 entry 重新挂回等待集合，并返回「最近一个到期时刻」用于
+ * loop() 选择等待切片（返回 nullopt = 当前没有处于退避的 entry）。
+ *
+ * ⛔ 为什么必须让 loop 知道最早到期时刻：退避期内该 fd **不在**等待集合里，worker
+ *    若照常 `wait(wait_timeout)` 就只能在切片结束时才发现"该重挂了"——
+ *    真数据到达时最坏多等一个 wait_timeout(100ms)。返回最近到期时刻后，loop 取
+ *    `min(wait_timeout, 最早到期 - now)`，把最坏延迟压到 kFruitlessBackoffMax(10ms) 量级。
+ * ⛔ 重挂必须与 remove 配对，且只在到期后做（未到期就重挂 = 退回忙转）。 */
+bool SocketRecvWorker::Impl::rearm_backoffs(std::chrono::milliseconds* next_due)
+{
+    std::vector<SocketWaitToken> tokens;
+    const std::uint64_t now = steady_now_ns();
+    std::int64_t soonest_ns = -1;
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        for (const auto& entry : routes)
+        {
+            if (entry->removed.load(std::memory_order_acquire)) continue;
+            const std::uint64_t until = entry->backoff_until_ns.load(std::memory_order_acquire);
+            if (until == 0) continue;
+            if (now >= until)
+            {
+                entry->backoff_until_ns.store(0, std::memory_order_release);
+                tokens.push_back(entry->token);
+            }
+            else
+            {
+                const std::int64_t delta = static_cast<std::int64_t>(until - now);
+                if (soonest_ns < 0 || delta < soonest_ns) soonest_ns = delta;
+            }
+        }
+    }
+    for (const auto& token : tokens)
+    {
+        wait_set.add(token);
+        rearm_events.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (soonest_ns < 0)
+    {
+        return false;
+    }
+    if (next_due != nullptr) *next_due = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::nanoseconds{soonest_ns});
+    return true;
 }
 
 /* 一次**非阻塞**全量探测（wait(0) + 消费就绪）。loop 每轮开头调用它，作用是
@@ -334,7 +451,11 @@ void SocketRecvWorker::Impl::run_budget(const std::shared_ptr<Entry>& entry)
             break;
         }
         empty_polls = 0;
-        entry->fruitless.store(0, std::memory_order_relaxed);   // 真读到东西：假就绪计数清零
+        /* 真读到东西：假就绪计数、退避级数与退避截止一并清零（读了就是读了 —— 退避没有
+         * 理由延续；这也是"恢复延迟不被拖长"的机制保证）。 */
+        entry->fruitless.store(0, std::memory_order_relaxed);
+        entry->backoff_level.store(0, std::memory_order_relaxed);
+        entry->backoff_until_ns.store(0, std::memory_order_relaxed);
         ++messages;
         bytes += n;
 
@@ -356,6 +477,8 @@ void SocketRecvWorker::Impl::run_budget(const std::shared_ptr<Entry>& entry)
      * more/has_pending；未让出且读空时不做任何事，等下一次内核报就绪。 */
     if (messages == 0)
     {
+        /* 连续空读计数。达到 kMaxFruitlessReadiness 后由 requeue_ready() 把它摘出等待
+         * 集合并退避（W04-F3），进入退避的那一次在那里计数；只有真读到数据才清零。 */
         entry->fruitless.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -409,6 +532,12 @@ void SocketRecvWorker::Impl::loop()
         /* 非阻塞全量探测：deferred 非空时也要先看一眼内核（防热 route 饿死冷 route）。 */
         collect_pending();
 
+        /* 假就绪退避的到期重挂（W04-F3）：把到期项放回等待集合，并取回最近一个未到期
+         * 项的剩余时长，用于把下面两个 wait 切片压到它以内 —— 这样真数据到达后的最坏
+         * 重新检查延迟是 kFruitlessBackoffMax(10ms)，而不是一整个 wait_timeout(100ms)。 */
+        std::chrono::milliseconds backoff_due{0};
+        const bool has_backoff = rearm_backoffs(&backoff_due);
+
         if (deferred_empty())
         {
             const auto now = Clock::now();
@@ -418,6 +547,11 @@ void SocketRecvWorker::Impl::loop()
                 /* 空闲等待是 wait-set 的**阻塞**等待：取 min(wait_timeout, 剩余空闲窗口)，
                  * 下界 1 ms 防止 wait(0) 退化成忙轮询。 */
                 auto slice = std::min(budget.wait_timeout, idle_span - idle_for);
+                if (has_backoff && backoff_due >= std::chrono::milliseconds{1}
+                    && backoff_due < slice)
+                {
+                    slice = backoff_due;
+                }
                 if (slice < std::chrono::milliseconds{1}) slice = std::chrono::milliseconds{1};
                 wait_once(slice);
                 if (!deferred_empty()) idle_since = Clock::now();
@@ -444,7 +578,12 @@ void SocketRecvWorker::Impl::loop()
             return;
         }
 
-        wait_once(budget.wait_timeout);
+        auto slice = budget.wait_timeout;
+        if (has_backoff && backoff_due >= std::chrono::milliseconds{1} && backoff_due < slice)
+        {
+            slice = backoff_due;
+        }
+        wait_once(slice);
         idle_since = Clock::now();
         drain_deferred();
     }
@@ -698,6 +837,14 @@ void SocketRecvWorker::remove_route(const SocketRecvRouteSource* route) noexcept
 {
     if (impl_ == nullptr || route == nullptr) return;
 
+    /* W04-F1（队长裁决 D-11）：同线程调用是不支持的用法（见 SHM 侧同名注释与头文件
+     * 的 grep 判据）。debug 构建下当场断言；Release 下由 2000ms 超时 + 诊断日志给出
+     * 运行期可观测信号。 */
+#if !defined(NDEBUG)
+    assert(impl_->thread.get_id() != std::this_thread::get_id()
+           && "remove_route() must not be called from the worker thread (see W04-F1)");
+#endif
+
     std::shared_ptr<Impl::Entry> entry;
     {
         std::lock_guard<std::mutex> lock(impl_->mtx);
@@ -776,6 +923,8 @@ RecvWorkerStats SocketRecvWorker::stats() const
     out.recv_errors = impl_->recv_errors.load(std::memory_order_relaxed);
     out.idle_exits = impl_->idle_exits.load(std::memory_order_relaxed);
     out.thread_restarts = impl_->thread_restarts.load(std::memory_order_relaxed);
+    out.fruitless_backoffs = impl_->fruitless_backoffs.load(std::memory_order_relaxed);
+    out.rearm_events = impl_->rearm_events.load(std::memory_order_relaxed);
     out.route_count = route_count();
     return out;
 }
@@ -959,6 +1108,8 @@ RecvWorkerStats SocketRecvWorkerPool::stats() const
         out.recv_errors += s.recv_errors;
         out.idle_exits += s.idle_exits;
         out.thread_restarts += s.thread_restarts;
+        out.fruitless_backoffs += s.fruitless_backoffs;
+        out.rearm_events += s.rearm_events;
         out.route_count += s.route_count;
     }
     return out;

@@ -1,0 +1,13 @@
+{
+  "counter_inc_ns": 4.31276,
+  "counter_inc_cached_ns": 4.3286,
+  "diagnostics_inc_enabled_ns": 4.27715,
+  "diagnostics_inc_disabled_ns": 0.466695,
+  "scan_scope_enabled_ns": 37.5013,
+  "scan_scope_disabled_ns": 0.50678,
+  "clock_now_ns": 10.7515,
+  "clock_vdso_ns_per_call": 10.2013,
+  "clock_syscall_ns_per_call": 83.7836,
+  "proc_self_stat_read_ns": 6145.34,
+  "proc_task_status_all_ns": 10731.8
+}

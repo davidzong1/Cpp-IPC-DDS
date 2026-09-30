@@ -1,0 +1,88 @@
+--- a/src/dzIPC/threepools/recv_worker.cc
++++ b/src/dzIPC/threepools/recv_worker.cc
+@@ -189,6 +189,19 @@
+     std::atomic<std::uint64_t> deferred_depth_last{0};
+     std::atomic<std::uint64_t> deferred_depth_max{0};
+ 
++    /* R0-9/R0-10 的**结束值**每 worker 累加器（W06 接线，t53）。
++     *
++     * 一类量两个落点：门控全局计数（`scan.finish()`，W03 维护，⛔ 本层只读引用）与
++     * **本 worker** 的常驻累加器（本成员）。为什么常驻侧也必须有：诊断关闭时门控计数
++     * 是"未采集"，若只看门控面，正式性能窗口里就完全没有结束值可读（与 t30 的常驻/
++     * 门控分工同一条理由）。
++     *
++     * ⛔ 本累加器**不写任何 gauge**（R0-10）：它按 worker 累积，全池当前总深度由
++     * `RecvWorkerPool::stats()` 对 `deferred_depth_after_last` **求和**得到 —— 单个 gauge
++     * 只剩"最后写入者"的值，无法表达多 worker 的总量（t44 自测反例：全池 12、gauge 7）。
++     * 线程纪律：只由拥有本 worker 的那条线程在 `collect_pending()` 内使用（单消费者），
++     * 故内部全为 relaxed 原子、无锁。 */
++    dzIPC::measure::ScanRoundAccumulator scan_acc_;
+ 
+     void loop();
+     void thread_main(std::uint64_t epoch) noexcept;
+@@ -267,6 +280,33 @@
+         }
+     }
+ 
++    /* ---- R0-9 / R0-10 结束值（W06 接线，t53）---------------------------------
++     *
++     * 为什么必须有这一段（t12 实测到的零值语义混淆）：`ScanRoundScope::finish()` 若不
++     * 调用，`scan_ready_routes_total` / `deferred_depth_after_*` 四个门控计数**一个都不写**
++     * ⇒ 读数恒 0，而 `0` 会被误读成"本轮没有新就绪 route / 扫描后队列为空"。接线之后
++     * 它们才表达真实事实。⛔ 本段只**上报观测值**：上面的 for 循环逐字未动。
++     *
++     * 两套落点（与 t30 的常驻/门控分工同构，⛔ 不得互相替代）：
++     *   · `scan.finish(queued, depth_after)` —— 写**门控**全局计数（诊断关闭时零写入，
++     *     属"未采集"，⛔ 不得当作"深度为 0"；判别用 `counter_is_uncollected()`）；
++     *   · `scan_acc_.add(scan.result())` —— 写**本 worker** 的常驻累加器（relaxed 原子、
++     *     不取时钟、⛔ 不写任何 gauge），由 `RecvWorkerStats` 导出。全池**当前**总深度 =
++     *     Σ 每 worker 的 `deferred_depth_after_last`（R0-10 冻结的求法；任一 gauge 都
++     *     不能冒充它 —— t44 自测反例：全池 12 而 gauge 7）。
++     *
++     * ⚠️ 顺序（承重，别改）：`finish()` 放在**遍历 + `set_ready` + 常驻孪生之后**，
++     * 于是 `result().elapsed_ns` 的区间与 `scan_time_ns_total`（构造 → 析构）几乎重合，
++     * 两者可直接对账（t44 声明的守恒判据 `Σ elapsed_ns ≈ scan_time_ns_total`）。t44 的
++     * `finish()` 明确允许它在 `set_ready()` 前后任一点调用，此处取"之后"。
++     * `depth_after` 取**扫描后、运行预算前**的 `deferred.size()`；`set_ready()` 与常驻
++     * 孪生都不改 `deferred`，故在其后读取仍是同一事实。
++     *
++     * 开销：常驻半（`scan_acc_`）无时钟、无门控，每轮 4 次 relaxed 原子加 + 1 次 CAS；
++     * 门控半（`finish()`）在诊断关闭时只置两个成员即 return（⛔ 不读时钟）。 */
++    const std::size_t depth_after = deferred.size();
++    scan.finish(queued, depth_after);
++    scan_acc_.add(scan.result());
+ }
+ 
+ bool RecvWorker::Impl::requeue(const std::shared_ptr<Entry>& entry)
+@@ -952,6 +992,12 @@
+     out.scan_ready_rounds = impl_->scan_ready_rounds.load(std::memory_order_relaxed);
+     out.deferred_depth_last = impl_->deferred_depth_last.load(std::memory_order_relaxed);
+     out.deferred_depth_max = impl_->deferred_depth_max.load(std::memory_order_relaxed);
++    /* t53：R0-9/R0-10 结束值（本 worker 的常驻导出；与门控全局计数同源同点）。 */
++    out.scan_ready_routes_total = impl_->scan_acc_.ready_routes_total();
++    out.deferred_depth_after_last = impl_->scan_acc_.deferred_depth_after_last();
++    out.deferred_depth_after_max = impl_->scan_acc_.deferred_depth_after_max();
++    out.deferred_depth_after_total = impl_->scan_acc_.deferred_depth_after_total();
++    out.scan_elapsed_ns_total = impl_->scan_acc_.elapsed_ns_total();
+     out.route_count = route_count();
+     return out;
+ }
+@@ -1157,6 +1203,18 @@
+         out.scan_ready_rounds += s.scan_ready_rounds;
+         if (s.deferred_depth_last > out.deferred_depth_last) out.deferred_depth_last = s.deferred_depth_last;
+         if (s.deferred_depth_max > out.deferred_depth_max) out.deferred_depth_max = s.deferred_depth_max;
++        /* t53（R0-10）：结束值的池级聚合纪律 —— 与上面两个"入队前"gauge **相反**：
++         *   · `deferred_depth_after_last` = **Σ 每 worker**（全池**当前**总深度；任一 gauge
++         *     都不能表达它 —— t44 自测反例：全池 12 而 gauge 7）；
++         *   · `deferred_depth_after_total` / `scan_ready_routes_total` /
++         *     `scan_elapsed_ns_total` = **sum**（都是可安全相加的累计量）；
++         *   · `deferred_depth_after_max` = **max**（峰值，与 `deferred_depth_max` 同纪律）。 */
++        out.scan_ready_routes_total += s.scan_ready_routes_total;
++        out.deferred_depth_after_last += s.deferred_depth_after_last;
++        out.deferred_depth_after_total += s.deferred_depth_after_total;
++        out.scan_elapsed_ns_total += s.scan_elapsed_ns_total;
++        if (s.deferred_depth_after_max > out.deferred_depth_after_max)
++            out.deferred_depth_after_max = s.deferred_depth_after_max;
+         out.route_count += s.route_count;
+     }
+     return out;

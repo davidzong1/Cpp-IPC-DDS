@@ -1,0 +1,69 @@
+W08 → W02 路径计数冲突交叉核对（2026-09-28，基于 artifacts/perf/20260928-r19-W02）
+
+冲突面（同一 CounterId 有两个写入者）:
+  *_messages :
+    W02 写入者  test/xproc_benchmark.cpp:851-853  CounterRegistry::inc(..._messages)   ← 测量循环每成功一条 +1
+    W08 写入者  src/dzIPC/common/nodelet_config.cc:72/76/80  DZIPC_MEASURE_INC(..._messages) ← 传输层钩子每成功一条 +1
+  *_bytes 与 *_wire_bytes 是**不同 ID**, 目前不冲突 (W02 写 *_bytes, W08 写 *_wire_bytes)
+
+对 dzIPC 三档（tlv/dzflat-a/dzflat-b）15×3=45 个 case 的实测:
+  family = tlv_messages + dzflat_a_messages + dzflat_b_messages
+  恒等式 family - (pub_dzflat + pub_fallback) == sent_ok 严格成立 27/45, 其余偏差 -2~-3
+  （偏差来自进程退出前最后几条钩子计数未被 harness 读取窗口覆盖, 方向单一、量级 ~2~3）
+
+case_id, path, sent_ok, family, family-sent_ok(=钩子+harness 双记), pub_dzflat, pub_fallback
+r0_tlv_timestamp_blocking_64B_1000Hz, tlv, 1000, 3212, 2212, 0, 2212
+r1_tlv_crc_blocking_64B_1000Hz, tlv, 1000, 3210, 2210, 0, 2210
+r2_tlv_full_blocking_64B_1000Hz, tlv, 1000, 3212, 2212, 0, 2212
+r3_tlv_timestamp_blocking_1024B_1000Hz, tlv, 1000, 3210, 2210, 0, 2210
+r4_tlv_timestamp_busy_1024B_1000Hz, tlv, 1000, 3213, 2213, 0, 2213
+r5_tlv_crc_blocking_1024B_1000Hz, tlv, 1000, 3210, 2210, 0, 2210
+r6_tlv_crc_busy_1024B_1000Hz, tlv, 1000, 3210, 2210, 0, 2210
+r7_tlv_full_blocking_1024B_1000Hz, tlv, 1000, 3211, 2211, 0, 2211
+r8_tlv_full_busy_1024B_1000Hz, tlv, 1000, 3212, 2212, 0, 2212
+r9_tlv_timestamp_blocking_65536B_1000Hz, tlv, 1000, 3129, 2129, 0, 2131
+r10_tlv_crc_blocking_65536B_1000Hz, tlv, 1000, 3119, 2119, 0, 2121
+r11_tlv_full_blocking_65536B_1000Hz, tlv, 1000, 3128, 2128, 0, 2130
+r12_tlv_timestamp_blocking_1048576B_500Hz, tlv, 500, 1621, 1121, 0, 1123
+r13_tlv_crc_blocking_1048576B_500Hz, tlv, 500, 1610, 1110, 0, 1112
+r14_tlv_full_blocking_1048576B_500Hz, tlv, 500, 1619, 1119, 0, 1121
+r15_dzflat-a_timestamp_blocking_64B_1000Hz, dzflat-a, 1000, 3210, 2210, 2208, 2
+r16_dzflat-a_crc_blocking_64B_1000Hz, dzflat-a, 1000, 3210, 2210, 2208, 2
+r17_dzflat-a_full_blocking_64B_1000Hz, dzflat-a, 1000, 3212, 2212, 2210, 2
+r18_dzflat-a_timestamp_blocking_1024B_1000Hz, dzflat-a, 1000, 3212, 2212, 2210, 2
+r19_dzflat-a_timestamp_busy_1024B_1000Hz, dzflat-a, 1000, 3212, 2212, 2209, 3
+r20_dzflat-a_crc_blocking_1024B_1000Hz, dzflat-a, 1000, 3213, 2213, 2211, 2
+r21_dzflat-a_crc_busy_1024B_1000Hz, dzflat-a, 1000, 3213, 2213, 2211, 2
+r22_dzflat-a_full_blocking_1024B_1000Hz, dzflat-a, 1000, 3213, 2213, 2211, 2
+r23_dzflat-a_full_busy_1024B_1000Hz, dzflat-a, 1000, 3211, 2211, 2209, 2
+r24_dzflat-a_timestamp_blocking_65536B_1000Hz, dzflat-a, 1000, 3144, 2144, 2144, 2
+r25_dzflat-a_crc_blocking_65536B_1000Hz, dzflat-a, 1000, 3120, 2120, 2120, 2
+r26_dzflat-a_full_blocking_65536B_1000Hz, dzflat-a, 1000, 3143, 2143, 2143, 2
+r27_dzflat-a_timestamp_blocking_1048576B_500Hz, dzflat-a, 500, 1691, 1191, 1191, 2
+r28_dzflat-a_crc_blocking_1048576B_500Hz, dzflat-a, 500, 1679, 1179, 1179, 2
+r29_dzflat-a_full_blocking_1048576B_500Hz, dzflat-a, 500, 1687, 1187, 1187, 2
+r30_dzflat-b_timestamp_blocking_64B_1000Hz, dzflat-b, 1000, 3211, 2211, 2209, 2
+r31_dzflat-b_crc_blocking_64B_1000Hz, dzflat-b, 1000, 3211, 2211, 2209, 2
+r32_dzflat-b_full_blocking_64B_1000Hz, dzflat-b, 1000, 3212, 2212, 2209, 3
+r33_dzflat-b_timestamp_blocking_1024B_1000Hz, dzflat-b, 1000, 3211, 2211, 2209, 2
+r34_dzflat-b_timestamp_busy_1024B_1000Hz, dzflat-b, 1000, 3212, 2212, 2210, 2
+r35_dzflat-b_crc_blocking_1024B_1000Hz, dzflat-b, 1000, 3210, 2210, 2208, 2
+r36_dzflat-b_crc_busy_1024B_1000Hz, dzflat-b, 1000, 3211, 2211, 2208, 3
+r37_dzflat-b_full_blocking_1024B_1000Hz, dzflat-b, 1000, 3210, 2210, 2208, 2
+r38_dzflat-b_full_busy_1024B_1000Hz, dzflat-b, 1000, 3211, 2211, 2208, 3
+r39_dzflat-b_timestamp_blocking_65536B_1000Hz, dzflat-b, 1000, 3155, 2155, 2155, 2
+r40_dzflat-b_crc_blocking_65536B_1000Hz, dzflat-b, 1000, 3152, 2152, 2152, 2
+r41_dzflat-b_full_blocking_65536B_1000Hz, dzflat-b, 1000, 3147, 2147, 2147, 2
+r42_dzflat-b_timestamp_blocking_1048576B_500Hz, dzflat-b, 500, 1717, 1217, 1217, 2
+r43_dzflat-b_crc_blocking_1048576B_500Hz, dzflat-b, 500, 1731, 1231, 1231, 2
+r44_dzflat-b_full_blocking_1048576B_500Hz, dzflat-b, 500, 1696, 1196, 1196, 2
+
+dzIPC case 总数=45; family>sent_ok（即发生双记）的=45
+
+影响与建议:
+  1) sent_ok / recv_measure / 延迟分位 不受影响（它们是 harness 自算, 不读注册表）;
+  2) 只有直接读 counters.json 的 *_messages 会得到约 2× 条数 ⇒ 报告/W11 若引用需先消歧;
+  3) 消歧放法（择一, 属接口裁决, 本包不擅自改）:
+     (a) W02 的 851-853 行改为 '只在 path==cyc-* 时 inc'（dzIPC 档交给传输层钩子）;
+     (b) 或 W08 钩子加进程级开关, 由采集器决定谁记账;
+     (c) 或 counters.json 增加 writer 字段让读方知道该值由谁写。

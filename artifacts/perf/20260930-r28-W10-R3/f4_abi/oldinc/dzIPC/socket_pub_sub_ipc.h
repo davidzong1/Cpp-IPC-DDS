@@ -1,0 +1,269 @@
+#pragma once
+// #include <semaphore.h>
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <type_traits>
+#include <vector>
+#include "dzIPC/common/circularqueue.h"
+#include "dzIPC/common/local_pub_sub_registry.h"
+#include "dzIPC/common/nodelet_config.h"
+#include "dzIPC/common/sample_message.h"
+#include "dzIPC/common/thread_dispatch.h"
+#include "dzIPC/common/topic_data.h"
+
+namespace dzIPC { class Sample; }
+#include "dzIPC/ipc_info_pool.h"
+#include "dzIPC/pub_sub_base.h"
+#include "libipc/udp.h"
+
+namespace dzIPC {
+namespace threepools {
+/* 阶段 5 共享层：socket 侧 route 抽象（include/dzIPC/threepools/socket_recv_worker.h，
+ * 由 captain 裁定 A 归共享层唯一 owner）。公开头只做**前置声明**，真正的 include 放在
+ * .cc —— 只 include 本头的消费者不必为此拉进等待层，也不会看到任何平台头。 */
+class SocketRecvRouteSource;
+}   // namespace threepools
+namespace socket {
+class socket_pub_ipc;
+class socket_sub_ipc;
+
+/* socket_sub_ipc 订阅接收路径的 shared state（定义在 .cc）。
+ *
+ * 收包 worker 只通过 SocketRecvRouteSource 适配器接触它，**不持**裸 socket_sub_ipc
+ * 指针 —— 这是"注销返回后 worker 不再回调已析构对象"的前提（契约 §4.4）。 */
+struct socket_sub_receive_state;
+
+class IPC_EXPORT socket_pub_ipc : public pub_ipc_base
+{
+public:
+    explicit socket_pub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
+                            bool verbose = false, bool enable_thread_qos = false, int cpu_id = -1,
+                            int thread_priority = 20);
+    ~socket_pub_ipc();
+    void reset_message(const std::shared_ptr<TopicData>& msg);
+    void InitChannel(std::string extra_info = "");
+    bool publish(std::shared_ptr<IpcMsgBase> msg);
+    bool publish_best_effort(std::shared_ptr<IpcMsgBase> msg) override;
+    /* publish_blocking: "至少一个确认", 不是全部确认。
+     *
+     * 返回 true 当且仅当收到**任意一个**匹配本消息的 ACK —— chunk_send_ex
+     * 首个匹配即判定 DeliveredAcked (data_rev.cc 的 got_ack 分支)。N 个订阅者
+     * 时, true 只说明"至少有一个收到了", 不保证其余 N-1 个; false 说明等待
+     * 窗口内一个都没收到, 或 CRC 校验失败。
+     *
+     * 防误用: 该接口无法表达"谁收到了、谁没收到"。全体确认需要 RTPS 的
+     * Reader/Writer 配对与逐 Reader 确认状态, 本轮明确不做 (DECISIONS.md
+     * D-3)。也不要用 IpcInfoPool 的"进程活着"当"正在收数据" —— 其 liveness
+     * 是 kill(pid,0) (ipc_info_pool.cc:105-123), fork 入组慢 / socket 坏 /
+     * pid 复用任一情形都会让基于它的全体确认永久超时。 */
+    bool publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm) override;
+    bool publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg) override;
+
+    /* 预构造段发布(见 pub_ipc_base.h)。
+     *
+     * 段直接作为 UDP 载荷送出 —— 分帧仍是既有的 1460+12 页尾, wire 格式**没变**; 变的
+     * 只是"载荷是平坦段还是 TLV"。接收侧的 T1 分流(data_rev.cc 的 out_payload 闸)认的
+     * 正是这个, 于是 UDP 的借样腿由此有了第一个生产者(见 test_socket_borrow.cpp)。 */
+    bool publish_prebuilt_segment(const void* seg, std::size_t len) override;
+
+    /* 是否已有订阅者。
+     *
+     * 与 SHM 的语义对齐(SHM 由 pub_handshake() 线程从控制面回填), socket 侧
+     * 由 discovery_loop() 线程每 kDiscoveryPollMs 毫秒从 IpcInfoPool 统计本
+     * topic/domain 下存活的 SocketSub 条目数回填。
+     *
+     * ---- 探测边界(与 nodelet 快路径相同) ----
+     * IpcInfoPool 只能看到通过 dzIPC 自身 socket_sub_ipc::InitChannel 注册的
+     * 订阅者。原生 UDP 监听程序、抓包工具、外部组播消费者对它不可见, 因此本
+     * 接口返回 false 不代表组播上真的没有接收方。仅可用作"是否有 dzIPC 订阅
+     * 者"的判据, 不可用作是否发送的开关。 */
+    bool has_subscribed() const { return subscribed_; }
+
+    bool client_subscribed() const { return cli_cnt; }
+
+    /* 禁用拷贝 */
+    socket_pub_ipc(const socket_pub_ipc&) = delete;
+    socket_pub_ipc& operator=(const socket_pub_ipc&) = delete;
+
+private:
+    /* 订阅者发现线程: 周期性从 IpcInfoPool 回填 subscribed_。
+     * UDP 组播没有反向发现通道, 只能靠这个进程外共享的信息池。 */
+    void discovery_loop();
+    static constexpr int kDiscoveryPollMs = 50;
+
+    size_t domain_id_{0};
+    int cli_cnt{0};
+    std::atomic<bool> subscribed_{false};
+    bool verbose_{false};
+    std::atomic<bool> running{true};
+    std::string topic_name_;
+    std::shared_ptr<ipc::socket::UDPNode> publisher_;
+    /* ACK 回传通道 (端点分离)。
+     *
+     * publisher_ 是 SendOnly: 不入组, 因此收不到自己发出去的分片回绕 —— 这是
+     * Reliable 能工作的前提。但不入组也意味着它收不到订阅端的 ACK, 所以 ACK 走
+     * 这条独立的 RecvOnly socket, 绑在 port_hash_ + kAckPortOffset 上。
+     *
+     * 只有 publish_blocking() 用到它; BestEffort 路径完全不碰。 */
+    std::shared_ptr<ipc::socket::UDPNode> ack_rx_;
+    uint16_t port_hash_;
+    std::string ipaddr_;
+    std::mutex sleep_mtx;
+    std::condition_variable sleep_cv;
+    std::thread* discovery_thread_{nullptr};
+    dzIPC::info_pool::ScopedRegistration pool_reg_;
+    std::shared_ptr<TopicData> topic_msg_;
+    dzIPC::ThreadDispatch::ThreadOptions thread_options_;
+
+    /* 本话题模板的 msg_id —— 预构造段发布拿它复核段头(SHM 侧 dzflat_msg_id() 的对应物)。
+     * 读取方式与既有 nodelet 块一致(不额外加锁): 模板只在 reset_message() 里换, 那是
+     * 话题类型变更路径, 与今天 pub 其它读法的并发语义相同。 */
+    std::uint32_t template_msg_id() const
+    {
+        return (topic_msg_ && topic_msg_->topic()) ? topic_msg_->topic()->msg_id() : 0;
+    }
+
+    // ---- intra-process fast-path state ----
+    // K=3 consecutive publishes with the same (key, local snapshot size,
+    // IpcInfoPool SocketSub count) must be observed before the fast path
+    // engages.  Any topology change resets the counter.
+    // Cross-process subs are detected by comparing the IpcInfoPool total
+    // SocketSub count (all processes) against the local registry count.
+    mutable std::mutex fast_path_mtx_;
+    ChannelKey last_fp_key_{};
+    size_t last_fp_snapshot_size_{0};
+    size_t last_fp_total_subs_{0};   // from IpcInfoPool snapshot
+    int fp_consecutive_{0};
+    static constexpr int kFastPathConfirm = 3;
+
+    // One-shot warning throttles (per instance, per reason).
+    bool warned_no_local_sub_{false};       // nodelet on but registry empty
+    bool warned_cross_process_{false};      // cross-process SocketSub detected
+    bool warned_pool_unavailable_{false};   // IpcInfoPool returned 0 total subs
+};
+
+class IPC_EXPORT socket_sub_ipc : public sub_ipc_base
+{
+public:
+    explicit socket_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
+                            const size_t queue_size, bool verbose = false, bool enable_thread_qos = false,
+                            int cpu_id = -1, int thread_priority = 20);
+    ~socket_sub_ipc();
+    void InitChannel(std::string extra_info = "");
+    void reset_message(const std::shared_ptr<TopicData>& msg);
+    /* ---- 视图路径(借样) ----
+     *
+     * 与 SHM 侧**同构**的两条互补队列:
+     *
+     *   view_queue_  ← DZFlat 段 + typed 话题(dzflat_schema_hash() != 0) → 借样 Sample
+     *   msg_queue_   ← TLV 段, 以及 schema-less 话题(GenericMessage/手写类型)的 DZFlat 段
+     *
+     * ⚠️ "schema-less 的 DZFlat 段进物化队列" **不等于**"它被物化了": GenericMessage
+     * 覆写 dzflat_adopt, 段字节仍是**借**来的(不拷), 只是没有 C++ flat 视图可绑, 所以
+     * 归到物化队列这条归宿上 —— Python 侧正是从这条队列拿到借样 + memoryview 的。
+     *
+     * ⇒ `try_get` 只服务借样段, `try_get_clone` 只服务物化对象, 一条消息**只会进其中
+     * 一条**。混合 wire(灰度期)需要调用方两条都 drain, 见 pub_sub_base.h 与
+     * sample_message.h 的头注释。
+     *
+     * ⚠️ 两条使用约束(不写清会静默挂死, 与本仓已修过的第 4 条缺陷同类):
+     *   ① 话题恒发 TLV 时视图队列**永远为空** ⇒ 无超时的 get(Sample&) 会永久阻塞,
+     *      这类话题请用 get(Sample&, tm_ms) 或 get_clone/try_get_clone;
+     *   ② 开着 nodelet 快速路径(EnableNodelet(true))时, **同进程**发布者走
+     *      LocalPubSubRegistry 直接投进 msg_queue_ —— 视图队列拿不到那些消息, 该拓扑
+     *      下只能走物化路径。
+     *
+     * 生命周期与 SHM 一致: Sample 持有一段独立的连续段(见 chunk_rev_topic 的
+     * out_payload 契约), view<T>() / span 只在 Sample 活着时有效; Sample 是 move-only。 */
+    void get(Sample& out);
+    bool try_get(Sample& out);
+    /// 带超时的视图取: 超时返回 false 而不是永久阻塞(队列底能力本来就支持, 见
+    /// docs/shm_defect_fixes.md 第 4 条)。
+    bool get(Sample& out, std::uint64_t tm_ms);
+
+    /* 物化路径。socket 的接收走这条(TLV 与 schema-less 的借样段都从这里出)。 */
+    void get_clone(std::shared_ptr<TopicData>& msg);
+    bool try_get_clone(std::shared_ptr<TopicData>& msg);
+    /* 禁用拷贝 */
+    socket_sub_ipc(const socket_sub_ipc&) = delete;
+    socket_sub_ipc& operator=(const socket_sub_ipc&) = delete;
+
+private:
+    /* ---- 阶段 5：固定 socket worker 接入面（captain 裁定 A）----
+     *
+     * worker 本体由共享层提供（threepools/socket_recv_worker.h）；本类只写 **route 适配器**
+     * 与注册/回退/停机协议。⛔ 不复制 worker、不新增等待原语、不出现平台宏、
+     * 不 include 另一个 socket 模块。
+     *
+     * 抽取出来的两条处理路径（.cc 内定义，与抽取前逐行同义）：
+     *   · process_received_wire() —— 把一次 chunk_rev_topic() 的结果按 TLV / schema-less
+     *     dzflat_adopt / typed view 三条分支分流（含 NoteDzFlatRx 三档计数）；
+     *   · socket_receive_once()  —— 模板 clone → chunk_rev_topic → 上面的分流，
+     *     返回**本条完整消息的字节数**。
+     * worker 路径与兼容 subscribe_thread_ 路径**共用**这两条函数与同一个 receive_state_，
+     * 差别只在"谁调用"（契约 §4.6 的单消费者互斥）。
+     *
+     * ---- P0（阻塞解阻方案 §3）：receive_state_ 是跨线程共享的 shared_ptr 成员 ----
+     * 它自身需要独立同步 —— topic_msg_mtx_ / state->mtx 保护的都是别的对象，不能代替它。
+     *   · 任何读 / 写 / 清空都必须走下面三个访问口；⛔ 不得直接碰成员；
+     *   · 只在 receive_state_mtx_ 内复制 shared_ptr 快照，**不得**在持本锁时取
+     *     state->mtx / 队列锁、join 线程或访问 worker pool；
+     *   · 锁序（§3.2）：topic_msg_mtx_ →（短暂取快照后释放本锁）→ state->mtx。
+     *     receive_state_mtx_ **绝不**与 state->mtx 同时持有。
+     * receive_route_ / worker_mode_ / subscribe_thread_ 只由**串行**的 Init/teardown
+     * 路径写（API 约束：调用方必须串行化 InitChannel 与其停止路径），不额外加锁。 */
+    mutable std::mutex receive_state_mtx_;
+    std::shared_ptr<socket_sub_receive_state> receive_state_;
+    std::shared_ptr<threepools::SocketRecvRouteSource> receive_route_;
+    /* true = 当前接收路径是共享层 worker；false = 兼容 subscribe_thread_（显式回退）。 */
+    bool worker_mode_{false};
+    /* 接收路径代际：每次重新注册 +1（restart 必须先完全注销旧代）。 */
+    std::atomic<std::uint32_t> receive_generation_{0};
+
+    /* 注册/注销接收路径。start 返回 false 表示本进程/本后端必须走兼容收包线程（已打显式原因）。 */
+    bool start_receive_path();
+    void teardown_receive_path();
+
+    /* ---- P0：receive_state_ 的同步访问口（唯一合法读写途径；语义同 socket_ser_ipc）---- */
+    std::shared_ptr<socket_sub_receive_state> current_receive_state() const;
+    void set_receive_state(const std::shared_ptr<socket_sub_receive_state>& state);
+    void clear_receive_state() noexcept;
+    /* 抽取出来的两条处理路径定义在 .cc，并以 socket_sub_receive_state 为载体 ——
+     * 收包 worker **不持**裸 socket_sub_ipc 指针：
+     *   · socket_sub_receive_once(state, gate_on_readiness) —— 模板 clone →（worker 路径）可读判据
+     *     → chunk_rev_topic → 分流；返回本条完整消息的**真实字节数**；
+     *   · process_received_wire(state, local_msg, wire, exp_id, exp_hash) —— TLV 物化 /
+     *     schema-less dzflat_adopt / typed view 三支分流（含 NoteDzFlatRx 三档计数）。
+     * worker 路径与兼容 subscribe_thread_ 路径共用它们与同一个 receive_state_。 */
+
+    size_t domain_id_{0};
+    std::atomic<bool> subscribed_{false};
+    std::atomic<bool> running{true};
+    bool data_update_{false};
+    bool verbose_{false};
+    std::string topic_name_;
+    uint16_t port_hash_;
+    std::string ipaddr_;
+    std::shared_ptr<ipc::socket::UDPNode> subscriber_;
+    /* ACK 发送通道 (端点分离): SendOnly, 绑在与发布端 ack_rx_ 相同的端口上。
+     * subscriber_ 只收不发, ACK/NACK 从这条出去。 */
+    std::shared_ptr<ipc::socket::UDPNode> ack_tx_;
+    std::shared_ptr<TopicData> topic_msg_;
+    std::mutex topic_msg_mtx_;
+    std::shared_ptr<CircularQueue<IpcMsgBase>> msg_queue_;  // 物化队列(shared_ptr for fast-path fanout)
+    std::shared_ptr<CircularQueue<Sample>> view_queue_;     // 视图队列: 借样的 DZFlat 段
+    std::thread* subscribe_thread_{nullptr};
+    dzIPC::info_pool::ScopedRegistration pool_reg_;
+    dzIPC::ThreadDispatch::ThreadOptions thread_options_;
+    uint32_t msg_id_{0};             // current registration key msg_id
+    bool local_registered_{false};   // guarded by topic_msg_mtx_
+};
+}   // namespace socket
+}   // namespace dzIPC

@@ -1,0 +1,31 @@
+=== 判据 A：return 语句集合逐字不变（= 返回值语义未被改动）===
+  [cc] 接前 117 条 / 接后 117 条 ⇒ 多重集相等 = True
+  [header] 接前 7 条 / 接后 7 条 ⇒ 多重集相等 = True
+
+=== 判据 B：新增/删除行逐行归类（白名单外必须为 0）===
+  合计 51 行：{'注释/空行': 12, '结构花括号': 8, '计数器调用': 9, '栈上证据填充': 22}
+  ⛔ 白名单外 0 行 
+  ⇒ ✅ 全部归类；无一行是既有代码的改写（删除行内**无**任何代码，仅注释重写）
+
+=== 判据 C：新增 if(!ok) 分支体内无 return / 无对外赋值 / 无副作用调用 ===
+  [note_dzflat_attempt] 新增 if(!ok) 分支 1 个；体内越界语句 0 条 []
+      · 含 return/break/continue/sleep/lock/wait = False
+  [note_dzflat_borrow_failed] 新增 if(!ok) 分支 1 个；体内越界语句 0 条 []
+      · 含 return/break/continue/sleep/lock/wait = False
+
+=== 判据 D：既有控制流关键字计数变化 ===
+  [cc] {'if': (155, 156)}
+  [header] {'if': (5, 6)}
+  cc  +1 if = publish_prebuilt_segment 的 if(!ok)；hdr +1 if = publish_loaned 的 if(!ok)；两处体内仅计数器。
+
+=== 判据 E：新增调用点不引入等待/加锁/I/O ===
+  CounterRegistry::inc = 无锁原子自增，无分配/无日志/无系统调用；调用点在原有 return 之前，
+  不改变任何语句顺序的可观察效果。
+
+=== 判据 F：删除行内容清单（证明删除的只有注释）===
+  -[cc] '    /* 失败不在这里计数: 调用方随后那次 TLV publish() 会记一次回退。两边各记一次会把'
+  -[cc] '     * fallback/(dzflat+fallback) 这个比值算歪 —— 那个比值是判断"收益有没有生效"的唯一'
+  -[cc] '     * 指标(nodelet_config.h), 不能因为记账方式失真。 */'
+  -[header] '            /* 超出变长预算 —— lo 析构会归还 chunk。 */'
+
+✅ 判据 A/B/C/D/E/F 全绿 ⇒『仅计数器点、无行为变更』成立（EX-1 惯例）。

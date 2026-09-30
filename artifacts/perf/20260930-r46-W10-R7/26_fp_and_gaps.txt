@@ -1,0 +1,7 @@
+r40 run 目录=80  逐 run .fingerprint=72  缺指纹的 run=['B-st1-n1-diagoff-r1', 'B-st1-n100-diagoff-r1', 'B-st1-n1000-diagoff-r1', 'B-st1-n500-diagoff-r1', 'B-st2-n1-diagoff-r1', 'B-st2-n100-diagoff-r1', 'B-st2-n1000-diagoff-r1', 'B-st2-n500-diagoff-r1']
+
+socket-ind-1000  threads_after_create=1033   fds_open=4068   socket_pool_routes_alive=1000   pool_routes_alive=0     
+shm-ind-1000     threads_after_create=34     fds_open=4      socket_pool_routes_alive=0      pool_routes_alive=1000  
+
+门槛 3 CPU 项（state3, n=1000, 60s）：我的复算 mean=0.2588 min=0.2408 max=0.2749  vs 门槛 0.20 core ⇒ 超标 1.29×
+门槛 3 线程项 ≤8：实测 threads=34（恒）⇒ 不满足（R-2c 已登记与该场景互斥）

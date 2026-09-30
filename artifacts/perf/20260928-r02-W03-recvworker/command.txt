@@ -1,0 +1,1 @@
+w03_collector evidence --run-id=20260928-r02-W03 --out-dir=artifacts/perf/20260928-r02-W03-recvworker --window-s=30 --required-window-s=60 --sample-ms=100 --diagnostics=on --job=test_recv_worker,other,/home/zwc/cpp_ipc_dds/build/bin/test_recv_worker

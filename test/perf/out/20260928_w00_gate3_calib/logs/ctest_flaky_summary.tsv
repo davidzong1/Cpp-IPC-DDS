@@ -1,0 +1,26 @@
+1	rc=0	
+2	rc=0	
+3	rc=0	
+4	rc=0	
+5	rc=8	17 - test_dzflat_builder (Failed)|
+6	rc=8	17 - test_dzflat_builder (Failed)|
+7	rc=8	17 - test_dzflat_builder (Failed)|
+8	rc=8	17 - test_dzflat_builder (Failed)|
+9	rc=8	17 - test_dzflat_builder (Failed)|
+10	rc=8	17 - test_dzflat_builder (Failed)|
+11	rc=8	17 - test_dzflat_builder (Failed)|
+12	rc=8	17 - test_dzflat_builder (Failed)|
+13	rc=8	17 - test_dzflat_builder (Failed)|
+14	rc=8	17 - test_dzflat_builder (Failed)|
+15	rc=8	17 - test_dzflat_builder (Failed)|
+16	rc=8	17 - test_dzflat_builder (Failed)|
+17	rc=8	17 - test_dzflat_builder (Failed)|
+18	rc=8	17 - test_dzflat_builder (Failed)|
+19	rc=8	17 - test_dzflat_builder (Failed)|
+20	rc=8	17 - test_dzflat_builder (Failed)|
+21	rc=8	17 - test_dzflat_builder (Failed)|
+22	rc=8	17 - test_dzflat_builder (Failed)|
+23	rc=8	3 - test_shm_route_session (Failed)|4 - test_wakeup_artifact (SEGFAULT)|6 - test_shm_sub_dtor_gate (Failed)|9 - test_recv_worker (Failed)|15 - test_w03_measurement (Failed)|17 - test_dzflat_builder (Failed)|22 - test_socket_high_fd (Failed)|
+24	rc=8	15 - test_w03_measurement (Failed)|17 - test_dzflat_builder (Failed)|22 - test_socket_high_fd (Failed)|
+25	rc=8	11 - test_socket_recv_worker (Failed)|15 - test_w03_measurement (Failed)|17 - test_dzflat_builder (Failed)|22 - test_socket_high_fd (Failed)|
+DONE

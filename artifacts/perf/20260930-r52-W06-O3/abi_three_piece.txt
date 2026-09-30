@@ -1,0 +1,99 @@
+# ③d ABI 三件套（引用方清单 / 重编命令 / 库与工装指纹）
+# 变更：RecvWorkerStats 追加 5 个 uint64 字段 ⇒ sizeof 176 → 216（+40 B）
+# 时间: 2026-09-30 19:18:20 +0800
+
+## 1. 结构体尺寸变化（按值返回 ⇒ 陈旧调用方的栈空间不足）
+RecvWorkerStats BEFORE = 176 B
+RecvWorkerStats AFTER  = 216 B   (+40 B, 5 × uint64)
+测量方式：build/r53/size_before.cpp（含追加前头文件副本）vs build/r53/size_now.cpp（当前头文件），
+两者都用 g++ -std=c++17 -O2 -DNDEBUG 编译、链接同一 build/lib/libipc。
+
+## 2. 引用方清单（谁必须随库重编）
+### 2.1 产品侧（在 CMake 内 ⇒ make 自动处理）
+  src/dzIPC/shm_ser_cli_ipc.cc:19:#include "dzIPC/threepools/recv_worker.h"
+  src/dzIPC/threepools/recv_worker.cc:1:#include "dzIPC/threepools/recv_worker.h"
+  src/dzIPC/shm_pub_sub_ipc.cc:23:#include "dzIPC/threepools/recv_worker.h" /* W06: 共享层固定 route 收包 worker（只消费，不复制） */
+  src/dzIPC/threepools/socket_recv_worker.cc  —— 直接构造 RecvWorkerStats（:913/:1089/:1099）
+  （socket 侧不写 scan 族字段：它无全扫语义，追加字段在 socket 侧保持 0）
+
+### 2.2 测试/工装侧（⛔ **不在 CMake** 的目标必须手工重编 —— t31-F4/t40 已实测陈旧即崩）
+#### 在 CMake 内的（`make` 自动重编；取自 `test/CMakeLists.txt` 两处清单）：
+  W10_HARNESSES:      w10_matrix w10_idle w10_scancost w10_threadscan w10_faults w10_wakescan
+                      w10_mixwake w10_tickcost w10_portconflict w10_portconflict_scope w10_rebuild_crash
+  W10_HARNESSES_LATER:w10_r2_interval w10_r2_minimal w10_r4b_firstfail w10_r4b_runtimetruth
+                      w10_r5_matrix w10_r5_minimal
+  SHARED:             force_backend_unavailable → build/bin/libforce_backend.so
+  （另有 w10_r3_counterexamples = 纯对拍件，**不链接 ipc** ⇒ 不受本 ABI 影响）
+#### ⛔ **不在 CMake 内**、必须手工重编的（本包逐一手工重编）：
+  test/perf/w10/w10_o3_endvalues.cpp      ← 本包新增（t53）；**尚未登记进 CMake**（见 §7 请求）
+  （`w10_r2_*` / `w10_r4b_*` / `w10_r5_*` 已于 t40 登记，故 `make` 会自动重编；
+    `force_backend_unavailable.cpp` 亦已登记为 SHARED 目标。）
+  ⚠️ `build/bin/w10_r5_matrix.prev` 是历史遗留副本（无对应源文件、不在任何构建图内），
+     本包**不重编、不使用**；它恰好是 §5 的陈旧反证样例。
+
+## 3. 重编命令（与 W10 工装既有方式一致；库先重编、工装随后）
+```bash
+make -C build -j16                      # ① 库（RecvWorkerStats 尺寸变化的源头）
+# ② 在 CMake 内的工装/测试：同一次 make 一并重编
+# ③ ⛔ 不在 CMake 内的工装：逐一手工重编（命令与 W10 既有方式逐字一致）
+INC="-I include -I src -I . -I 3rdparty"
+LNK="-L build/lib -lipc -lpthread -lrt -Wl,-rpath,$PWD/build/lib"
+for f in test/perf/w10/*.cpp; do
+  b=$(basename "$f" .cpp)
+  case "$b" in force_backend_unavailable) continue;; esac
+  g++ -std=c++17 -O2 -DNDEBUG $INC "$f" -o "build/bin/$b" $LNK
+done
+g++ -std=c++17 -O2 -fPIC -shared -I include test/perf/w10/force_backend_unavailable.cpp \
+    -o build/bin/libforce_backend.so     # LD_PRELOAD 注入器（不链接 ipc，不受 ABI 影响，但仍重编保持同源）
+```
+
+## 4. 库与工装指纹（本 run 读数所依据的对象；run_id 20260930-r52-W06-O3）
+f0ebc3ef2df5b276e35dd38a21183c0bbc59a51721b24aa2ef067783c07747c9  build/lib/libipc.so.1.3.0
+3754116cd495e2f252f1505f0ae5a0e3aadb5316bb64d29b49e5540dcea40ba3  src/dzIPC/threepools/recv_worker.cc
+27ff8079d3fa15ff1697483834dfe8f42bd86ae14698940a5ad21c6c2e3eaa73  include/dzIPC/threepools/recv_worker.h
+4810b53408d7687298a679a395eb3cefc55b76b49f701b289bc4a6aa1fdae393  include/dzIPC/measure/counters.h
+--- 本包新增/使用的工装 ---
+1f6b0241d093ba4f5f8fdd7011fec5bf74f266dffce11f1d1b3addadf3c408fa  build/bin/w10_o3_endvalues
+6f8a2e79f5539e520b0fc636c4eea834593a3ffd0c0c7f5301209f7150f2f704  test/perf/w10/w10_o3_endvalues.cpp
+87f6915becf03a8c3f561a41b42278a2e45d891bdc6b12e242162480c7ebefc0  test/perf/w10/w10_o3_driver.sh
+--- 全部 w10 工装（重编后）---
+056fc4be7c141d1388fcf7f1286eb16adab3638db6b91d1ed32307cc8f281b32  build/bin/w10_faults
+8441b9bb0345f27b86372997339494f6419717f4a34e19537cdb5cbe5b6698cc  build/bin/w10_idle
+ca1ba3ff9556145f3aacf99d4c708310927b235435da4c36dd6272dd6ffbc160  build/bin/w10_matrix
+7f3a9c69ea191ea54556ea1bd79af1bbc3ba1837cc8520209f1ba9ef9fd17745  build/bin/w10_mixwake
+1f6b0241d093ba4f5f8fdd7011fec5bf74f266dffce11f1d1b3addadf3c408fa  build/bin/w10_o3_endvalues
+f912e8f8e20d8de205e6dd34e1fc67021afb8fba99c6f8f0dedde4ce528de22f  build/bin/w10_portconflict
+b7d2bcb8134ce9fc74d21af28f29ee338096ab69184dd32e8c3c5bbf656c0015  build/bin/w10_portconflict_scope
+8b08c0a08c6e8e3afa6dbea7843638d1b1e665c8aa9177e6a87d1edd212e6368  build/bin/w10_r2_interval
+1bf7ebce6e528f2f5ac9888c6ce0c13d6e4db36bf061b7bfcd9541888f2e7341  build/bin/w10_r2_minimal
+11727fd9cb23adaaaeefe46df77f319dcdeb12d59aaed0adfb7aa55a5e3086d9  build/bin/w10_r3_counterexamples
+07f8a89a36bab67e2bd33cbe5aa647e0d97aaa939e05c6dfb6c8b48ffafb3593  build/bin/w10_r4b_firstfail
+855995a7125f762d7ba2fbfd895264da8a0bf99158318af9fdac7b9c4d3e468d  build/bin/w10_r4b_runtimetruth
+7dfd35244cdb8260e04cb1b45190a253f16d3443cd3aafe9e0d78f56aeb9642c  build/bin/w10_r5_matrix
+3ebc187221c367d6e23f498c7f534cbe12642ec2e7e96965027fd3a820b445b5  build/bin/w10_r5_minimal
+f4ff99487177615854b42c2d82fb77b226e6da00a42284415eb833b1619b6b72  build/bin/w10_rebuild_crash
+c71127d6ab35f0be82d006bcb790084687d1bfca358fb7d31bc70075ef516963  build/bin/w10_scancost
+e0b88a10e053667f45a2b9162ffb481643bfd8fde50166133acf9e25223ae0b9  build/bin/w10_threadscan
+114650fcf8fce2bb4c66b2d43cf0fb946164aa49a082a4d19176f3f437e95ba9  build/bin/w10_tickcost
+f611919f5faf92225c1a999f655cca98bec690f21edddb818ac76716e692e05f  build/bin/w10_wakescan
+
+## 5. 陈旧工装的反证（证明本纪律不是形式）
+build/bin/w10_r5_matrix.prev = 09-30 04:24 编译，而 build/lib/libipc.so.1.3.0 = 09-30 19:15 重链
+运行：timeout 300 build/bin/w10_r5_matrix.prev --n 1 --domain 9900
+结果：rc=134，stderr = 『*** stack smashing detected ***: terminated』（栈越界写）
+⇒ 陈旧调用方按旧 sizeof(RecvWorkerStats)=176 留栈空间，新库按 216 写 ⇒ 覆写相邻栈变量。
+   这正是 R0 §7 ABI 纪律与 t31-F4/t40 实测（rc=139 __libc_free）的同一根因。
+
+## 6. 重编后的冒烟（三件套齐备后必须显式做，否则重编过只是声明）
+| 工装 | 命令 | rc | 判定 |
+|---|---|---|---|
+| w10_matrix（t31-F4 的受害样例） | --transport shm --topology independent --n 100 --msgs 3 | 0 | PASS failures=0 |
+| w10_r2_minimal（t42） | --case 1（无 route） | 0 | 6/6 PASS |
+| w10_o3_endvalues（本包） | --case gauge | 0 | 6/6 PASS |
+
+## 7. 请求（⛔ 不在本包边界内）
+`test/CMakeLists.txt` 的写入权不在本任务（可改面仅 `test/perf/w10/**` + 交付目录 + 新 run 目录；
+工装入 CMake 是 **t40** 的范围）。请把本包新增的两个文件并入 `W10_HARNESSES_LATER` 或新块：
+- `w10_o3_endvalues`（可执行，链接 `ipc`）—— 源 `test/perf/w10/w10_o3_endvalues.cpp`
+- `w10_o3_driver.sh`（脚本，不进构建图，与既有 `w10_r2_driver.sh` 同待遇）
+在此之前，本包的全部读数由 **手工重编** 的 `build/bin/w10_o3_endvalues` 产出，指纹见 §4。

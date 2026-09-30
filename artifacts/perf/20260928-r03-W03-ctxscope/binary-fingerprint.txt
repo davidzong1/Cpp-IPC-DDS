@@ -1,0 +1,4 @@
+job=w01_csw_cpu_scope_probe role=other bin=/home/zwc/cpp_ipc_dds/build/w03/w01_csw_cpu_scope_probe sha256=a746ca6788d163eb78994628cd1e2bb7edcd95ef0e0881a4d66ff1025993c3f7
+    stat=/home/zwc/cpp_ipc_dds/build/w03/w01_csw_cpu_scope_probe size=16944 mtime=1790595246
+collector_sha256=2254ae8a3629397425dda96789958e4ced86d6ad89760e75f6e34aa26067854c
+libipc_sha256=97504a74138ada6d818b268d5bb64506bc671de6af8800dda3382879d5f4c537

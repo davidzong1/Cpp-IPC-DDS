@@ -1,0 +1,2 @@
+window,state,phase,routes,control_entries,wall_s,threads,peak_threads,cpu_cores,ctx_per_s,ctx_unreadable_tids,d_scan_rounds,d_scanned_routes_total,d_ready_rounds,d_wait_timeouts,d_idle_exits,d_thread_restarts,d_g_scan_rounds,d_g_scanned_routes_total,d_g_scan_time_ns,d_g_ready_observed,d_g_wait_timeout_count,avg_scanned_per_round,avg_ns_per_round,avg_ns_per_entry,ready_round_ratio,wait_timeouts_per_s,resident_gated_consistent,gates_passed
+0,3,idle,1000,2000,60.013,34,34,0.267275,6587.24,0,21106,659546,0,19193,0,0,0,0,0,0,0,31.249218,null,null,0.000000,0.000000,1,7/7

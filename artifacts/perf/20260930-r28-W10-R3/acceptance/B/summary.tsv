@@ -1,0 +1,5 @@
+t_rc124	rc=124	ok=0	verdict=FAIL failures=3	missing=none
+t_rc139	rc=139	ok=0	verdict=PASS failures=0	missing=none
+t_verdictfail	rc=0	ok=0	verdict=FAIL failures=1	missing=none
+t_missing	rc=0	ok=0	verdict=PASS failures=0	missing=b.csv,
+t_zerobyte	rc=0	ok=0	verdict=PASS failures=0	missing=a.csv,b.csv,

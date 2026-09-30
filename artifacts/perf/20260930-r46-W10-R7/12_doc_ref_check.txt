@@ -1,0 +1,43 @@
+# W10 文档引用的「仓库内路径」是否真实存在（机械核对）
+
+## R0_口径与接口冻结.md (8 缺失)
+  MISS include/dzIPC/measure/counters.h:657-667
+  MISS include/dzIPC/pub_sub_base.h:23,58
+  MISS include/dzIPC/socket_pub_sub_ipc.h:51,159
+  MISS include/dzIPC/threepools/recv_worker.h:312-335
+  MISS src/dzIPC/auto_ser_cli_ipc.cc:241
+  MISS src/dzIPC/auto_ser_cli_ipc.cc:241,573
+  MISS src/dzIPC/socket_pub_sub_ipc.cc:212-296
+  MISS src/dzIPC/threepools/recv_worker.cc:196-275
+
+## R2b_t19窗口开启与rejected语义.md (2 缺失)
+  MISS artifacts/.../rejected_coverage.txt
+  MISS artifacts/perf/artifacts/perf/...
+
+## R5_扫描与三态复验.md (4 缺失)
+  MISS artifacts/.../D-W4-capacity-limited.md
+  MISS artifacts/.../abnormal_round_audit.md
+  MISS artifacts/perf/20260930-r39-W10-R5/
+  MISS docs/.../W10/R5_扫描与三态复验.md
+
+## W10_交付.md (1 缺失)
+  MISS test/test_socket_high_fd.cpp:330-334
+
+## W10_前置标定与D6复现.md (5 缺失)
+  MISS src/leaker.cpp
+  MISS src/libipc/ipc.cpp:368
+  MISS src/libipc/platform/posix/shm_posix.cpp:232
+  MISS test/CMakeLists.txt:433-443
+  MISS test/test_dzflat_builder.cpp:260
+
+## W10_收口复跑_交付.md (1 缺失)
+  MISS src/dzIPC/threepools/recv_worker.cc:233
+
+合计缺失引用： 21
+
+# 去掉 :行号 后缀后的复检（区分「真缺文件」与「只是行号后缀」）
+## R5_扫描与三态复验.md
+  MISS artifacts/perf/20260930-r39-W10-R5/
+## W10_前置标定与D6复现.md
+  MISS src/leaker.cpp
+真缺文件数： 2

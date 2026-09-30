@@ -1,0 +1,16 @@
+{
+  "required_window_s": 60.000000,
+  "total_window_s": 69.818507,
+  "window_sufficient": true,
+  "diagnostics_enabled": true,
+  "phases": {
+    "startup_peak": {"covered": true, "samples": 19, "duration_s": 4.511889, "threads_mean": 18.000000, "threads_min": 18.000000, "threads_max": 18.000000, "threads_p95": 18.000000, "cpu_cores_mean": 0.041991, "cpu_cores_max": 0.079798, "ctx_switch_per_s_mean": 15245.529065, "rss_kb_mean": 3072.000000},
+    "steady_active": {"covered": true, "samples": 41, "duration_s": 14.778421, "threads_mean": 7.829268, "threads_min": 1.000000, "threads_max": 8.000000, "threads_p95": 8.000000, "cpu_cores_mean": 0.019480, "cpu_cores_max": 0.079894, "ctx_switch_per_s_mean": 5608.574988, "rss_kb_mean": 3003.317073},
+    "idle_fallback": {"covered": true, "samples": 220, "duration_s": 54.789635, "threads_mean": 2.000000, "threads_min": 2.000000, "threads_max": 2.000000, "threads_p95": 2.000000, "cpu_cores_mean": 0.000545, "cpu_cores_max": 0.039975, "ctx_switch_per_s_mean": 49.872737, "rss_kb_mean": 3072.000000}
+  },
+  "periodic_task_coverage": {"configured": true, "ticks_observed": 3500, "ticks_per_s": 49.950907, "source": "w03_thread_workload:periodic tick 50Hz"},
+  "recovery_first_packet_us": {"count": 0, "min": 0.000000, "mean": 0.000000, "p50": 0.000000, "p99": 0.000000, "max": 0.000000, "reregistration_required": 0, "lost": 0, "failed": 0},
+  "thread_fallback_ratio": 0.255452,
+  "idle_fallback_observed": true,
+  "verdict": "空闲回落已观测(线程均值回落至稳定活跃的 0.255452); "
+}

@@ -1,0 +1,13 @@
+# t45 单工装重采前置（2026-09-30 10:04:29 +0800）
+仲裁工装 = w10_r5_matrix（唯一；⛔ 不用第二工装做对比）
+libipc.so.1.3.0 cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46
+w10_r5_matrix   0802f8d0910a570bfb23cf56aaef8def8d7817ec8089697b97d474ef6e10450e
+窗口定义: --window-s 60 --settle-s 4（窗口前静置，不含启动瞬态）
+CPU 口径: 进程内 /proc/self/stat token[11]+token[12]（utime+stime）
+重复次数/格: 5
+## 机器
+nproc=32 loadavg=2.33 2.98 2.84
+275e2328f878306392f28b54618adfaa8df5741a19e870eeeeb0d417d41f4b2f  build/bin/w10_r5_matrix
+cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46  build/lib/libipc.so.1.3.0
+7e58845810c0dcaaecfdf4c52e74edf624447e08bcc208bee68af8036da70867  test/perf/w10/w10_r5_matrix.cpp
+6a479d82c2daaa3125e7f08c056a2c2ad14727aa90c598116c88bba4d8b44396  test/perf/w10/w10_idle.cpp

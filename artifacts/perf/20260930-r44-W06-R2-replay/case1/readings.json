@@ -1,0 +1,12 @@
+{
+  "run_id": "r42-case1",
+  "case": 1,
+  "arm": "control",
+  "domain": 8811,
+  "workers": 4,
+  "wait_timeout_ms": 200,
+  "max_messages_per_route": 32,
+  "stats": {"scan_rounds": 90, "scanned_routes_total": 0, "scan_ready_rounds": 0, "deferred_depth_last": 0, "deferred_depth_max": 0, "wait_timeouts": 86, "wait_wakeups": 0, "wait_errors": 0, "budget_yields": 0, "deferred_drains": 0, "messages_received": 0, "recv_once_calls": 0, "route_count": 0},
+  "seam": {"worker": 0, "compat": 0, "compat_backend_unavailable": 0, "compat_waitset_full": 0, "compat_other": 0},
+  "failures": 0
+}

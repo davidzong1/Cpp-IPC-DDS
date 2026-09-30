@@ -1,0 +1,16 @@
+CounterId                        判定        位置
+--------------------------------------------------------------------------------------------------------------
+chunk_exhausted                  直接(1)     src/libipc/ipc.cpp:723
+chunk_alloc_failed               直接(1)     src/libipc/ipc.cpp:720
+queue_evicted                    直接(1)     include/dzIPC/common/circularqueue.h:132
+wait_set_full                    直接(1)     src/dzIPC/shm_pub_sub_ipc.cc:1921
+wait_token_invalid               直接(1)     src/dzIPC/shm_pub_sub_ipc.cc:1924
+queue_backpressure               间接可达      counters.h 落点函数/分类器
+fallback_total                   直接(5)     src/dzIPC/shm_pub_sub_ipc.cc:1911, src/dzIPC/shm_pub_sub_ipc.cc:1915, src/dzIPC/shm_pub_sub_ipc.cc:1919, include/dzIPC/measure/counters.h:554, include/dzIPC/measure/measurement.h:13
+fallback_capacity_full           直接(1)     src/dzIPC/shm_pub_sub_ipc.cc:1920
+registration_rejected            间接可达      counters.h 落点函数/分类器
+fd_limit                         间接可达      counters.h 落点函数/分类器
+generation_mismatch              间接可达      counters.h 落点函数/分类器
+borrow_failed_pool_exhausted     间接可达      counters.h 落点函数/分类器
+publish_blocked                  间接可达      counters.h 落点函数/分类器
+tlv_bytes                        间接可达      counters.h 落点函数/分类器

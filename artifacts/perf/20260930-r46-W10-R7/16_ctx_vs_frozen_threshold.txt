@@ -1,0 +1,47 @@
+R-1b/rev-2 冻结判据：空闲 ctx ≤ ⌈池项 + 控制面项⌉ × 1.5
+  池项=320/s；默认路径 控制面项=Σ/B_min=120000/6.0=20000/s ⇒ 阈值=⌈20320⌉×1.5=30480/s
+  回退路径 控制面项=Σ=120000/s ⇒ 阈值=⌈120320⌉×1.5=180480/s
+
+n      diag          ctx/s  cpu_cores  threads   routes  判定(默认臂阈值30480)
+1      diagon        150.0    0.00233        3        1  PASS
+1      diagon        150.1    0.00167        3        1  PASS
+1      diagon        150.0    0.00233        3        1  PASS
+1      diagon        150.1    0.00283        3        1  PASS
+1      diagon        150.0    0.00200        3        1  PASS
+1      diagoff       150.1    0.00233        3        1  PASS
+1      diagoff       150.1    0.00217        3        1  PASS
+1      diagoff       150.0    0.00250        3        1  PASS
+1      diagoff       150.1    0.00183        3        1  PASS
+1      diagoff       150.0    0.00183        3        1  PASS
+100    diagon       2565.9    0.01800       34      100  PASS
+100    diagon       3147.1    0.02066       34      100  PASS
+100    diagon       2562.7    0.01866       34      100  PASS
+100    diagon       3048.2    0.01999       34      100  PASS
+100    diagon       3159.7    0.02016       34      100  PASS
+100    diagoff      3061.5    0.02083       34      100  PASS
+100    diagoff      2572.1    0.02083       34      100  PASS
+100    diagoff      3186.5    0.02200       34      100  PASS
+100    diagoff      2561.9    0.01950       34      100  PASS
+100    diagoff      3067.8    0.02283       34      100  PASS
+500    diagon       7160.9    0.11513       34      500  PASS
+500    diagon       7390.4    0.11380       34      500  PASS
+500    diagon       7061.7    0.11280       34      500  PASS
+500    diagon       7313.9    0.11830       34      500  PASS
+500    diagon       7228.0    0.11462       34      500  PASS
+500    diagoff      7126.1    0.11063       34      500  PASS
+500    diagoff      7288.0    0.11564       34      500  PASS
+500    diagoff      7245.7    0.11231       34      500  PASS
+500    diagoff      7418.1    0.11814       34      500  PASS
+500    diagoff      7246.9    0.11363       34      500  PASS
+1000   diagon       6848.6    0.25093       34     1000  PASS
+1000   diagon       6646.1    0.26144       34     1000  PASS
+1000   diagon       7271.4    0.26875       34     1000  PASS
+1000   diagon       7233.4    0.26689       34     1000  PASS
+1000   diagon       6735.5    0.25435       34     1000  PASS
+1000   diagoff      6238.4    0.24076       34     1000  PASS
+1000   diagoff      7418.3    0.27488       34     1000  PASS
+1000   diagoff      6578.6    0.24260       34     1000  PASS
+1000   diagoff      7324.6    0.27444       34     1000  PASS
+1000   diagoff      6785.8    0.25328       34     1000  PASS
+
+state3 全部格：min=150.0 max=7418.3 中位=4712.4  ⇒ 默认臂阈值余量 4.11×

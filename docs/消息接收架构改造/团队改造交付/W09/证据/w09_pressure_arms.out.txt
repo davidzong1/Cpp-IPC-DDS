@@ -1,0 +1,11 @@
+# W09 压测原始输出（只追加）
+# 2026-09-28T20:50:53+08:00  库指纹 2af82d372fbacdd1
+
+=== 臂 A：单 pair / queue=1024 / 慢消费者 ===
+RESULT queue=1024 drain=0 pairs=1 payload=11000 need=11096 cap=11264 cls=12288 fresh=1 nsamp=60 badsnap=0 badloop=0 badunstab=0 L_min=10 L_p50=10 L_p95=10 L_max=10 Q_min=NA Q_p50=NA Q_p95=NA Q_max=NA Qm_p50=NA R_p50=NA R_max=NA instr=0 qgtl=0 pin=1 vcap=10 pubs=40000 fb=258 rx_acc=39768 rx_def=0
+=== 臂 B：单 pair / queue=4（钉生效）===
+RESULT queue=4 drain=0 pairs=1 payload=11000 need=11096 cap=11264 cls=12288 fresh=1 nsamp=60 badsnap=0 badloop=0 badunstab=0 L_min=4 L_p50=4 L_p95=4 L_max=4 Q_min=NA Q_p50=NA Q_p95=NA Q_max=NA Qm_p50=NA R_p50=NA R_max=NA instr=0 qgtl=0 pin=1 vcap=10 pubs=40000 fb=464 rx_acc=39562 rx_def=0
+=== 臂 C：4 对 / queue=4（多发布者 + 慢消费者）===
+RESULT queue=4 drain=0 pairs=4 payload=11000 need=11096 cap=11264 cls=12288 fresh=1 nsamp=60 badsnap=0 badloop=0 badunstab=0 L_min=16 L_p50=16 L_p95=16 L_max=16 Q_min=NA Q_p50=NA Q_p95=NA Q_max=NA Qm_p50=NA R_p50=NA R_max=NA instr=0 qgtl=0 pin=1 vcap=10 pubs=40002 fb=251 rx_acc=39782 rx_def=0
+=== 臂 D：4 对 / queue=16 / 每对加 3 条发布线程（过载）===
+RESULT queue=16 drain=0 pairs=4 payload=11000 need=11096 cap=11264 cls=12288 fresh=1 nsamp=60 badsnap=0 badloop=0 badunstab=0 L_min=40 L_p50=40 L_p95=40 L_max=40 Q_min=NA Q_p50=NA Q_p95=NA Q_max=NA Qm_p50=NA R_p50=NA R_max=NA instr=0 qgtl=0 pin=1 vcap=10 pubs=40006 fb=39790 rx_acc=247 rx_def=0

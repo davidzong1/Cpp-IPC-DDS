@@ -1,0 +1,33 @@
+dzIPC performance benchmark - hardware and system configuration
+======================================================================
+test_time                : 2026-09-30 02:12:16+0800
+hostname                 : zwc-leju
+os                       : Linux
+kernel                   : 6.8.0-138-generic
+arch                     : x86_64
+distro                   : Ubuntu 22.04.5 LTS
+cpu_model                : Intel(R) Core(TM) i9-14900KF
+cpu_vendor               : GenuineIntel
+cpu_logical_cores        : 32
+cpu_physical_cores       : 24
+cpu_mhz_now              : 3473.606
+cpu_mhz_max              : 5700
+cpu_governor             : powersave
+cpu_cache                : L1d=48K, L1i=32K, L2=2048K, L3=36864K
+cpu_flags                : sse4_2,avx,avx2,constant_tsc,nonstop_tsc,rdtscp
+mem_total                : 65647728 kB
+mem_available            : 35184652 kB
+hugepages_thp            : always [madvise] never
+dev_shm_size             : 31.30 GiB
+net_rmem_max             : 536870912
+net_wmem_max             : 536870912
+net_rmem_default         : 536870912
+net_netdev_backlog       : 1000
+kernel_cmdline           : BOOT_IMAGE=/boot/vmlinuz-6.8.0-138-generic root=UUID=06a01074-4e9b-4948-b55f-68067b4f7827 ro quiet splash vt.handoff=7
+isolcpus                 : no
+loadavg_1min_at_start    : 2.19
+compiler                 : 11.4.0
+build_type               : release (NDEBUG, -O2)
+cxx_standard             : 201703
+nodelet_fast_path        : disabled
+process_model            : multi-process (fork+exec), 收发分属不同进程

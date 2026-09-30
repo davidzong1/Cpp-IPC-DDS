@@ -1,0 +1,25 @@
+--- git diff --stat -- src include test ---
+ include/dzIPC/common/nodelet_config.h         |   46 +
+ include/dzIPC/detail/shm_sub_seam.h           |   47 +-
+ include/dzIPC/ipc_info_pool.h                 |   48 +-
+ include/dzIPC/shm_pub_sub_ipc.h               |  141 +-
+ include/dzIPC/threepools/recv_worker.h        |   76 +-
+ include/dzIPC/threepools/socket_recv_worker.h |   11 +-
+ src/dzIPC/common/nodelet_config.cc            |   46 +
+ src/dzIPC/ipc_info_pool.cc                    |  109 +-
+ src/dzIPC/shm_pub_sub_ipc.cc                  | 1745 +++++++++++++++++++++----
+ src/dzIPC/threepools/recv_worker.cc           |   98 +-
+ src/dzIPC/threepools/socket_recv_worker.cc    |  177 ++-
+ src/libipc/ipc.cpp                            |  216 ++-
+ src/libipc/platform/posix/udp.h               |   33 +-
+ src/libipc/utility/id_pool.h                  |   18 +
+ test/CMakeLists.txt                           |  330 +++++
+ test/test_shm_ready_transition.cpp            |   79 +-
+ test/test_shm_sub_dtor_gate.cpp               |  103 +-
+ test/test_wakeup_artifact.cpp                 |   96 +-
+ 18 files changed, 3079 insertions(+), 340 deletions(-)
+--- recv_wait_set 干净性（共享层文件，W06 未改）---
+(以上若为空 = 未被改动)
+--- 调试残留自查（应为 0）---
+src/dzIPC/threepools/recv_worker.cc:0
+src/libipc/recv_wait_set.cpp:0

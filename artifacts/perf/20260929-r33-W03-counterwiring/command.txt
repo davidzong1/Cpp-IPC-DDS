@@ -1,0 +1,42 @@
+# F1/t35 复现命令 —— run_id 20260929-r33-W03-counterwiring
+# 工作目录 /home/zwc/cpp_ipc_dds  基线 e800ccc496ac710b711c9346709e86a148c41241
+
+# 0) 开工前指纹
+sha256sum src/libipc/ipc.cpp include/dzIPC/common/circularqueue.h \
+          src/dzIPC/shm_pub_sub_ipc.cc include/dzIPC/measure/counters.h build/lib/libipc.so.1.3.0 \
+          | tee fingerprints_before.txt           # lib = e1c2a7e9…
+
+# 1) 全量机械清点（要求 1）
+python3 src/audit_counter_wiring.py      . 11_counter_wiring_audit_after.tsv   # 接线判定（分层）
+python3 src/uniqueness_check.py          . 12_write_uniqueness.tsv            # 写出点唯一性（要求 4）
+
+# 2) 复现 t31 反例（修复前）
+g++ -std=c++17 -O2 -Iinclude -Ilocal/include \
+    docs/消息接收架构改造/团队改造交付/R1/复算脚本/verify_w10_chunk_counter.cpp \
+    -o prefix_chunk_counter -Lbuild/lib -lipc -pthread
+./prefix_chunk_counter          # ⇒ loaned=40 rejected=160 而 chunk_exhausted=0
+
+# 3) 接线（本次改动：src/libipc/ipc.cpp + include/dzIPC/common/circularqueue.h）
+cmake -S . -B build && make -C build -j16
+
+# 4) 跨二进制 ODR 统一性（接线有效性的**前提**，先证再接线）
+g++ -std=c++17 -O2 -Iinclude -Ilocal/include src/odr_unification_probe.cpp -o odr_unification_probe -Lbuild/lib -lipc -pthread
+./odr_unification_probe         # ⇒ UNIFIED（库内写、库外读）
+
+# 5) 五臂同臂复跑（要求 3）
+./f1_wiring_probe A             # chunk_exhausted 0→1
+./f1_wiring_probe B             # chunk_alloc_failed 0→80
+./f1_wiring_probe C             # queue_evicted 0→98(本TU) 且 C2 跨二进制 0→396
+DZIPC_SHM_RECV_WORKERS=1 ./armD_waitset_full 140    # wait_set_full 13→13（原有接线保持）
+./armE2_token_invalid state     # wait_token_invalid 1→1（原有接线保持）
+
+# 6) 前后对照（同配置同规模，仅换库）
+bash src/run_all_arms.sh counterfactual pre    # 先跑修复前库（见 §counterfactual 的还原步骤）
+bash src/run_all_arms.sh . post                # 再跑修复后库
+#   ⛔ 换库步骤：cp counterfactual/ipc.cpp.HEAD src/libipc/ipc.cpp 等 + make；之后用 .FIX 还原
+
+# 7) 未接线 ID 的"0 = 未采集"机械证据（要求 5/6）
+./undeclared_probe              # ⇒ 27 个未接线 ID 在真实负载下**全 0**，all_unwired_zero=1
+
+# 8) 回归
+ctest --test-dir build -j4      # 27/27 Passed

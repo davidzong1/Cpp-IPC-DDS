@@ -1,0 +1,48 @@
+W08 DZFlat A/B 专项验证 —— 复现命令（run_id 前缀 20260928-r05..r10-W08）
+工作目录 /home/zwc/cpp_ipc_dds, 基线 e800ccc496ac710b711c9346709e86a148c41241
+
+# 0) 改动面 = 4 个文件、+127/−4（**仅计数器调用点**，无发布/接收行为变更）
+#    src/dzIPC/shm_pub_sub_ipc.cc / .h        —— A/B/预构造段三入口分流计数（D-3 有界例外）
+#    include/dzIPC/common/nodelet_config.{h,cc} —— 追加口 NoteDzFlatPathDelivered(转发到 W03 注册表)
+#    补丁: ./w08_counter_only.patch      指纹: ./fingerprints.txt
+#    基线指纹(与队长给定一致): shm_pub_sub_ipc.cc e6e53db8…  shm_pub_sub_ipc.h b9ae81ce…
+
+# 1) 构建
+cmake -S . -B build
+cmake --build build --target ipc test_w08_dzflat_ab test_dzflat_transport test_dzflat_builder \
+      test_dzflat test_dzflat_rx test_dzflat_sercli test_loan test_chunk_hold \
+      test_pool_exhaust_observability -j"$(nproc)"
+
+# 2) W08 用例（3 个）
+#    ① CrossProcessPathCountersAreSeparableByConfig —— 三路径计数可分(每个配置断言"该路径=N, 另两条=0")
+#    ② CrossProcessPerSampleEvidenceIsWrittenAndPayloadFullyVerified —— 6 run × 120 样本落盘 + 全量载荷校验
+#    ③ FailedLoanIsReturnedAndApplicationFallbackStillDelivers —— B 失败契约(归还 chunk + 回退仍送达 + 记在 A)
+export LD_LIBRARY_PATH=build/lib:build/bin
+timeout 900 ./build/bin/test_w08_dzflat_ab       # 日志 ./test_w08_dzflat_ab.log
+
+# 3) 逐样本落盘位置（每 run 6 个文件）
+#    artifacts/perf/20260928-r05-W08-tlv-prebuilt/          tlv        + prebuilt
+#    artifacts/perf/20260928-r06-W08-tlv-permsg/            tlv        + 每消息新构造
+#    artifacts/perf/20260928-r07-W08-dzflat-a-prebuilt/     DZFlat A   + prebuilt
+#    artifacts/perf/20260928-r08-W08-dzflat-a-permsg/       DZFlat A   + 每消息新构造
+#    artifacts/perf/20260928-r09-W08-dzflat-b-prebuilt/     DZFlat B   + prebuilt
+#    artifacts/perf/20260928-r10-W08-dzflat-b-permsg/       DZFlat B   + 应用原地构造
+#    每个目录: samples.csv / samples.jsonl（W03 field_schema.h 的 SampleRecord 逐字段）
+#              manifest.json（transport=…、process_model=cross-process、work_package=W08）
+#              counters_publisher.json（生产进程的路径计数）/ counters_consumer.json / README.md
+
+# 4) 汇总（中位数/分位 + 每行校验；产物 ./perf_summary.md ./perf_summary.json）
+python3 artifacts/perf/20260928-r01-W08/analyze.py
+
+# 5) 相关回归（9 个用例文件，全绿）
+for t in test_dzflat_transport test_dzflat_builder test_dzflat test_dzflat_rx test_dzflat_sercli \
+         test_loan test_chunk_hold test_pool_exhaust_observability test_w08_dzflat_ab ; do
+  timeout 900 ./build/bin/$t ; echo "$t rc=$?" ;
+done     # 逐项日志见 ./regression/*.log
+
+# 6) 热路径硬闸（本改动在发布热路径上，虽不在 include/libipc/** 也一并跑）
+bash docs/hotpath_gate.sh build          # 读数 ./hotpath_gate_after_w08.txt
+
+# 7) 既存缺陷规避（⛔ 不是本包修的）
+#    docs/dzflat_shm.md §9.5 末尾: 大消息连发且订阅方不取 ⇒ chunk 池耗尽 ⇒ 64B 分片 ⇒ 环覆写 ⇒ 段错误。
+#    本套件在协议上**发一条取一条**(生产端每发一条等消费端 ack), 因此不触发; 归因与修复属 W09/W10。

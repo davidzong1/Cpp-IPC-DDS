@@ -1,0 +1,101 @@
+{
+  "run_id": "20260930-r29-libipc-loan-reason",
+  "task": "t46",
+  "attempt_id": "822ee9fa-c146-4b52-b574-6a902a9753a7",
+  "work_package": "W03/F2 (libipc 原因出口)",
+  "source_revision": "e800ccc496ac710b711c9346709e86a148c41241",
+  "decision": "(b) 独立原因出口重载；⛔ 不改 loan_t 布局、⛔ 不改 valid() 语义",
+  "changed_paths": [
+    "include/libipc/ipc.h",
+    "src/libipc/ipc.cpp"
+  ],
+  "change_surface": {
+    "include/libipc/ipc.h": "+54/-0 (纯新增, 行尾逐字保留 CRLF)",
+    "src/libipc/ipc.cpp": "累计 +325/-14；其中 t46 专属 +86/-12 (其余为 t35 F1 接线)"
+  },
+  "fingerprints": {
+    "ipc.h": {
+      "before": "f8b91bba6e09cbf714e37c6ed530259c520c1bf59cc2a414235f839c1f2ee689",
+      "after": "9dbe4a6a0762ab0ede3a030e65578c81efc05384c8c68b1859ea60970824275b"
+    },
+    "ipc.cpp": {
+      "before": "379918b9f6a24da928bda1c843adb29a7bd8367d5e0e14ca3a25dfa2873d0d59",
+      "after": "e15cbdd83a72f050768b89e400a6c37e307e53906fa41b4055203f2570b7a00f"
+    },
+    "libipc.so": {
+      "before": "17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f",
+      "after": "cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46"
+    },
+    "counters.h_untouched": "4810b53408d7687298a679a395eb3cefc55b76b49f701b289bc4a6aa1fdae393"
+  },
+  "abi": {
+    "syms_pre": 1497,
+    "syms_post": 1500,
+    "added": 3,
+    "removed": 0,
+    "loan_t_layout": "sizeof=24 alignof=8 off_id=0 off_data=8 off_size=16 (未变)",
+    "gate_3d": "未触发（未改按值返回结构体布局）；仍给全引用方清单+重编命令+指纹"
+  },
+  "exit_reachability": {
+    "invalid_handle": "reached",
+    "not_ready": "reached (单生产端 flag 争用)",
+    "no_receiver": "reached",
+    "pool_exhausted": "reached",
+    "size_too_large": "reached (溢出请求)",
+    "storage_unavailable": "reached (2^54 段建不出)"
+  },
+  "same_arm": {
+    "borrow_failed_pool_exhausted_bool_api": "0 (ARM-C, 旧 API 零行为变化)",
+    "borrow_failed_pool_exhausted_reason_api": "0→160 (ARM-B) / 0→80 (影子验证)",
+    "chunk_exhausted": "全程 0（未被污染）",
+    "chunk_alloc_failed": "独立计数 80",
+    "fallback_total": "全程 0（⛔ 未并入）",
+    "old_vs_new_api": "CONSISTENT (ARM-D)"
+  },
+  "not_closed": {
+    "borrow_failed_oversized": "仍不可达 ⇒ counters.h/W03 落点改判（41_*需求.md）",
+    "borrow_failed_pool_exhausted": "生产写入点待 SHM接入负责人落 40_*.patch"
+  },
+  "regression": {
+    "ctest": "27/27 Passed (50_ctest_j4.log)",
+    "hotpath_gate": "过闸 GATE_RC=0 (51_hotpath_gate.log) 64B=174527 msg/s; 1MiB 条件化中位=1336 n=5"
+  },
+  "result_files": [
+    "01_classifier_exhaustion.log",
+    "02_loan_exit_reachability.log",
+    "03_divergence.log",
+    "10_arms.log",
+    "11_shadow_verify.log",
+    "20_referrers.txt",
+    "30_audit.tsv",
+    "40_proposed_callsite.patch",
+    "41_borrow_failed_oversized_需求.md",
+    "50_ctest_j4.log",
+    "51_hotpath_gate.log",
+    "classifier_exhaustion",
+    "command.txt",
+    "divergence_classifier_vs_site",
+    "fingerprints_after.txt",
+    "fingerprints_before.txt",
+    "lib_pre/libipc.so.1.3.0",
+    "loan_exit_reachability",
+    "loan_reason_arms",
+    "newipc_crlf.h",
+    "oldinc/libipc/ipc.h",
+    "patchwork/a/shm_pub_sub_ipc.h",
+    "patchwork/b/shm_pub_sub_ipc.h",
+    "shadow/dzIPC/shm_pub_sub_ipc.h",
+    "shadow/reach_check",
+    "shadow/reach_check.cpp",
+    "shadow/shadow_exhaust",
+    "shadow/shadow_exhaust.cpp",
+    "src/audit_counter_wiring.py",
+    "src/classifier_exhaustion.cpp",
+    "src/divergence_classifier_vs_site.cpp",
+    "src/loan_exit_reachability.cpp",
+    "src/loan_reason_arms.cpp",
+    "src/uniqueness_check.py",
+    "syms_post.txt",
+    "syms_pre.txt"
+  ]
+}

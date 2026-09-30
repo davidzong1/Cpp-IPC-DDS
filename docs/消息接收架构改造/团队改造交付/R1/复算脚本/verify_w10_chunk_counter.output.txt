@@ -1,0 +1,4 @@
+BEFORE registry: chunk_exhausted=0 chunk_alloc_failed=0 fallback_pool_exhausted=0
+loaned=40 rejected=160 (池容量 40/档)
+AFTER  registry: chunk_exhausted=0 chunk_alloc_failed=0 fallback_pool_exhausted=0
+VERDICT: 池已明确耗尽(rejected=160) 而 CounterRegistry::chunk_exhausted=0

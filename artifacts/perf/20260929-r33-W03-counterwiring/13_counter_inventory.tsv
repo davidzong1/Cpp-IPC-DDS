@@ -1,0 +1,63 @@
+id	wiring_verdict	producer_evidence	n_write_sites	uniqueness	write_sites
+budget_yields	wired	src/dzIPC/threepools/recv_worker.cc:431	1	single	src/dzIPC/threepools/recv_worker.cc:431
+capacity_first_failed_resource_recorded	wired	src/dzIPC/shm_pub_sub_ipc.cc:1920	1	single	src/dzIPC/shm_pub_sub_ipc.cc:1920
+chunk_alloc_failed	wired	src/libipc/ipc.cpp:720	1	single	src/libipc/ipc.cpp:720
+chunk_exhausted	wired	src/libipc/ipc.cpp:723	1	single	src/libipc/ipc.cpp:723
+deferred_drains	wired	src/dzIPC/threepools/recv_worker.cc:432	1	single	src/dzIPC/threepools/recv_worker.cc:432
+dzflat_a_messages	wired	src/dzIPC/common/nodelet_config.cc:76	1	single	src/dzIPC/common/nodelet_config.cc:76
+dzflat_b_messages	wired	src/dzIPC/common/nodelet_config.cc:80	1	single	src/dzIPC/common/nodelet_config.cc:80
+dzflat_wire_bytes	wired	src/dzIPC/common/nodelet_config.cc:77;src/dzIPC/common/nodelet_config.cc:81;src/dzIPC/common/nodelet_config.cc:87	3	single_file_multi_branch	src/dzIPC/common/nodelet_config.cc:77;src/dzIPC/common/nodelet_config.cc:81;src/dzIPC/common/nodelet_config.cc:87
+fallback_backend_unavailable	wired	src/dzIPC/shm_pub_sub_ipc.cc:1882;src/dzIPC/shm_pub_sub_ipc.cc:1886	2	single_file_multi_branch	src/dzIPC/shm_pub_sub_ipc.cc:1882;src/dzIPC/shm_pub_sub_ipc.cc:1886
+fallback_capacity_full	wired	src/dzIPC/shm_pub_sub_ipc.cc:1890	1	single	src/dzIPC/shm_pub_sub_ipc.cc:1890
+fallback_total	wired	src/dzIPC/shm_pub_sub_ipc.cc:1881;src/dzIPC/shm_pub_sub_ipc.cc:1885;src/dzIPC/shm_pub_sub_ipc.cc:1889	3	single_file_multi_branch	src/dzIPC/shm_pub_sub_ipc.cc:1881;src/dzIPC/shm_pub_sub_ipc.cc:1885;src/dzIPC/shm_pub_sub_ipc.cc:1889
+idle_exits	wired	src/dzIPC/threepools/recv_worker.cc:514	1	single	src/dzIPC/threepools/recv_worker.cc:514
+queue_evicted	wired	include/dzIPC/common/circularqueue.h:132	1	single	include/dzIPC/common/circularqueue.h:132
+recv_once_calls	wired	src/dzIPC/threepools/recv_worker.cc:382	1	single	src/dzIPC/threepools/recv_worker.cc:382
+recv_once_over_budget	wired	src/dzIPC/threepools/recv_worker.cc:379	1	single	src/dzIPC/threepools/recv_worker.cc:379
+registration_attempts	wired	src/dzIPC/shm_pub_sub_ipc.cc:1794	1	single	src/dzIPC/shm_pub_sub_ipc.cc:1794
+registration_busy	wired	src/dzIPC/shm_pub_sub_ipc.cc:1898	1	single	src/dzIPC/shm_pub_sub_ipc.cc:1898
+registration_duplicate	wired	src/dzIPC/shm_pub_sub_ipc.cc:1901	1	single	src/dzIPC/shm_pub_sub_ipc.cc:1901
+registration_failed	wired	src/dzIPC/shm_pub_sub_ipc.cc:1915	1	single	src/dzIPC/shm_pub_sub_ipc.cc:1915
+registration_invalid_route	wired	src/dzIPC/shm_pub_sub_ipc.cc:1907	1	single	src/dzIPC/shm_pub_sub_ipc.cc:1907
+registration_invalid_token	wired	src/dzIPC/shm_pub_sub_ipc.cc:1895	1	single	src/dzIPC/shm_pub_sub_ipc.cc:1895
+registration_ok	wired	src/dzIPC/shm_pub_sub_ipc.cc:1827	1	single	src/dzIPC/shm_pub_sub_ipc.cc:1827
+registration_stopped	wired	src/dzIPC/shm_pub_sub_ipc.cc:1904	1	single	src/dzIPC/shm_pub_sub_ipc.cc:1904
+thread_restarts	wired	src/dzIPC/threepools/recv_worker.cc:631	1	single	src/dzIPC/threepools/recv_worker.cc:631
+tlv_messages	wired	src/dzIPC/common/nodelet_config.cc:72	1	single	src/dzIPC/common/nodelet_config.cc:72
+tlv_wire_bytes	wired	src/dzIPC/common/nodelet_config.cc:73	1	single	src/dzIPC/common/nodelet_config.cc:73
+wait_set_full	wired	src/dzIPC/shm_pub_sub_ipc.cc:1891	1	single	src/dzIPC/shm_pub_sub_ipc.cc:1891
+wait_timeout_count	wired	src/dzIPC/threepools/recv_worker.cc:452	1	single	src/dzIPC/threepools/recv_worker.cc:452
+wait_token_invalid	wired	src/dzIPC/shm_pub_sub_ipc.cc:1894	1	single	src/dzIPC/shm_pub_sub_ipc.cc:1894
+deferred_depth_last	potential_used	carrier=ScanRoundScope users=['include/dzIPC/measure/measurement.h', 'include/dzIPC/measure/proc_sampler.h', 'src/dzIPC/threepools/recv_worker.cc']	0	none	-
+deferred_depth_max	potential_used	carrier=ScanRoundScope users=['include/dzIPC/measure/measurement.h', 'include/dzIPC/measure/proc_sampler.h', 'src/dzIPC/threepools/recv_worker.cc']	0	none	-
+ready_observed	potential_used	carrier=ScanRoundScope users=['include/dzIPC/measure/measurement.h', 'include/dzIPC/measure/proc_sampler.h', 'src/dzIPC/threepools/recv_worker.cc']	0	none	-
+scan_time_ns_total	potential_used	carrier=ScanRoundScope users=['include/dzIPC/measure/measurement.h', 'include/dzIPC/measure/proc_sampler.h', 'src/dzIPC/threepools/recv_worker.cc']	0	none	-
+scan_rounds	selftest_only	self-test only: include/dzIPC/measure/proc_sampler.h:784;include/dzIPC/measure/proc_sampler.h:791	2	single_file_multi_branch	include/dzIPC/measure/proc_sampler.h:784;include/dzIPC/measure/proc_sampler.h:791
+scanned_routes_total	selftest_only	self-test only: include/dzIPC/measure/proc_sampler.h:768	1	single	include/dzIPC/measure/proc_sampler.h:768
+borrow_failed_no_receiver	table_only	counter_table only	0	none	-
+borrow_failed_oversized	table_only	counter_table only	0	none	-
+borrow_failed_pool_exhausted	table_only	counter_table only	0	none	-
+borrow_failed_publish	table_only	counter_table only	0	none	-
+borrow_failed_reason_unknown	table_only	counter_table only	0	none	-
+dzflat_a_bytes	table_only	counter_table only	0	none	-
+dzflat_b_bytes	table_only	counter_table only	0	none	-
+fallback_oversized	table_only	counter_table only	0	none	-
+fallback_pool_exhausted	table_only	counter_table only	0	none	-
+fallback_reason_unknown	table_only	counter_table only	0	none	-
+fallback_type_incompatible	table_only	counter_table only	0	none	-
+fd_limit	table_only	counter_table only	0	none	-
+generation_mismatch	table_only	counter_table only	0	none	-
+path_selection_dzflat_disabled	table_only	counter_table only	0	none	-
+path_selection_type_unsupported	table_only	counter_table only	0	none	-
+payload_checksum_bad	table_only	counter_table only	0	none	-
+payload_checksum_ok	table_only	counter_table only	0	none	-
+publish_blocked	table_only	counter_table only	0	none	-
+publish_failed	table_only	counter_table only	0	none	-
+queue_backpressure	table_only	counter_table only	0	none	-
+registration_rejected	table_only	counter_table only	0	none	-
+rx_timeout	table_only	counter_table only	0	none	-
+seq_duplicate	table_only	counter_table only	0	none	-
+seq_lost	table_only	counter_table only	0	none	-
+seq_monotonic_ok	table_only	counter_table only	0	none	-
+seq_out_of_order	table_only	counter_table only	0	none	-
+tlv_bytes	table_only	counter_table only	0	none	-

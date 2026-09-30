@@ -1,0 +1,20 @@
+  ✅ 解析出的 identity 行数 ==75
+  ✅ parent/pub/sub 三者互异 (逐条)
+  ✅ 75 个 pid 三元组互不重复
+  ✅ pub_ready 落在 spawn 括号内
+  ✅ sub_ready 落在 spawn 括号内
+  ✅ starttime 均存在(>0)
+  ✅ pub_lib 全部 = build/lib/libipc.so.1.3.0
+  ✅ sub_lib 全部 = build/lib/libipc.so.1.3.0
+  ✅ child_killed_total == 0
+  ✅ results.json cases == 75
+  ✅ 逐 case sent_ok == plan（无静默丢失）
+  ✅ 逐 case recv_measure == plan（有效接收）
+  ✅ 逐 case missing/duplicate/out_of_order/checksum_bad/abnormal 全 0
+  ✅ 逐 case child_killed == 0
+  ✅ 逐 case case_ok == True
+  ✅ 逐 case failure_reasons 为空
+
+  样例 pid 三元组: [(10, 47, 46), (10, 53, 52), (10, 59, 58)] … 共 75 组唯一值
+
+IDENTITY_OK rows=75 violations=0

@@ -1,0 +1,19 @@
+{
+  "run_id": "r30negctl_backlog",
+  "canonical": "duration=1;warmup=0.2;rate=1000;queue=256;view_queue_cap=64;domain=1;queue_wait_ms=100;workload=full;wait=blocking;best_effort=0;nodelet=0;payloads=1024;smoke=0;sample_limit=3000",
+  "config_hash": "3be9041c4dacfc12",
+  "duration_s": 1, "warmup_s": 0.2,
+  "rate_hz": 1000, "queue_size": 256,
+  "view_queue_cap": 64, "domain": 1,
+  "queue_wait_ms": 100,
+  "best_effort": false,
+  "nodelet_enabled": false,
+  "smoke": false,
+  "sample_limit": 3000,
+  "payloads": [1024],
+  "paths": ["tlv"],
+  "dds_uri_udp": "file:///home/zwc/cpp_ipc_dds/test/w02_dds_udp.xml",
+  "dds_uri_iox": "file:///home/zwc/cpp_ipc_dds/test/w02_dds_iox.xml",
+  "purpose": "verification", "citation_authority": "20260928-r30-W02",
+  "failure_thresholds": {"late_abs_max": 0, "late_rate_max": 0, "backlog_max_periods": 0.0001, "send_blocked_max": 0, "abnormal_max": 0, "bad_header_max": 0, "cli_overridden": true}
+}

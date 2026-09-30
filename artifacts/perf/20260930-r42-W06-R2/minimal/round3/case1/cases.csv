@@ -1,0 +1,7 @@
+case,name,result,detail
+1,"1a 空表仍按轮扫描（scan_rounds>0）",PASS,"Δscan_rounds=77（窗口 4.00 s）"
+1,"1b 空表扫描 route 数恒为 0",PASS,"Δscanned_routes_total=0"
+1,"1c 空表无就绪轮（scan_ready_rounds 不增）",PASS,"Δscan_ready_rounds=0"
+1,"1d route_count==0 且 deferred 深度为 0",PASS,"route_count=0 deferred_depth_max=0"
+1,"1e 不忙转（轮频率有上界）",PASS,"rounds/s=19.249504 ≤ 上界 80.000000；Δrecv_once_calls=0（应为 0）"
+1,"1f 无错误（wait_errors/recv_errors 不增）",PASS,"Δerrors=0"

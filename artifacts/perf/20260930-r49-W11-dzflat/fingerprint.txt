@@ -1,0 +1,10 @@
+# W11 DZFlat TLV/A/B 串行配对（独占窗口，逐轮独立进程）
+harness=test_w08_dzflat_ab（W08 权威工装；本任务 ⛔ 未改其源码）
+libipc.so.1.3.0   cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46
+test_w08_dzflat_ab 6bbc6367b2b1256a8f15f7e27274534d5701e0cb351b968b4dbda295f2d8dae5
+rounds=6  samples/round=6 配置 × 3 尺寸档 × 40 条 = 720 样本/轮
+落点规则: <root>/round<K>/artifacts/perf/<工装内嵌 run_id>/（W08_ARTIFACT_ROOT 逐轮隔离）
+口径: transport=①传输机制 / app_read=②完整读取 / e2e=③生产到消费（§10.7）
+started=2026-09-30 16:17:55 +0800
+rounds_ok=6 rounds_failed=0
+end=2026-09-30 16:18:16 +0800

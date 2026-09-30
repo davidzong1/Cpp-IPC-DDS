@@ -1,0 +1,25 @@
+ARM1 OFF(TLV 30) tlv=30 a=0 b=0 fb_total=0 sel_off=30 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+ARM2 ON+unsupported 20 tlv=20 a=0 b=0 fb_total=20 sel_off=0 sel_unsup=0 fb_type=20 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+ARM3 B over-budget 10 tlv=0 a=0 b=0 fb_total=0 sel_off=0 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=10 bf_pub=0 bf_over=0 
+ARM4 B ok 10 tlv=0 a=0 b=10 fb_total=0 sel_off=0 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+---
+ARM1 OFF(TLV 30) tlv=30 a=0 b=0 fb_total=0 sel_off=30 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+ARM2 ON+unsupported 20 tlv=20 a=0 b=0 fb_total=20 sel_off=0 sel_unsup=0 fb_type=20 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+ARM3 B over-budget 10 tlv=0 a=0 b=0 fb_total=0 sel_off=0 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=10 bf_pub=0 bf_over=0 
+ARM4 B ok 10 tlv=0 a=0 b=10 fb_total=0 sel_off=0 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+---
+ARM1 OFF(TLV 30) tlv=30 a=0 b=0 fb_total=0 sel_off=30 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+ARM2 ON+unsupported 20 tlv=20 a=0 b=0 fb_total=20 sel_off=0 sel_unsup=0 fb_type=20 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+ARM3 B over-budget 10 tlv=0 a=0 b=0 fb_total=0 sel_off=0 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=10 bf_pub=0 bf_over=0 
+ARM4 B ok 10 tlv=0 a=0 b=10 fb_total=0 sel_off=0 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+---
+ARM1 OFF(TLV 30) tlv=30 a=0 b=0 fb_total=0 sel_off=30 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+ARM2 ON+unsupported 20 tlv=20 a=0 b=0 fb_total=20 sel_off=0 sel_unsup=0 fb_type=20 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+ARM3 B over-budget 10 tlv=0 a=0 b=0 fb_total=0 sel_off=0 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=10 bf_pub=0 bf_over=0 
+ARM4 B ok 10 tlv=0 a=0 b=10 fb_total=0 sel_off=0 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+---
+ARM1 OFF(TLV 30) tlv=30 a=0 b=0 fb_total=0 sel_off=30 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+ARM2 ON+unsupported 20 tlv=20 a=0 b=0 fb_total=20 sel_off=0 sel_unsup=0 fb_type=20 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+ARM3 B over-budget 10 tlv=0 a=0 b=0 fb_total=0 sel_off=0 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=10 bf_pub=0 bf_over=0 
+ARM4 B ok 10 tlv=0 a=0 b=10 fb_total=0 sel_off=0 sel_unsup=0 fb_type=0 fb_unknown=0 | bf_no_rx=0 bf_unknown=0 bf_pub=0 bf_over=0 
+---

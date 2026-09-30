@@ -1,0 +1,5 @@
+rows=173 parsed_nonzero=0 used_set_size=1
+first_token_sample="145:"
+used={0 }
+real_occupied=160  real_has_48650=1
+topic38_base=48650  picker_would_exclude_it=0

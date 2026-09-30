@@ -1,0 +1,25 @@
+# t42 交付指纹（run_id 20260930-r42-W06-R2；可用 sha256sum -c 复核）
+
+0dde3eabd02e23bafffa3142c20c525535f65b1da2635704c5b25458f742650c  src/dzIPC/threepools/recv_worker.cc
+3c2913b9ef08b6d1ab2a81c9fa9d51032fcfe472c9eb866981a1061f69ab0502  include/dzIPC/threepools/recv_worker.h
+1f9c2bd0b9419aea1332c9c295e032ef8e5889e40bf48ebdbf79d8659530b6ae  include/dzIPC/measure/counters.h
+558f47ede2419e14554766af55e53671e69d05d940b05351b1d4aa0e45d79031  build/lib/libipc.so.1.3.0
+656264caa663520ff938d3cce38c13cdff847070590d562511f69737390fefe3  test/perf/w10/w10_r2_minimal.cpp
+3acabd14e2f315123a5cc9e721c0415894fc1a154cee95ab0de1f789155c69e8  test/perf/w10/w10_r2_driver.sh
+d73d5e853e97c2c2a1cbae8a5d7b056611f9c3bf86ead2c3b7b0bff28f9fdcd7  test/perf/w10/w10_r2_interval.cpp
+05729facdd3f7b7409c716f39f86ea70b4c8a0174729f979bb935126185b1709  test/perf/w10/force_backend_unavailable.cpp
+43a0573538afc4b4d4f341abbf4eb1515b22e7037ea409f98d5057f096ab81a0  test/perf/w10/w10_r2_negative_control.sh
+5343a52f161502a7ae0aed89169a3713ad46008b9d03d580b737a2369eacf95f  docs/消息接收架构改造/团队改造交付/W06/R2_T30补齐_交付.md
+27e233fbf1ab896ac48895c1939941aa26ad753b225d6e3ebd5baed669569a4c  docs/消息接收架构改造/团队改造交付/W06/deferred_结束值接口_规格提交W03.md
+01863a3052cee4f9981df96eafe19d8c429f9b53dc9f6b47b855a20d43598470  docs/消息接收架构改造/团队改造交付/W06/扫描计数接线_交付.md
+5cb781eedbe9b82095338d72fc2c060ce8a3d6e60b6efe366788ba7520aec3ff  artifacts/perf/20260930-r42-W06-R2/negative_control_scan_wiring.log
+cb85cb456835dfca85e42ab4dbd9bf1082dedbb64c27d9f9a58b96da075692bb  artifacts/perf/20260930-r42-W06-R2/minimal/matrix_summary.md
+acd21f97738521fb9a6da426a2667c19657d2ba133e10ab1bcb592e2a42695ea  artifacts/perf/20260930-r42-W06-R2/gate_rerun.log
+
+## 反向复核（反例期间临时改动的基线快照）
+
+0dde3eabd02e23bafffa3142c20c525535f65b1da2635704c5b25458f742650c  artifacts/perf/20260930-r42-W06-R2/recv_worker.before.cc
+
+## 结论
+recv_worker.cc 与 recv_worker.before.cc **逐字相同** ⇒ 本包产品代码净改动 = 0。
+（该文件相对 git HEAD 显示为 M 是 **t30 的接线**，非本包改动。）

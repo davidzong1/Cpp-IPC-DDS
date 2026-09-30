@@ -1,0 +1,91 @@
+{
+  "run_id": "r30negctl_backlog",
+  "work_package": "W02",
+  "source_revision": "e800ccc496ac710b711c9346709e86a148c41241",
+  "working_tree_clean": false,
+  "working_tree_diff": [" M .gitignore", " M docs/hotpath_gate.sh", " M \"docs/\\346\\266\\210\\346\\201\\257\\346\\216\\245\\346\\224\\266\\346\\236\\266\\346\\236\\204\\346\\224\\271\\351\\200\\240/\\344\\272\\244\\345\\217\\211Review\\345\\207\\206\\345\\244\\207-\\345\\237\\272\\345\\207\\206\\345\\206\\262\\347\\252\\201\\344\\270\\216\\345\\245\\221\\347\\272\\246\\346\\243\\200\\346\\237\\245\\350\\241\\250.md\"", " M \"docs/\\346\\266\\210\\346\\201\\257\\346\\216\\245\\346\\224\\266\\346\\236\\266\\346\\236\\204\\346\\224\\271\\351\\200\\240/\\344\\272\\244\\345\\217\\211Review\\346\\212\\245\\345\\221\\212.md\"", " M \"docs/\\346\\266\\210\\346\\201\\257\\346\\216\\245\\346\\224\\266\\346\\236\\266\\346\\236\\204\\346\\224\\271\\351\\200\\240/\\346\\226\\207\\346\\241\\243\\345\\233\\236\\345\\206\\231\\350\\256\\260\\345\\275\\225.md\"", " M \"docs/\\346\\266\\210\\346\\201\\257\\346\\216\\245\\346\\224\\266\\346\\236\\266\\346\\236\\204\\346\\224\\271\\351\\200\\240/\\351\\233\\206\\346\\210\\220\\346\\265\\213\\350\\257\\225\\344\\270\\216\\346\\200\\247\\350\\203\\275\\345\\237\\272\\345\\207\\206\\346\\212\\245\\345\\221\\212.md\"", " M include/dzIPC/common/circularqueue.h", " M include/dzIPC/common/nodelet_config.h", " M include/dzIPC/detail/shm_sub_seam.h", " M include/dzIPC/ipc_info_pool.h", " M include/dzIPC/shm_pub_sub_ipc.h", " M include/dzIPC/threepools/recv_worker.h", " M include/dzIPC/threepools/socket_recv_worker.h", " M include/libipc/ipc.h", " M src/dzIPC/common/nodelet_config.cc", " M src/dzIPC/ipc_info_pool.cc", " M src/dzIPC/shm_pub_sub_ipc.cc", " M src/dzIPC/socket_pub_sub_ipc.cc", " M src/dzIPC/threepools/recv_worker.cc", " M src/dzIPC/threepools/socket_recv_worker.cc", " M src/libipc/ipc.cpp", " M src/libipc/platform/posix/udp.h", " M src/libipc/utility/id_pool.h", " M test/CMakeLists.txt", " M test/test_shm_ready_transition.cpp", " M test/test_shm_sub_dtor_gate.cpp", " M test/test_wakeup_artifact.cpp", "?? artifacts/", "?? \"docs/\\346\\266\\210\\346\\201\\257\\346\\216\\245\\346\\224\\266\\346\\236\\266\\346\\236\\204\\346\\224\\271\\351\\200\\240/\\344\\272\\213\\344\\273\\266\\351\\251\\261\\345\\212\\250\\347\\272\\277\\347\\250\\213\\346\\261\\240_vs_iceoryx_\\346\\200\\247\\350\\203\\275\\345\\257\\271\\346\\257\\224.md\"", "?? \"docs/\\346\\266\\210\\346\\201\\257\\346\\216\\245\\346\\224\\266\\346\\236\\266\\346\\236\\204\\346\\224\\271\\351\\200\\240/\\345\\233\\242\\351\\230\\237\\346\\224\\271\\351\\200\\240\\344\\272\\244\\344\\273\\230/\"", "?? \"docs/\\346\\266\\210\\346\\201\\257\\346\\216\\245\\346\\224\\266\\346\\236\\266\\346\\236\\204\\346\\224\\271\\351\\200\\240/\\345\\233\\242\\351\\230\\237\\346\\224\\271\\351\\200\\240\\346\\226\\271\\346\\241\\210_\\346\\200\\247\\350\\203\\275\\350\\257\\201\\346\\215\\256\\351\\227\\255\\347\\216\\257\\344\\270\\216SHM\\350\\247\\204\\346\\250\\241\\345\\214\\226.md\"", "?? include/dzIPC/measure/", "?? test/perf/out/20260928_w00_gate3_calib/", "?? test/perf/w10/", "?? test/test_chunk_capacity_backpressure.cpp", "?? test/test_dzflat_fallback_semantics.cpp", "?? test/test_ipc_info_pool_layout.cpp", "?? test/test_ipc_info_pool_version.cpp", "?? test/test_lifecycle_contract.cpp", "?? test/test_socket_high_fd.cpp", "?? test/test_w02_xproc_benchmark.cpp", "?? test/test_w03_measurement.cpp", "?? test/test_w08_dzflat_ab.cpp", "?? test/w02_benchmark.sh", "?? test/w02_dds_iox.xml", "?? test/w02_dds_types.c", "?? test/w02_dds_types.h", "?? test/w02_dds_types.idl", "?? test/w02_dds_udp.xml", "?? test/w02_pattern.h", "?? test/w02_sample_audit.py", "?? test/w02_summary_schema_check.py", "?? test/w02_xproc_common.h", "?? test/xproc_benchmark.cpp", "?? tools/measure/", "?? tools/w12/"],
+  "build_dir": "build",
+  "build_type": "Release",
+  "compiler": "/usr/bin/c++ c++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0",
+  "binary_sha256": {"publisher": "7d77172381ad3ce44ee94dcf783dabe023637125070cfc979e3c94903f4ee616", "subscriber": "7d77172381ad3ce44ee94dcf783dabe023637125070cfc979e3c94903f4ee616", "library": "cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46"},
+  "loaded_library_paths": ["/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0", "/home/zwc/branch/lejulab_platform/src/lejusdk/3rd_party/x86_64/cyclonedds-0.10.2/lib/libddsc.so.0.10.2"],
+  "transport": "tlv",
+  "process_model": "cross-process",
+  "measurement_mode": "rusage",
+  "diagnostics_enabled": false,
+  "topic_count": 1,
+  "unique_topic_count": 1,
+  "worker_count": null,
+  "registered_count": 1,
+  "expected_count": 1,
+  "valid_rx_count": 0,
+  "fallback_count": 1803,
+  "fallback_count_note": "dzIPC 语义: TLV 档每条成功发布都计一次 fallback; 本字段不是「兼容回退事故数」, 逐路径真回退率见 summary.csv 的 pub_dzflat/pub_fallback",
+  "sample_count": 1000,
+  "window_s": 0.999005,
+  "config_hash": "3be9041c4dacfc12",
+  "clock_source": "CLOCK_MONOTONIC",
+  "clock_cost_ns_per_call": 12.1792,
+  "collector_overhead_ns": null,
+  "roudi_pid": null,
+  "child_killed_total": 0,
+  "payload_checksum_bad_total": 0,
+  "result_files": ["results.json", "summary.csv", "samples/", "counters.json", "environment.json", "topology.json", "config.json", "field_schema.json", "path_evidence.json", "console.log", "verdict.md"],
+  "dds_qos": "reliable/keep_last(1024)/volatile",
+  "dds_precheck_skipped": [],
+  "superseded_runs": {
+    "note": "W02 中间轮次 r01…r19 的目录已清理（人工、未留痕，已登记为 W12 已知限制）；控制台日志归档在 superseded/；⛔ 这些轮次不作为任何结论的样本来源",
+    "console_archive_dir": "superseded/",
+    "superseded_run_ids": ["20260928-r01-W02", "20260928-r02-W02", "20260928-r03-W02", "20260928-r04-W02", "20260928-r05-W02", "20260928-r06-W02", "20260928-r07-W02", "20260928-r08-W02-script", "20260928-r09-W02", "20260928-r10-W02", "20260928-r11-W02", "20260928-r12-W02", "20260928-r13-W02", "20260928-r14-W02", "20260928-r15-W02", "20260928-r16-W02", "20260928-r17-W02", "20260928-r18-W02", "20260928-r19-W02", "20260928-r20-W02", "20260928-r21-W02", "20260928-r22-W02", "20260928-r24-W02", "20260928-r25-W02", "20260928-r26-W02", "20260928-r27-W02", "20260928-r28-W02"],
+    "currently_citable": "r30negctl_backlog",
+    "authority_rule": "本字段是 W02 交付面**唯一权威指针**：任何引用必须指向它；指向 superseded_run_ids 中的 run 时必须同时标「非现行 + 原因」。补了这条是因为 t25 复核合同引用了 r19 的 cells=269896/skipped=26，而现行 run 已是 r23（cells=269852/skipped=37）—— 引用链断裂会让下游拿错数字。",
+    "r19_r20_non_current": "r19（*_messages 因 D-17 计数双写作废，且非现行）、r20（W02-F2 修复前对照，非现行）—— 历史对照可留，但⛔ 不得作为现行结论出现",
+    "non_current_runs": [
+      {"run_id": "20260928-r19-W02", "status": "非现行", "reason": "*_messages 因 D-17 计数双写作废（约 2× 且回退场景下把「期望路径」记成「实际路径」）；cells=269896/skipped=26 是 t25 合同引用的数字，⛔ 不得再作为现行结论"},
+      {"run_id": "20260928-r20-W02", "status": "非现行", "reason": "W02-F2(wire null 表示) 修复前对照；cells=269848/skipped=38"},
+      {"run_id": "20260928-r23-W02", "status": "历史证据 run", "reason": "F3 修复（失败量进判定 + bad_header 补列）之前的一代；其 summary.csv 缺 bad_header 与 5 个 gate 列，⛔ 不得据此判「失败量已被判定」"},
+      {"run_id": "20260928-r24-W02", "status": "非现行", "reason": "首次带 F3 判定的冒烟轮：RouDi 不在线 ⇒ cyc-iox 被显式剔除（仅 60 case）；且当时 B 档预热帧形状缺陷已被本列暴露出来（bad_header 1194–1200/case），随后修复"},
+      {"run_id": "20260928-r25-W02", "status": "非现行", "reason": "backlog 预算取 5 周期档 ⇒ 1 case 因真实排队（5.171 周期）判失败；该轮用于确定默认预算，不作为结论"},
+      {"run_id": "20260928-r26-W02", "status": "非现行", "reason": "late 预算取 5% 档 ⇒ 1 case（40/500 迟发）判失败；该轮用于确定默认预算"},
+      {"run_id": "20260928-r27-W02", "status": "非现行", "reason": "同 r28 的矩阵与判定（75/75），但 manifest 尚缺 failure_thresholds.informational_only"},
+      {"run_id": "20260928-r28-W02", "status": "非现行", "reason": "t47 收口前一轮（含 informational_only）；最终可引用 run 见 currently_citable"}
+    ],
+    "r19_note": "r19 的 *_messages 因 D-17 计数双写作废; r20 为 W02-F2(wire null 表示)修复前对照; 本 run 之前的 r23/r24 分别是 F3 修复前/首次冒烟；只可引用 currently_citable 指向的 run"
+  },
+  "failure_thresholds": {
+    "note": "t47/W02-F3：失败量必须有**显式声明阈值**并进入机器可读判定通路；仅落列不判定=静默排除，⛔ 不允许。阈值可用 CLI 覆盖，覆盖后同样落在本字段。",
+    "late_abs_max": 0, "late_rate_max": 0,
+    "backlog_max_periods": 0.0001, "send_blocked_max": 0,
+    "abnormal_max": 0, "bad_header_max": 0,
+    "cli_overridden": true,
+    "gates": ["late", "backlog", "send_blocked", "abnormal", "bad_header"],
+    "informational_only": {
+      "via_view": "通道构成（本轮有多少样本经视图/借样通道取得），不是失败；且实测 A 与 B 两档消费者侧同形（各 13500/0），判它没有区分力",
+      "via_object": "同上（对象通道构成）",
+      "via_dds": "同上（DDS 通道构成）",
+      "late_threshold_ns": "它只定义「什么叫迟发」，不是失败预算；失败预算见 late_abs_max/late_rate_max",
+      "backlog_sum_ns": "累计迟发量用于刻画分布，单次峰值才作预算（backlog_max_periods）",
+      "note": "以上各量仍逐 case 落列（可查），只是**不据此判 case_ok**；这是显式声明，不是静默跳过"
+    },
+    "gates_in_judgement": {
+      "late": "进判定（阈值见上）; 本 run 触发 1 个 case",
+      "backlog": "进判定（阈值见上）; 本 run 触发 1 个 case",
+      "send_blocked": "进判定（阈值见上）; 本 run 触发 0 个 case",
+      "abnormal": "进判定（阈值见上）; 本 run 触发 0 个 case",
+      "bad_header": "进判定（阈值见上）; 本 run 触发 0 个 case"
+    }
+  },
+  "currently_citable": "20260928-r30-W02",
+  "run_identity": {"this_run_id": "r30negctl_backlog", "purpose": "verification", "this_run_is_evidence": false, "citation_authority": "20260928-r30-W02"},
+  "evidence_discipline": {
+    "current_run_authority": "任何引用必须是 manifest.currently_citable 指向的 run；引用 superseded_runs.superseded_run_ids 里的 run 必须同时标「非现行 + 原因」",
+    "single_judgement_logic": "同一事实只有一处判定逻辑：failure_reasons 由 run_one_case 内唯一一处产生，summary.csv/results.json/verdict.md 只读该结果，⛔ 不各自重算",
+    "zero_value_three_states": {
+      "0": "已采集且实测为零（可读作「未发生」）",
+      "null": "未采集 或 分母为零（CSV 写空字段，⛔ 不写 0 冒充）",
+      "unwired": "字段有定义但无生产者（其 0 不可读作「未发生」；本基准的实例见 manifest.fallback_count_note 与 W03 counters 清点）"
+    }
+  },
+  "path_evidence": "path_evidence.json",
+  "notes": "process_model 恒为 cross-process：pub/sub 是 fork+exec 的两个新映像；计时边界见 field_schema.json 的 timestamp_write_points；未测项一律写 null/空字段(不加 0 冒充)，DDS 档 wire 字节即为一例(见各 case 的 wire_bytes_source)；样本表跳过以行为单位: cells == 4*(rows-skipped_rows)，判据固化在 test/w02_sample_audit.py"
+}

@@ -1,0 +1,32 @@
+# W10/t36 F2 独立复现汇总（外部逐 TID 读 /proc）
+# 库指纹 e1c2a7e99f8bd2e8dd05b393c05d9fe00e35c640efccbe7a8dfbbf991dc174c4
+# 工装 $（sha256sum build/bin/w10_idle | cut -d' ' -f1）
+
+## A/C/D/B 单轮（10 s 窗口，state3 n=1000）
+  A schON  poolON  = 0.5880 core  非零TID=1（调度器）
+  C schON  poolOFF = 0.6180 core  非零TID=1（调度器）  ← 池整体停用，CPU 不降反升
+  B schOFF poolON  = 0.0000 core（窗口内）；进程内读数 0.383 core（见下方备注）
+  D schOFF poolOFF = 0.0000 core（窗口内）；进程内读数 0.695 core（见下方备注）
+
+## A vs C 三轮重复
+  rep1  A=0.5775  C=0.6150
+  rep2  A=0.5925  C=0.6125
+  rep3  A=0.5850  C=0.6025
+  ⇒ C ≥ A 稳定复现（池停用后 CPU 不降）
+
+## 决定性标定：state2（池完全不参与，全进程 2 线程）
+  n=100  → 0.0030 core（进程内 0.00286）  调度器 entries=100
+  n=500  → 0.0660 core（进程内 0.06500）  调度器 entries=500
+  n=1000 → 0.2930 core（进程内 0.29428）  调度器 entries=1000
+  ⇒ 仅 2 条线程、零接收池，1000 项即 0.29 core；state3(entries=2000) 实测 0.575–0.595 ≈ 0.293×2
+
+## 备注：B/D 两格的外部逐 TID 与进程内读数不一致的原因（如实登记）
+  B/D 下 per-topic 兼容控制线程数达 2033/3001，逐 TID 采样需遍历 3000+ 个 /proc 文件；
+  两快照间存在线程新建/退出 ⇒ 我按「只统计两快照共同 TID」口径得到 0，
+  而进程内 /proc/self/stat（线程组累计）给出 0.383/0.695 core。
+  ⛔ 该两格不作为本次归因判据；判据只用 A/C（同为 34/1002 线程的稳态、无 churn）与 state2 标定。
+
+## 复现脚本自证（第 4 次，用 w10_idle_attribution.sh 一键复跑）
+  cell A = 0.5780 core（34 线程，唯一非零 TID=1 调度器）
+  cell C = 0.6090 core（1002 线程，唯一非零 TID=1 调度器；pool running=0 route_count=0）
+  ⇒ 与前三轮同向：**C > A 稳定成立**（4/4）

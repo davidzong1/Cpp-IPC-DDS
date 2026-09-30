@@ -1,0 +1,46 @@
+# 计数链路独立复算（v2：覆盖全部 DZIPC_MEASURE_* 宏 + 成员调用；去注释、排除备份文件）
+CounterId（元数据表）= 62
+  ① 生产面有落计数调用                = 31
+  ② 仅 counters.h 落点函数/分类器可写  = 13
+  ③ 全仓无任何写入路径（0 ⛔ ≠ 未发生） = 18
+
+② 间接可达（分类器 return 块内任一 ID）：
+    borrow_failed_no_receiver
+    borrow_failed_oversized
+    borrow_failed_publish
+    borrow_failed_reason_unknown
+    deferred_depth_last
+    deferred_depth_max
+    fallback_oversized
+    fallback_reason_unknown
+    fallback_type_incompatible
+    path_selection_dzflat_disabled
+    path_selection_type_unsupported
+    ready_observed
+    scan_time_ns_total
+
+③ 无写入路径（引用其 0 须标注「该维未被观测」）：
+    borrow_failed_pool_exhausted
+    dzflat_a_bytes
+    dzflat_b_bytes
+    fallback_pool_exhausted
+    fd_limit
+    generation_mismatch
+    payload_checksum_bad
+    payload_checksum_ok
+    publish_blocked
+    publish_failed
+    queue_backpressure
+    registration_rejected
+    rx_timeout
+    seq_duplicate
+    seq_lost
+    seq_monotonic_ok
+    seq_out_of_order
+    tlv_bytes
+
+## 与 t35 只读脚本的交叉核对（30_counter_audit_now.tsv）
+  t35 脚本当前树 = {'wired': 29, 'potential_used': 7, 'selftest_only': 2, 'table_only': 24} （t35 接后快照：wired 29 / potential 4 / selftest 2 / table_only 27）
+  我① ∩ t35 wired = 29；我① − t35 wired = ['scan_rounds', 'scanned_routes_total']
+  t35 wired − 我① = []
+  我③ ∩ t35 「table_only ∪ potential_used」 = 18 / 18

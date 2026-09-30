@@ -1,0 +1,3 @@
+w03_collector scan-end-values > interface_selftest.json
+./build/bin/test_w03_measurement --gtest_color=no > gtest_w03_measurement.log
+ctest --test-dir build -j4 --output-on-failure > ctest_27.log

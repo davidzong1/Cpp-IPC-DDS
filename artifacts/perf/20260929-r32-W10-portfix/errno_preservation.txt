@@ -1,0 +1,2 @@
+=== 关键实测: errno 在 connect() 失败后是否可读 ===
+port=47777 connect_ok=0 errno_after=98(Address already in use) -> readable_as_EADDRINUSE=1

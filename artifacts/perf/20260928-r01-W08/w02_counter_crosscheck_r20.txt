@@ -1,0 +1,62 @@
+W08 → W02 D-17 修复复验（基准 run: artifacts/perf/20260928-r20-W02）
+复验人: socket与数据面负责人（只读；脚本判据按修复后口径）
+
+判据（修复后）: family = tlv_messages+dzflat_a_messages+dzflat_b_messages
+                family - (pub_dzflat + pub_fallback) ∈ [-8, 8]
+               （容差 8 吸收'进程退出前最后几条钩子计数未被读窗口覆盖'）
+               ⛔ 旧判据 family-sent_ok==sent_ok 是'双写'时代的，已不适用
+
+case_id, path, sent_ok, dz(钩子), fb(钩子), family(钩子), 残差
+r0_tlv_timestamp_blocking_64B_1000Hz, tlv, 1000, 0, 2212, 2212, 0
+r1_tlv_crc_blocking_64B_1000Hz, tlv, 1000, 0, 2213, 2213, 0
+r2_tlv_full_blocking_64B_1000Hz, tlv, 1000, 0, 2212, 2212, 0
+r3_tlv_timestamp_blocking_1024B_1000Hz, tlv, 1000, 0, 2213, 2213, 0
+r4_tlv_timestamp_busy_1024B_1000Hz, tlv, 1000, 0, 2212, 2212, 0
+r5_tlv_crc_blocking_1024B_1000Hz, tlv, 1000, 0, 2213, 2213, 0
+r6_tlv_crc_busy_1024B_1000Hz, tlv, 1000, 0, 2212, 2212, 0
+r7_tlv_full_blocking_1024B_1000Hz, tlv, 1000, 0, 2212, 2212, 0
+r8_tlv_full_busy_1024B_1000Hz, tlv, 1000, 0, 2213, 2213, 0
+r9_tlv_timestamp_blocking_65536B_1000Hz, tlv, 1000, 0, 2108, 2106, -2
+r10_tlv_crc_blocking_65536B_1000Hz, tlv, 1000, 0, 2126, 2124, -2
+r11_tlv_full_blocking_65536B_1000Hz, tlv, 1000, 0, 2136, 2134, -2
+r12_tlv_timestamp_blocking_1048576B_500Hz, tlv, 500, 0, 1112, 1110, -2
+r13_tlv_crc_blocking_1048576B_500Hz, tlv, 500, 0, 1074, 1072, -2
+r14_tlv_full_blocking_1048576B_500Hz, tlv, 500, 0, 1087, 1085, -2
+r15_dzflat-a_timestamp_blocking_64B_1000Hz, dzflat-a, 1000, 2222, 2, 2224, 0
+r16_dzflat-a_crc_blocking_64B_1000Hz, dzflat-a, 1000, 2214, 2, 2216, 0
+r17_dzflat-a_full_blocking_64B_1000Hz, dzflat-a, 1000, 2214, 2, 2216, 0
+r18_dzflat-a_timestamp_blocking_1024B_1000Hz, dzflat-a, 1000, 2216, 3, 2219, 0
+r19_dzflat-a_timestamp_busy_1024B_1000Hz, dzflat-a, 1000, 2214, 2, 2216, 0
+r20_dzflat-a_crc_blocking_1024B_1000Hz, dzflat-a, 1000, 2211, 3, 2214, 0
+r21_dzflat-a_crc_busy_1024B_1000Hz, dzflat-a, 1000, 2215, 3, 2218, 0
+r22_dzflat-a_full_blocking_1024B_1000Hz, dzflat-a, 1000, 2213, 3, 2216, 0
+r23_dzflat-a_full_busy_1024B_1000Hz, dzflat-a, 1000, 2217, 2, 2219, 0
+r24_dzflat-a_timestamp_blocking_65536B_1000Hz, dzflat-a, 1000, 2155, 2, 2155, -2
+r25_dzflat-a_crc_blocking_65536B_1000Hz, dzflat-a, 1000, 2159, 2, 2159, -2
+r26_dzflat-a_full_blocking_65536B_1000Hz, dzflat-a, 1000, 2137, 2, 2137, -2
+r27_dzflat-a_timestamp_blocking_1048576B_500Hz, dzflat-a, 500, 1178, 2, 1178, -2
+r28_dzflat-a_crc_blocking_1048576B_500Hz, dzflat-a, 500, 1182, 3, 1182, -3
+r29_dzflat-a_full_blocking_1048576B_500Hz, dzflat-a, 500, 1169, 2, 1169, -2
+r30_dzflat-b_timestamp_blocking_64B_1000Hz, dzflat-b, 1000, 2216, 2, 2218, 0
+r31_dzflat-b_crc_blocking_64B_1000Hz, dzflat-b, 1000, 2217, 2, 2219, 0
+r32_dzflat-b_full_blocking_64B_1000Hz, dzflat-b, 1000, 2215, 2, 2217, 0
+r33_dzflat-b_timestamp_blocking_1024B_1000Hz, dzflat-b, 1000, 2220, 3, 2223, 0
+r34_dzflat-b_timestamp_busy_1024B_1000Hz, dzflat-b, 1000, 2215, 2, 2217, 0
+r35_dzflat-b_crc_blocking_1024B_1000Hz, dzflat-b, 1000, 2213, 2, 2215, 0
+r36_dzflat-b_crc_busy_1024B_1000Hz, dzflat-b, 1000, 2217, 2, 2219, 0
+r37_dzflat-b_full_blocking_1024B_1000Hz, dzflat-b, 1000, 2217, 3, 2220, 0
+r38_dzflat-b_full_busy_1024B_1000Hz, dzflat-b, 1000, 2213, 2, 2215, 0
+r39_dzflat-b_timestamp_blocking_65536B_1000Hz, dzflat-b, 1000, 2148, 3, 2148, -3
+r40_dzflat-b_crc_blocking_65536B_1000Hz, dzflat-b, 1000, 2131, 2, 2131, -2
+r41_dzflat-b_full_blocking_65536B_1000Hz, dzflat-b, 1000, 2146, 2, 2146, -2
+r42_dzflat-b_timestamp_blocking_1048576B_500Hz, dzflat-b, 500, 1217, 2, 1217, -2
+r43_dzflat-b_crc_blocking_1048576B_500Hz, dzflat-b, 500, 1232, 2, 1232, -2
+r44_dzflat-b_full_blocking_1048576B_500Hz, dzflat-b, 500, 1219, 2, 1219, -2
+
+dzIPC case=45  残差 min=-3 max=0  |残差|>8 的=0
+DDS 30 case 的 *_messages 是否恒 0: 是（上面无 !! 行）
+
+对照 r19（修复前）: 残差 min=498 max=1000  ← 含 harness 追加的 sent_ok，故偏大
+
+结论: r20 残差全部落在 [-3, 0]，|残差|>8 的 case = 0 ⇒ **双写已消除，D-17 (a) 修复有效**。
+      `counter_scope` 元字段已落盘并声明 path_message_counts.harness_writes=false（自证材料）。

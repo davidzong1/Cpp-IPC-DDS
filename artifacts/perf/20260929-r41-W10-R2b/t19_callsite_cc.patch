@@ -1,0 +1,59 @@
+--- src/dzIPC/shm_pub_sub_ipc.cc	2026-09-28 21:35:56.509829239 +0800
++++ build/w19/src/shm_pub_sub_ipc.cc	2026-09-28 21:47:31.382552857 +0800
+@@ -615,6 +615,16 @@
+             return true;
+         }
+         dzIPC::detail::NoteDzFlatPublish(false);
++        /* W09/t19：三种语义分列（只计数，不改返回值/控制流）。 */
++        {
++            dzIPC::measure::DzFlatAttempt att;
++            att.dzflat_enabled   = dzIPC::IsDzFlatEnabled();
++            att.type_supported   = (msg != nullptr) && msg->dzflat_supported();
++            att.had_receiver     = (publisher_ != nullptr) && (publisher_->recv_count() > 0);
++            att.need_bytes       = (msg != nullptr) ? msg->dzflat_size() : 0u;
++            att.dzflat_delivered = false;
++            dzIPC::measure::note_dzflat_attempt(att);
++        }
+         ipc::buffer response_data(std::move(msg->serialize()));
+         /* W08: 为计数把原两个 return 收敛成一个局部 sent —— 控制流与返回值逐位不变。 */
+         const bool sent = (publisher_->recv_count() == 0)
+@@ -729,9 +739,19 @@
+         dzIPC::detail::NoteDzFlatPathDelivered(
+             dzIPC::DzFlatPath::PrebuiltSegment, static_cast<std::uint64_t>(h.total_size));
+     }
+-    /* 失败不在这里计数: 调用方随后那次 TLV publish() 会记一次回退。两边各记一次会把
+-     * fallback/(dzflat+fallback) 这个比值算歪 —— 那个比值是判断"收益有没有生效"的唯一
+-     * 指标(nodelet_config.h), 不能因为记账方式失真。 */
++    if (!ok)
++    {
++        /* W09/t19：预构造段失败同样按"真回退"分列（h.total_size 已知 ⇒ 超尺寸档可精确判定）。 */
++        dzIPC::measure::DzFlatAttempt att;
++        att.dzflat_enabled   = true;
++        att.type_supported   = true;
++        att.had_receiver     = (publisher_ != nullptr) && (publisher_->recv_count() > 0);
++        att.need_bytes       = h.total_size;
++        att.capacity_bytes   = static_cast<std::uint32_t>(lo.size);
++        att.dzflat_delivered = false;
++        dzIPC::measure::note_dzflat_attempt(att);
++    }
++    /* 失败不在这里记 tlv: 调用方随后那次 TLV publish() 会记一次 tlv_messages。 */
+     return ok;
+ }
+ 
+@@ -755,6 +775,16 @@
+         }
+         dzIPC::detail::NoteDzFlatPublish(false);
+         ipc::buffer response_data(std::move(msg->serialize()));
++        /* W09/t19：三种语义分列（sniffer 路径的回退点）。 */
++        {
++            dzIPC::measure::DzFlatAttempt att;
++            att.dzflat_enabled   = dzIPC::IsDzFlatEnabled();
++            att.type_supported   = (msg != nullptr) && msg->dzflat_supported();
++            att.had_receiver     = (publisher_ != nullptr) && (publisher_->recv_count() > 0);
++            att.need_bytes       = (msg != nullptr) ? msg->dzflat_size() : 0u;
++            att.dzflat_delivered = false;
++            dzIPC::measure::note_dzflat_attempt(att);
++        }
+         const bool sent = publisher_->no_member_try_send(response_data.data(), response_data.size(), 0);
+         if (sent)
+         {

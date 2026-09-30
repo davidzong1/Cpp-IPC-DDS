@@ -1,0 +1,9 @@
+phase,ms,note
+pool_start,0,"workers=32 diag=on"
+register,192,"state=3 pubs=500 subs=500"
+handshake,38,"attached=500/500"
+confirm,1,"confirmed=500/500"
+state_settle,0,"state=3 routes=500"
+window,60017,"state=3 phase=load"
+load,0,"sent=11907 rx=11407"
+recover,1,"ok=500/500 lost=0 threads_before=34"

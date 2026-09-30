@@ -1,0 +1,77 @@
+{
+  "kind": "path_evidence",
+  "paths": [
+  {
+    "path": "tlv",
+    "level": "S0",
+    "status": "未确认",
+    "experiment_id": "20260928-r03-W03",
+    "samples": 0,
+    "fallback_count": 0,
+    "call_sites": [],
+    "runtime_evidence": [],
+    "binary_fingerprints": [],
+    "counters": [],
+    "experiment_groups": [],
+    "missing": ["缺真实调用点(call site)", "缺运行日志/计数中的路径标识", "缺二进制/库指纹", "缺该路径独立计数", "无有效样本", "证据等级不足(当前 S0, 需 >= S3)"]
+  },
+  {
+    "path": "dzflat-a",
+    "level": "S0",
+    "status": "未确认",
+    "experiment_id": "20260928-r03-W03",
+    "samples": 0,
+    "fallback_count": 0,
+    "call_sites": [],
+    "runtime_evidence": [],
+    "binary_fingerprints": [],
+    "counters": [],
+    "experiment_groups": [],
+    "missing": ["缺真实调用点(call site)", "缺运行日志/计数中的路径标识", "缺二进制/库指纹", "缺该路径独立计数", "无有效样本", "证据等级不足(当前 S0, 需 >= S3)"]
+  },
+  {
+    "path": "dzflat-b",
+    "level": "S0",
+    "status": "未确认",
+    "experiment_id": "20260928-r03-W03",
+    "samples": 0,
+    "fallback_count": 0,
+    "call_sites": [],
+    "runtime_evidence": [],
+    "binary_fingerprints": [],
+    "counters": [],
+    "experiment_groups": [],
+    "missing": ["缺真实调用点(call site)", "缺运行日志/计数中的路径标识", "缺二进制/库指纹", "缺该路径独立计数", "无有效样本", "证据等级不足(当前 S0, 需 >= S3)", "DZFlat B 缺 `loan -> 应用原地构造 -> publish_loan` 调用点(内部 loan() 不算)"]
+  },
+  {
+    "path": "cyclonedds-iox",
+    "level": "S0",
+    "status": "未确认",
+    "experiment_id": "20260928-r03-W03",
+    "samples": 0,
+    "fallback_count": 0,
+    "call_sites": [],
+    "runtime_evidence": [],
+    "binary_fingerprints": [],
+    "counters": [],
+    "experiment_groups": [],
+    "missing": ["缺真实调用点(call site)", "缺运行日志/计数中的路径标识", "缺二进制/库指纹", "缺该路径独立计数", "无有效样本", "证据等级不足(当前 S0, 需 >= S3)"]
+  },
+  {
+    "path": "compat-fallback",
+    "level": "S0",
+    "status": "未确认",
+    "experiment_id": "20260928-r03-W03",
+    "samples": 0,
+    "fallback_count": 0,
+    "call_sites": [],
+    "runtime_evidence": [],
+    "binary_fingerprints": [],
+    "counters": [],
+    "experiment_groups": [],
+    "missing": ["缺真实调用点(call site)", "缺运行日志/计数中的路径标识", "缺二进制/库指纹", "缺该路径独立计数", "无有效样本", "证据等级不足(当前 S0, 需 >= S3)"]
+  }
+  ],
+  "confirmed": [],
+  "unconfirmed": ["tlv", "dzflat-a", "dzflat-b", "cyclonedds-iox", "compat-fallback"]
+}

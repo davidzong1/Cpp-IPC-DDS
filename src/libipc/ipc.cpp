@@ -1,6 +1,10 @@
 
 #include <type_traits>
 #include <cstring>
+#include <limits>
+#include <dirent.h>   /* W09/D-14: 陈旧池段探活(扫 /proc/<pid>/maps) */
+#include <cstdio>     /* std::snprintf / std::fopen */
+#include <cstdlib>
 #include <cstdint>
 #include <algorithm>
 #include <utility> // std::pair, std::move, std::forward
@@ -12,6 +16,10 @@
 #include <cassert>
 #include <mutex>
 
+/* F1/t35：把池穷尽这个**产品侧事实**接到 W03 的计数注册表（只引用既有 ID）。
+ * ⛔ 只读引用，不改 counters.h；counters.h 是 header-only，其单例是 inline 函数局部
+ * static ⇒ 与 libipc.so 内既有写入点**同一份**（实测见 evidence 的 odr_unification_probe）。 */
+#include "dzIPC/measure/counters.h"
 #include "libipc/ipc.h"
 #include "libipc/def.h"
 #include "libipc/shm.h"
@@ -323,6 +331,165 @@ namespace
   static_assert(sizeof(chunk_info_t) % 8 == 0,
                 "chunk payload must stay 8-byte aligned: see docs/dzflat_shm.md 3.6");
 
+  /* ── W09/D-14: 陈旧池段（崩溃遗留段）的段级回收 ───────────────────────────
+   *
+   * 判决性实验(团队改造交付/W09/死进程借样泄漏收口_D14.md §1): 发布者被 SIGKILL 时
+   * 既不 unlink 段、也不归还它借走的 chunk —— 尤其 published()==0 的未发布借样, 按
+   * UF-003 §5 的窗口论证⛔不得被 reclaim_dead_chunks 清扫。于是**段仍在**期间该尺寸档
+   * 的池永久不可用: 单跑也挂、同话题重开也救不回(owner 位仍在 + published==0 两道门),
+   * 删段即恢复。
+   *
+   * 为什么不能逐块回收未发布借样(本包的关键判定):
+   *   chunk 的位图 `conns` 是**接收方**集合(acquire_storage 在借出时就写好了发送时刻的
+   *   收方位图), 而 owner_table 记的也是**接收方**身份。未发布借样的持有者是**发送方**,
+   *   它的身份**没有记在任何地方** ⇒ "证明发送方已死"没有依据 ⇒ 逐块回收不可能安全。
+   *   同时 `proven_dead_bits` 也救不了它: 那些收方是活的(它们在等一条永远不会来的消息),
+   *   所以 `(cur & ~dead) != 0` 这一条本来就会让它放弃。⛔ 这也解释了为什么"调换
+   *   :577/:578 谓词顺序"是错的(除 UAF 之外, 谓词本身也不足以判定)。
+   *
+   * 能做的是**段级**判定: 段内任何一个持有者(发送方或接收方)都必须先 mmap 该段才能
+   * 拿到载荷指针 ⇒ **除本进程外没有任何进程映射该段** ⟺ 段内不存在在飞持有者。
+   *
+   * ── 安全性论证(published 写入 vs 判定的同步分析)─────────────────────────
+   * 要安全复位池, 必须保证"段内没有任何进程还能执行代码去 mark_published"。
+   * 三条合起来给出该保证:
+   *   ① **段级无活映射者**(扫 /proc/<pid>/maps, 排除本进程)。持有 chunk 指针者必须先
+   *      映射本段; 一个进程死了就不再执行任何代码 ⇒ 死者不可能再 mark_published。
+   *      不可判(opendir 失败 / 某个 maps 因权限读不到)⇒ 一律放弃(保守, 退化为现状)。
+   *   ② **池的字节镜像在窗口内未被改动**(①快照 → 探活 → ③复核, 两次都在池锁内)。
+   *      借出必然从空闲链摘掉一个 id ⇒ 链就与镜像不同; 于是"①与③之间有人借出"必被
+   *      抓住并放弃。这条把"新进程在探活之后才映射并借出"的窗口封死。
+   *   ③ 真正的复位在 ③ 的**同一把池锁内**完成 ⇒ 复位与任何借出/归还互斥。
+   *   ⇒ 复位时池内空闲链上不存在任何活进程持有的 id; 死进程持有的 id 可以安全重新
+   *      发放(它已不可能再访问)。⛔ 与 UF-003 §5 的"published=0 让路"不冲突: 那段
+   *      论证的射程是"段内还有活持有者"的情形, 而本函数的前提恰恰是**没有**活持有者。
+   *
+   * 触发与代价: 仅在**池穷尽**路径上、且**每进程每尺寸档至多一次**(见
+   * orphan_reset_first_attempt)。正常负载不触发, 探活不进热路径。 */
+  enum class seg_scan : std::uint8_t { orphaned, live, unknown };
+
+  /* 段名构造收口 —— get_info 与段级探活必须用**同一个**名字, 否则探针会去扫一个
+   * 不存在的路径(静默失效)。⛔ 与 sniffer.cpp 的同款构造保持逐字一致。 */
+  inline ipc::string chunk_segment_name(ipc::string const &pref,
+                                        std::size_t chunk_size)
+  {
+    return ipc::make_prefix(
+        pref, {"CHUNK_INFO__", ipc::to_string(chunk_size), "__C",
+               ipc::to_string(static_cast<std::size_t>(ipc::large_msg_cache))});
+  }
+
+  /* 扫 /proc/<pid>/maps 找"除本进程外"映射了该段文件的活进程。
+   * unclear = 无法判定(保守: 调用方必须放弃)。 */
+  inline seg_scan scan_segment_mappers(char const *shm_name) noexcept
+  {
+#if defined(_WIN32)
+    (void)shm_name;
+    return seg_scan::unknown;   /* 无 /proc: 一律不可判 ⇒ 永不回收 */
+#else
+    if (shm_name == nullptr || shm_name[0] == '\0') return seg_scan::unknown;
+    char const *base = std::strrchr(shm_name, '/');
+    base = (base == nullptr) ? shm_name : (base + 1);
+    if (base[0] == '\0') return seg_scan::unknown;
+
+    DIR *d = ::opendir("/proc");
+    if (d == nullptr) return seg_scan::unknown;
+    bool complete = true;
+    bool live = false;
+    struct ::dirent *e = nullptr;
+    while (!live && ((e = ::readdir(d)) != nullptr))
+    {
+      if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+      std::uint32_t const pid = static_cast<std::uint32_t>(std::atoi(e->d_name));
+      if (pid == ipc::circ::current_pid()) continue;   /* 自己不算"别人" */
+      char maps_path[64];
+      std::snprintf(maps_path, sizeof(maps_path), "/proc/%s/maps", e->d_name);
+      std::FILE *f = std::fopen(maps_path, "r");
+      if (f == nullptr)
+      {
+        /* ENOENT: 进程已退出 —— 不构成持有者, 正常。其它 errno(权限/隔离):
+         * 无法判定 ⇒ 本轮整体按"不可判"处理。 */
+        if (errno != ENOENT) complete = false;
+        continue;
+      }
+      char buf[4096];
+      while (std::fgets(buf, sizeof(buf), f) != nullptr)
+      {
+        if (std::strstr(buf, base) != nullptr) { live = true; break; }
+      }
+      std::fclose(f);
+    }
+    ::closedir(d);
+    if (!complete) return seg_scan::unknown;
+    return live ? seg_scan::live : seg_scan::orphaned;
+#endif
+  }
+
+  void note_orphan_reset(char const *kind, std::size_t chunk_size,
+                         ipc::string const &prefix);
+
+  /* ── v2：陈旧池段的复位点 = **首次 attach 该段的那一刻** ─────────────────────
+   *
+   * v1 的错误(已被本包自己的对照实验证伪, 见 W09/证据/UNSOUND_v1_selfhold.md):
+   * v1 把复位放在"池穷尽"路径上, 判据只排除本进程 ⇒ 当池是被**本进程自己**借空时
+   * (完全正当: test_chunk_capacity_backpressure / dzflat_transport 都这么构造耗尽),
+   * 判据照样成立 ⇒ 把本进程正持有的 id 重新发出去。实测两条用例立即转红。
+   *
+   * v2 的两个前提必须**同时**成立:
+   *   ① **本进程此刻尚未持有本档任何 chunk**。取"首次 attach"这一刻即天然满足:
+   *      要持有本段的 chunk, 必须先映射本段; 而本函数只在 handles_[prefix] 由
+   *      "无效"变为"有效"的那一次被调用 ⇒ 此前本进程不可能从本段借出过任何东西,
+   *      也不可能持有接收侧的 buff_t(那同样要求先映射)。
+   *   ② **除本进程外没有活进程映射本段**。持有载荷指针者必须先 mmap; 死者不再执行
+   *      任何代码 ⇒ 死者不可能再 mark_published。不可判(opendir 失败 / maps 读不出)
+   *      ⇒ 一律放弃, 退化为现状行为。
+   *
+   * ①②之间仍有"别的进程在我们探活之后才 mmap 并借出"的窗口, 由**字节镜像复核**封死:
+   * 探活前取一次池的字节快照(持池锁), 探活后持锁复核; 借出/归还都会改动空闲链,
+   * 字节不一致即放弃。真正的复位与复核在**同一把池锁内** ⇒ 与任何借出/归还互斥。
+   *
+   * ⛔ 与 UF-003 §5"published==0 让路"不冲突: 那段论证的射程是"段内还有活持有者";
+   *    本函数的两个前提恰恰排除了活持有者。⛔ 也不改任何正常路径语义 —— 只在
+   *    "首次 attach 一个**已被用过**的段"这一非热路径上做一次判定。 */
+  bool reclaim_orphan_segment(chunk_info_t *info, ipc::string const &prefix,
+                              std::size_t chunk_size, char const *kind) noexcept
+  {
+    if (info == nullptr) return false;
+
+    /* 全新段(zero-filled ⇒ id_pool::invalid()): 空闲链本来就是空的, prepare() 会 init,
+     * ⛔ 不需要复位 ⇒ 这条早退让**正常首次建段完全不付 /proc 扫描的成本**。 */
+    {
+      info->lock_.lock();
+      bool const pristine = info->pool_.invalid();
+      info->lock_.unlock();
+      if (pristine) return false;
+    }
+
+    /* ① 一致快照(持池锁)。 */
+    ipc::id_pool<> snap;
+    {
+      info->lock_.lock();
+      std::memcpy(&snap, &info->pool_, sizeof(snap));
+      info->lock_.unlock();
+    }
+
+    /* ② 段级探活(锁外: 读 /proc 是毫秒级操作, 不得在自旋锁内做)。 */
+    ipc::string const name = chunk_segment_name(prefix, chunk_size);
+    if (scan_segment_mappers(name.c_str()) != seg_scan::orphaned) return false;
+
+    /* ③ 持锁复核 + 复位(与借出/归还互斥)。 */
+    info->lock_.lock();
+    if (std::memcmp(&snap, &info->pool_, sizeof(snap)) != 0)
+    {
+      info->lock_.unlock();
+      return false;
+    }
+    info->pool_.reset_free_chain();
+    info->lock_.unlock();
+
+    note_orphan_reset(kind, chunk_size, prefix);
+    return true;
+  }
+
   auto &chunk_storages()
   {
     class chunk_handle_t
@@ -364,13 +531,13 @@ namespace
          * 反之亦然。这也是 UF-003 登记过的 "CHUNK_INFO 无版本标记" 缺口
          * (unfixed_defects_full_v1.md:607)的收口。改容量时本名自动跟随;
          * ⛔ sniffer.cpp 的同款构造必须同步修改(两处 chunk_info_t 定义同源)。 */
-        ipc::string shm_name{ipc::make_prefix(
-            pref, {"CHUNK_INFO__", ipc::to_string(chunk_size), "__C",
-                   ipc::to_string(static_cast<std::size_t>(ipc::large_msg_cache))})};
+        ipc::string const shm_name = chunk_segment_name(pref, chunk_size);
         ipc::shm::handle *h;
+        bool newly_attached = false;
         {
           std::lock_guard<std::mutex> guard{lock_};
           h = &(handles_[pref]);
+          newly_attached = !h->valid();
           if (!make_handle(*h, shm_name, chunk_size))
           {
             return nullptr;
@@ -384,6 +551,14 @@ namespace
               "%zd\n",
               chunk_size);
           return nullptr;
+        }
+        /* W09/D-14: 首次 attach 一个"已被用过"的段 ⇒ 判它是否崩溃遗留(见
+         * reclaim_orphan_segment 的论证), 是则整体复位空闲链。⛔ 这一步必须在
+         * **返回给调用方之前**完成: 调用方随后就会 acquire, 不能让它拿到一个
+         * 尚未判定的池。 */
+        if (newly_attached)
+        {
+          (void)reclaim_orphan_segment(info, pref, chunk_size, "attach");
         }
         return info;
       }
@@ -526,6 +701,29 @@ namespace
       n = ++(it->count);
     }
 
+    /* ---- F1/t35：W03 计数接线（**本函数是全仓唯一的池穷尽出口**，故也是这两个
+     * ID 的唯一写入点）。
+     *
+     * kind → ID 的映射沿用 W09-F5 冻结口径（docs/.../W09/容量与背压_交付.md:184）：
+     *   `loan`                        ⇒ chunk_alloc_failed（B 借样被拒；调用方**必须**回退整包）
+     *   `send` / `no_member_send`     ⇒ chunk_exhausted（A/TLV 降级为 64 B 分片，**仍交付**）
+     * 两者是**不同**的失败类别（W09 §5.1：一个未交付、一个降级交付），⛔ 不得混算成一个。
+     *
+     * ⛔ 这两个 ID **不属于** t19 的三语义分离中的任何一组：`fallback_*` 是"DZFlat 尝试过
+     *    但降级"，`borrow_failed_*` 是"应用 loan() 失败"。池穷尽是**传输层容量事实**，
+     *    故只写 capacity 组，⛔ 不碰 fallback_total / borrow_failed_*（与本函数既有日志
+     *    同一口径：日志里也从不说"回退"）。
+     *
+     * 位置：与首报/节流**同一函数**、在 `n` 已知之后 —— 记账与诊断共用同一次 (kind,
+     * chunk_size) 归并，不可能出现"报了日志但没计数"或反之。 */
+    if (std::strcmp(kind, "loan") == 0) {
+      ::dzIPC::measure::CounterRegistry::instance().inc(
+          ::dzIPC::measure::CounterId::chunk_alloc_failed);
+    } else {
+      ::dzIPC::measure::CounterRegistry::instance().inc(
+          ::dzIPC::measure::CounterId::chunk_exhausted);
+    }
+
     if ((n == 1) || ((n % 1024) == 0)) {
       ipc::error("chunk pool exhausted: kind = %s, chunk_size = %zu, size = %zu, "
                  "pool capacity = %zu, count = %llu (本进程), prefix = '%s'%s\n",
@@ -587,6 +785,45 @@ namespace
     }
     if (reclaimed != 0) note_reclaimed(kind, chunk_size, reclaimed, inf->prefix_);
     return reclaimed != 0;
+  }
+
+  /* W09/D-14: 陈旧段恢复计数(与 note_pool_exhausted/note_reclaimed 同款口径). */
+  void note_orphan_reset(char const *kind, std::size_t chunk_size,
+                         ipc::string const &prefix) {
+    struct key_t {
+      std::size_t chunk_size;
+      char const *kind;
+    };
+    struct stat_t {
+      key_t key;
+      std::uint64_t count;
+    };
+    static std::mutex lock;
+    static std::vector<stat_t> stats;
+
+    std::uint64_t n;
+    {
+      std::lock_guard<std::mutex> guard{lock};
+      auto it = std::find_if(stats.begin(), stats.end(),
+                             [&](stat_t const &s)
+                             {
+                               return (s.key.chunk_size == chunk_size) &&
+                                      (std::strcmp(s.key.kind, kind) == 0);
+                             });
+      if (it == stats.end()) {
+        stats.push_back(stat_t{key_t{chunk_size, kind}, 0});
+        it = stats.end() - 1;
+      }
+      n = ++(it->count);
+    }
+    if ((n == 1) || ((n % 1024) == 0)) {
+      ipc::log("chunk pool orphan segment reset: kind = %s, chunk_size = %zu, "
+               "capacity = %zu, count = %llu (本进程), prefix = '%s'%s\n",
+               kind, chunk_size,
+               static_cast<std::size_t>(ipc::id_pool<>::max_count),
+               static_cast<unsigned long long>(n), prefix.c_str(),
+               "  <= 段已无活映射者(崩溃遗留), 空闲链已整体复位");
+    }
   }
 
   /* UF-003: 清扫归还计数(与 note_pool_exhausted 同款: 本进程计数 + 首报/节流). */
@@ -655,17 +892,27 @@ namespace
     info->lock_.unlock();
   }
 
+  /* t46：把"为什么没借到"逐出口带出去（`why` 可为空 ⇒ 与旧行为逐位相同）。
+   * ⛔ 本函数在**匿名 namespace** 内（`ipc.cpp:41` 起），不是 libipc 的导出面
+   *    ⇒ 加参数不改任何符号/布局（`nm -D` 对照见交付 §5）。 */
   std::pair<ipc::storage_id_t, void *> acquire_storage(conn_info_head *inf,
                                                        std::size_t size,
                                                        ipc::circ::cc_t conns,
                                                        char const *kind,
-                                                       bool bitmap_semantics)  {
-    if (inf == nullptr)
+                                                       bool bitmap_semantics,
+                                                       ipc::loan_status *why = nullptr)  {
+    const auto fail = [why](ipc::loan_status w) -> std::pair<ipc::storage_id_t, void *> {
+      if (why != nullptr)
+        *why = w;
       return {};
+    };
+    if (inf == nullptr)
+      return fail(ipc::loan_status::invalid_handle);
     std::size_t chunk_size = calc_chunk_size(size);
     auto info = chunk_storage_info(inf->prefix_, chunk_size);
     if (info == nullptr)
-      return {};
+      /* 段建不出来（mmap 失败 / 名字被占 / 尺寸算术越界）—— **不是**背压。 */
+      return fail(ipc::loan_status::storage_unavailable);
 
     info->lock_.lock();
     info->pool_.prepare();
@@ -686,18 +933,20 @@ namespace
         id = info->pool_.acquire();
         info->lock_.unlock();
       }
+
       if (id < 0) {
         /* prefix 按 const& 传、且只在本次调用内同步使用 —— 这里没有 get_info 上面
          * 那条"buff_t 析构时 conn_info 可能已 mem::free"的生存期问题: 本函数在
          * acquire 路径上, inf 是调用方自己活着的 conn_info。 */
         note_pool_exhausted(kind, chunk_size, size, inf->prefix_);
-        return {};
+        return fail(ipc::loan_status::pool_exhausted);
       }
     }
 
     auto chunk = info->at(chunk_size, id);
     if (chunk == nullptr)
-      return {};
+      /* id 拿到了却定位不到块 = 池/段不一致（id 越界），与环境有关而与背压无关。 */
+      return fail(ipc::loan_status::storage_unavailable);
     /* UF-003: 借出即标"未发布"并打上本路由标签。两处都必须在 conns.store 之前
      * 完成, 且 conns.store 用 release: 清扫方读到新位图时, 必然也已经看到
      * published == 0(在飞, 让路)与正确的路由标签。 */
@@ -1807,20 +2056,29 @@ namespace
 
     /* ---------------------------------------------------------------- 借样 */
 
-    static ipc::loan_t loan(ipc::handle_t h, std::size_t size, bool verbose)
+    /* t46：**唯一**的借样实现。`why == nullptr` 时与旧实现逐位相同（旧行为由下面
+     * 那个薄转发保留）。所有失败出口都在这里逐条归因 —— 出口数 6，与 §"五出口"
+     * 清点一一对应（交付 §2 的表）。 */
+    static ipc::loan_t loan_impl(ipc::handle_t h, std::size_t size,
+                                 ipc::loan_status *why, bool verbose)
     {
+      const auto fail = [why](ipc::loan_status w) -> ipc::loan_t {
+        if (why != nullptr)
+          *why = w;
+        return {};
+      };
       auto que = queue_of(h);
       if (que == nullptr || que->elems() == nullptr)
       {
         if (verbose)
           ipc::error("fail: loan, invalid queue\n");
-        return {};
+        return fail(ipc::loan_status::invalid_handle);
       }
       if (!que->ready_sending())
       {
         if (verbose)
           ipc::error("fail: loan, que->ready_sending() == false\n");
-        return {};
+        return fail(ipc::loan_status::not_ready);
       }
       /* 无接收方时不存在 chunk 语义: send() 在这种情况下也不走 chunk(改用 sniffer
        * 环或分片), 强行借了没人回收。让调用方回退。 */
@@ -1830,7 +2088,7 @@ namespace
       {
         if (verbose)
           ipc::error("fail: loan, there is no receiver on this connection.\n");
-        return {};
+        return fail(ipc::loan_status::no_receiver);
       }
       /* 接收侧靠 msg.storage_ 判定大消息, 而 storage_ 只在 size > large_msg_limit
        * 的分支被设置。借样必须落在那条路径上。 */
@@ -1838,21 +2096,67 @@ namespace
       {
         size = ipc::large_msg_limit + 1;
       }
+      /* ---- t46 安全修复：容量算术溢出必须**拒绝**，⛔ 不得返回假容量 ----
+       *
+       * 缺陷（本包实测, 见交付 §4）：`chunk_info_t::chunks_mem_size(chunk_size)` 是
+       * `max_count(=40) * chunk_size`，`make_handle` 再用
+       * `sizeof(chunk_info_t) + 那个乘积` 去 mmap。当乘积溢出 `size_t` 时它**回绕成一个
+       * 小值并成功映射一个过小的段**，而 `loan()` 依旧把 `size = 请求档位` 报给调用方：
+       *
+       *     loan(2^62)  → valid=true, size=4611686018427387904,
+       *                   真实段 = __IPC_SHM__CHUNK_INFO__4611686018427388928__C40, 41012 B
+       *     loan(2^64-1)→ calc_chunk_size 里的 8+size 先回绕 ⇒ 档位假装是 1024,
+       *                   实测 valid=true, size=18446744073709551615, 真实段 41012 B
+       *
+       * ⇒ 调用方按 `lo.size` 写就是**必然越界**。`loan_t` 无法表达"容量不够"，所以只能在
+       * 这里拒绝：把一个静默越界变回一次可判定的 `size_too_large`。
+       *
+       * 判据（唯一authoritative上界）：`chunks_mem_size(cap)` 必须仍可表示，即
+       *     cap ≤ (SIZE_MAX - sizeof(chunk_info_t)) / max_count
+       * 这条**同时**覆盖 `calc_chunk_size` 的 `8+size` 回绕（那种情况 cap 会算出接近
+       * `SIZE_MAX` 的值）。40 块 × 4.6e17 B ≈ 18 EB 远超任何真实负载，故对正常请求
+       * 零行为变更（64 KiB 档实测 valid=1/size=65536, 见交付 §4 的回归读数）。
+       */
+      const std::size_t kMaxChunkSize =
+          ((std::numeric_limits<std::size_t>::max)() - sizeof(chunk_info_t)) /
+          static_cast<std::size_t>(ipc::id_pool<>::max_count);
       const std::size_t cap = loan_size_class(size);
+      if (cap > kMaxChunkSize)
+      {
+        if (verbose)
+          ipc::error("fail: loan, requested size too large (segment size arithmetic "
+                     "would overflow): size = %zu, cap = %zu, max = %zu\n",
+                     size, cap, kMaxChunkSize);
+        return fail(ipc::loan_status::size_too_large);
+      }
       conn_info_t *inf = info_of(h);
+      ipc::loan_status w = ipc::loan_status::ok;
       auto dat = acquire_storage(inf, cap, conns, "loan",
-                                 ipc::relat_trait<flag_t>::is_broadcast);
+                                 ipc::relat_trait<flag_t>::is_broadcast, &w);
       if (dat.second == nullptr)
       {
         /* chunk 池耗尽(每档位 32 块)。不是错误, 是背压信号 —— 调用方回退整包路径。
          * 计数与首报在 acquire_storage 的 note_pool_exhausted 里, 见该处注释。 */
-        return {};
+        return fail(w);
       }
       ipc::loan_t lo;
       lo.id = dat.first;
       lo.data = dat.second;
       lo.size = cap;
+      if (why != nullptr)
+        *why = ipc::loan_status::ok;
       return lo;
+    }
+
+    static ipc::loan_t loan(ipc::handle_t h, std::size_t size, bool verbose)
+    {
+      return loan_impl(h, size, nullptr, verbose);
+    }
+
+    static ipc::loan_t loan(ipc::handle_t h, std::size_t size,
+                            ipc::loan_status *st, bool verbose)
+    {
+      return loan_impl(h, size, st, verbose);
     }
 
     static bool publish_loan(ipc::handle_t h, ipc::loan_t const &lo,
@@ -2098,6 +2402,13 @@ namespace ipc
                                     bool verbose)
   {
     return detail_impl<policy_t<Flag>>::loan(h, size, verbose);
+  }
+
+  template <typename Flag>
+  ipc::loan_t chan_impl<Flag>::loan(ipc::handle_t h, std::size_t size,
+                                    ipc::loan_status *st, bool verbose)
+  {
+    return detail_impl<policy_t<Flag>>::loan(h, size, st, verbose);
   }
 
   template <typename Flag>

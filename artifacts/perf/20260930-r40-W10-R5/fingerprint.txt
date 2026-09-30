@@ -1,0 +1,38 @@
+# W10-R5 复验前置（2026-09-30 06:13:57 +0800）
+## 库/工装指纹（成对，R0-A1）
+libipc.so.1.3.0 558f47ede2419e14554766af55e53671e69d05d940b05351b1d4aa0e45d79031
+w10_r5_matrix   25bef0abccf7532b96a39caeb5b5687eb375db72b960c3cf4d9844ed0cc98285
+## 配对检查（库/头文件是否比工装新）
+PAIRING: OK
+## 实际加载库
+	libipc.so.3 => /home/zwc/cpp_ipc_dds/build/lib/libipc.so.3 (0x000078bed72c4000)
+## git
+e800ccc496ac710b711c9346709e86a148c41241
+ M include/dzIPC/common/circularqueue.h
+ M include/dzIPC/common/nodelet_config.h
+ M include/dzIPC/detail/shm_sub_seam.h
+ M include/dzIPC/ipc_info_pool.h
+ M include/dzIPC/shm_pub_sub_ipc.h
+ M include/dzIPC/threepools/recv_worker.h
+ M include/dzIPC/threepools/socket_recv_worker.h
+ M src/dzIPC/common/nodelet_config.cc
+ M src/dzIPC/ipc_info_pool.cc
+ M src/dzIPC/shm_pub_sub_ipc.cc
+ M src/dzIPC/socket_pub_sub_ipc.cc
+ M src/dzIPC/threepools/recv_worker.cc
+ M src/dzIPC/threepools/socket_recv_worker.cc
+ M src/libipc/ipc.cpp
+ M src/libipc/platform/posix/udp.h
+ M src/libipc/utility/id_pool.h
+ M test/CMakeLists.txt
+ M test/test_shm_ready_transition.cpp
+ M test/test_shm_sub_dtor_gate.cpp
+ M test/test_wakeup_artifact.cpp
+## 机器
+nproc=32 loadavg=1.85 1.88 1.79
+## 继承环境清理声明
+DZIPC_SHM_RECV_COMPAT=<unset> DZIPC_SHM_RECV_WORKERS=<unset> DZIPC_SHM_RECV_BUDGET_MSGS=<unset>
+## 判据版本
+W10-R5/§6.2-§6.3/v1
+## 窗口
+window_s=60 rounds=5 fast=0

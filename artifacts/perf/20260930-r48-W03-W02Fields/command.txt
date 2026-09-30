@@ -1,0 +1,4 @@
+./build/w03/w03_collector schema --out=artifacts/perf/20260930-r48-W03-W02Fields/field_schema.json   # 生成 schema.json + schema.csv
+./build/bin/test_w03_measurement                                        # 28 条
+ctest --test-dir build -j4 --output-on-failure                           # 29 项
+./build/w03/w03_collector scan-end-values                               # 接口自测

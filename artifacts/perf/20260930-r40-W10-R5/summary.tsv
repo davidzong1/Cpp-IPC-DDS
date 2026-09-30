@@ -1,0 +1,80 @@
+A-st3-n1-diagoff-r1	st=3	n=1	W=32	diag=off	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1-diagon-r1	st=3	n=1	W=32	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n100-diagoff-r1	st=3	n=100	W=32	diag=off	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n100-diagon-r1	st=3	n=100	W=32	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n500-diagoff-r1	st=3	n=500	W=32	diag=off	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n500-diagon-r1	st=3	n=500	W=32	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1000-diagoff-r1	st=3	n=1000	W=32	diag=off	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1000-diagon-r1	st=3	n=1000	W=32	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1-diagoff-r2	st=3	n=1	W=32	diag=off	load=0	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1-diagon-r2	st=3	n=1	W=32	diag=on	load=0	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n100-diagoff-r2	st=3	n=100	W=32	diag=off	load=0	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n100-diagon-r2	st=3	n=100	W=32	diag=on	load=0	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n500-diagoff-r2	st=3	n=500	W=32	diag=off	load=0	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n500-diagon-r2	st=3	n=500	W=32	diag=on	load=0	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1000-diagoff-r2	st=3	n=1000	W=32	diag=off	load=0	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1000-diagon-r2	st=3	n=1000	W=32	diag=on	load=0	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1-diagoff-r3	st=3	n=1	W=32	diag=off	load=0	round=3	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1-diagon-r3	st=3	n=1	W=32	diag=on	load=0	round=3	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n100-diagoff-r3	st=3	n=100	W=32	diag=off	load=0	round=3	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n100-diagon-r3	st=3	n=100	W=32	diag=on	load=0	round=3	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n500-diagoff-r3	st=3	n=500	W=32	diag=off	load=0	round=3	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n500-diagon-r3	st=3	n=500	W=32	diag=on	load=0	round=3	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1000-diagoff-r3	st=3	n=1000	W=32	diag=off	load=0	round=3	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1000-diagon-r3	st=3	n=1000	W=32	diag=on	load=0	round=3	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1-diagoff-r4	st=3	n=1	W=32	diag=off	load=0	round=4	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1-diagon-r4	st=3	n=1	W=32	diag=on	load=0	round=4	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n100-diagoff-r4	st=3	n=100	W=32	diag=off	load=0	round=4	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n100-diagon-r4	st=3	n=100	W=32	diag=on	load=0	round=4	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n500-diagoff-r4	st=3	n=500	W=32	diag=off	load=0	round=4	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n500-diagon-r4	st=3	n=500	W=32	diag=on	load=0	round=4	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1000-diagoff-r4	st=3	n=1000	W=32	diag=off	load=0	round=4	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1000-diagon-r4	st=3	n=1000	W=32	diag=on	load=0	round=4	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1-diagoff-r5	st=3	n=1	W=32	diag=off	load=0	round=5	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1-diagon-r5	st=3	n=1	W=32	diag=on	load=0	round=5	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n100-diagoff-r5	st=3	n=100	W=32	diag=off	load=0	round=5	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n100-diagon-r5	st=3	n=100	W=32	diag=on	load=0	round=5	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n500-diagoff-r5	st=3	n=500	W=32	diag=off	load=0	round=5	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n500-diagon-r5	st=3	n=500	W=32	diag=on	load=0	round=5	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1000-diagoff-r5	st=3	n=1000	W=32	diag=off	load=0	round=5	rc=0	ok=1	verdict=PASS failures=0	missing=none
+A-st3-n1000-diagon-r5	st=3	n=1000	W=32	diag=on	load=0	round=5	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st1-n1-diagon-r1	st=1	n=1	W=32	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st1-n100-diagon-r1	st=1	n=100	W=32	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st1-n500-diagon-r1	st=1	n=500	W=32	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st1-n1000-diagon-r1	st=1	n=1000	W=32	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st2-n1-diagon-r1	st=2	n=1	W=32	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st2-n100-diagon-r1	st=2	n=100	W=32	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st2-n500-diagon-r1	st=2	n=500	W=32	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st2-n1000-diagon-r1	st=2	n=1000	W=32	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n1-diagoff-r1	st=3	n=1	W=32	diag=off	load=5	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n1-diagoff-r2	st=3	n=1	W=32	diag=off	load=5	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n1-diagon-r1	st=3	n=1	W=32	diag=on	load=5	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n1-diagon-r2	st=3	n=1	W=32	diag=on	load=5	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n100-diagoff-r1	st=3	n=100	W=32	diag=off	load=5	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n100-diagoff-r2	st=3	n=100	W=32	diag=off	load=5	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n100-diagon-r1	st=3	n=100	W=32	diag=on	load=5	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n100-diagon-r2	st=3	n=100	W=32	diag=on	load=5	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n500-diagoff-r1	st=3	n=500	W=32	diag=off	load=5	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n500-diagoff-r2	st=3	n=500	W=32	diag=off	load=5	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n500-diagon-r1	st=3	n=500	W=32	diag=on	load=5	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n500-diagon-r2	st=3	n=500	W=32	diag=on	load=5	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n1000-diagoff-r1	st=3	n=1000	W=32	diag=off	load=5	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n1000-diagoff-r2	st=3	n=1000	W=32	diag=off	load=5	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n1000-diagon-r1	st=3	n=1000	W=32	diag=on	load=5	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+C-load-n1000-diagon-r2	st=3	n=1000	W=32	diag=on	load=5	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+D-W4-n1000-diagon-r1	st=3	n=1000	W=4	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+D-W4-n1000-diagon-r2	st=3	n=1000	W=4	diag=on	load=0	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+D-W8-n1000-diagon-r1	st=3	n=1000	W=8	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+D-W8-n1000-diagon-r2	st=3	n=1000	W=8	diag=on	load=0	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+D-W16-n1000-diagon-r1	st=3	n=1000	W=16	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+D-W16-n1000-diagon-r2	st=3	n=1000	W=16	diag=on	load=0	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+D-W32-n1000-diagon-r1	st=3	n=1000	W=32	diag=on	load=0	round=1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+D-W32-n1000-diagon-r2	st=3	n=1000	W=32	diag=on	load=0	round=2	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st1-n1-diagoff-r1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st1-n100-diagoff-r1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st1-n500-diagoff-r1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st1-n1000-diagoff-r1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st2-n1-diagoff-r1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st2-n100-diagoff-r1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st2-n500-diagoff-r1	rc=0	ok=1	verdict=PASS failures=0	missing=none
+B-st2-n1000-diagoff-r1	rc=0	ok=1	verdict=PASS failures=0	missing=none

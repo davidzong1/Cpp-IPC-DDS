@@ -1,0 +1,14 @@
+run_id: 20260929-r41-W10-R2b
+task: t41 / attempt d2b0e58a-7b4c-43a0 (t19 窗口开启)
+date: 2026-09-30T04:15:14+08:00
+--- BEFORE sha256 ---
+12131d8c354b868faca61204ceb21600a4888109a1dd059442f230358000586f  src/dzIPC/shm_pub_sub_ipc.cc
+b12be18e00bc836b6d78d4c0aa9f55354ad01ae8baf8fa1e8450e6a717329f6b  include/dzIPC/shm_pub_sub_ipc.h
+1f9c2bd0b9419aea1332c9c295e032ef8e5889e40bf48ebdbf79d8659530b6ae  include/dzIPC/measure/counters.h
+--- libipc BEFORE ---
+81fe91ffa14ee00a9ebfeb8eee23cd1bfae71956545ee79e686919a8e6f8d4c9  build/lib/libipc.so.1.3.0
+--- AFTER sha256 ---
+ceab50331f2a2449a7b425afa21c2f9a0e27e6a02016dbacc384a34dfdba0628  src/dzIPC/shm_pub_sub_ipc.cc
+40eeb7cc20570ac0e9f968eef4d69d8ede21ff178161295c134b1ada24568e7b  include/dzIPC/shm_pub_sub_ipc.h
+1f9c2bd0b9419aea1332c9c295e032ef8e5889e40bf48ebdbf79d8659530b6ae  include/dzIPC/measure/counters.h
+558f47ede2419e14554766af55e53671e69d05d940b05351b1d4aa0e45d79031  ../build/lib/libipc.so.1.3.0

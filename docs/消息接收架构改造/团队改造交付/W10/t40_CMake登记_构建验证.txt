@@ -1,0 +1,41 @@
+# t40：make -C build -j16 的 3 次尝试（用于区分「我的登记」与「并行任务重生成 idlc 头」）
+
+| 次 | 时刻 | 结果 | 失败目标与原因 |
+|---|---|---|---|
+| 1 | 04:49 | ⛔ exit 2 | `test/dzflat_tx_benchmark.cpp:29` ⇒ `ipc_msg/std_msgs/std_point_cloud.hpp: 没有那个文件或目录` |
+| 2 | 04:51:03 | ⛔ exit 2 | `test/dzflat_tx_benchmark.cpp:28` ⇒ `ipc_msg/std_msgs/std_image.hpp: 没有那个文件或目录` |
+| 3 | 04:51:22 | ✅ **exit 0** | 无（`grep -c 'error:'` = 0） |
+
+## 根因与归因（⛔ 非本任务引入）
+- 两次失败的目标都是 **`dzflat_tx_benchmark`**（**在 t40 开工前就在构建图里**，见 `build/t40/CMakeLists.before.txt:338`），**不是** 任何 `w10_*` 工装。
+- 失败的是 **`include/ipc_msg/std_msgs/{std_image,std_point_cloud}.hpp`** —— 这两个 idlc 生成头在 04:50/04:51 **被并行任务重新生成**（`ls -la` 显示 mtime 04:51:17），生成窗口内文件短暂不可读 ⇒ 命中编译。
+- **反证**：用**未含本任务登记的** `CMakeLists`（`before.txt`）单独构建同一目标 `dzflat_tx_benchmark` = **exit 0 / Built target**（因那时头已生成完毕）⇒ 该目标与我的登记**无关**；失败纯属**并行窗口的时序**。
+- ⛔ 本任务**未**触碰 `include/ipc_msg/**` 或 `test/dzflat_tx_benchmark.cpp`。
+
+## 判定
+- ✅ **任务 1 的验收语句成立**：12 个工装目标**全部**进入构建图（`make -C build help` ⇒ 12 个 `... w10_*`），且 `make -C build -j16` **exit 0**（第 3 次）。
+- ⚠️ **已知的旁证限制（如实登记）**：全量 `make` 在与数据面负责人并行重建 idlc 头时会**偶发失败**，且该失败**与本任务无关**；单独 `--target w10_*` 与 `--target dzflat_tx_benchmark` 均 exit 0。建议后续把 idlc 生成纳入依赖图（另案）。
+
+# ══════════════════════════════════════════════════════════════════════
+# t14 追加授权后（队长 2026-09-30）：再纳入 7 个目标（显式清单，⛔ 不用 GLOB）
+# ══════════════════════════════════════════════════════════════════════
+# | 目标 | 类型 | 所属任务 |
+# | w10_r2_interval / w10_r2_minimal | 可执行 | t42 |
+# | w10_r4b_firstfail / w10_r4b_runtimetruth | 可执行 | t43 |
+# | w10_r5_matrix / w10_r5_minimal | 可执行 | t38 |
+# | force_backend_unavailable | SHARED 库（libforce_backend.so） | t42 |
+# 合计 **19 个构建目标**（18 可执行 + 1 共享库）
+#
+# 实测（t14）：
+cmake -S . -B build   ⇒ 19 条 "Created W10 harness ..."（含 6 条 later phase + 1 条 fault injector）
+make -C build help    ⇒ 19 条 `... w10_*` / `... force_*`
+cmake --build build --target <上述 7 个> -j16  ⇒ exit 0、grep -c "error:" = 0
+grep -c 'add_test(NAME w10' test/CMakeLists.txt      ⇒ 0（⛔ 工装仍不是 CTest 用例）
+ctest --test-dir build -j4 ⇒ 27/27 Passed（未新增测试项）
+
+# 为什么 force_backend_unavailable 必须是 SHARED 且输出名固定为 libforce_backend.so：
+#   t42 驱动脚本 `test/perf/w10/w10_r2_driver.sh` 里写死了
+#   `FORCE=build/bin/libforce_backend.so`，并由 `LD_PRELOAD` 注入抢占
+#   `ipc::recv_wait_set::add`（构造 "后端不可用" 故障面）。
+#   ⇒ 若 CMake 产出别的名字/类型，脚本会**重新手工编译一份**，
+#     构建图与实际加载的库再次分叉（正是 ③d 要消除的那类分叉）。

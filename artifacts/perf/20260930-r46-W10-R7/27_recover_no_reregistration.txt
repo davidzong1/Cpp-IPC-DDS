@@ -1,0 +1,9 @@
+# 恢复阶段是否**重新注册**（方案 §10.1 要求"不重新注册"）
+  A-st3-n1000-diagon-r1          {'registration_attempts': 1000, 'registration_ok': 1000, 'registration_failed': 0}
+  B-st2-n1000-diagon-r1          {'registration_attempts': 0, 'registration_ok': 0, 'registration_failed': 0}
+
+# state3 的 registration_* 终值（= 建连阶段 1000 次，窗口/恢复内无新增）
+  n=1     attempts=1      ok=1      failed=0   
+  n=100   attempts=100    ok=100    failed=0   
+  n=500   attempts=500    ok=500    failed=0   
+  n=1000  attempts=1000   ok=1000   failed=0   

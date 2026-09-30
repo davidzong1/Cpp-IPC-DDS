@@ -1,0 +1,14 @@
+# D-22 (t29) 源码状态
+采集 2026-09-29T23:10:42+08:00
+
+## 本任务改动的文件（仅一个）
+src/dzIPC/socket_pub_sub_ipc.cc   M  +201/-8  （有界重试 + 可识别诊断；两处调用点 + 匿名命名空间新函数）
+
+## 明确未改动（指纹与开工前一致）
+src/libipc/platform/posix/udp.h   226950d437e71e7857cf4c7e938565e3c60960bf8b1ed70b79b4394254f27130  （W07 既有改动，本任务未动）
+
+## 未改动（授权面外，仅上报）
+test/perf/w10/w10_matrix.cpp      —— w10_pick_socket_topics() 解析取错列（见 03_picker_parse_check.txt）
+
+## 全仓其它 M 项均为他人 WP
+24 个已修改文件（含本任务 1 个）

@@ -1,0 +1,8 @@
+case,name,result,detail
+2,"2a route 已进池（前提成立）",PASS,"route_count=1"
+2,"2b 积压已发出（> 每轮预算 1 条）",PASS,"sent=8/8，每轮消息预算=1"
+2,"2c 无新发布下全部排空（不得依赖新消息）",PASS,"收到 8/8（发布完成后未再 publish）"
+2,"2d 逐条序号/载荷正确（无丢失、无重复、无乱序）",PASS,"M0..M7 逐条一致"
+2,"2e 预算耗尽已重入（budget_yields/deferred_drains 增长）",PASS,"Δbudget_yields=3 Δdeferred_drains=3（≥ 重入次数；N-1=7）"
+2,"2f deferred 深度有非零读数（按 worker 导出）",PASS,"deferred_depth_max=1 deferred_depth_last=0"
+2,"2g 无错误",PASS,"Δrecv_errors=0"

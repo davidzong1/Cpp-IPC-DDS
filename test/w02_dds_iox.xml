@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  W02 统一跨进程基准 · CycloneDDS 对照档 B：本机 SHM（iceoryx 共享内存开启）
+
+  ⚠️ 前置条件：必须已有 RouDi 守护进程在运行，否则 CycloneDDS 的 create_participant
+  会**永久阻塞**（实测：没有 RouDi 时连 participant 都建不出来，日志里什么都看不到）。
+  基准的采集器会在跑 DDS 档之前做一次带超时的预检（--role=ddscheck），预检失败就
+  显式标"该档不可用"，不会让整个运行卡死。
+
+  启动 RouDi（本机路径随安装而变，用环境变量 W02_ROUDI 覆盖）：
+    iox-roudi -c /etc/iceoryx/roudi_config.toml &
+
+  用法：
+    CYCLONEDDS_URI=file://<repo>/test/w02_dds_iox.xml build/bin/xproc_benchmark --path=cyc-iox ...
+  基准默认已指向本文件（可用 --dds-uri-iox= 覆盖）。
+
+  判读纪律（方案 §10.6）：本节把 <LogLevel> 设为 debug 时，iceoryx 会在 stderr 打出
+  "Application registered payload data segment ... to id N" —— 那是"进程接上了同一个
+  iceoryx 段"的证据；但它**仍不等于**"这条消息零拷贝"。所以本基准的 manifest 里
+  DDS 档的 wire_bytes_per_msg 写 null，verdict.md 把 Zero-copy 标为未确认，不冒充。
+-->
+<CycloneDDS>
+  <Domain Id="any">
+    <SharedMemory>
+      <Enable>true</Enable>
+      <LogLevel>debug</LogLevel>
+    </SharedMemory>
+    <General>
+      <Interfaces>
+        <NetworkInterface name="lo" multicast="true" />
+      </Interfaces>
+      <AllowMulticast>true</AllowMulticast>
+      <EnableMulticastLoopback>true</EnableMulticastLoopback>
+    </General>
+    <Discovery>
+      <EnableTopicDiscoveryEndpoints>true</EnableTopicDiscoveryEndpoints>
+      <Peers>
+        <Peer Address="127.0.0.1"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

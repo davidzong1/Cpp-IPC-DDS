@@ -1,0 +1,42 @@
+# t46 复现命令 —— run_id 20260930-r29-libipc-loan-reason
+# 工作目录 /home/zwc/cpp_ipc_dds  基线 e800ccc496ac710b711c9346709e86a148c41241
+
+# 0) 开工前指纹（libipc.so = 17acf7a2…）
+sha256sum include/libipc/ipc.h src/libipc/ipc.cpp include/dzIPC/measure/counters.h \
+          include/dzIPC/shm_pub_sub_ipc.h include/dzIPC/shm_pub_sub_ipc.cc \
+          build/lib/libipc.so.1.3.0 | tee fingerprints_before.txt
+
+# 1) 缺口机械核查（两个 ID 在 src/ 的生产者数 = 0）
+python3 src/audit_counter_wiring.py . 30_audit.tsv   # borrow_failed_*: table_only, n_direct_writers=0
+
+# 2) 结构不可达证明（8 组合穷举，逐组合一个进程）
+g++ -std=c++17 -O2 -Iinclude -o classifier_exhaustion src/classifier_exhaustion.cpp -Lbuild/lib -lipc -pthread
+for hr in 0 1; do for fo in 0 1; do for po in 0 1; do ./classifier_exhaustion $hr $fo $po; done; done; done > 01_classifier_exhaustion.log
+# 判据：全程 OVERSIZED=0 ⇒ oversized 在唯一活落点结构不可达
+
+# 3) 分类器 vs 落点分歧
+g++ -std=c++17 -O2 -Iinclude -o divergence_classifier_vs_site src/divergence_classifier_vs_site.cpp -Lbuild/lib -lipc -pthread
+./divergence_classifier_vs_site classifier >  03_divergence.log
+./divergence_classifier_vs_site site      >> 03_divergence.log
+# 判据：同一事件 classifier⇒borrow_failed_oversized, site⇒borrow_failed_reason_unknown
+
+# 4) loan() 出口可达性 + 原因出口实现后的六臂取证
+g++ -std=c++17 -O2 -Iinclude -o loan_exit_reachability src/loan_exit_reachability.cpp -Lbuild/lib -lipc -pthread
+g++ -std=c++17 -O2 -Iinclude -o loan_reason_arms      src/loan_reason_arms.cpp      -Lbuild/lib -lipc -pthread
+for a in A B C D E F; do rm -f /dev/shm/*CHUNK_INFO*; ./loan_reason_arms $a; done > 10_arms.log
+
+# 5) 收益验证：应用调用点补丁（40_*.patch）的影子编译 + 同臂 0→非 0
+diff -u --label a/include/dzIPC/shm_pub_sub_ipc.h --label b/include/dzIPC/shm_pub_sub_ipc.h \
+     patchwork/a/shm_pub_sub_ipc.h patchwork/b/shm_pub_sub_ipc.h > 40_proposed_callsite.patch
+# 影子目录只做证据（真树 shm_pub_sub_ipc.h 未被改动）：
+g++ -std=c++17 -O2 -Ishadow -Iinclude -Ilocal/include -o shadow/shadow_exhaust shadow/shadow_exhaust.cpp -Lbuild/lib -lipc -pthread
+./shadow/shadow_exhaust        # ⇒ io_pool 0→80, 且 chunk_exhausted 仍为 0
+
+# 6) ABI / 符号对照（③d）
+nm -DC --defined-only build/lib/libipc.so.1.3.0 | awk '{print $1,$2,$3}' | sort > syms_post.txt
+comm -23 <(awk '{print $2" "$3}' syms_pre.txt|sort) <(awk '{print $2" "$3}' syms_post.txt|sort)  # 必须为空
+
+# 7) 回归
+cmake -S . -B build && make -C build -j16
+ctest --test-dir build -j4                      # 27/27
+bash docs/hotpath_gate.sh build 20260930-t46-loanreason

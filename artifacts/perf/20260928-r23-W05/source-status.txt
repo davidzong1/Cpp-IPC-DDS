@@ -1,0 +1,13 @@
+# W05 (t6) 源码状态快照
+采集: 2026-09-29T09:47:49+08:00  工作目录 /home/zwc/cpp_ipc_dds  基线 e800ccc496ac710b711c9346709e86a148c41241
+
+## 入库与否
+src/dzIPC/shm_pub_sub_ipc.cc        : 已修改(未提交) — 含 W05 控制面接入 + W08 计数点
+include/dzIPC/shm_pub_sub_ipc.h     : 已修改(未提交) — 同上
+include/dzIPC/threepools/shm_control_scheduler.h : 与 HEAD 一致(W05 未改; 阶段1 已入库 82d3760)
+src/dzIPC/threepools/shm_control_scheduler.cc    : 与 HEAD 一致(W05 未改)
+ include/dzIPC/shm_pub_sub_ipc.h               |  59 +-
+ include/dzIPC/threepools/recv_worker.h        |  25 +-
+ include/dzIPC/threepools/socket_recv_worker.h |  11 +-
+ src/dzIPC/shm_pub_sub_ipc.cc                  | 846 ++++++++++++++++++++------
+ 4 files changed, 735 insertions(+), 206 deletions(-)

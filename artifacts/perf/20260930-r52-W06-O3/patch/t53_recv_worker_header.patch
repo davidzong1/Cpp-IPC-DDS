@@ -1,0 +1,39 @@
+--- a/include/dzIPC/threepools/recv_worker.h
++++ b/include/dzIPC/threepools/recv_worker.h
+@@ -333,6 +333,36 @@
+     std::uint64_t deferred_depth_last{0};
+     std::uint64_t deferred_depth_max{0};
+ 
++    /* 追加字段（W06/t53，2026-09-30；R0-9/R0-10 的**结束值**，冻结规则：新增一律追加）：
++     * `collect_pending()` 每轮**扫描后**上报的值（`ScanRoundScope::finish()` +
++     * `ScanRoundAccumulator`，接线点见 `recv_worker.cc`）。
++     *
++     * ⛔ 与上面 5 个字段**时点/量纲不同，不得互相替代、不得混列**：
++     *   · `scan_ready_routes_total` —— Σ 每轮**新入队 route 数**（route 数口径）。
++     *     与 `scan_ready_rounds`（**轮数**）量纲不同 ⇒ **不得相加**；
++     *     `scan_ready_routes_total / scan_ready_rounds` = 有就绪的轮平均入队几条 route。
++     *   · `deferred_depth_after_last` —— **扫描后**深度（上面 `deferred_depth_last` 是
++     *     **入队前**深度）⇒ 报告必须分列，⛔ 不得混列一列。
++     *   · `deferred_depth_after_max` —— 扫描后深度最大值（上面 `deferred_depth_max` 同理
++     *     是入队前口径）。
++     *   · `deferred_depth_after_total` —— Σ 每轮扫描后深度；**唯一可安全按 worker 相加**
++     *     的深度量（均值 = 本值 / `scan_rounds`，前提是每轮都上报结束值）。
++     *   · `scan_elapsed_ns_total` —— Σ `ScanRoundResult::elapsed_ns`，**仅**在
++     *     `diagnostics_enabled()` 时累加。⛔ 关闭时为 0 表示**未采集**（不是"零成本"）；
++     *     判别用 `dzIPC::measure::counter_is_uncollected()`。与 `scan_time_ns_total`
++     *     同区间（构造 → `finish()`）⇒ 守恒判据 `Σ elapsed ≈ scan_time_ns_total`。
++     *
++     * 池级聚合纪律（`RecvWorkerPool::stats()`）：
++     *   `scan_ready_routes_total` / `deferred_depth_after_total` / `scan_elapsed_ns_total`
++     *   = **sum**；`deferred_depth_after_max` = **max**；`deferred_depth_after_last` =
++     *   **sum** —— 即"全池**当前**总深度 = Σ 每 worker 最近一轮扫描后深度"（R0-10 冻结）。
++     *   ⚠️ 与池级 `deferred_depth_last`（**max** = 最繁忙 worker 的深度）聚合纪律**相反**，
++     *   这正是 R0-10 要区分的两件事（t44 自测反例：全池 12 而 gauge 7）。 */
++    std::uint64_t scan_ready_routes_total{0};
++    std::uint64_t deferred_depth_after_last{0};
++    std::uint64_t deferred_depth_after_max{0};
++    std::uint64_t deferred_depth_after_total{0};
++    std::uint64_t scan_elapsed_ns_total{0};
+ };
+ 
+ enum class RecvRegisterStatus

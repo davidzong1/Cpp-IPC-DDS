@@ -1,0 +1,32 @@
+# W10/t36 2×2 反事实（外部逐 TID 读 /proc；N=1000 win=10s settle=6s）
+# 变量：DZIPC_SHM_CONTROL_SCHEDULER=1 ⇒ 控制面改走 per-topic 兼容线程（调度器路径 OFF）
+#       DZIPC_SHM_RECV_COMPAT=1     ⇒ 接收改走 per-topic 兼容线程（RecvWorker 池 OFF）
+
+### cell A : scheduler=ON pool=ON  pid=11
+      PID=11 窗口内可见线程=34 总tick=590 => 0.5900 core  非零CPU线程=1
+         tid=14      w10_idle                    590 tick  0.5900 core
+    state=3 n=1000 domain=28100 pool running=1 workers=32 route_count=1000 threads=34
+    0,3,18.000,34,0.59389,0.0,0.0000,0,0,5760,0,0,0,0
+       scheduler entries=2000 tick_delta=153781 tick_wakes_per_s=8543.4 tick_max_us=2188.79 overruns=0
+
+### cell C : scheduler=ON pool=OFF  pid=102
+      PID=102 窗口内可见线程=1002 总tick=601 => 0.6010 core  非零CPU线程=1
+         tid=106     w10_idle                    601 tick  0.6010 core
+    state=3 n=1000 domain=28200 pool running=0 workers=0 route_count=0 threads=1002
+    0,3,18.000,1002,0.94111,0.0,0.0000,0,0,0,0,0,0,0
+       scheduler entries=2000 tick_delta=151089 tick_wakes_per_s=8393.8 tick_max_us=616.31 overruns=0
+
+### cell B : scheduler=OFF pool=ON  pid=1163
+      PID=1163 窗口内可见线程=2034 总tick=0 => 0.0000 core  非零CPU线程=0
+    state=3 n=1000 domain=28300 pool running=1 workers=32 route_count=1000 threads=2033
+    0,3,18.000,2034,0.38333,0.0,0.0000,0,0,5760,0,0,0,0
+       scheduler entries=0 tick_delta=0 tick_wakes_per_s=0.0 tick_max_us=0.00 overruns=0
+
+### cell D : scheduler=OFF pool=OFF  pid=3256
+      PID=3256 窗口内可见线程=3002 总tick=0 => 0.0000 core  非零CPU线程=0
+    state=3 n=1000 domain=28400 pool running=0 workers=0 route_count=0 threads=3001
+    0,3,18.000,3002,0.69500,0.0,0.0000,0,0,0,0,0,0,0
+       scheduler entries=0 tick_delta=0 tick_wakes_per_s=0.0 tick_max_us=0.00 overruns=0
+
+# 判定：若 C 的总 CPU ≥ A（且 A/C 的唯一非零 TID 都是调度器线程），
+#       则『主成本来自 RecvWorker 池 collect_pending 全扫』被证伪。

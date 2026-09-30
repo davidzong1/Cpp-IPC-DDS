@@ -1,0 +1,4 @@
+CONFIG valid_rx=1000/1000 pool_routes=1000 entries=2000 workers=32
+WIN 60s | idle_exits_delta=0 thread_restarts_delta=0 | wait_wakeups=0 wait_timeouts=19199 recv_once_calls=0 recv_errors=0
+WIN 60s | sched tick_delta=514419 wakes/s=8573.6 tick_max_us=1360.8 overruns=0
+VERDICT idle_exits==0 ? YES ; thread_restarts==0 ? YES

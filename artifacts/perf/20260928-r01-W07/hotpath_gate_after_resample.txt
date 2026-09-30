@@ -1,0 +1,11 @@
+W07 热闸门 1(1 MiB)补采 —— 用于判定 hotpath_gate_after.txt 里 705 msg/s 是否为本改动的回归
+命令: LD_LIBRARY_PATH=build/lib:build/bin ./build/bin/dzipc_perf_benchmark \
+        --cases=pubsub_shm --payloads=1048576 --duration=5 --pin=5,6
+采集时间: 2026-09-28 19:48 CST, load average 2.98 3.19 3.10 (同机另有 7 名成员在跑构建/基准)
+
+run1: pubsub_shm_1048576B_tput  1034 msg/s  1033.7 MB/s  p50=12063.41 p99=37588.81 丢包=0.00% CPU=1.42
+run2: pubsub_shm_1048576B_tput  1065 msg/s  1064.6 MB/s  p50=12603.82 p99=36957.56 丢包=0.00% CPU=1.44
+run3: pubsub_shm_1048576B_tput  1193 msg/s  1192.5 MB/s  p50=12511.84 p99=33833.26 丢包=0.00% CPU=1.46
+
+结论: 与改前 1079 msg/s 同档 ⇒ after 文件里的 705 是并发负载抖动, 不是本改动的回归。
+注: udp.h 不在 pubsub_shm 路径上(SHM 路由不经过 UDPNode::receive)。
