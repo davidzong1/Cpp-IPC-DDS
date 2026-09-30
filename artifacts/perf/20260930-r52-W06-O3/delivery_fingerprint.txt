@@ -1,0 +1,24 @@
+# t53 交付指纹（run_id 20260930-r52-W06-O3；可 sha256sum -c 复核）
+
+f0ebc3ef2df5b276e35dd38a21183c0bbc59a51721b24aa2ef067783c07747c9  build/lib/libipc.so.1.3.0
+3754116cd495e2f252f1505f0ae5a0e3aadb5316bb64d29b49e5540dcea40ba3  src/dzIPC/threepools/recv_worker.cc
+27ff8079d3fa15ff1697483834dfe8f42bd86ae14698940a5ad21c6c2e3eaa73  include/dzIPC/threepools/recv_worker.h
+4810b53408d7687298a679a395eb3cefc55b76b49f701b289bc4a6aa1fdae393  include/dzIPC/measure/counters.h
+5c430b9690c4d3d118fd4cae9f82dd0ecceba3ba90aea2c6ed15f606a24cd585  build/bin/w10_o3_endvalues
+5595455cf58bc9ef340dbd372c048d16a004a0783cbfe195b3a43e26508bc6a2  test/perf/w10/w10_o3_endvalues.cpp
+87f6915becf03a8c3f561a41b42278a2e45d891bdc6b12e242162480c7ebefc0  test/perf/w10/w10_o3_driver.sh
+b55ebaf0d4acff8607d614a334b9ebb168a3c33ceefe77793b589f04bc537c8e  docs/消息接收架构改造/团队改造交付/W06/O3_结束值接线_交付.md
+673ba3325cc82c0a953cd208de271e6fffa9aa7bfe21f86b0585becbe99e0e50  artifacts/perf/20260930-r52-W06-O3/gauge.log
+102402ad333b7a1fc3b469c4d75448b16d9c3f3e575430a5e8b2a39f7a093dda  artifacts/perf/20260930-r52-W06-O3/conserve.log
+bde6cfea4cbcd1a8d531b9cde7ba20f75d3533614bda5058c01469f5653594e7  artifacts/perf/20260930-r52-W06-O3/negative_control/negative_control_wiring.log
+9ddabc3f1c8747e39a025a057b20a3a109d84a805b32a13d4e3c1cd1c6bcd17a  artifacts/perf/20260930-r52-W06-O3/abi_three_piece.txt
+fbf039f9f73c3ec97ebbd61b73fcf130ba2f601aea4052e7eb8826c4f3ad01c8  artifacts/perf/20260930-r52-W06-O3/gate_rerun.log
+42814804fc1a5b1aeb7f02292122d899cb65b9ee1d7c92d415f3590dd73f6c19  artifacts/perf/20260930-r52-W06-O3/scale/scale_readings.csv
+ed9094cf39c0a440ff21523f6ec2ff35706df106481e163941d449c97d61d35c  artifacts/perf/20260930-r52-W06-O3/patch/t53_recv_worker_cc.patch
+b69b25428c06cc27a89f18f1bc62e4e1a82eba0527b9141576eb51bbe2ddc748  artifacts/perf/20260930-r52-W06-O3/patch/t53_recv_worker_header.patch
+
+## 关键结论
+recv_worker.cc 相对 t53 开工前 = +58/-0（4 hunks，全部在 for 循环之后 / 成员声明处；零删除行）
+recv_worker.h 相对 t53 开工前 = +30/-0（1 hunk，RecvWorkerStats 追加 5 字段）
+counters.h 未被本包改动（W03 维护；本包只读引用 4 个既有 ID）
+sizeof(RecvWorkerStats): 176 -> 216 (+40 B) => 引用方必须随库重编（见 abi_three_piece.txt）
