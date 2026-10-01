@@ -1,0 +1,25 @@
+```bash
+cd /home/zwc/cpp_ipc_dds
+# 逐值复算：只读现行 run 的 samples.csv（⛔ 不读 perf_summary.json）
+python3 - <<'EOF'
+import csv, statistics as st
+B='artifacts/perf'
+RUNS={'r11':'20260928-r11-W08-tlv-prebuilt','r12':'20260928-r12-W08-tlv-permsg',
+      'r13':'20260928-r13-W08-dzflat-a-prebuilt','r14':'20260928-r14-W08-dzflat-a-permsg',
+      'r15':'20260928-r15-W08-dzflat-b-prebuilt','r16':'20260928-r16-W08-dzflat-b-permsg'}
+SZ=['img66k','img262k','img880k']
+def med(k,size,col):
+    rs=[r for r in csv.DictReader(open(f'{B}/{RUNS[k]}/samples.csv',encoding='utf-8'))
+        if r['route'].endswith('/'+size)]
+    return st.median(int(r[col])/1000.0 for r in rs)
+print("§1.2 (permsg: r12=TLV, r14=A)  transport/e2e/相对")
+for s in SZ:
+    t,a=med('r12',s,'transport_ns'),med('r14',s,'transport_ns')
+    te,ae=med('r12',s,'e2e_ns'),med('r14',s,'e2e_ns')
+    print(f"  {s}: {t:.1f} {a:.1f} {te:.1f} {ae:.1f} {(ae-te)/te*100:+.1f}%")
+print("§0:61/62 (img880k: r12/r14/r16)")
+t,a,b=med('r12','img880k','transport_ns'),med('r14','img880k','transport_ns'),med('r16','img880k','transport_ns')
+te,ae,be=med('r12','img880k','e2e_ns'),med('r14','img880k','e2e_ns'),med('r16','img880k','e2e_ns')
+print(f"  发布 {t:.1f}/{a:.1f}/{b:.1f}  e2e {te:.1f}/{ae:.1f}/{be:.1f}  A-B差={a-b:.1f}µs  BvsA={(be-ae)/ae*100:.2f}%")
+EOF
+

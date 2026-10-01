@@ -18,6 +18,10 @@
  *   C6 **B 贷款失败 ≠ A/TLV 发送回退**（合同第 (5) 条）：池耗尽时 `loan` 返回**无效**
  *      （拒绝语义，调用方必须回退整包），而 `send` 退化成分片并**返回成功**。两者是
  *      不同失败类别，不得混计、也不得假定「所有失败都能转成 64B 分片」。
+ *   C9 **段级复位的"首次 attach"判定不得与同进程在飞借样竞争**（t73 新增，R1/S4-W09-F1 的常驻回归）：
+ *      同进程 8 个话题共用同一 (prefix, chunk_size) 池并**并发首次借样**时，任何两块借样
+ *      都不得拿到相同 `loan_t::id` 或相同 `data` 指针。失效形态：复位把另一线程刚借出的
+ *      id 重新置为空闲 ⇒ **同一块 chunk 被两块借样同时持有**（数据面正确性缺陷，静默）。
  *   C7 **「策略性回退」与「内存安全越界」分开判定**（队长 D-11 与任务书硬要求）：
  *      退化后的分片数 = ceil(size/64)；当它 > 环槽位(256) 时环**必然覆写**，该情形记
  *      为独立的「越界风险」类别，**不是**回退计数的一部分。本用例到此为止，**不** drain
@@ -37,10 +41,13 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <signal.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -527,4 +534,189 @@ TEST(ChunkCapacityBackpressure, PoolOccupancyReturnsToBaselineAfterRelease)
         << "全部归还后该档池必须回到满空闲（实测 " << *after << "）—— 漏还一块就会少一块";
     std::printf("[W09-C8] 档 %zu 外部直读：借满=%zu → 归还后空闲=%zu（满值 %zu）\n", cls, *during,
                 *after, kChunkPoolSize);
+}
+
+/* ───────────────────────── C9 段级复位 vs 同进程并发首借（t73）─────────────────────────
+ *
+ * 背景（R1/S4 复核 W09-S4-F1，high）：t22 的段级复位 `reclaim_orphan_segment()` 声称
+ * 前提①"首次 attach 时本进程必然未持有本档 chunk"**天然满足**。该说法**不成立**：
+ * `get_info()` 在 `handles_[pref]` 的 `lock_` **释放之后**才去取池快照 ⇒ 同进程另一线程
+ * 在这条缝里经同一 `handles_[pref]` 借出 id#0，而随后的"字节镜像复核"看到正是被改动的池
+ * ⇒ 复核通过 ⇒ 复位把**别人正持有的 id 重新发出去**。
+ *
+ * 本用例是该反例的**常驻形态**（原反例 `R1/S4验收_W09_证据/repro_alias.cpp` 为一次性件）：
+ *   · 同一 prefix、**8 个不同话题**、每话题一个生产者（`ipc::route` 默认单生产端，合法）；
+ *   · 8 个线程用栅栏**同时**首发 `loan(8000)`（⇒ 档 9216）⇒ 竞争"首次 attach 判定"；
+ *   · 判据：任意两块借样的 `id` 或 `data` **不得相同**（`same_data_ptr` 直接证明两块内存别名）。
+ *
+ * 为什么用**独立 prefix** 而不是默认空前缀：机制与归属键都只取决于
+ * `(prefix, chunk_size)`，用独立 prefix 能**逐字复现同一代码路径**（同一 prefix 的多个话题
+ * 就是同一个池），同时⛔不占用全机共享的默认池、也不会被邻居污染（与本文件其余用例同纪律）。
+ *
+ * 为什么必须常驻：命中是概率性的（复核时实测 4/120），而后果是**静默的数据面错误** ——
+ * 两条被分别写不同字节的消息指向同一内存。⛔ 不能靠一次性复现件守。
+ */
+/* 判据专用前缀（⛔ 不用空前缀）：空前缀的 9216 段是**全机共享**的 ⇒ 并发邻居的借样/复位
+ * 会把噪声引进判据（t73 实测：600 轮下曾出现 2/10 假红，随后 50 次全绿 ⇒ 判据受邻居干扰）。
+ * 用专属前缀仍**逐字复现同一代码路径**（复位的进入条件 = "首次 attach 一个已被用过的段"，
+ * 与 prefix 取值无关），但把干扰面收窄到本用例自身。 */
+namespace {
+
+constexpr char const *kAliasPrefix = "w09c9alias";
+
+int alias_round_in_fresh_process(int seed)
+{
+    constexpr int kTopics = 8;
+    std::vector<std::unique_ptr<ipc::route>> rx;
+    std::vector<std::unique_ptr<ipc::route>> tx;
+    for (int i = 0; i < kTopics; ++i)
+    {
+        const std::string topic = "w09c9_" + std::to_string(seed) + "_t" + std::to_string(i);
+        rx.emplace_back(new ipc::route{ipc::prefix{kAliasPrefix}, topic.c_str(), ipc::receiver});
+        tx.emplace_back(new ipc::route{ipc::prefix{kAliasPrefix}, topic.c_str(), ipc::sender});
+    }
+    for (int i = 0; i < kTopics; ++i)
+    {
+        if (!tx[(std::size_t)i]->wait_for_recv(1, 3000)) return 3;
+    }
+    std::atomic<int> go{0};
+    std::mutex m;
+    struct Owned
+    {
+        int topic;
+        ipc::loan_t lo;
+    };
+    std::vector<Owned> held;
+    std::vector<std::thread> th;
+    for (int i = 0; i < kTopics; ++i)
+    {
+        th.emplace_back(
+            [&, i]
+            {
+                while (go.load(std::memory_order_acquire) == 0)
+                {
+                }
+                auto lo = tx[(std::size_t)i]->loan(8000);
+                if (lo.valid())
+                {
+                    std::memset(lo.data, 'A' + i, 64);
+                    std::lock_guard<std::mutex> g(m);
+                    held.push_back(Owned{i, lo});
+                }
+            });
+    }
+    go.store(1, std::memory_order_release);
+    for (auto& x : th) x.join();
+
+    int si = 0;
+    int sp = 0;
+    for (std::size_t i = 0; i < held.size(); ++i)
+    {
+        for (std::size_t j = i + 1; j < held.size(); ++j)
+        {
+            if (held[i].topic == held[j].topic) continue;
+            if (held[i].lo.id == held[j].lo.id) ++si;
+            if (held[i].lo.data == held[j].lo.data) ++sp;
+        }
+    }
+    for (auto& h : held) tx[(std::size_t)h.topic]->discard_loan(h.lo);
+    std::fflush(nullptr);
+    return (si || sp) ? 1 : 0;
+}
+
+}   // namespace
+
+/* ───────────────────────── C9 段级复位 vs 同进程并发首借（t73）─────────────────────────
+ *
+ * 背景（S4 复核 W09-S4-F1，high；`团队改造交付/R1/S4验收_W09.md` §2.2–§2.4）：
+ * t22 的段级复位声称前提①"首次 attach 时本进程必然未持有本档 chunk"**天然满足**。
+ * 该说法**不成立** —— `get_info()` 在 `handles_[pref]` 的 `lock_` **释放之后**才取池快照
+ * ⇒ 同进程另一线程在这条缝里经同一 `handles_[pref]` 借出 id#0，随后的"字节镜像复核"
+ * 看到的正是被改动过的池 ⇒ 复核通过 ⇒ 复位把**别人正持有的 id 重新发出去** ⇒
+ * 同一块 chunk 被两块借样同时持有（静默的数据面别名）。
+ *
+ * 本用例是复核最小反例（`R1/S4验收_W09_证据/repro_alias.cpp`）的**常驻形态**。
+ *
+ * ⚠️ **为什么每一轮要 fork 一个全新进程**（这是本用例唯一"看起来多余"的设计，也是踩过的坑）：
+ *   · 段级复位**只在"首次 attach 一个已被用过的段"那一刻**被调用，判据是进程内的
+ *     `handles_[prefix]` 由无效变有效；
+ *   · `handles_` 是**进程局部**的，且 `clear_storage`（unlink 段文件）**不会**让它失效
+ *     ⇒ 同一进程内**只有第一次**能进入该路径，之后每一轮都是 `newly_attached == false` ⇒
+ *     复位函数根本不跑 ⇒ 判据永远绿（**静默假绿**：我第一版就是这样，连负控都照样通过）；
+ *   · 所以"每轮一个全新进程"是把"首次 attach"这件事**每轮各来一次**的唯一办法。
+ *     ⛔ 不要为了"省点开销"把它改成同进程多轮 —— 那会让本用例退化成永真的假绿。
+ *
+ * 判据：任一子进程报告"两个不同话题拿到相同 `loan_t::id` 或相同 `data` 指针" ⇒ 失败。
+ */
+TEST(ChunkCapacityBackpressure, OrphanResetDoesNotAliasInflightLoansAcrossTopics)
+{
+    constexpr int kRounds = 1200;  ///< 命中是概率性的（复核实测 4/120 量级）⇒ 轮数要给足
+    int bad = 0;
+    int skipped = 0;
+
+    /* ⛔ 开跑前把本前缀的段清干净：段是**跨轮复用**的（这正是"已被用过"形态的来源），
+     * 但若不清，段会把**上一次运行**的残留状态带进来 ⇒ 判据会继承历史污染（t73 实测：
+     * 负控库跑完后再跑修复库，修复库也会报红）。清一次 ≠ 每轮清：每轮的"非素净"由种子进程现造。 */
+    ipc::route::clear_storage(ipc::prefix{kAliasPrefix}, "w09c9_seed");
+
+    for (int r = 0; r < kRounds && bad == 0; ++r)
+    {
+        /* ① 先造出"已被用过"的段：fork 一个**借样后不归还**的种子进程，用 `_exit` 跳过析构
+         * ⇒ 段留存且空闲链**非素净**（`pool_.invalid() == false`）。
+         * ⛔ 这一步是本用例有牙的前提：段级复位函数首行是 `if (pool_.invalid()) return false;`
+         *    （全新段早退）—— 不造非素净段，复位路径**根本不会进入**，判据就永远绿。
+         * ⛔ 不能改用 `clear_storage`：那是删段 ⇒ 下一轮又成"全新段" ⇒ 同样早退。 */
+        {
+            const ::pid_t sp = ::fork();
+            ASSERT_GE(sp, 0) << "seeder fork 失败";
+            if (sp == 0)
+            {
+                std::vector<ipc::route> keep;
+                ipc::route stx{ipc::prefix{kAliasPrefix}, "w09c9_seed", ipc::sender};
+                ipc::route srx{ipc::prefix{kAliasPrefix}, "w09c9_seed", ipc::receiver};
+                if (!stx.wait_for_recv(1, 3000)) ::_exit(0);
+                std::vector<ipc::loan_t> held;
+                for (int i = 0; i < 3; ++i)
+                {
+                    auto lo = stx.loan(8000);
+                    if (!lo.valid()) break;
+                    held.push_back(lo);
+                }
+                std::fflush(nullptr);
+                ::_exit(0);   /* 不 discard ⇒ 段内空闲链保持非素净 */
+            }
+            int sst = 0;
+            (void)::waitpid(sp, &sst, 0);
+        }
+        const ::pid_t pid = ::fork();
+        ASSERT_GE(pid, 0) << "fork 失败";
+        if (pid == 0)
+        {
+            ::_exit(alias_round_in_fresh_process(r));
+        }
+        int status = 0;
+        const ::pid_t got = ::waitpid(pid, &status, 0);
+        ASSERT_EQ(got, pid) << "waitpid 失败";
+        if (!WIFEXITED(status))
+        {
+            FAIL() << "第 " << r << " 轮子进程异常退出（signal=" << (WIFSIGNALED(status) ? WTERMSIG(status) : -1)
+                   << "）—— 段级复位引发的别名可能已把进程写崩";
+        }
+        const int code = WEXITSTATUS(status);
+        if (code == 3)
+        {
+            ++skipped;
+            continue;
+        }
+        if (code == 1) ++bad;
+    }
+
+    ::testing::Test::RecordProperty("alias_bad_rounds", std::to_string(bad));
+    ::testing::Test::RecordProperty("alias_skipped_rounds", std::to_string(skipped));
+    std::printf("[W09-C9] 专属前缀 %s 的 8 话题并发首借 ×%d 个独立进程：bad_rounds=%d skipped=%d\n", kAliasPrefix, kRounds, bad,
+                skipped);
+    EXPECT_GT(kRounds - skipped, 0) << "所有轮次都因前提不成立被跳过 ⇒ 本用例没有牙";
+    EXPECT_EQ(bad, 0)
+        << "段级复位把同进程在飞借样当成孤儿段残留重新发出：两个不同话题拿到相同 id / 相同 data 指针"
+           " ⇒ 同一块 chunk 被两块借样同时持有（数据面别名）";
 }

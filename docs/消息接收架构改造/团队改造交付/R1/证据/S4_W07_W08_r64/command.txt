@@ -1,0 +1,67 @@
+# t64 · S4 独立验收 W07 + W08 —— 复现命令
+# 复核者：基准负责人（未参与 W07/W08 实现）｜日期：2026-10-01
+# 工作目录 /home/zwc/cpp_ipc_dds   基线 e800ccc496ac710b711c9346709e86a148c41241
+# ⛔ 只读复核：未改交付物/产品代码/工装/他人 WP/既有 run；新增产物仅在 R1/**
+
+# ---------- 0) 机械检查（合同 verify 原样） ----------
+cd build && ctest -j4 --output-on-failure 2>&1 | tail -5 ; cd ..
+git show e800ccc:src/libipc/platform/posix/udp.h | sed -n '344,354p' | nl -ba -v344
+grep -nE '快 ?[0-9]+ ?倍|提升 ?[0-9]+ ?倍|[0-9]+x ?提升' docs/消息接收架构改造/团队改造交付/W08/*.md | head
+ls -d artifacts/perf/20260928-r1[1-6]-W08-*
+
+# ---------- 1) W07 高 fd 反事实（poll 迁移） ----------
+# 1a 最小件（20 行，与被审代码无关）
+gcc -O2 -D_FORTIFY_SOURCE=2 -o /tmp/fdset_probe docs/消息接收架构改造/团队改造交付/R1/证据/S4_W07_W08_r64/fdset_probe.c
+/tmp/fdset_probe fdset    # 期望 rc=134 + *** buffer overflow detected ***
+/tmp/fdset_probe poll     # 期望 rc=0
+
+# 1b 隔离树反事实（⛔ 在 tmp/t64 副本里做，不碰仓库源码）
+mkdir -p tmp/t64 && cp -a build tmp/t64/build && cp -a src include test 3rdparty cmake exec extern generator msg local python CMakeLists.txt tmp/t64/
+rm -rf tmp/t64/build && cmake -S tmp/t64 -B tmp/t64/build -DCMAKE_BUILD_TYPE=Release
+cmake --build tmp/t64/build --target ipc test_socket_high_fd -j8
+./tmp/t64/build/bin/test_socket_high_fd            # 基线（= 当前树）⇒ 3/3 PASSED
+git show e800ccc:src/libipc/platform/posix/udp.h > tmp/t64/src/libipc/platform/posix/udp.h
+cmake --build tmp/t64/build --target ipc test_socket_high_fd -j8
+./tmp/t64/build/bin/test_socket_high_fd            # ⇒ rc=1，3/3 FAILED signal=6
+cp src/libipc/platform/posix/udp.h tmp/t64/src/libipc/platform/posix/udp.h   # 复原
+cmake --build tmp/t64/build --target ipc test_socket_high_fd -j8
+./tmp/t64/build/bin/test_socket_high_fd            # ⇒ rc=0，3/3 PASSED
+
+# ---------- 2) W07 容量修复（512→4096）+ 版本/attach ----------
+g++ -std=c++17 -O2 -I include       -o tmp/t64/cap_probe4096 docs/.../cap_probe.cpp -L build/lib -lipc
+g++ -std=c++17 -O2 -I tmp/t64/include -o tmp/t64/cap_probe512  docs/.../cap_probe.cpp -L tmp/t64/build/lib -lipc
+./tmp/t64/cap_probe4096   # kMaxEntries=4096 ⇒ registered=1200 first_fail=-1 rc=0
+./tmp/t64/cap_probe512    # kMaxEntries=512  ⇒ registered=512  first_fail=512 rc=1（隔离树已把 kMaxEntries 改回 512）
+
+g++ -std=c++17 -O2 -o tmp/t64/stale_v2 docs/.../stale_v2.cpp   # 在 v2 段名上装旧布局前缀
+g++ -std=c++17 -O2 -o tmp/t64/stale_v1 docs/.../stale_v1.cpp   # 在 v1 段名上装旧布局前缀
+g++ -std=c++17 -O2 -I include -o tmp/t64/attach_probe docs/.../attach_probe.cpp -L build/lib -lipc
+./tmp/t64/stale_v2 && ./tmp/t64/attach_probe   # ⇒ slot=-1 + 「拒绝使用既有段」/layout_ver/max_entries
+./tmp/t64/stale_v1 && ./tmp/t64/attach_probe   # ⇒ v1 段 size/前缀 before==after（未触碰）
+
+# ---------- 3) W07/D-22 有界重试 ----------
+g++ -std=c++17 -O2 -Iinclude -Ilocal/include \
+    artifacts/perf/20260929-r32-W10-portfix/src/socket_scale_probe.cpp \
+    -o tmp/t64/socket_scale_probe -Lbuild/lib -lipc -pthread
+export LD_LIBRARY_PATH=$PWD/build/lib:$PWD/build/bin
+timeout 120 ./tmp/t64/socket_scale_probe 39 3103 1 naive      # rc=1，有界 ~29s，errno=98 可识别
+DZIPC_SOCKET_CONNECT_MAX_ATTEMPTS=3 timeout 120 ./tmp/t64/socket_scale_probe 39 3103 1 naive   # rc=1，~2.0s
+DZIPC_SOCKET_CONNECT_MAX_ATTEMPTS=0 timeout 25  ./tmp/t64/socket_scale_probe 39 3103 1 naive   # rc=124（旧语义）
+timeout 120 ./tmp/t64/socket_scale_probe 39 3103 1 scanned    # rc=0，39/39
+# 修复前反事实：把 HEAD 版 socket 源注入隔离树后重编
+cp artifacts/perf/20260929-r32-W10-portfix/socket_pub_sub_ipc.cc.HEAD tmp/t64/src/dzIPC/socket_pub_sub_ipc.cc
+cmake --build tmp/t64/build --target ipc -j8
+timeout 45 env LD_LIBRARY_PATH=$PWD/tmp/t64/build/lib ./tmp/t64/socket_scale_probe 39 3103 1 naive   # rc=124
+
+# ---------- 4) W08 A/B 可分性 + 旧 run 失效 + 落盘闸 ----------
+python3 - <<'PY'   # 见 w08_consumer_vs_publisher.log / w08_r05r10_overwrite_check.log / w08_section25_vs_r11r16.log
+PY
+# 裸跑不写仓库（默认落 build/test-scratch/w08）
+sha256sum artifacts/perf/20260928-r{05,06,07,08,09,10}-W08-*/samples.csv | sha256sum     # = 3febe459…
+./build/bin/test_w08_dzflat_ab                                                            # 3/3 PASSED
+sha256sum artifacts/perf/20260928-r{05,06,07,08,09,10}-W08-*/samples.csv | sha256sum     # 不变
+ls build/test-scratch/w08/artifacts/perf/                                                    # 新样本落这里
+# 防覆盖闸（目标已存在 + 未授权）
+mkdir -p tmp/t64/fakebuild/bin && cp build/bin/test_w08_dzflat_ab tmp/t64/fakebuild/bin/
+./tmp/t64/fakebuild/bin/test_w08_dzflat_ab     # 第 1 次 rc=0（落 <fakebuild>/test-scratch）
+./tmp/t64/fakebuild/bin/test_w08_dzflat_ab     # 第 2 次 rc=1（evidence_dir_exists 断言失败）

@@ -1,0 +1,35 @@
+=== 复核证据清单（run 20260930-r59-R1-W06）===
+ 
+4096 .
+4096 ..
+1207 fingerprints.txt
+742 r59_budget_independent.log
+95 r59_budget.log
+51536 r59_budget_probe
+3261 r59_budget_probe.cpp
+3413 r59_ctest_compat.log
+1808 r59_f1_1000scale_decoupling.log
+2130 r59_f1_1000scale_decoupling.sh
+48416 r59_f1_counterfactual.log
+2126 r59_f1_counterfactual.sh
+165 r59_fallback_compat.log
+157 r59_fallback_worker.log
+1177 r59_hol_dyn_idle_lat.log
+444 r59_inject_sweep.log
+616 r59_lease.log
+77784 r59_lease_pairing
+3684 r59_lease_pairing.cpp
+903 r59_negative_control_3files.log
+1686 r59_negative_control_3files.sh
+1072 r59_negative_control.log
+1946 r59_negative_control.sh
+2456 r59_neg_ready_only.log
+918 r59_neg_ready_only.sh
+123908 r59_scale_1000_compat.log
+984 r59_scale_1000_worker.log
+1366 r59_test_files_arm_rewrite.txt
+231 r59_two_arms_misc.log
+842 r59_wsetfull.log
+55 README.md
+90032 w06_regress_r59
+62448 w06_scale_r59

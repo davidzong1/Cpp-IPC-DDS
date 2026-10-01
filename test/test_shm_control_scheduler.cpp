@@ -177,7 +177,22 @@ TEST(ShmControlScheduler, TimingSemanticsUnchanged)
         << "peer 判死超时必须是 2s（kPeerDeadTimeoutNs 现状值）";
 }
 
-/* 无 peer 时 owner heartbeat **必须继续**，只跳过 stale 扫描（需求 §3.1 明文）。 */
+/* 无 peer 时 owner heartbeat **必须继续**；stale 扫描**不得整条跳过**，
+ * 但要**按低频兜底**扫（周期 = peer_dead_timeout 量级）。
+ *
+ * ⛔ 本条于 t77 更正（队长裁定 §4.4 / R1-W05-F1）。原断言是：
+ *      EXPECT_EQ(pub->stale_scan.load(), 0) << "peer_count()==0 时必须跳过 stale 扫描";
+ *   它把**已证伪的门控**锁死成了契约 —— 其理由"无 peer 时扫描结果必然是 0（没有
+ *   in_use 槽位可判死）"**为假**：`collect_stale_peers()` 判死的是 **PeerSlot**，
+ *   不是 `peer_count`；而产品的清理顺序是 `remove_peer()` → `release_peer_slot()`
+ *   **两步**，进程死在两步之间就会留下 `peer_count==0 + slot.in_use==1 + 心跳陈旧`。
+ *   后果是陈旧槽位/cc_id 位**永不回收**，且回收被推迟到"活订阅者已挂上"之后
+ *   ⇒ 旧 cc_id 位已被复用 ⇒ `disconnect_receivers()` **永久误断活订阅者**。
+ *   该状态的端到端判据（回收 + 不被误断）由常驻用例
+ *   `test/test_w05_stale_slot_gate.cpp` 独立守门；本例只守**调度器侧的周期语义**：
+ *     ① 头 1.5s 内**不得**扫 —— 证"低频"而不是按 pub_heartbeat(50ms) 每拍扫；
+ *     ② 到 2.5s 时**必须**扫过 ≥1 次 —— 证兜底真的存在，而不是整条跳过。
+ *   两条缺一不可：只留 ① 就是原来的错误门控，只留 ② 会放过"每拍都扫"的降频退化。 */
 TEST(ShmControlScheduler, PublisherHeartbeatWithoutPeers)
 {
     ShmControlScheduler sched;
@@ -186,11 +201,34 @@ TEST(ShmControlScheduler, PublisherHeartbeatWithoutPeers)
 
     ASSERT_TRUE(wait_for([&] { return pub->owner_hb.load() >= 3; }, 500))
         << "无 peer 时 owner heartbeat 停了 —— 别的进程将无法判断本发布者是否还活着";
-    EXPECT_EQ(pub->stale_scan.load(), 0) << "peer_count()==0 时必须跳过 stale 扫描";
 
+    /* ① 低频：头 1.5s 内不得出现 stale 扫描（兜底周期 = peer_dead_timeout = 2s）。 */
+    const auto t0 = ControlClock::now();
+    bool fired_early = false;
+    while (ControlClock::now() - t0 < 1500ms)
+    {
+        if (pub->stale_scan.load() != 0)
+        {
+            fired_early = true;
+            break;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    const int after_1_5s = pub->stale_scan.load();
+    EXPECT_FALSE(fired_early)
+        << "peer_count()==0 时不得按 pub_heartbeat(50ms) **每拍**扫 —— 低频兜底的周期"
+           "必须与 peer_dead_timeout(2s) 同量级（t77 语义）";
+
+    /* ② 兜底存在：到 2.5s 时必须至少扫过一次（⛔ 不是"整条跳过"）。 */
+    ASSERT_TRUE(wait_for([&] { return pub->stale_scan.load() > after_1_5s; }, 2500))
+        << "peer_count()==0 时 stale 扫描被**整条跳过**（陈旧槽位/cc_id 位永不回收）—— "
+           "这正是 R1-W05-F1 的正确性回归形态；必须按 peer_dead_timeout 量级兜底扫一次";
+
+    /* 有 peer 后回到每拍扫（周期 = pub_heartbeat = 50ms）。 */
+    const int before_peers = pub->stale_scan.load();
     pub->peers.store(true);
-    ASSERT_TRUE(wait_for([&] { return pub->stale_scan.load() >= 2; }, 500))
-        << "有 peer 后 stale 扫描必须恢复";
+    ASSERT_TRUE(wait_for([&] { return pub->stale_scan.load() >= before_peers + 2; }, 800))
+        << "有 peer 后 stale 扫描必须恢复到每拍（50ms）";
     EXPECT_GT(pub->owner_hb.load(), 3) << "有 peer 时 owner heartbeat 必须继续";
 }
 

@@ -1,0 +1,22 @@
+=== .cc ===
+return 多重集相等: False   基线 50 条 / W05 66 条
+  仅在基线: [('publisher_->no_member_try_send(response_data.data(), response_data.size(), 0)', 2), ('publisher_->try_send(response_data.data(), response_data.size(), tm)', 1), ('std::make_shared<ipc::route>(topic_name_.c_str(), ipc::receiver, verbose_)', 1)]
+  仅在 W05 : [('', 7), ('false', 2), ('(host_ != nullptr) ? host_->topic_name_.c_str() : nullptr', 2), ('sent', 2), ('true', 1), ('forced', 1)]
+控制流关键字  基线 → W05 : {'if': (85, 116), 'else': (5, 14), 'return': (50, 66), 'continue': (5, 3)}
+删除行 192 行：纯注释/空行 39，含代码 153
+   代码删除示例: shm_pub_ipc::~shm_pub_ipc()
+   代码删除示例: running.store(false, std::memory_order_release);
+   代码删除示例: if (publish_thread_ != nullptr)
+   代码删除示例: if (publish_thread_->joinable())
+   代码删除示例: publish_thread_->join();
+   代码删除示例: delete publish_thread_;
+=== .h ===
+return 多重集相等: True   基线 5 条 / W05 5 条
+控制流关键字  基线 → W05 : {'if': (4, 5)}
+删除行 10 行：纯注释/空行 4，含代码 6
+   代码删除示例: void pub_handshake();
+   代码删除示例: std::thread* publish_thread_{nullptr};
+   代码删除示例: void sub_handshake();
+   代码删除示例: private:
+   代码删除示例: std::thread* sub_handshake_thread_{nullptr};
+   代码删除示例: int peer_slot_{-1};

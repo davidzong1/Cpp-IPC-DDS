@@ -26,6 +26,10 @@ LIB=build/lib/libipc.so.1.3.0
 [ -x "$TESTBIN" ] || { echo "REFUSE: 缺 $TESTBIN（先 make test_w08_dzflat_ab）"; exit 2; }
 [ -f "$LIB" ] || { echo "REFUSE: 缺 $LIB"; exit 2; }
 mkdir -p "$ROOT"
+# ⛔ t68 修正：把 ROOT 归一成**绝对路径**后再用。原实现写 `W08_ARTIFACT_ROOT="$PWD/$RD"`，
+# 当调用方传绝对路径时会拼成 `/repo//repo/artifacts/...`（双路径），证据静默落到
+# `<cwd>/home/zwc/...` 下 —— 实测踩到（t68 第 1 次重跑）。此处显式归一，杜绝该形态。
+ROOT="$(cd "$ROOT" && pwd)"
 
 LIB_SHA=$(sha256sum "$LIB" | cut -d' ' -f1)
 TST_SHA=$(sha256sum "$TESTBIN" | cut -d' ' -f1)
@@ -41,19 +45,27 @@ TST_SHA=$(sha256sum "$TESTBIN" | cut -d' ' -f1)
 } > "$ROOT/fingerprint.txt"
 
 FAILED=0; PASSED=0
+# ⛔ t68/F8：逐轮负载与窗口**落盘**（此前只打印到 stdout ⇒ 无法第三方核验）
+printf '#round\trc\twall_s\tloadavg_before\tloadavg_after\tbirth_epoch\tend_epoch\tsamples\n' > "$ROOT/rounds.tsv"
 for k in $(seq 1 "$ROUNDS"); do
   RD="$ROOT/round$k"
   if [ -n "$(ls -A "$RD" 2>/dev/null)" ]; then echo "SKIP round$k（已存在）"; continue; fi
   mkdir -p "$RD"
   LA=$(cut -d' ' -f1-3 /proc/loadavg)
   T0=$(date +%s)
-  W08_ARTIFACT_ROOT="$PWD/$RD" "$TESTBIN" \
+  # ⛔ ROOT 已归一到绝对路径 ⇒ RD 亦为绝对 ⇒ 此处**直传 RD**（不再拼 $PWD）。
+  W08_ARTIFACT_ROOT="$RD" "$TESTBIN" \
       --gtest_filter='W08DzFlatAB.CrossProcessPerSampleEvidenceIsWrittenAndPayloadFullyVerified' \
       > "$ROOT/round$k.log" 2>&1
   RC=$?
   T1=$(date +%s)
+  LA2=$(cut -d' ' -f1-3 /proc/loadavg)
+  BIRTH=$(stat -c %W "$RD" 2>/dev/null || echo 0)
+  SAMP=$(cat "$RD"/artifacts/perf/*/samples.csv 2>/dev/null | grep -vc '^run_id' || echo 0)
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "round$k" "$RC" "$((T1-T0))" "$LA" "$LA2" "$BIRTH" "$(date +%s)" "$SAMP" >> "$ROOT/rounds.tsv"
   if [ "$RC" -eq 0 ]; then PASSED=$((PASSED+1)); else FAILED=$((FAILED+1)); fi
-  printf '  round%-2s rc=%-3s %ss load=%s %s\n' "$k" "$RC" "$((T1-T0))" "$LA" \
+  printf '  round%-2s rc=%-3s %ss load=%s->%s samples=%s %s\n' "$k" "$RC" "$((T1-T0))" "$LA" "$LA2" "$SAMP" \
       "$(grep -c '^\[       OK \]' "$ROOT/round$k.log" 2>/dev/null) OK-line"
 done
 

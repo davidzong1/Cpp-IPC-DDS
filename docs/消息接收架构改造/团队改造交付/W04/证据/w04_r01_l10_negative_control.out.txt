@@ -1,0 +1,25 @@
+=== L10 常驻用例的输出（含 RecordProperty 实测值）===
+[       OK ] LifecycleContract.GenerationRebuildRequiresRemoveRouteFirstOrCrashStall (203 ms)
+[----------] 1 test from LifecycleContract (203 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (203 ms total)
+[  PASSED  ] 1 test.
+
+=== RecordProperty ===
+name="safe_order_received_after_rebuild" value="2"
+name="unsafe_order_signal" value="11"
+
+=== 负控（把不安全顺序改成安全顺序 ⇒ 应 FAIL）===
+=== 负控：临时把 L10 的不安全顺序改成安全顺序（先 remove_route + 重新 add_route）===
+期望：子进程不再崩/不再停收，而是'静默正常工作' ⇒ 用例 FAIL
+negative_sha256=899ece3faa85b2bb
+不安全顺序（未先 remove_route 就 rebuild）**静默地正常工作**了 —— 这正是 W04-F2 要禁止的形态：该顺序不可依赖，且实现随时可能改回崩溃
+[  FAILED  ] LifecycleContract.GenerationRebuildRequiresRemoveRouteFirstOrCrashStall (304 ms)
+[  PASSED  ] 0 tests.
+[  FAILED  ] 1 test, listed below:
+[  FAILED  ] LifecycleContract.GenerationRebuildRequiresRemoveRouteFirstOrCrashStall
+ 1 FAILED TEST
+restore_sha256=5c1efced77f22226
+--- 还原后 ---
+[  PASSED  ] 1 test.

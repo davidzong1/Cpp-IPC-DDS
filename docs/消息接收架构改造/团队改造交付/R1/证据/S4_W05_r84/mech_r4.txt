@@ -1,0 +1,5 @@
+基线 → W05 快照: 654	192	build/t58/base/cc => artifacts/perf/20260928-r23-W05/shm_pub_sub_ipc.cc.W05
+return 多重集相等: False  基线 34 → 快照 43
+控制流: {'if': 86, 'else': 5, 'return': 50, 'continue': 5} → {'if': 117, 'else': 14, 'return': 68, 'continue': 5}
+删除 192 行，纯注释/空行 39 ，含代码 153
+.h 基线→快照: 1	98	build/t85/head_h.h => artifacts/perf/20260928-r23-W05/shm_pub_sub_ipc.h.W05 (注: 用 HEAD 作基线近似)

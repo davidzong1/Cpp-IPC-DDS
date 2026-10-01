@@ -244,12 +244,21 @@ fd 预算：池**不占 fd**（每进程 1 个映射）；增容量不改变 fd 
 
 **W07 是独立工作线**，只负责 socket 容量与 fd 边界；⛔不扩展《事件驱动线程池需求》首批范围
 （不新增接收后端、不改 `RecvWorkerPool`/`SocketWaitSet` 语义、不动 `kMaxWorkerCount`/`RecvBudget`）。
-本改动与 W05/W06 的接收池接入正交：`socket_pub_sub_ipc.cc` **一行未动**（高 fd 崩溃点在它下面的
-libipc 原语上修，正是为了不与其交叉）。
+本改动与 W05/W06 的接收池接入正交：**截至 W07 收工时（2026-09-28）**`socket_pub_sub_ipc.cc` **一行未动**
+（高 fd 崩溃点在它下面的 libipc 原语上修，正是为了不与其交叉）。
+⚠️ **时间限定（t71 补）**：该文件**此后已被 D-22（socket 连接挂起修复）修改**（+201/−8，最终 sha256
+`b1867d0f…`，见《D22_socket连接挂起修复_交付.md》§1）⇒ 上句只描述 **W07 的改动面与边界**，
+⛔ 不得读作"该文件至今未变"。两包的改动面互不重叠（W07 只动 `udp.h` 与 `ipc_info_pool.{h,cc}`）。
 
 ---
 
 ## 6. 证据索引
+
+> ⚠️ **证据目录 = `artifacts/perf/20260928-r01-W07/`（t71 显式声明，防下游找错路径）**：
+> 本包全部证据（15 项逐项日志 + 反事实两版 `udp.h` + 补丁 + 指纹 + 热闸读数 + 容量实测）都在**该目录**下。
+> ⛔ **任务书里曾写的 `artifacts/perf/20260928-r23-W05/` 是 W05 的 run，不含任何 W07 证据** ——
+> 那是任务书本身的笔误（队长已确认），**请勿**按该路径检索；本包未往那里写过任何文件。
+> 复核方式：`ls artifacts/perf/20260928-r01-W07/ | wc -l`（应为 25 项文件、8 个回归日志在 `regression/`）。
 
 全部在 `artifacts/perf/20260928-r01-W07/`：
 
@@ -276,7 +285,24 @@ libipc 原语上修，正是为了不与其交叉）。
 
 ## 7. 已知限制与后续（⛔ 不假装已闭环）
 
-1. **CTest 未登记**：三个新用例 target 由 GLOB 生成但**尚未进 CTest**（`test/CMakeLists.txt` 的写入责任人是架构负责人）。已把精确 `add_test` 行提交给架构负责人；落地后才算"回归常驻"。本交付的读数是**直接跑 `build/bin/<target>`**得到的。
+1. **CTest 登记 —— 已由架构负责人登记（#20/#21/#22）**（⛔ 本条 2026-09-30 由 t71 更正；原文写"尚未进 CTest"已过时）：
+   三个新用例 target 当时由 GLOB 生成但未进 CTest，本包把精确 `add_test` 行提交给架构负责人；
+   **现已落地并常驻回归**：
+
+   | 用例 | `ctest` 编号 |
+   |---|---|
+   | `test_ipc_info_pool_layout` | **#20** |
+   | `test_ipc_info_pool_version` | **#21** |
+   | `test_socket_high_fd` | **#22** |
+
+   **复核方式**（机械可判，任何人在任何机器上可重跑）：
+   ```bash
+   ctest --test-dir build -N | grep -E "ipc_info_pool_layout|ipc_info_pool_version|socket_high_fd"
+   # 期望：#20 test_ipc_info_pool_layout / #21 test_ipc_info_pool_version / #22 test_socket_high_fd
+   ctest --test-dir build -R "ipc_info_pool_layout|ipc_info_pool_version|socket_high_fd"   # 3/3 Passed
+   ```
+   ⚠️ 本交付 §4 的读数是**当时直接跑 `build/bin/<target>`** 得到的（与 CTest 路径等价，但登记前不构成"回归常驻"）；
+   登记后两条路径都可复算。编号会随其他工作包新增用例而漂移 ⇒ ⛔ 引用时以 `ctest -N` 现值为准，不要写死编号。
 2. **Windows 未动**：`src/libipc/platform/win/udp.h` 仍有 4 处 `select`+`FD_SET`（单 fd，Winsock 默认 `FD_SETSIZE=64`），同样会在高 fd 下失败。⛔本轮**未改也未验证**（Linux 工具链无法编译/运行 Windows 路径；盲改风险大于收益）。该文件应另立条目按同一模式迁 `WSAPoll`。
 3. **`test_ipc_info_pool_version` 会临时在生产段名上装陈旧段**（必须如此才测得到），因此⛔不应与其它池用例并行跑；用例结束前已 `unlink` 干净。
 4. **socket_ser_cli 未单独加高 fd 用例**：其收包走同一个 `UDPNode::receive`，已被同一修复覆盖、`test_socket_ser_concurrency` 亦通过；但"sercli 在 fd>1024 下的端到端收发"没有专属用例，属可补的缺口。

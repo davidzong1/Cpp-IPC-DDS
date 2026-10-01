@@ -115,17 +115,121 @@ public:
      * （需求 §3.1："即使没有 peer，发布端仍需维持 owner heartbeat"）。 */
     virtual void on_pub_heartbeat(ControlClock::time_point now) = 0;
 
-    /// peer_count() > 0。为 false 时调度器**跳过** on_pub_stale_scan。
+    /// peer_count() > 0。
+    /// ⚠️ **它不再是"是否扫 stale"的门控**（t77 接口修订，见下）。
     virtual bool has_peers() const = 0;
 
-    /* 每 pub_heartbeat，**仅当 has_peers() 为真**：
-     * collect_stale_peers(dead_timeout) + disconnect_receivers(stale)
-     * （现状 src/dzIPC/shm_pub_sub_ipc.cc:159-169）。 */
+    /* stale 扫描：`collect_stale_peers(dead_timeout) + disconnect_receivers(stale)`。
+     *
+     * ── t77 接口修订（队长裁定 §4.4 / R1-W05-F1）────────────────────────────
+     * **原位语义（已废止）**：「`has_peers()==false` 时调度器**跳过**本回调」。
+     * **该语义的前提为假**：`collect_stale_peers()` 判死的是 **PeerSlot**，不是
+     * `peer_count`；而产品的清理顺序是 `remove_peer()` → `release_peer_slot()`
+     * **两步**（generation 重建分支与 `detach_on_exit()` 同序）。进程若恰好死在两步
+     * 之间，共享段就留下 `peer_count == 0` + `slot.in_use == 1` + 心跳陈旧 ——
+     * 这正是该扫描存在的理由。整条跳过 ⇒ 陈旧槽位/cc_id 位**永不回收**，且回收被
+     * 推迟到"活订阅者已挂上"之后 ⇒ 旧 `cc_id` 位已被复用 ⇒ `disconnect_receivers()`
+     * **永久误断活订阅者**（最小反例只差门控一行：**400 发 0 收** vs 基线 400/400）。
+     *
+     * **现语义**：调度器**总是**在发布项的每拍里到达本回调的判定点，节奏为
+     *   · `has_peers() == true`  ⇒ 按 `pub_heartbeat`（50ms）每拍调用；
+     *   · `has_peers() == false` ⇒ 按 `peer_dead_timeout`（2s）同量级**低频兜底**调用。
+     * ⛔ 低频兜底**不是**"降频优化/省 CPU"：扫 64 个槽位是**常数开销**（µs 级），
+     *    它的全部意义是**正确性**；⛔ 不得据此声称任何 CPU/吞吐收益。
+     * 实现见 `src/dzIPC/threepools/shm_control_scheduler.cc` 的 `dispatch()`
+     * （`Entry::next_stale_due`）。常驻判据：
+     * `test/test_w05_stale_slot_gate.cpp`（端到端）与
+     * `test/test_shm_control_scheduler.cpp:PublisherHeartbeatWithoutPeers`（周期语义）。 */
     virtual void on_pub_stale_scan(ControlClock::time_point now, std::chrono::nanoseconds dead_timeout) = 0;
 
     /// 诊断用名字（可为空）。语义同 SubControlState::debug_name()。
     virtual const char* debug_name() const noexcept { return nullptr; }
+
 };
+
+/* ── 发布侧控制面的**唯一**节拍判据（t84，(B) 路线；⛔ 逻辑只此一处）───────────────
+ *
+ * ⛔ **为什么必须有它**（N1 的根因）：W05 有**两条驱动源** ——
+ *   ① 进程级 `ShmControlScheduler`（默认臂）；
+ *   ② 每话题的 `shm_pub_ipc::compat_control_loop()`（`DZIPC_SHM_CONTROL_SCHEDULER=1`
+ *      的 **L1 运行时回退臂**）。
+ * t77 把「何时扫 stale」的修复只落在驱动方①，而**驱动方②自带一份同样判据且是修复前
+ * 形态** ⇒ 回退臂比基线更差（400 发 **0 收** vs 400/400），而 L1 是文档 §4.2 的**回滚入口**。
+ * **根因一句话**：同一判据被**复制**到两条驱动路径 ⇒ 修一条、漏一条。
+ *
+ * **修法**：判据做成**唯一的自由函数** `pub_control_tick()`，两条驱动源都只调它；
+ * 「下次该扫的时刻」这种**每项私有**的状态由各驱动方自持（`PubTickState`）——
+ * 因为它本质上属于"驱动方自己的排程"，不是判据。
+ * ⇒ 「何时扫」的逻辑**结构上只存在一处**，两条驱动源不可能再分叉。
+ *
+ * ⚠️ **为什么不用虚成员函数**：那需要把状态放进 `PubControlState` 里，会**改变这个
+ *    导出抽象基类的布局**（③d 硬闸）⇒ 任何派生它的二进制都要重编（t84 初版就这么错过
+ *    一次：`test_shm_control_scheduler` 的替身仍按旧尺寸构造 ⇒ 成员被写花、断言乱红）。
+ *    自由函数 + 外部状态**不改变 `PubControlState` 的布局**（纯虚接口保持原样）。
+ *
+ * **节拍语义**（与 t77 的调度器实现逐位一致，此处只是搬了位置）：
+ *   · 每拍**无条件**先 `on_pub_heartbeat(now)`（需求 §3.1：owner heartbeat 必须无条件维持）；
+ *   · `has_peers() == true`  ⇒ **每拍**调 `on_pub_stale_scan`（周期 = 驱动方给的拍长）；
+ *   · `has_peers() == false` ⇒ 按 `dead_timeout` **同量级低频兜底**调一次
+ *     （首次到期点 = 第一次 tick + dead_timeout，**不是**立刻扫）。
+ * ⛔ 低频兜底**不是**"降频优化/省 CPU"：扫 64 个槽位是**常数开销**（µs 级），
+ *    它的全部意义是**正确性**（`collect_stale_peers()` 判死的是 **PeerSlot** 而非
+ *    `peer_count`；`remove_peer()`→`release_peer_slot()` 之间的窗口会留下
+ *    `peer_count==0` + `slot.in_use==1` + 心跳陈旧的槽位，跳过整条扫描会让它
+ *    永不回收并最终误断活订阅者）。⛔ 不得据此声称任何 CPU/吞吐收益。
+ *
+ * ⚠️ `has_peers()` 抛出时**只放弃本拍的 stale 判定**，`owner heartbeat` 已先执行完
+ *    ⇒ 不会把心跳一起丢掉；也**不会**让异常逃到驱动线程（回退臂没有异常隔离层，
+ *    逃出去会终止该话题的兼容线程）。
+ *
+ * ⚠️ 线程纪律：`st` 只在**该驱动方的线程**上被读写（调度器在锁外逐项 dispatch；
+ *    回退臂是该话题自己的单线程循环）⇒ 无需加锁，⛔ 不得跨驱动方共享同一个 `st`。 */
+struct PubTickState
+{
+    ControlClock::time_point next_stale_due{};
+    bool init{false};
+};
+
+inline void pub_control_tick(PubControlState& pub, ControlClock::time_point now,
+                             std::chrono::nanoseconds dead_timeout, PubTickState& st)
+{
+    /* ① owner heartbeat：无条件、且必须在任何可能抛出的判断之前完成。 */
+    pub.on_pub_heartbeat(now);
+
+    /* ② peer 查询：抛异常只放弃本拍的 stale 判定（见上方说明）。 */
+    bool has = false;
+    try
+    {
+        has = pub.has_peers();
+    }
+    catch (...)
+    {
+        return;
+    }
+
+    /* ③ 首次调用只**安排**低频兜底的下次到期点 —— ⛔ 不立刻扫。 */
+    if (!st.init)
+    {
+        st.init = true;
+        st.next_stale_due = now + dead_timeout;
+    }
+
+    if (has)
+    {
+        /* 有 peer：每拍扫，并把兜底的下次到期点推后（刚扫过，不必紧接着再扫）。 */
+        st.next_stale_due = now + dead_timeout;
+        pub.on_pub_stale_scan(now, dead_timeout);
+        return;
+    }
+
+    /* 无 peer：低频兜底 —— 到期才扫。 */
+    if (now < st.next_stale_due)
+    {
+        return;
+    }
+    st.next_stale_due = now + dead_timeout;
+    pub.on_pub_stale_scan(now, dead_timeout);
+}
 
 /* 进程级控制面调度器：1 条 worker 线程，按项到期驱动。
  *

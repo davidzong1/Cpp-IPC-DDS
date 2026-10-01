@@ -45,6 +45,8 @@ BIN_SHA=$(sha256sum "$BIN" | cut -d' ' -f1)
 } > "$ROOT/fingerprint.txt"
 
 : > "$ROOT/runs.tsv"
+# 表头（t68/F7+F8 追加第 14/15 列；旧批无表头 ⇒ 用首行注释区分）
+printf '#sub\tstate\tn\tentries\tW\tdiag\trc\tcpu\ttick_per_s\ttick_max_us\tthreads\twall_s\tloadavg_before\tloadavg_after\tdomain\n' >> "$ROOT/runs.tsv"
 DOM=700000
 FAILED=0; N=0
 
@@ -71,9 +73,12 @@ import csv
 r=list(csv.DictReader(open('$d/windows.csv')))[0]
 print(r['cpu_cores'], r['tick_per_s'], r['sched_tick_max_us'], r['threads'], r['wall_s'])")
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  # ⛔ 列序（t68/F7+F8 起固定，第 14/15 列为 t68 追加）：
+  #  1 sub  2 state  3 n  4 注册项数  5 W  6 diag  7 rc  8 cpu  9 tick/s  10 tick_max_us
+  #  11 threads  12 墙钟 s  13 loadavg(before)  14 loadavg(after)  15 domain（逐 run 唯一，可第三方核验）
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$sub" "$st" "$n" "$((st==3 ? 2*n : n))" "$w" "$dg" "$rc" "${cpu:-}" "${tick:-}" \
-    "${tmax:-}" "${threads:-}" "$((t1-t0))" "$la_before" >> "$ROOT/runs.tsv"
+    "${tmax:-}" "${threads:-}" "$((t1-t0))" "$la_before" "$la_after" "$dom" >> "$ROOT/runs.tsv"
   printf '  %-40s rc=%-3s cpu=%-10s tick/s=%-9s W=%-3s %ss load=%s\n' \
     "$sub" "$rc" "${cpu:-?}" "${tick:-?}" "$w" "$((t1-t0))" "$la_before"
   [ "$rc" -eq 0 ] || FAILED=$((FAILED+1))
