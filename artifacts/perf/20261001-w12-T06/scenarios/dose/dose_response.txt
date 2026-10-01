@@ -1,0 +1,8 @@
+=== topics=1
+T06_RACE_RESULT rounds=200 executed=200 topics=1 bad_rounds=0 skipped_rounds=0 same_id_pairs=0 same_data_ptr=0 alias_hit_rounds=0 crash_rounds=0 first_alias_round=-1 crash_round=-1 worker_reset_total=200 worker_rounds_with_reset=200 worker_rounds_without_reset=0
+=== topics=2
+T06_RACE_RESULT rounds=200 executed=200 topics=2 bad_rounds=0 skipped_rounds=0 same_id_pairs=0 same_data_ptr=0 alias_hit_rounds=0 crash_rounds=0 first_alias_round=-1 crash_round=-1 worker_reset_total=33 worker_rounds_with_reset=33 worker_rounds_without_reset=167
+=== topics=4
+T06_RACE_RESULT rounds=200 executed=200 topics=4 bad_rounds=0 skipped_rounds=0 same_id_pairs=0 same_data_ptr=0 alias_hit_rounds=0 crash_rounds=0 first_alias_round=-1 crash_round=-1 worker_reset_total=161 worker_rounds_with_reset=161 worker_rounds_without_reset=39
+=== topics=8
+T06_RACE_RESULT rounds=200 executed=200 topics=8 bad_rounds=0 skipped_rounds=0 same_id_pairs=0 same_data_ptr=0 alias_hit_rounds=0 crash_rounds=0 first_alias_round=-1 crash_round=-1 worker_reset_total=31 worker_rounds_with_reset=31 worker_rounds_without_reset=169

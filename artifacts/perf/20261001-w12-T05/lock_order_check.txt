@@ -1,0 +1,38 @@
+── A. 取快照位置（§7.2 顺序）────────────────────────────
+handles_ lock_guard 行            = 552
+临界区结束行（该 lock_guard 闭括号）= 571
+  ① handles_[prefix] 获取      行 553   在 handles_ 临界区内 = True
+  ② 首次 attach 判定             行 554   在 handles_ 临界区内 = True
+  ③ 建立 handle                行 555   在 handles_ 临界区内 = True
+  ④ pristine 判定              行 566   在 handles_ 临界区内 = True
+  ⑤ orphan_snap 取得(memcpy)   行 569   在 handles_ 临界区内 = True
+  判定：①–⑤ 全部在同一 handles_ 临界区内 ⇒ 通过
+
+── B. 复核临界区（info->lock_ 下的 memcmp）───────────────
+info->lock_.lock()  行 = 486
+memcmp 复核         行 = 487
+memcmp 不等 ⇒ 提前 unlock 行 = [489]（失败分支不写池）
+reset_free_chain    行 = 492
+收尾 info->lock_.unlock() 行 = 493
+  判定：memcmp 复核与 reset_free_chain 同在 info->lock_ 持锁区间内 ⇒ 通过
+
+── C. 锁序：是否存在「持 info->lock_ 再取 handles_ 锁」的逆序 ──
+handles_ 的 lock_ 取用点数量 = 1（行 [552]）
+逆序嵌套命中数 = 0 
+  判定：锁序始终为 handles_.lock_ -> info->lock_ ⇒ 通过
+
+── D. /proc 探活位置（锁外）─────────────────────────
+reclaim_orphan_segment 定义行 = 469；/proc 探活行 = 482；info->lock_ 取锁行 = 486
+  探活在 handles_ 临界区内 = False；在 info->lock_ 持锁区间内 = False；在取锁之前 = True
+  判定：探活在两把锁之外（锁外执行 /proc 扫描）⇒ 通过
+
+── E. 变体差异局部性（段名/容量布局/published 语义未被触碰）──
+  允许的 reclaim 区间 = [465,496] ∪ [537,595]
+  ABLATE: 差异 hunk 1 个，触及行数 8，落在 reclaim 区间之外的行 = 无
+  V2NEG: 差异 hunk 1 个，触及行数 21，落在 reclaim 区间之外的行 = 无
+  FIXNEG: 差异 hunk 1 个，触及行数 11，落在 reclaim 区间之外的行 = 无
+  段名/容量锚点 CHUNK_INFO__     命中 4 处
+  段名/容量锚点 __C              命中 4 处
+  段名/容量锚点 large_msg_cache  命中 2 处
+
+═══ 总判定：全部通过 ═══

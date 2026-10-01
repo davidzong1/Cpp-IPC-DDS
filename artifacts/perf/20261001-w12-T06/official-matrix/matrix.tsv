@@ -1,0 +1,11 @@
+arm єlib_sha16 rc verdict bad_rounds skipped orphan_reset
+ABLATE-1		0	PASSED	bad_rounds=0	skipped=0	0
+BASELINE-1		0	PASSED	bad_rounds=0	skipped=0	0
+BASELINE-polluted		1	FAILED	bad_rounds=1	skipped=0	0
+FIX-1		0	PASSED	bad_rounds=0	skipped=0	182
+FIX-2		0	PASSED	bad_rounds=0	skipped=0	138
+FIX-3		0	PASSED	bad_rounds=0	skipped=0	183
+FIXNEG-1		1	FAILED	bad_rounds=1	skipped=0	1
+FIX_RB-1		0	PASSED	bad_rounds=0	skipped=0	266
+V2NEG-1		1	FAILED	bad_rounds=1	skipped=0	20
+V2NEG-2		1	FAILED	bad_rounds=1	skipped=0	66

@@ -1,0 +1,14 @@
+--- src/dzIPC/threepools/shm_control_scheduler.cc	2026-10-01 14:21:56.678146906 +0800
++++ build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver1-removed/src/dzIPC/threepools/shm_control_scheduler.cc	2026-10-01 20:45:59.657679774 +0800
+@@ -337,7 +337,10 @@
+              * **结构修法**：判据收敛成唯一自由函数 `pub_control_tick()`，本函数只负责
+              * "按时拍一下"并把**自己那一份**排程状态 `e->stale` 传进去。
+              * ⇒ 两条驱动源不可能再分叉（N1 要求的结构性防复发）。 */
+-            pub_control_tick(*e->pub, now, e->timing.peer_dead_timeout, e->stale);
++            /* ⛔⛔ T02 反向验证变体②（**只在本消融树内**）⛔⛔
++             * 消融点 = **默认臂的驱动调用**。判据 `pub_control_tick()` 本体不动，
++             * 只让进程级调度器不再调用它 ⇒ 预期：默认臂变红、L1 回退臂通过。 */
++            (void)now;
+         }
+         catch (const std::exception& ex)
+         {

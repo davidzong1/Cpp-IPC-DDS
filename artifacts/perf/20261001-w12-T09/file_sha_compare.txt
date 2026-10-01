@@ -1,0 +1,9 @@
+=== §2.3 逐文件 SHA 对照（5 个点名文件）===
+src/dzIPC/shm_pub_sub_ipc.cc                         work=067e79be378c1235 head=067e79be378c1235 MATCH
+include/dzIPC/shm_pub_sub_ipc.h                      work=354e17488089d16a head=354e17488089d16a MATCH
+src/dzIPC/threepools/shm_control_scheduler.cc        work=acbf73ec6b01f8a6 head=acbf73ec6b01f8a6 MATCH
+include/dzIPC/threepools/shm_control_scheduler.h     work=a494bdecc57ebe9f head=eb6a7219bf959ff9 DIFF
+src/libipc/ipc.cpp                                   work=9f936b25b5eb76d7 head=9f936b25b5eb76d7 MATCH
+=== 额外：T03 触碰的两个文件 ===
+test/CMakeLists.txt                                  work=f78491583a5d9c6d head=5a8a734826d9e5aa DIFF(预期: T03 已改)
+test/test_shm_control_scheduler.cpp                  work=d281c4fbb0556a8b head=805774c2ede55818 DIFF(预期: T03 已改)

@@ -1,0 +1,6 @@
+arm lib_sha256[0:16] rc C9读数
+BASELINE 4fc0e95dc316ac01 PASS bad_rounds=0 skipped=0
+ABLATE 52ccbe9e7e054aad PASS bad_rounds=0 skipped=0
+V2NEG 3380016ba38084d8 FAIL bad_rounds=1 skipped=0
+FIXNEG 1e7d5d7f12c20919 FAIL bad_rounds=1 skipped=0
+FIX 813fab5be886ef6e PASS bad_rounds=0 skipped=0

@@ -1,0 +1,37 @@
+=== T11 交付凭证（终版 2026-10-01 22:04:56 +0800）
+文件: docs/消息接收架构改造/团队改造交付/W09/容量与背压_交付.md
+追加前: 474 行, sha256=219e4bb6d17a5e8bfc0fda755219190e46e0da335bd5b1a15218edb23defca45
+追加后: 621 行, sha256=7d846fd8a2b4f0a6ed23203283df5d26e85344cdfa737fc84fe83354ae7d109e
+追加节标题行: 478  → 覆盖 478..621
+纯追加: git diff --numstat = 147 新增 / 0 删除（删除行数 0）
+git hunk: @@ -474,0 +475,147 @@ cd build && env -u DZIPC_SOCKET_COMPAT_THREAD -u DZIPC_SOCKET_RECV_WORKERS ctest
+
+-- 七个必写事实 → 落位:
+   ① 缺陷/源码锚点      → §12.1（ipc.cpp:210-222 与 373-378）
+   ② 后果（同库相反结论）→ §12.2（BASELINE 4fc0e95d… 污染态 rc=1/bad=1 vs 干净态 rc=0/bad=0）
+   ③ 最小复现三连+量化  → §12.3（POLDEMO 三连 + PROBE_CHAIN）
+   ④ 定性 low/非产品    → §12.4
+   ⑤ 合法处置           → §12.5
+   ⑥ 集成强制要求       → §12.6（test/CMakeLists.txt:672-673 非 RUN_SERIAL；672-673 无 RETRY=0）
+   ⑦ 未覆盖项           → §12.7（ABA 窄窗口、/proc 退化路径）
+-- 前缀逐字节校验（独立证据，不依赖 git 的 numstat）:
+   git show HEAD:<file> sha256 = 219e4bb6d17a5e8bfc0fda755219190e46e0da335bd5b1a15218edb23defca45（474 行）
+   head -474 <现文件>   sha256 = 219e4bb6d17a5e8bfc0fda755219190e46e0da335bd5b1a15218edb23defca45
+   ⇒ diff -q 结果：无差异（既有正文逐字节未变）
+-- 追加部分: 第 475..621 行（147 行），其中第 478 行起为 §12 标题
+
+=== 终稿凭证 2026-10-01 22:05:26 +0800
+文件 sha256 = 35e38aca6a941007974397de6f1003b2bf8b2a04074ef5d3cf98ed2554305539
+行数 = 621（474 + 147）
+追加节 = 第 478 行起（§12，含 §12.1–§12.8 与登记记录）
+git diff = 147 新增 / 0 删除；hunk = @@ -474,0 +475,147 @@ cd build && env -u DZIPC_SOCKET_COMPAT_THREAD -u DZIPC_SOCKET_RECV_WORKERS ctest
+前缀逐字节校验 = 通过（head -474 与 git show HEAD: 同 sha256）
+
+=== 终稿凭证 v2 2026-10-01 22:05:54 +0800
+文件 = docs/消息接收架构改造/团队改造交付/W09/容量与背压_交付.md
+sha256 = 45d677779d6266f6023e017fc339cafd29081253e3d6e26d9c4744c87bd4282b
+行数 = 623（原 474 + 追加 149）
+追加节标题行 = 478
+git diff = 149 新增 / 0 删除
+git hunk = @@ -474,0 +475,149 @@ cd build && env -u DZIPC_SOCKET_COMPAT_THREAD -u DZIPC_SOCKET_RECV_WORKERS ctest
+前缀逐字节校验 = 通过（head -474 == git show HEAD:，sha256 219e4bb6…）

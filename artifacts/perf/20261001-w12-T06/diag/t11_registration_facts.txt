@@ -1,0 +1,25 @@
+=== 登记用事实复核（2026-10-01 22:02:08 +0800）
+-- POLDEMO 三连：
+POLDEMO-V2NEG                  lib=3380016ba38084d8 1 bad_rounds=1
+POLDEMO-BASELINE-polluted      lib=4fc0e95dc316ac01 1 bad_rounds=1
+POLDEMO-BASELINE-clean         lib=4fc0e95dc316ac01 0 bad_rounds=0
+
+-- 段名/段文件（本用例专属前缀）:
+  /dev/shm/w09c9alias__IPC_SHM__CHUNK_INFO__9216__C40
+-- clear_storage 清理的段（源码锚点 ipc.cpp:210-222）:
+"CC_CONN__"
+"WT_CONN__"
+"RD_CONN__"
+"AC_CONN__"
+-- chunk 段名构造（ipc.cpp:373-378）:
+ inline ipc::string chunk_segment_name(ipc::string const &pref,
+ std::size_t chunk_size)
+ {
+ return ipc::make_prefix(
+ pref, {"CHUNK_INFO__", ipc::to_string(chunk_size), "__C",
+ ipc::to_string(static_cast<std::size_t>(ipc::large_msg_cache))});
+-- CTest 登记（test/CMakeLists.txt:672-673）:
+add_test(NAME test_chunk_capacity_backpressure COMMAND test_chunk_capacity_backpressure)
+set_tests_properties(test_chunk_capacity_backpressure PROPERTIES TIMEOUT 120)
+-- 其上方注释理由（669 行）:
+# 用例各自使用**独立 prefix** ⇒ 段名不同 ⇒ 物理上是不同的池, 不占用默认池的任何一档,

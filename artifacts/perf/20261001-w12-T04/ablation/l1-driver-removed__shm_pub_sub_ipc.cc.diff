@@ -1,0 +1,17 @@
+--- /dev/fd/63	2026-10-01 21:39:57.858361535 +0800
++++ /home/zwc/cpp_ipc_dds/build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-l1-driver-removed/src/dzIPC/shm_pub_sub_ipc.cc	2026-10-01 21:39:54.845383913 +0800
+@@ -953,10 +953,10 @@
+              * 回退臂却带着修复前的错误判据 ⇒ **L1 运行时回退比基线更差**（400 发 0 收 vs 400/400）。
+              * 现在两条驱动源**都只调同一个判据** `pub_control_tick()`（唯一一处），
+              * 各自只持有自己的排程状态（见 include/dzIPC/threepools/shm_control_scheduler.h）。 */
+-            dzIPC::shm_control::pub_control_tick(*pub_control_state_,
+-                                                 dzIPC::shm_control::ControlClock::now(),
+-                                                 kControlTiming.peer_dead_timeout,
+-                                                 pub_control_state_->compat_tick_state);
++            /* ==== T04 消融变体 B（只在本消融树内）====
++             * 消融点：L1 回退臂（每话题兼容线程）的驱动调用。
++             * 判据 pub_control_tick() 本体不动 ⇒ 预期：默认臂通过、L1 臂判据①变红。 */
++            (void)0;
+         }
+         std::this_thread::sleep_for(kControlTiming.pub_heartbeat);
+     }

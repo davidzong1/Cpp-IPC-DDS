@@ -1,0 +1,8 @@
+start=2026-10-01T22:43:05+08:00
+=== R-4 前置清理（集成开始前）===
+cleaned w09c9alias__IPC_SHM__*
+943e284964fd753de0a0e1f98fa2d6372f5702685b1583f024d605465feb428a  artifacts/perf/20261001-w12-freeze/fingerprint.txt
+f548cd71bf8b00cbf72fab0d8e0b72cdcf7ff34f
+end=2026-10-01T22:47:02+08:00
+=== 最终清理（防止残留污染后续）===
+0

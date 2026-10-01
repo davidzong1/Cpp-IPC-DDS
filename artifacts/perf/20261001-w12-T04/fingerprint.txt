@@ -1,0 +1,99 @@
+# T04 W05 独立复核 —— 运行环境与库绑定指纹
+# collected_at=2026-10-01T22:41:31+08:00  epoch=1790865691
+# host=zwc-leju  nproc=32  loadavg=2.58 2.67 3.01
+# HEAD=f548cd71bf8b00cbf72fab0d8e0b72cdcf7ff34f  frozen_commit=f548cd71bf8b00cbf72fab0d8e0b72cdcf7ff34f  frozen_tree=3cdc80e934f39bfba683b8069d2fd29a75066ec7
+# attempt=84e13e6b-7a26-44d5-80fd-04a1365107d4  run_dir=build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4  evidence_dir=artifacts/perf/20261001-w12-T04
+
+## 1) 冻结提交独立复核树的构建产物（本复核**判据来源**）
+frozen[lib/libipc.so.1.3.0]                                build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/b/lib/libipc.so.1.3.0  size=1291248  mtime=2026-10-01 21:36:20  sha256=6dc1e3b292b0ba0cc60bb576d0e35446899fb3b6ba69ecc62de7473396862c30
+frozen[bin/test_w05_stale_slot_gate]                       build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/b/bin/test_w05_stale_slot_gate  size=483048  mtime=2026-10-01 21:36:58  sha256=45e4618e1cbb9665bcc5c5323f32c34b81cbcf250cf71daefd810ef39642ff87
+frozen[bin/test_w05_stale_slot_gate_arm]                   build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/b/bin/test_w05_stale_slot_gate_arm  size=472752  mtime=2026-10-01 21:36:59  sha256=4855576951fc93d66da1d3b59967b13af50e077f6ef5557f6205d2aa9c07ce70
+frozen[bin/t04_probe]                                      build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/bin/t04_probe  size=56392  mtime=2026-10-01 21:39:02  sha256=01cff67c0819883b1fb289cbf08986dcbefdb86ac92a58b8cd9410439dbd11d2
+
+## 2) 解析目标（readlink/ldd：确认运行期真正装载的是本复核树的库）
+libipc.so -> /home/zwc/cpp_ipc_dds/build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/b/lib/libipc.so.1.3.0
+libipc.so.3 -> /home/zwc/cpp_ipc_dds/build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/b/lib/libipc.so.1.3.0
+ldd(frozen gate) : 	libipc.so.3 => /home/zwc/cpp_ipc_dds/build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/b/lib/libipc.so.3 (0x000075c67cd2d000)
+ldd(frozen arm)  : 	libipc.so.3 => /home/zwc/cpp_ipc_dds/build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/b/lib/libipc.so.3 (0x000078d4b7b58000)
+ldd(t04_probe)   : 	libipc.so.3 => /home/zwc/cpp_ipc_dds/build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/b/lib/libipc.so.3 (0x000076f0936cb000)
+RUNPATH(frozen gate) = [/home/zwc/cpp_ipc_dds/build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/b/lib]
+
+## 3) 工作区 build/（T01 冻结登记，**对照用**，非本复核判据来源）
+workspace[lib/libipc.so.1.3.0]                             build/lib/libipc.so.1.3.0  size=1291248  mtime=2026-10-01 14:33:25  sha256=813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a
+workspace[bin/test_w05_stale_slot_gate]                    build/bin/test_w05_stale_slot_gate  size=483048  mtime=2026-10-01 14:33:31  sha256=4990720d9a48ba632c25f98bd7ef2196208f80fe8f510adf13edac5849ff2e80
+workspace[bin/test_w05_stale_slot_gate_arm]                build/bin/test_w05_stale_slot_gate_arm  size=468656  mtime=2026-10-01 14:33:31  sha256=3b84746174676de86e6354273986364e5507124af03e409cb9a7603719e6d63e
+workspace[bin/test_shm_control_scheduler]                  build/bin/test_shm_control_scheduler  size=647704  mtime=2026-10-01 21:25:33  sha256=f1092f0838276f5f56d4f3638ffdf158076e427a10be8b92021dae91a782cb23
+
+## 4) 源码指纹（8 个目标文件：冻结提交 vs 本复核树 vs 工作区）
+include/dzIPC/threepools/shm_control_scheduler.h               commit=eb6a7219bf959ff9 run_tree=eb6a7219bf959ff9(SAME) workspace=a494bdecc57ebe9f
+src/dzIPC/threepools/shm_control_scheduler.cc                  commit=acbf73ec6b01f8a6 run_tree=acbf73ec6b01f8a6(SAME) workspace=acbf73ec6b01f8a6
+src/dzIPC/shm_pub_sub_ipc.cc                                   commit=067e79be378c1235 run_tree=067e79be378c1235(SAME) workspace=067e79be378c1235
+include/dzIPC/shm_pub_sub_ipc.h                                commit=354e17488089d16a run_tree=354e17488089d16a(SAME) workspace=354e17488089d16a
+src/libipc/ipc.cpp                                             commit=9f936b25b5eb76d7 run_tree=9f936b25b5eb76d7(SAME) workspace=9f936b25b5eb76d7
+test/test_w05_stale_slot_gate.cpp                              commit=31758502442ce5cd run_tree=31758502442ce5cd(SAME) workspace=31758502442ce5cd
+test/test_w05_stale_slot_gate_arm.cpp                          commit=8e00fca0af758a81 run_tree=8e00fca0af758a81(SAME) workspace=8e00fca0af758a81
+test/CMakeLists.txt                                            commit=5a8a734826d9e5aa run_tree=5a8a734826d9e5aa(SAME) workspace=f78491583a5d9c6d
+
+## 5) 消融库（变红判据来源）——构建后由 collect_fingerprint.sh 二次采集
+ablate[ablate-fallback-branch-removed/b/lib/libipc.so.1.3.0] build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-fallback-branch-removed/b/lib/libipc.so.1.3.0  size=1291248  mtime=2026-10-01 21:40:04  sha256=134c257cbb1929b05d6832c2dcdc3bd76954171cd76c52073eed54f1e72d9ecb
+ablate[ablate-fallback-branch-removed/b/bin/test_w05_stale_slot_gate_arm] build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-fallback-branch-removed/b/bin/test_w05_stale_slot_gate_arm  size=472752  mtime=2026-10-01 21:40:07  sha256=bc0c15fe170db4cb8fe5f51813b0016f368a9b6fe843e498f7d5c6dab6876aed
+ablate[ablate-fallback-branch-removed/b/bin/test_w05_stale_slot_gate] build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-fallback-branch-removed/b/bin/test_w05_stale_slot_gate  size=483048  mtime=2026-10-01 21:40:06  sha256=5310ce5a5182ac2f2feae511c780948ac8247a02bc9527ad6a1664cd93012a5f
+ablate[ablate-l1-driver-removed/b/lib/libipc.so.1.3.0]     build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-l1-driver-removed/b/lib/libipc.so.1.3.0  size=1291168  mtime=2026-10-01 21:40:04  sha256=fb9d8a0c4189bfb5230d5ec935ecee7dbaa91721b26ee5448fd145f4f0110a1d
+ablate[ablate-l1-driver-removed/b/bin/test_w05_stale_slot_gate_arm] build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-l1-driver-removed/b/bin/test_w05_stale_slot_gate_arm  size=472752  mtime=2026-10-01 21:40:08  sha256=3e52b64dda12241bb35b5c34ba77438cb6f7a6591dc6e400e6786d9080f42ec6
+ablate[ablate-l1-driver-removed/b/bin/test_w05_stale_slot_gate] build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-l1-driver-removed/b/bin/test_w05_stale_slot_gate  size=483048  mtime=2026-10-01 21:40:07  sha256=fb381717b65196133d8a448864ced99c590721d26887c654e0b99f2517903b1a
+
+## 5b) 本复核自建探针与工装（逐版本）
+probe[bin/t04_probe]                                       build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/bin/t04_probe  size=56392  mtime=2026-10-01 21:39:02  sha256=01cff67c0819883b1fb289cbf08986dcbefdb86ac92a58b8cd9410439dbd11d2
+probe[bin/t04_probe_A]                                     build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/bin/t04_probe_A  size=56392  mtime=2026-10-01 21:40:16  sha256=efdbc32b846c3c3533b6d259c1736afdc4b5075c4cfc0910de621a581339a912
+probe[bin/t04_probe_B]                                     build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/bin/t04_probe_B  size=56392  mtime=2026-10-01 21:40:16  sha256=7274c83c2c766f292730f01ea9712f5e13bd7862d4c6a9cc58f3d859b83fba2b
+probe[bin/t04_probe_v2]                                    build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/bin/t04_probe_v2  size=56392  mtime=2026-10-01 21:49:10  sha256=2ed70a89ef99abbf41163dc72f887f64369f0441cb66eb3f888e7ec5476109fd
+probe[bin/t04_probe_v3]                                    build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/bin/t04_probe_v3  size=60488  mtime=2026-10-01 21:49:35  sha256=e8b0c6bb9f821a31bb7fb9437fe5f4cc9aa8aee7b12bbdb037908e31de540609
+probe[bin/t04_probe_v4]                                    build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/bin/t04_probe_v4  size=60488  mtime=2026-10-01 21:52:30  sha256=2341258ae68c7a7c3498e0e2bb95ce6fc75fcc6e71148b5a30bb5c227e509024
+probe[bin/t04_probe_v5]                                    build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/bin/t04_probe_v5  size=60608  mtime=2026-10-01 22:07:12  sha256=1509e20e36b40c1d4cb9a325add5c8eb6f9b04325dde4ba36f124ed0260aeb04
+probe[bin/t04_probe_v6]                                    build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/bin/t04_probe_v6  size=60720  mtime=2026-10-01 22:11:28  sha256=c0211aa073615f1aa34adf2fcb0e70416d12fa45a56ee6f20877d87a6d74f765
+probe[bin/t04_probe_v7]                                    build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/bin/t04_probe_v7  size=60832  mtime=2026-10-01 22:20:11  sha256=765a44cd050bd3ddf29107e295b04788b3240d8c63ded1010dca7a796cb0f74e
+probe[bin] 与各自绑定的库（ldd）:
+  bin/t04_probe          -> /home/zwc/cpp_ipc_dds/build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/b/lib/libipc.so.3
+  bin/t04_probe_A        -> /home/zwc/cpp_ipc_dds/build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-fallback-branch-removed/b/lib/libipc.so.3
+  bin/t04_probe_B        -> /home/zwc/cpp_ipc_dds/build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-l1-driver-removed/b/lib/libipc.so.3
+  bin/t04_probe_v2       -> /home/zwc/cpp_ipc_dds/build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/b/lib/libipc.so.3
+  bin/t04_probe_v6       -> /home/zwc/cpp_ipc_dds/build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/b/lib/libipc.so.3
+  bin/t04_probe_v7       -> /home/zwc/cpp_ipc_dds/build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/b/lib/libipc.so.3
+
+## 5c) 逐次读数与汇总文件（sha256；复核报告的每个数字都可追到这些文件）
+evidence[flake/gate_runs.csv]                              artifacts/perf/20261001-w12-T04/flake/gate_runs.csv  size=14169  mtime=2026-10-01 21:56:34  sha256=5d358b3f8bd8b97ed354b500ecc5a51a67aba1b8b58433f8f129dbfbe22f8ad5
+evidence[flake/gate_runs_clean.csv]                        artifacts/perf/20261001-w12-T04/flake/gate_runs_clean.csv  size=10324  mtime=2026-10-01 22:05:54  sha256=90506600730654149fa01599e21fb2af5d8bd1ef0fd3f66b06a0be04022daa64
+evidence[flake/arm_runs_clean.csv]                         artifacts/perf/20261001-w12-T04/flake/arm_runs_clean.csv  size=920  mtime=2026-10-01 22:05:54  sha256=86c926003232b1d9395a1afda99d4e9b70f7e71f0ba6572e77cc725b2ab53cb6
+evidence[flake/probe_runs_clean.csv]                       artifacts/perf/20261001-w12-T04/flake/probe_runs_clean.csv  size=6159  mtime=2026-10-01 22:05:54  sha256=9d2ba02cb329bc3260ddc2773765550a90560d3200d401f86bf4cf6dec403c9d
+evidence[flake/e400_matrix.csv]                            artifacts/perf/20261001-w12-T04/flake/e400_matrix.csv  size=2581  mtime=2026-10-01 22:22:48  sha256=216de95c12881e6a1a6dba2ef4b028b8e469e6610b50bb0ffe1438f0046b1bfc
+evidence[flake/paired_craft.csv]                           artifacts/perf/20261001-w12-T04/flake/paired_craft.csv  size=4743  mtime=2026-10-01 22:25:50  sha256=e9954566ae981f50a2d37e35d974d6c2f6ffba043c099491e7eea910517412ac
+evidence[flake/nocraft_runs.csv]                           artifacts/perf/20261001-w12-T04/flake/nocraft_runs.csv  size=3880  mtime=2026-10-01 22:19:41  sha256=197e96e4078fb542825fefe546bf7bdbe020e0ec463ce35ddeb5cba1591b5d69
+evidence[flake/matrix_runs.csv]                            artifacts/perf/20261001-w12-T04/flake/matrix_runs.csv  size=711  mtime=2026-10-01 21:51:27  sha256=6cf4aeee1d7a194d1c0b32b8f42d7d04676b4c69bfa1e23f35f301d1cec8121a
+evidence[logs/verify3x_summary.txt]                        artifacts/perf/20261001-w12-T04/logs/verify3x_summary.txt  size=288  mtime=2026-10-01 21:43:59  sha256=40c4acbfc9c46fa7d97a3a4ddf1d33301aac6e92b76bab407ebd9fc9335f63e2
+evidence[logs/verify_workspace_3x.txt]                     artifacts/perf/20261001-w12-T04/logs/verify_workspace_3x.txt  size=785  mtime=2026-10-01 21:45:04  sha256=c742f734d1cd659086602e3c436dfb2270d4c827094d39af2e5923471e7a8f2b
+evidence[logs/ablation_gate.log]                           artifacts/perf/20261001-w12-T04/logs/ablation_gate.log  size=2671  mtime=2026-10-01 22:28:21  sha256=804c19db9ad5d176d0a255fb5fd3a80a8b3473737e21c67fb122e07c88a1b5f6
+evidence[logs/abi_side_check.txt]                          artifacts/perf/20261001-w12-T04/logs/abi_side_check.txt  size=841  mtime=2026-10-01 21:48:10  sha256=a50c86366dca3a1f3c1ffb7aa5ba17385669e4d2b05f48611a194928301a1fd2
+evidence[logs/bdad6093_exists_check.txt]                   artifacts/perf/20261001-w12-T04/logs/bdad6093_exists_check.txt  size=20035  mtime=2026-10-01 21:48:01  sha256=eef1dd7484c5eee05c0c3ed22c126d61528fe7508ee9fbcd263dfecc577d5913
+
+## 6) 消融树源码 diff 指纹（相对冻结提交；完整 diff 落 artifacts/perf/20261001-w12-T04/ablation/）
+ablate[ablate-fallback-branch-removed] include/dzIPC/threepools/shm_control_scheduler.h             DIFF sha256=2ec04c17ea7af9cf5f18b6975db30e1a3ca93ffff64cfdb7f8eda8e531bafb10
+ablate[ablate-fallback-branch-removed] src/dzIPC/threepools/shm_control_scheduler.cc                SAME sha256=acbf73ec6b01f8a6ac3c2c77ac62ee0c8dfc2727063ff59961d12feca7011779
+ablate[ablate-fallback-branch-removed] src/dzIPC/shm_pub_sub_ipc.cc                                 SAME sha256=067e79be378c12356e7be5c509097fcce5f39134ac3cab6586945f66ef0cec5d
+ablate[ablate-l1-driver-removed] include/dzIPC/threepools/shm_control_scheduler.h             SAME sha256=eb6a7219bf959ff95171d8af4f4db34a980327f41305557aafc86c7d150cd2b3
+ablate[ablate-l1-driver-removed] src/dzIPC/threepools/shm_control_scheduler.cc                SAME sha256=acbf73ec6b01f8a6ac3c2c77ac62ee0c8dfc2727063ff59961d12feca7011779
+ablate[ablate-l1-driver-removed] src/dzIPC/shm_pub_sub_ipc.cc                                 DIFF sha256=3ffc15621e9e5e82ec88b7ed83537735842bda38292070104ec3c54dc446fc32
+
+## 7) 历史读数声明
+bdad60939e9c75f80eff87c9f669268a09ea9b00e1539240e94a1167eb84a86c = **历史读数**（T58 时点 W05 生效库）
+search_result=NOT_FOUND（本轮对 build/** 与 artifacts/** 全量遍历：无该 sha256 副本）
+⇒ 本复核**不使用**该库的任何读数；凡引用均为历史读数并显式标注不可复跑（⛔ 不伪造其可用性）
+
+## 8) 冻结树导出补入清单（f548cd7 未跟踪但构建必需的生成物/输入）
+详见 build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/logs/supplemental_inputs.txt 与 supplemental_inputs2.txt（含逐文件 sha256）
+working_tree_untracked_inputs=artifacts/perf/20261001-w12-T04/../  : 81 个 test/ 下未跟踪输入
+
+## 9) 环境变量（影响驱动路径选择）
+DZIPC_SHM_CONTROL_SCHEDULER              = <unset>
+DZIPC_VERBOSE                            = <unset>
+LD_PRELOAD                               = <unset>
+env_total=95

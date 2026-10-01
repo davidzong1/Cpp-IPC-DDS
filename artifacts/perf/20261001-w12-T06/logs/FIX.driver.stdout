@@ -1,0 +1,82 @@
+=== [21:37:50] fresh: 10
+T06_PROBE scenario=fresh prefix=t06fix_fresh rounds=10 loaded_lib=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/libs/FIX/libipc.so.1.3.0 loaded_lib_sha256=813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a probe_pid=37 log_dir=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX
+T06_SEG tag=probe_start prefix=t06fix_fresh exists=0 size=0 cursor=0 chain=0 broken=0 all_zero=0 first_nonzero=-1
+T06_FRESH round=0 rc=0 pre_absent=1 reset_lines=0
+T06_FRESH round=1 rc=0 pre_absent=1 reset_lines=0
+T06_FRESH round=2 rc=0 pre_absent=1 reset_lines=0
+T06_FRESH round=3 rc=0 pre_absent=1 reset_lines=0
+T06_FRESH round=4 rc=0 pre_absent=1 reset_lines=0
+T06_FRESH round=5 rc=0 pre_absent=1 reset_lines=0
+T06_FRESH round=6 rc=0 pre_absent=1 reset_lines=0
+T06_FRESH round=7 rc=0 pre_absent=1 reset_lines=0
+T06_FRESH round=8 rc=0 pre_absent=1 reset_lines=0
+T06_FRESH round=9 rc=0 pre_absent=1 reset_lines=0
+T06_FRESH_RESULT rounds=10 ok=10 rounds_with_reset=0 reset_lines_total=0 log=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/fresh.log
+=== [21:37:50] live: 10
+T06_PROBE scenario=live prefix=t06fix_live rounds=10 loaded_lib=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/libs/FIX/libipc.so.1.3.0 loaded_lib_sha256=813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a probe_pid=54 log_dir=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX
+T06_SEG tag=probe_start prefix=t06fix_live exists=0 size=0 cursor=0 chain=0 broken=0 all_zero=0 first_nonzero=-1
+T06_SEG tag=live_before_subject prefix=t06fix_live exists=1 size=368692 cursor=1 chain=39 broken=0 all_zero=0 first_nonzero=0
+T06_LIVE round=0 subject_rc=0 subject_reset_lines=0 holder_id=0 subject_id=1 same_id=0 holder_verdict=UNCHANGED holder_exit=0
+T06_SEG tag=live_before_subject prefix=t06fix_live exists=1 size=368692 cursor=1 chain=39 broken=0 all_zero=0 first_nonzero=0
+T06_LIVE round=1 subject_rc=0 subject_reset_lines=0 holder_id=0 subject_id=1 same_id=0 holder_verdict=UNCHANGED holder_exit=0
+T06_SEG tag=live_before_subject prefix=t06fix_live exists=1 size=368692 cursor=1 chain=39 broken=0 all_zero=0 first_nonzero=0
+T06_LIVE round=2 subject_rc=0 subject_reset_lines=0 holder_id=0 subject_id=1 same_id=0 holder_verdict=UNCHANGED holder_exit=0
+T06_SEG tag=live_before_subject prefix=t06fix_live exists=1 size=368692 cursor=1 chain=39 broken=0 all_zero=0 first_nonzero=0
+T06_LIVE round=3 subject_rc=0 subject_reset_lines=0 holder_id=0 subject_id=1 same_id=0 holder_verdict=UNCHANGED holder_exit=0
+T06_SEG tag=live_before_subject prefix=t06fix_live exists=1 size=368692 cursor=1 chain=39 broken=0 all_zero=0 first_nonzero=0
+T06_LIVE round=4 subject_rc=0 subject_reset_lines=0 holder_id=0 subject_id=1 same_id=0 holder_verdict=UNCHANGED holder_exit=0
+T06_SEG tag=live_before_subject prefix=t06fix_live exists=1 size=368692 cursor=1 chain=39 broken=0 all_zero=0 first_nonzero=0
+T06_LIVE round=5 subject_rc=0 subject_reset_lines=0 holder_id=0 subject_id=1 same_id=0 holder_verdict=UNCHANGED holder_exit=0
+T06_SEG tag=live_before_subject prefix=t06fix_live exists=1 size=368692 cursor=1 chain=39 broken=0 all_zero=0 first_nonzero=0
+T06_LIVE round=6 subject_rc=0 subject_reset_lines=0 holder_id=0 subject_id=1 same_id=0 holder_verdict=UNCHANGED holder_exit=0
+T06_SEG tag=live_before_subject prefix=t06fix_live exists=1 size=368692 cursor=1 chain=39 broken=0 all_zero=0 first_nonzero=0
+T06_LIVE round=7 subject_rc=0 subject_reset_lines=0 holder_id=0 subject_id=1 same_id=0 holder_verdict=UNCHANGED holder_exit=0
+T06_SEG tag=live_before_subject prefix=t06fix_live exists=1 size=368692 cursor=1 chain=39 broken=0 all_zero=0 first_nonzero=0
+T06_LIVE round=8 subject_rc=0 subject_reset_lines=0 holder_id=0 subject_id=1 same_id=0 holder_verdict=UNCHANGED holder_exit=0
+T06_SEG tag=live_before_subject prefix=t06fix_live exists=1 size=368692 cursor=1 chain=39 broken=0 all_zero=0 first_nonzero=0
+T06_LIVE round=9 subject_rc=0 subject_reset_lines=0 holder_id=0 subject_id=1 same_id=0 holder_verdict=UNCHANGED holder_exit=0
+T06_LIVE_RESULT rounds=10 subject_ok=10 subject_rounds_with_reset=0 holder_unchanged=10 same_id_rounds=0 log=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/live.log
+=== [21:37:50] dead: 10 1
+T06_PROBE scenario=dead prefix=t06fix_dead rounds=10 loaded_lib=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/libs/FIX/libipc.so.1.3.0 loaded_lib_sha256=813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a probe_pid=81 log_dir=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX
+T06_SEG tag=probe_start prefix=t06fix_dead exists=0 size=0 cursor=0 chain=0 broken=0 all_zero=0 first_nonzero=-1
+T06_SEG tag=dead_pre_subject prefix=t06fix_dead exists=1 size=368692 cursor=3 chain=37 broken=0 all_zero=0 first_nonzero=0
+chunk pool exhausted: kind = loan, chunk_size = 9216, size = 8192, pool capacity = 40, count = 1 (本进程), prefix = 't06fix_dead'
+T06_DEAD round=0 seeder_borrowed=3 pre_chain=37 subject_borrowed=40 subject_reset_lines=1
+T06_SEG tag=dead_pre_subject prefix=t06fix_dead exists=1 size=368692 cursor=3 chain=37 broken=0 all_zero=0 first_nonzero=0
+chunk pool exhausted: kind = loan, chunk_size = 9216, size = 8192, pool capacity = 40, count = 1 (本进程), prefix = 't06fix_dead'
+T06_DEAD round=1 seeder_borrowed=3 pre_chain=37 subject_borrowed=40 subject_reset_lines=1
+T06_SEG tag=dead_pre_subject prefix=t06fix_dead exists=1 size=368692 cursor=3 chain=37 broken=0 all_zero=0 first_nonzero=0
+chunk pool exhausted: kind = loan, chunk_size = 9216, size = 8192, pool capacity = 40, count = 1 (本进程), prefix = 't06fix_dead'
+T06_DEAD round=2 seeder_borrowed=3 pre_chain=37 subject_borrowed=40 subject_reset_lines=1
+T06_SEG tag=dead_pre_subject prefix=t06fix_dead exists=1 size=368692 cursor=3 chain=37 broken=0 all_zero=0 first_nonzero=0
+chunk pool exhausted: kind = loan, chunk_size = 9216, size = 8192, pool capacity = 40, count = 1 (本进程), prefix = 't06fix_dead'
+T06_DEAD round=3 seeder_borrowed=3 pre_chain=37 subject_borrowed=40 subject_reset_lines=1
+T06_SEG tag=dead_pre_subject prefix=t06fix_dead exists=1 size=368692 cursor=3 chain=37 broken=0 all_zero=0 first_nonzero=0
+chunk pool exhausted: kind = loan, chunk_size = 9216, size = 8192, pool capacity = 40, count = 1 (本进程), prefix = 't06fix_dead'
+T06_DEAD round=4 seeder_borrowed=3 pre_chain=37 subject_borrowed=40 subject_reset_lines=1
+T06_SEG tag=dead_pre_subject prefix=t06fix_dead exists=1 size=368692 cursor=3 chain=37 broken=0 all_zero=0 first_nonzero=0
+chunk pool exhausted: kind = loan, chunk_size = 9216, size = 8192, pool capacity = 40, count = 1 (本进程), prefix = 't06fix_dead'
+T06_DEAD round=5 seeder_borrowed=3 pre_chain=37 subject_borrowed=40 subject_reset_lines=1
+T06_SEG tag=dead_pre_subject prefix=t06fix_dead exists=1 size=368692 cursor=3 chain=37 broken=0 all_zero=0 first_nonzero=0
+chunk pool exhausted: kind = loan, chunk_size = 9216, size = 8192, pool capacity = 40, count = 1 (本进程), prefix = 't06fix_dead'
+T06_DEAD round=6 seeder_borrowed=3 pre_chain=37 subject_borrowed=40 subject_reset_lines=1
+T06_SEG tag=dead_pre_subject prefix=t06fix_dead exists=1 size=368692 cursor=3 chain=37 broken=0 all_zero=0 first_nonzero=0
+chunk pool exhausted: kind = loan, chunk_size = 9216, size = 8192, pool capacity = 40, count = 1 (本进程), prefix = 't06fix_dead'
+T06_DEAD round=7 seeder_borrowed=3 pre_chain=37 subject_borrowed=40 subject_reset_lines=1
+T06_SEG tag=dead_pre_subject prefix=t06fix_dead exists=1 size=368692 cursor=3 chain=37 broken=0 all_zero=0 first_nonzero=0
+chunk pool exhausted: kind = loan, chunk_size = 9216, size = 8192, pool capacity = 40, count = 1 (本进程), prefix = 't06fix_dead'
+T06_DEAD round=8 seeder_borrowed=3 pre_chain=37 subject_borrowed=40 subject_reset_lines=1
+T06_SEG tag=dead_pre_subject prefix=t06fix_dead exists=1 size=368692 cursor=3 chain=37 broken=0 all_zero=0 first_nonzero=0
+chunk pool exhausted: kind = loan, chunk_size = 9216, size = 8192, pool capacity = 40, count = 1 (本进程), prefix = 't06fix_dead'
+T06_DEAD round=9 seeder_borrowed=3 pre_chain=37 subject_borrowed=40 subject_reset_lines=1
+T06_DEAD_RESULT rounds=10 rounds_as_expected=10 borrowed_full=10 rounds_with_reset=10 pre_chain_last=37 expect_reset=1 log=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/dead.log
+=== [21:37:50] race: 300 8
+T06_PROBE scenario=race prefix=t06fix_race rounds=300 loaded_lib=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/libs/FIX/libipc.so.1.3.0 loaded_lib_sha256=813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a probe_pid=108 log_dir=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX
+T06_SEG tag=probe_start prefix=t06fix_race exists=0 size=0 cursor=0 chain=0 broken=0 all_zero=0 first_nonzero=-1
+T06_MEAS_ERR scenario=race round=0 log=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/race_worker_topics8.log reason=no_worker_output
+T06_RACE_RESULT rounds=300 executed=0 topics=8 bad_rounds=1 skipped_rounds=0 same_id_pairs=0 same_data_ptr=0 alias_hit_rounds=0 crash_rounds=0 first_alias_round=-1 crash_round=-1 worker_reset_total=0 worker_rounds_with_reset=0 worker_rounds_without_reset=0 log=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/race_worker_topics8.log
+/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/dead.log:T06_DEAD_RESULT rounds=10 rounds_as_expected=10 borrowed_full=10 rounds_with_reset=10 pre_chain_last=37 expect_reset=1 log=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/dead.log
+/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/fresh.log:T06_FRESH_RESULT rounds=10 ok=10 rounds_with_reset=0 reset_lines_total=0 log=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/fresh.log
+/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/live.log:T06_LIVE_RESULT rounds=10 subject_ok=10 subject_rounds_with_reset=0 holder_unchanged=10 same_id_rounds=0 log=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/live.log
+/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/race.log:T06_MEAS_ERR scenario=race round=0 log=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/race_worker_topics8.log reason=no_worker_output
+/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/race.log:T06_RACE_RESULT rounds=300 executed=0 topics=8 bad_rounds=1 skipped_rounds=0 same_id_pairs=0 same_data_ptr=0 alias_hit_rounds=0 crash_rounds=0 first_alias_round=-1 crash_round=-1 worker_reset_total=0 worker_rounds_with_reset=0 worker_rounds_without_reset=0 log=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIX/race_worker_topics8.log

@@ -1,0 +1,23 @@
+--- /dev/fd/63	2026-10-01 21:39:57.842361654 +0800
++++ /home/zwc/cpp_ipc_dds/build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-fallback-branch-removed/include/dzIPC/threepools/shm_control_scheduler.h	2026-10-01 21:39:54.844383921 +0800
+@@ -222,13 +222,13 @@
+         return;
+     }
+ 
+-    /* 无 peer：低频兜底 —— 到期才扫。 */
+-    if (now < st.next_stale_due)
+-    {
+-        return;
+-    }
+-    st.next_stale_due = now + dead_timeout;
+-    pub.on_pub_stale_scan(now, dead_timeout);
++    /* ==== T04 消融变体 A（只在本消融树内；工作区产品代码零改动）====
++     * 消融点：唯一判据 pub_control_tick() 的「无 peer 低频兜底」分支。
++     * 预期：默认臂与 L1 臂**同时**拿不到 stale 扫描 ⇒ 两臂判据①变红。
++     * 冻结提交原始形态见 artifacts/perf/20261001-w12-T04/ablation/variantA_shm_control_scheduler.h.diff */
++    (void)now;
++    (void)dead_timeout;
++    (void)st;
+ }
+ 
+ /* 进程级控制面调度器：1 条 worker 线程，按项到期驱动。

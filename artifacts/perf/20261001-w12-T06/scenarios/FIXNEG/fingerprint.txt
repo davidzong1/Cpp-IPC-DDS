@@ -1,0 +1,24 @@
+arm            = FIXNEG
+lib_dir        = /home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/libs/FIXNEG
+lib_real_path  = /home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/libs/FIXNEG/libipc.so.1.3.0
+lib_sha256     = 1e7d5d7f12c20919e3994b9bdcd818375ba53afb11d99e8f74cb1a21c69dfc91
+lib_size       = 1291248
+probe_binary   = /home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/probe/t06_scenario_probe
+probe_sha256   = f70017d2e8c5519fee28cac14ecc49eb3cda17a44c71b553c449423b75e66b11
+probe_ldd_libipc = /usr/local/lib/libipc.so.3
+official_binary = build/bin/test_chunk_capacity_backpressure
+official_binary_sha256 = 08b803b169852c7e5c7bdcdf91060b3c8dd1199cd63578167ecd19d40818836f
+product_lib_sha256 = 813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a
+race_rounds    = 300
+topics         = 8
+ld_library_path= /home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/libs/FIXNEG
+collect_start  = 2026-10-01 21:43:03 +0800
+collect_end    = 2026-10-01 21:43:03 +0800
+--- fresh
+T06_FRESH_RESULT rounds=10 ok=10 rounds_with_reset=0 reset_lines_total=0 log=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIXNEG/fresh.log
+--- live
+T06_LIVE_RESULT rounds=10 subject_ok=10 subject_rounds_with_reset=0 holder_unchanged=10 same_id_rounds=0 log=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIXNEG/live.log
+--- dead
+T06_DEAD_RESULT rounds=10 rounds_as_expected=10 borrowed_full=10 rounds_with_reset=10 pre_chain_last=37 expect_reset=1 log=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIXNEG/dead.log
+--- race
+T06_RACE_RESULT rounds=300 executed=1 topics=8 bad_rounds=1 skipped_rounds=0 same_id_pairs=2 same_data_ptr=2 alias_hit_rounds=1 crash_rounds=0 first_alias_round=0 crash_round=-1 worker_reset_total=1 worker_rounds_with_reset=1 worker_rounds_without_reset=0 log=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/scenarios/FIXNEG/race_worker_topics8.log

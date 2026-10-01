@@ -1,0 +1,106 @@
+# T02 fingerprint —— W05 产品语义收敛与双臂/消融/ABI 证据
+collect_start=2026-10-01T21:13:55+08:00
+collect_epoch_start=1790860435
+host=zwc-leju
+kernel=Linux 6.8.0-138-generic
+nproc=32
+cpu_model=Intel(R) Core(TM) i9-14900KF
+mem_total=65647728 kB
+pwd=/home/zwc/cpp_ipc_dds
+
+## git
+git_head=f548cd71bf8b00cbf72fab0d8e0b72cdcf7ff34f
+git_head_short=f548cd7
+git_branch=dev
+git_head_subject=fix(shm):最终交付失败，生成失败分析报告
+git_head_date=2026-10-01T15:36:52+08:00
+plan_baseline_commit=e800ccc496ac710b711c9346709e86a148c41241
+ab_prefix_commit=dcaa0d9 (方案头部声明的“当前参考 HEAD”，用作 ABI 修复前对照)
+merge_base_baseline_head=e800ccc496ac710b711c9346709e86a148c41241
+
+## §4.2 目标源文件（工作区）
+src_sha256 include/dzIPC/threepools/shm_control_scheduler.h eb6a7219bf959ff95171d8af4f4db34a980327f41305557aafc86c7d150cd2b3  bytes=27517  mtime=2026-10-01 14:24:06.513511429 +0800
+src_sha256 src/dzIPC/threepools/shm_control_scheduler.cc acbf73ec6b01f8a6ac3c2c77ac62ee0c8dfc2727063ff59961d12feca7011779  bytes=44504  mtime=2026-10-01 14:21:56.678146906 +0800
+src_sha256 src/dzIPC/shm_pub_sub_ipc.cc 067e79be378c12356e7be5c509097fcce5f39134ac3cab6586945f66ef0cec5d  bytes=122149  mtime=2026-10-01 14:32:18.754486050 +0800
+src_sha256 include/dzIPC/shm_pub_sub_ipc.h 354e17488089d16a8b002d6db0127d6df41fd449728ccd7ee98e89e010b94103  bytes=19467  mtime=2026-10-01 14:33:14.296393510 +0800
+src_sha256 test/test_w05_stale_slot_gate.cpp 31758502442ce5cd2d84d019f078144d70f3bb7d6dd4da9d2a8fce0e285a932c  bytes=8217  mtime=2026-10-01 13:20:02.008638180 +0800
+src_sha256 test/test_w05_stale_slot_gate_arm.cpp 8e00fca0af758a81ffa41a8fada75d2be60356aa563e0e1d15d73eccdeb51188  bytes=9987  mtime=2026-10-01 14:29:45.063668079 +0800
+
+## §4.2 目标源文件 vs git blob（证明工作区 == HEAD 提交内容）
+blob_cmp include/dzIPC/threepools/shm_control_scheduler.h SAME worktree=eb6a7219bf959ff9 head=eb6a7219bf959ff9
+blob_cmp src/dzIPC/threepools/shm_control_scheduler.cc SAME worktree=acbf73ec6b01f8a6 head=acbf73ec6b01f8a6
+blob_cmp src/dzIPC/shm_pub_sub_ipc.cc SAME worktree=067e79be378c1235 head=067e79be378c1235
+blob_cmp include/dzIPC/shm_pub_sub_ipc.h SAME worktree=354e17488089d16a head=354e17488089d16a
+blob_cmp test/test_w05_stale_slot_gate.cpp SAME worktree=31758502442ce5cd head=31758502442ce5cd
+blob_cmp test/test_w05_stale_slot_gate_arm.cpp SAME worktree=8e00fca0af758a81 head=8e00fca0af758a81
+
+## 产品库指纹（修复后）
+lib_realpath=/home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+lib_sha256=813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a
+lib_bytes=1291248
+lib_mtime=2026-10-01 14:33:25.044374186 +0800
+lib_link_libipc.so=libipc.so.3
+lib_link_libipc.so.3=libipc.so.1.3.0
+
+## 工装指纹（双臂判据 + 消融树 + 探针）
+tool_sha256 build/bin/test_w05_stale_slot_gate 4990720d9a48ba632c25f98bd7ef2196208f80fe8f510adf13edac5849ff2e80  bytes=483048  mtime=2026-10-01 14:33:31.374362600 +0800
+tool_sha256 build/bin/test_w05_stale_slot_gate_arm 3b84746174676de86e6354273986364e5507124af03e409cb9a7603719e6d63e  bytes=468656  mtime=2026-10-01 14:33:31.380362589 +0800
+tool_sha256 build/bin/test_shm_control_scheduler aa6c3cc09faaff1443d6d480a824dba5c0759004f3ebac9691b9cf1c790c3b3c  bytes=647704  mtime=2026-10-01 14:33:27.414369866 +0800
+tool_sha256 build/bin/test_chunk_capacity_backpressure 08b803b169852c7e5c7bdcdf91060b3c8dd1199cd63578167ecd19d40818836f  bytes=522736  mtime=2026-10-01 14:33:25.166373964 +0800
+tool_sha256 build/T02/.../bin/w05_harm400 a089de869d93fa057989b613a1665afe858a8bc13f5fe9aa895f4d5e1bb97d58  bytes=56712
+tool_sha256 build/T02/.../bin/w05_tick_transition bc20a325889ddd75c4aff2256e3a34cbf028eb4509c2ca6a2ac1b7a555be2a18  bytes=18328
+tool_sha256 build/T02/.../bin/abi_size_prefix 06a4e61ac1785cc2c12ac50456c8135f9097229de447a1c374301c71e7f1e3c4  bytes=16232
+tool_sha256 build/T02/.../bin/abi_size_post 06a4e61ac1785cc2c12ac50456c8135f9097229de447a1c374301c71e7f1e3c4  bytes=16232
+tool_sha256 build/T02/.../bin/w05_clean_baseline a336c00dc2e51b910e85fef38260ff9a24e960d49bea8199fb5f7803f528c793  bytes=51072
+tool_sha256 build/T02/.../bin/w05_stale_gate_diag fcad8cf0096234060379e8e7b6c57e66eb484df33b02443cbb4dfa9f50789ade  bytes=57560
+
+## 消融树（新目录；⛔ 未就地覆写任何历史变体树）
+tree ablate-branch-removed header_sha256=99c02fe04cad00aa6b2075f1feb92910272f8dd2041f891630e35e52cee7b60b sched_cc_sha256=acbf73ec6b01f8a6ac3c2c77ac62ee0c8dfc2727063ff59961d12feca7011779 pubsub_cc_sha256=067e79be378c12356e7be5c509097fcce5f39134ac3cab6586945f66ef0cec5d
+  tree_lib_sha256=52f3e9634e89c34c1db2976617a79eeb0cdafb90ce05a7ad6f80aa09fcbd539c bytes=1291248
+  tree_gate_sha256=2c418359e43524a7ccc3f17c7aa230170eaea0ef0c36b114d3f91f9c9a620618 tree_gate_arm_sha256=f3519343b873fced1e9d665ffdf337daad0d0d73a05ff15d5d030423cb6caccf
+  tree_git_status_pristine=yes
+tree ablate-driver1-removed header_sha256=eb6a7219bf959ff95171d8af4f4db34a980327f41305557aafc86c7d150cd2b3 sched_cc_sha256=e438b93d35785352f60992ea360a80a0b764b54a664bbd123f54f9e4e3e295a6 pubsub_cc_sha256=067e79be378c12356e7be5c509097fcce5f39134ac3cab6586945f66ef0cec5d
+  tree_lib_sha256=cb4913258083a62bb1b71f0bcbf0de6e56a05c2c2b37409b8c4e76ff3467009b bytes=1291248
+  tree_gate_sha256=d9f51236dadc0bf92ca61f77a1d20dffc8b86bace7f415f570345314bf82d204 tree_gate_arm_sha256=2ed6c7c52eee328e84656e704a8e7fec1473717cc9e674d841e68d0916d31975
+  tree_git_status_pristine=yes
+tree ablate-driver2-removed header_sha256=eb6a7219bf959ff95171d8af4f4db34a980327f41305557aafc86c7d150cd2b3 sched_cc_sha256=acbf73ec6b01f8a6ac3c2c77ac62ee0c8dfc2727063ff59961d12feca7011779 pubsub_cc_sha256=8d6b14d90c12f7d4fd445d5d3a65f3aee2bcafdb89d6c90415cdb78802ea9092
+  tree_lib_sha256=ee62d328a4948bd549c36368fcbf32252e7b6cbae319e86595c49a38b41555d6 bytes=1291168
+  tree_gate_sha256=c90aefbe799432544cd74568ae8f77999aae79103ddc781b22ba0e76b0bc7b5a tree_gate_arm_sha256=5d41a14180152479705bbb07fb8885b686b9383e094f99c9ff7dcdb2e6726c7a
+  tree_git_status_pristine=yes
+tree baseline-prefix-dcaa0d9 header_sha256=51c7c165317d7dc45474c2852639f776ee7b4852b7ed490641481e761f482d9b sched_cc_sha256=a3861af46e73ad670f2b731ed07454209d512da6d9bdc5770e9e9acb753eaef5 pubsub_cc_sha256=ceab50331f2a2449a7b425afa21c2f9a0e27e6a02016dbacc384a34dfdba0628
+  tree_lib_sha256=1752798fc27c6bc49766ada9d15dba5d6d7a0234f8a6609537e6e62704e94fce bytes=1291168
+  tree_git_status_pristine=yes
+
+## 历史变体树未被触碰的自证（mtime 保持 2026-10-01 15:0x）
+untouched build/t58/w05only mtime=2026-10-01 10:58:00.173233287 +0800 lib_mtime=2026-10-01 14:32:37.545456158 +0800
+untouched build/t58/w05src mtime=2026-10-01 10:29:49.657581329 +0800 lib_mtime=2026-10-01 10:30:08.876494934 +0800
+untouched build/t58/w05offsrc mtime=2026-10-01 10:31:10.065228849 +0800 lib_mtime=2026-10-01 10:31:12.644217919 +0800
+untouched build/t85/head mtime=2026-10-01 15:00:42.122977320 +0800 lib_mtime=2026-10-01 15:00:45.119932356 +0800
+untouched build/t85/cur mtime=2026-10-01 14:56:05.613935444 +0800 lib_mtime=2026-10-01 14:55:52.496218815 +0800
+untouched build/t85/abl_tick mtime=2026-10-01 14:56:07.075904180 +0800 lib_mtime=2026-10-01 14:56:00.699041007 +0800
+untouched build/t85/abl_sched mtime=2026-10-01 14:58:06.240554508 +0800 lib_mtime=2026-10-01 14:58:02.965614228 +0800
+untouched build/t85/abl_compat mtime=2026-10-01 14:58:06.731545576 +0800 lib_mtime=2026-10-01 14:58:05.756563318 +0800
+
+## 构建配置
+cmake_version=cmake version 3.22.1
+compiler=c++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0
+build_dir=/home/zwc/cpp_ipc_dds/build (Release / Unix Makefiles)
+build_cache_mtime=2026-09-28 20:10:23.384737342 +0800
+
+## 环境变量（关键项）
+DZIPC_SHM_CONTROL_SCHEDULER=<unset>
+DZIPC_SOCKET_COMPAT_THREAD=<unset>
+env_count=95
+
+## §4.3 执行命令（见 commands.sh / README.md）
+cmd1=./build/bin/test_w05_stale_slot_gate                                  (默认臂 gate，3 次)
+cmd2=./build/bin/test_w05_stale_slot_gate_arm                              (双臂 gate，3 次)
+cmd3=DZIPC_SHM_CONTROL_SCHEDULER=1 ./build/bin/test_w05_stale_slot_gate    (L1 回退臂 gate，3 次)
+cmd4=build/T02/.../bin/w05_harm400 <dom> 400 4500                          (400 条端到端，双臂各 3 次)
+cmd5=rg -n "has_peers|on_pub_stale_scan|pub_control_tick" include/dzIPC src/dzIPC
+cmd6=build/T02/.../bin/w05_tick_transition                                 (§4.3.2 节拍四分情形)
+cmd7=nm -DC / readelf -S / abi_size_{prefix,post}                          (§4.3.5 ABI)
+
+collect_end=2026-10-01T21:13:55+08:00
+collect_epoch_end=1790860435
+rg_note=本机未安装 ripgrep（which rg 为空, exit 127）；方案 §4.3.1 的同语义命令由 run 内 shim build/T02/<attempt>/bin/rg 执行（grep -rnE 等价子集），输出见 logs/mech_rg_publish_side.txt

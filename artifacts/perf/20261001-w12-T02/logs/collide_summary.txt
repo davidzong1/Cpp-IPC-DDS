@@ -1,0 +1,9 @@
+t1_a rc=1
+t1_c rc=1
+t1_b rc=1
+t2_a rc=1
+t2_b rc=1
+t2_c rc=1
+t3_a rc=1
+t3_b rc=1
+t3_c rc=1

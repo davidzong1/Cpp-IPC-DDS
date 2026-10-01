@@ -1,0 +1,4 @@
+variant,ablation_point,default_arm,default_arm_rc,compat_L1_arm,compat_arm_rc,expected,observed_matches,log
+①,build/T02/<attempt>/ablate-branch-removed :: pub_control_tick() 无 peer 兜底分支删除,FAILED,1,FAILED,1,两臂同时失败,yes,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/ablate1_abs_armtest.log
+②,build/T02/<attempt>/ablate-driver1-removed :: ShmControlScheduler::Impl::dispatch() 默认臂驱动调用删除,FAILED,1,PASSED,-,只对应臂失败、另一臂通过,yes,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/ablate2_abs_armtest.log
+③,build/T02/<attempt>/ablate-driver2-removed :: shm_pub_ipc::compat_control_loop() L1 驱动调用删除,PASSED,-,FAILED,1,只对应臂失败、另一臂通过,yes,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/ablate3_abs_armtest.log

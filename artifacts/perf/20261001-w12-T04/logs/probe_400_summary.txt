@@ -1,0 +1,7 @@
+default run=1 rc=0 RESULT arm=default-sched craft=1 n=400 received=400 misses=0 first_miss_at=-1 criterion1_reaped=1 reap_ms=2100 criterion2_pass=1
+default run=2 rc=0 RESULT arm=default-sched craft=1 n=400 received=400 misses=0 first_miss_at=-1 criterion1_reaped=1 reap_ms=2050 criterion2_pass=1
+default run=3 rc=0 RESULT arm=default-sched craft=1 n=400 received=400 misses=0 first_miss_at=-1 criterion1_reaped=1 reap_ms=2101 criterion2_pass=1
+L1 run=1 rc=0 RESULT arm=L1-compat craft=1 n=400 received=400 misses=0 first_miss_at=-1 criterion1_reaped=1 reap_ms=2004 criterion2_pass=1
+L1 run=2 rc=0 RESULT arm=L1-compat craft=1 n=400 received=400 misses=0 first_miss_at=-1 criterion1_reaped=1 reap_ms=2005 criterion2_pass=1
+L1 run=3 rc=0 RESULT arm=L1-compat craft=1 n=400 received=400 misses=0 first_miss_at=-1 criterion1_reaped=1 reap_ms=2003 criterion2_pass=1
+nocraft run=1 rc=0 RESULT arm=default-sched craft=0 n=400 received=400 misses=0 first_miss_at=-1 criterion1_reaped=0 reap_ms=-1 criterion2_pass=1

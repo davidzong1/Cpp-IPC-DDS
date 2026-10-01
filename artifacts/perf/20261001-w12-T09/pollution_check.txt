@@ -1,0 +1,19 @@
+=== 跑一次官方用例后 /dev/shm 残留段（验证 R-4 根因前提）===
+run1_exit=0
+--- 残留段 ---
+w09c9alias__IPC_SHM__AC_CONN__w09c9_seed
+w09c9alias__IPC_SHM__CA_CONN__
+w09c9alias__IPC_SHM__CC_CONN__w09c9_seed_WAITER_COND_
+w09c9alias__IPC_SHM__CC_CONN__w09c9_seed_WAITER_LOCK_
+w09c9alias__IPC_SHM__CC_CONN__w09c9_seed_WAITER_STATE_
+w09c9alias__IPC_SHM__CHUNK_INFO__9216__C40
+w09c9alias__IPC_SHM__QU_CONN__w09c9_seed__64__16__V3
+w09c9alias__IPC_SHM__RD_CONN__w09c9_seed_WAITER_COND_
+w09c9alias__IPC_SHM__RD_CONN__w09c9_seed_WAITER_LOCK_
+w09c9alias__IPC_SHM__RD_CONN__w09c9_seed_WAITER_STATE_
+w09c9alias__IPC_SHM__WT_CONN__w09c9_seed_WAITER_COND_
+w09c9alias__IPC_SHM__WT_CONN__w09c9_seed_WAITER_LOCK_
+w09c9alias__IPC_SHM__WT_CONN__w09c9_seed_WAITER_STATE_
+--- 不清段连跑第 2 次（FIX 库应自愈仍绿）---
+run2_exit=0 (0=通过)
+cleanup done

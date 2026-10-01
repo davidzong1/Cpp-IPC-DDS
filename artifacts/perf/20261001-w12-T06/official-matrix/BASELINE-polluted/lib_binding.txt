@@ -1,0 +1,5 @@
+== 实际加载库绑定（ldd + 探针运行时自报）
+arm=BASELINE-polluted libdir=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/libs/BASELINE
+	libipc.so.3 => /home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/libs/BASELINE/libipc.so.3 (0x000076dd895e5000)
+-- 无 LD_LIBRARY_PATH 时（ctest 环境）:
+	libipc.so.3 => /home/zwc/cpp_ipc_dds/build/lib/libipc.so.3 (0x000075b0d76b4000)

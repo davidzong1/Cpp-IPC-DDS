@@ -1,0 +1,8 @@
+scope,arm,runs,fails,fail_rate,fail_mode,evidence
+门控用例(冻结树自建),L1回退臂,200,3,3/200 (1.50%),rx=99/100 @:189（判据②）；判据①(:146) 0 次失败,logs/flake_gate_L1_*.log
+门控用例(冻结树自建),默认臂,80,1,1/80 (1.25%),rx=99/100 @:189,logs/flake_gate_DEFAULT_*.log
+双臂用例(冻结树自建),默认+L1,50,0,0/50 (0.00%),—,logs/flake_arm_*.log
+独立探针(有陈旧槽位),默认臂,56,0,0/56 (0.00%),判据①/②均无失败,logs/*.log → flake/all_probe_runs.csv
+独立探针(有陈旧槽位),L1回退臂,460,2,2/460 (0.43%),2 次 99/100（first_miss_at=0，判据①通过）,"logs/flake_probe_L1_37.log, _48.log"
+独立探针(干净路径/无陈旧槽位),默认臂,101,0,0/101 (0.00%),—,logs/fm_DEF_*.log 等
+独立探针(干净路径/无陈旧槽位),L1回退臂,430,14,14/430 (3.26%),首条在 200ms+5s 内未到（rx_late=0）；多轮中表现为「迟到一条」,"logs/nocraft_L1_*.log, paired_*_craft0.log, fv_*.log"

@@ -1,0 +1,19 @@
+ARM       LIB_SHA16          K      RC     BAD        SKIP           SAME_ID     SAME_PTR    ORPHAN   RUN_DIR  
+ABLATE    52ccbe9e7e054aad   0      0      0          0              0           0           -1       1200     ABLATE-1
+ABLATE    52ccbe9e7e054aad   0      0      0          0              0           0           -1       1200     ABLATE-2
+ABLATE    52ccbe9e7e054aad   0      0      0          0              0           0           -1       1200     ABLATE-3
+BASELINE  4fc0e95dc316ac01   0      0      0          0              0           0           -1       1200     BASELINE-1
+BASELINE  4fc0e95dc316ac01   0      0      0          0              0           0           -1       1200     BASELINE-2
+BASELINE  4fc0e95dc316ac01   0      0      0          0              0           0           -1       1200     BASELINE-3
+FIX       813fab5be886ef6e   0      0      0          0              0           148         -1       1200     FIX-1
+FIX       813fab5be886ef6e   0      0      0          0              0           232         -1       1200     FIX-2
+FIX       813fab5be886ef6e   0      0      0          0              0           164         -1       1200     FIX-3
+FIXNEG    1e7d5d7f12c20919   1      1      0          1              1           1           -1       1        FIXNEG-1
+FIXNEG    1e7d5d7f12c20919   1      1      0          2              2           1           -1       1        FIXNEG-2
+FIXNEG    1e7d5d7f12c20919   1      1      0          2              2           1           -1       1        FIXNEG-3
+FIX_RB    c928deaa4f480ee3   0      0      0          0              0           240         -1       1200     FIX_RB-1
+FIX_RB    c928deaa4f480ee3   0      0      0          0              0           138         -1       1200     FIX_RB-2
+FIX_RB    c928deaa4f480ee3   0      0      0          0              0           164         -1       1200     FIX_RB-3
+V2NEG     3380016ba38084d8   1      1      0          3              3           65          -1       367      V2NEG-1
+V2NEG     3380016ba38084d8   1      1      0          1              1           9           -1       32       V2NEG-2
+V2NEG     3380016ba38084d8   1      1      0          1              1           166         -1       910      V2NEG-3

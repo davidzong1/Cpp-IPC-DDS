@@ -1,0 +1,14 @@
+--- prefix dcaa0d9 (修复前)
+sizeof(PubControlState)=8
+alignof(PubControlState)=8
+sizeof(SubControlState)=8
+sizeof(shm_pub_ipc)=336
+sizeof(ControlTiming)=24
+T02_ABI_SIZE_DONE
+--- post workspace (修复后)
+sizeof(PubControlState)=8
+alignof(PubControlState)=8
+sizeof(SubControlState)=8
+sizeof(shm_pub_ipc)=336
+sizeof(ControlTiming)=24
+T02_ABI_SIZE_DONE

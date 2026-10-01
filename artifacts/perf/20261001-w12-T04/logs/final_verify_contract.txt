@@ -1,0 +1,10 @@
+# 合同 verify 命令终局记录（工作区 T01 冻结工装 + 本复核树工装）
+at=2026-10-01T22:37:30+08:00
+verify ws: ./build/bin/test_w05_stale_slot_gate => exit=0
+verify ws: ./build/bin/test_w05_stale_slot_gate_arm => exit=0
+verify ws: DZIPC_SHM_CONTROL_SCHEDULER=1 ./build/bin/test_w05_stale_slot_gate => exit=0
+verify ws: git status --short include/dzIPC src/dzIPC => exit=0 ; output_lines=1
+  output:  M include/dzIPC/threepools/shm_control_scheduler.h
+verify frozen: gate(default) => exit=0
+verify frozen: gate(L1) => exit=0
+verify frozen: arm(two arms) => exit=0

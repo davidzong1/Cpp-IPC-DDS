@@ -1,0 +1,23 @@
+--- build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/src/pub_control_tick.orig.h	2026-10-01 20:43:30.478810836 +0800
++++ build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-branch-removed/include/dzIPC/threepools/shm_control_scheduler.h	2026-10-01 20:43:19.445734119 +0800
+@@ -222,13 +222,13 @@
+         return;
+     }
+ 
+-    /* 无 peer：低频兜底 —— 到期才扫。 */
+-    if (now < st.next_stale_due)
+-    {
+-        return;
+-    }
+-    st.next_stale_due = now + dead_timeout;
+-    pub.on_pub_stale_scan(now, dead_timeout);
++    /* ⛔⛔ T02 反向验证变体①（**只在本消融树内**，工作区产品代码不受影响）⛔⛔
++     * 消融点 = **唯一判据** `pub_control_tick()` 的「无 peer 低频兜底」分支。
++     * 预期：两臂同时失败（默认臂 + L1 回退臂都拿不到 stale 扫描）。
++     * 原始形态（t84/T02 基线）见 build/T02/<attempt>/src/pub_control_tick.orig.h。 */
++    (void)now;
++    (void)dead_timeout;
++    (void)st;
+ }
+ 
+ /* 进程级控制面调度器：1 条 worker 线程，按项到期驱动。

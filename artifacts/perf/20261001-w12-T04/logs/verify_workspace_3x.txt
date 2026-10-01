@@ -1,0 +1,11 @@
+verify1 ./build/bin/test_w05_stale_slot_gate                     run=1 rc=0
+verify2 ./build/bin/test_w05_stale_slot_gate_arm                 run=1 rc=0
+verify3 DZIPC_SHM_CONTROL_SCHEDULER=1 ./build/bin/test_w05_stale_slot_gate run=1 rc=0
+verify1 ./build/bin/test_w05_stale_slot_gate                     run=2 rc=0
+verify2 ./build/bin/test_w05_stale_slot_gate_arm                 run=2 rc=0
+verify3 DZIPC_SHM_CONTROL_SCHEDULER=1 ./build/bin/test_w05_stale_slot_gate run=2 rc=0
+verify1 ./build/bin/test_w05_stale_slot_gate                     run=3 rc=0
+verify2 ./build/bin/test_w05_stale_slot_gate_arm                 run=3 rc=0
+verify3 DZIPC_SHM_CONTROL_SCHEDULER=1 ./build/bin/test_w05_stale_slot_gate run=3 rc=0
+ M include/dzIPC/threepools/shm_control_scheduler.h
+git_status_lines=1

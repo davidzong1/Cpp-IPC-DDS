@@ -1,0 +1,20 @@
+# T05 官方常驻判据（build/bin/test_chunk_capacity_backpressure --gtest_filter='*OrphanReset*'）单臂指纹
+arm              = BASELINE
+run_dir          = artifacts/perf/20261001-w12-T05/gtest-arm/BASELINE
+cmdline          = LD_LIBRARY_PATH=artifacts/perf/20261001-w12-T05/arms/BASELINE timeout 900 build/bin/test_chunk_capacity_backpressure --gtest_filter='*OrphanReset*' --gtest_color=no > BASELINE/run.log 2>&1
+lib_real_path    = /home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T05/arms/BASELINE/libipc.so.1.3.0
+lib_sha256       = 4fc0e95dc316ac01972edd7fe6efde4eb13de8f4793c08b05ea95eae29dd3a71
+lib_size         = 1285504
+binary           = build/bin/test_chunk_capacity_backpressure
+binary_sha256    = 08b803b169852c7e5c7bdcdf91060b3c8dd1199cd63578167ecd19d40818836f
+exe_rc           = 0
+gtest_case       = ChunkCapacityBackpressure.OrphanResetDoesNotAliasInflightLoansAcrossTopics
+kRounds          = 1200 (源内常量)
+prefix           = w09c9alias (用例内的专属前缀；非空)
+topics           = 8 话题并发首借, 每轮两个独立 fork 进程
+clear_storage    = 开跑前一次（⛔ 非每轮清段）
+gtest_verdict    = [  PASSED  ]
+reading          = W09-C9] 专属前缀 w09c9alias 的 8 话题并发首借 ×1200 个独立进程：bad_rounds=0 skipped=0
+orphan_segment_reset_count = 0
+elapsed          = 7.31 s
+host             = nproc=32 Linux 6.8.0-138-generic x86_64

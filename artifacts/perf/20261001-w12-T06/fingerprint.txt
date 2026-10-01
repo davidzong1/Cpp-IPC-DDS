@@ -1,0 +1,52 @@
+# T06 run 总指纹（W12 §8 成员五 / 验证与性能负责人，W09 独立复核）
+run_id            = 20261001-w12-T06
+attempt_id        = 13e0fbea-b9d3-419a-92b9-92381b188d6a
+task              = t7 / T06 W09 独立复核：四类场景同二进制换库验证（方案 §8）
+reviewed_task     = t4 / T05（成员四：共享层负责人，W09 修复保护）
+collect_start     = 2026-10-01 21:16 +0800
+collect_end       = 2026-10-01 21:58 +0800
+HEAD              = f548cd71bf8b00cbf72fab0d8e0b72cdcf7ff34f
+branch            = dev
+product_ipc_cpp   = src/libipc/ipc.cpp
+product_ipc_sha256 = 9f936b25b5eb76d7207f982a4809063adf99fa1c4ef27b9e317260c868d5ebf4  (== git show HEAD:src/libipc/ipc.cpp)
+product_lib       = build/lib/libipc.so.1.3.0
+product_lib_sha256 = 813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a
+product_lib_size  = 1291248
+official_binary   = build/bin/test_chunk_capacity_backpressure
+official_binary_sha256 = 08b803b169852c7e5c7bdcdf91060b3c8dd1199cd63578167ecd19d40818836f
+official_binary_size = 522736
+official_binary_mtime = 2026-10-01 14:33:25 +0800
+host              = nproc=32 Linux 6.8.0-138-generic x86_64
+
+## 库绑定（唯一凭据 = 本 run 目录内的 fingerprint.txt；⛔ 不用 W11 manifest 快照）
+lib_root          = artifacts/perf/20261001-w12-T06/libs/
+FIX               sha256=813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a size=1291248  (产品库本体, cp 自 build/lib)
+FIX_RB            sha256=c928deaa4f480ee361e5974bf824c85c87658f2a6e9113bc0d3415568264b32d size=1291248
+V2NEG             sha256=3380016ba38084d8071d00133096298c733e1ebc8de16dde969a58456353d791 size=1291248
+FIXNEG            sha256=1e7d5d7f12c20919e3994b9bdcd818375ba53afb11d99e8f74cb1a21c69dfc91 size=1291248
+BASELINE          sha256=4fc0e95dc316ac01972edd7fe6efde4eb13de8f4793c08b05ea95eae29dd3a71 size=1285504
+ABLATE            sha256=52ccbe9e7e054aada32d5ec28f0ea97085ea7d6e1403e5dc756dc88878dde732 size=1285960
+FORCE(非产品臂)   sha256=ea8101d7f50e3dbdc489b6d1ef009ec79b4e5d61a208238c1cbaa8c2299e7c27 size=1291248
+                  path=build/T06/13e0fbea-b9d3-419a-92b9-92381b188d6a/lib/libipc.so.1.3.0
+                  diff=build/T06/13e0fbea-b9d3-419a-92b9-92381b188d6a/src/FORCE.diff（31 行）
+
+## 自建量具
+probe_binary      = artifacts/perf/20261001-w12-T06/probe/t06_scenario_probe
+probe_sha256      = f70017d2e8c5519fee28cac14ecc49eb3cda17a44c71b553c449423b75e66b11
+probe_source_sha256 = e78d5fb1e57f0bdcb0d0bf10d1f80b735d26c78ec4fd1ad4f057899bacba6f31
+seg_probe_binary  = artifacts/perf/20261001-w12-T06/probe/seg_probe
+seg_probe_sha256  = 94718a6252e4e1344cea19dd93fe8432eef5a77dd497d2e072f001decd9f11cb
+seg_probe_source_sha256 = 18f8e92793a5dca3e8ceef43ef752bf48fc1d9ad6f539f7e1a20d8d139945ddc
+
+## 关键读数（详见 T06_report.md §三/§四）
+ctest (§8.3)      = artifacts/perf/20261001-w12-T06/ctest/product/ctest.log  (1/1 Passed 6.53 s, ctest_exit=0)
+official matrix   = artifacts/perf/20261001-w12-T06/official-matrix/matrix.tsv   (10 臂次, 每臂 fingerprint.txt)
+scenarios matrix  = artifacts/perf/20261001-w12-T06/scenarios/summary.tsv       (7 臂 × fresh/live/dead/race)
+extended race     = artifacts/perf/20261001-w12-T06/scenarios/extended/ (FIX, 3000 轮 × 16 话题, bad_rounds=0)
+dose response     = artifacts/perf/20261001-w12-T06/scenarios/dose/     (topics=1/2/4/8 × 200 轮, 全绿)
+verdict           = pass（四类场景逐项成立；被测路径确实执行；两条负控各 3/3 有牙）
+
+## 未覆盖 / 残留（如实登记）
+- ABA 窄窗口（快照→复核之间完整的借出并归还）未封死：本 run 全部读数未命中，但**只是未命中**。
+- /proc 探活不可判的退化路径未构造（本机 maps 全可读；unshare --mount-proc 被拒）。
+- --require-lib-sha256 **不被本工装支持**（实测 deadbeef 被忽略、二进制内无该串）⇒ 未声称被接受。

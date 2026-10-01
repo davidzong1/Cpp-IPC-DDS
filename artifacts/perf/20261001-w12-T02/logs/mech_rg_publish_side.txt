@@ -1,0 +1,32 @@
+include/dzIPC/shm_pub_sub_ipc.h:164:     *     用**同一份回调体**（PubHeartbeatState::on_pub_heartbeat / on_pub_stale_scan），
+include/dzIPC/shm_pub_sub_ipc.h:189:     * **不影响任何公开布局**。判据本身在自由函数 `pub_control_tick()`（唯一一处）。 */
+include/dzIPC/threepools/shm_control_scheduler.h:120:    virtual bool has_peers() const = 0;
+include/dzIPC/threepools/shm_control_scheduler.h:125:     * **原位语义（已废止）**：「`has_peers()==false` 时调度器**跳过**本回调」。
+include/dzIPC/threepools/shm_control_scheduler.h:135:     *   · `has_peers() == true`  ⇒ 按 `pub_heartbeat`（50ms）每拍调用；
+include/dzIPC/threepools/shm_control_scheduler.h:136:     *   · `has_peers() == false` ⇒ 按 `peer_dead_timeout`（2s）同量级**低频兜底**调用。
+include/dzIPC/threepools/shm_control_scheduler.h:143:    virtual void on_pub_stale_scan(ControlClock::time_point now, std::chrono::nanoseconds dead_timeout) = 0;
+include/dzIPC/threepools/shm_control_scheduler.h:160: * **修法**：判据做成**唯一的自由函数** `pub_control_tick()`，两条驱动源都只调它；
+include/dzIPC/threepools/shm_control_scheduler.h:172: *   · `has_peers() == true`  ⇒ **每拍**调 `on_pub_stale_scan`（周期 = 驱动方给的拍长）；
+include/dzIPC/threepools/shm_control_scheduler.h:173: *   · `has_peers() == false` ⇒ 按 `dead_timeout` **同量级低频兜底**调一次
+include/dzIPC/threepools/shm_control_scheduler.h:181: * ⚠️ `has_peers()` 抛出时**只放弃本拍的 stale 判定**，`owner heartbeat` 已先执行完
+include/dzIPC/threepools/shm_control_scheduler.h:193:inline void pub_control_tick(PubControlState& pub, ControlClock::time_point now,
+include/dzIPC/threepools/shm_control_scheduler.h:203:        has = pub.has_peers();
+include/dzIPC/threepools/shm_control_scheduler.h:221:        pub.on_pub_stale_scan(now, dead_timeout);
+include/dzIPC/threepools/shm_control_scheduler.h:231:    pub.on_pub_stale_scan(now, dead_timeout);
+src/dzIPC/threepools/shm_control_scheduler.cc:72:     * `pub_control_tick()`（唯一一处，见 shm_control_scheduler.h）。t84，(B) 路线。 */
+src/dzIPC/threepools/shm_control_scheduler.cc:330:            /* ── 发布侧：**唯一**判据 `pub_control_tick()`（t84，(B) 路线）──────────
+src/dzIPC/threepools/shm_control_scheduler.cc:337:             * **结构修法**：判据收敛成唯一自由函数 `pub_control_tick()`，本函数只负责
+src/dzIPC/threepools/shm_control_scheduler.cc:340:            pub_control_tick(*e->pub, now, e->timing.peer_dead_timeout, e->stale);
+src/dzIPC/shm_pub_sub_ipc.cc:702:         * 「何时扫 stale」的判据已上收到 `pub_control_tick()`（**唯一**一处），
+src/dzIPC/shm_pub_sub_ipc.cc:705:         * `pub_control_tick()` 契约注释；端到端判据见
+src/dzIPC/shm_pub_sub_ipc.cc:719:    bool has_peers() const override
+src/dzIPC/shm_pub_sub_ipc.cc:725:    /* 由 `pub_control_tick()` 按**统一节拍**调用：
+src/dzIPC/shm_pub_sub_ipc.cc:726:     *   · `has_peers() == true`  ⇒ **每拍**调用（周期 = 驱动方拍长）；
+src/dzIPC/shm_pub_sub_ipc.cc:727:     *   · `has_peers() == false` ⇒ 按 `dead_timeout` 同量级**低频兜底**调用。
+src/dzIPC/shm_pub_sub_ipc.cc:728:     * ⛔ 本函数**不再**是"仅当 has_peers() 为真时才被调用" —— 该前提已被证伪
+src/dzIPC/shm_pub_sub_ipc.cc:732:     *    订阅者）。见 R1-W05-F1 / N1 与 shm_control_scheduler.h 的 `pub_control_tick()` 契约。
+src/dzIPC/shm_pub_sub_ipc.cc:734:    void on_pub_stale_scan(dzIPC::shm_control::ControlClock::time_point now,
+src/dzIPC/shm_pub_sub_ipc.cc:773:     * ⛔ 判据在自由函数 `pub_control_tick()`（唯一一处）；这里只是**驱动方排程状态**。
+src/dzIPC/shm_pub_sub_ipc.cc:951:            /* ⛔ 这里**曾经**自己写了一遍 `if (has_peers()) { stale_scan(); }` ——
+src/dzIPC/shm_pub_sub_ipc.cc:954:             * 现在两条驱动源**都只调同一个判据** `pub_control_tick()`（唯一一处），
+src/dzIPC/shm_pub_sub_ipc.cc:956:            dzIPC::shm_control::pub_control_tick(*pub_control_state_,

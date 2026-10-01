@@ -1,0 +1,10 @@
+cmd,arm,run,exit,passed_tests,log
+./build/bin/test_w05_stale_slot_gate,default,1,0,1,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/arm_default_run1.log
+./build/bin/test_w05_stale_slot_gate,default,2,0,1,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/arm_default_run2.log
+./build/bin/test_w05_stale_slot_gate,default,3,0,1,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/arm_default_run3.log
+./build/bin/test_w05_stale_slot_gate_arm,both,1,0,2,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/arm_both_run1.log
+./build/bin/test_w05_stale_slot_gate_arm,both,2,0,2,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/arm_both_run2.log
+./build/bin/test_w05_stale_slot_gate_arm,both,3,0,2,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/arm_both_run3.log
+DZIPC_SHM_CONTROL_SCHEDULER=1 ./build/bin/test_w05_stale_slot_gate,fallback,1,0,1,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/arm_fallback_run1.log
+DZIPC_SHM_CONTROL_SCHEDULER=1 ./build/bin/test_w05_stale_slot_gate,fallback,2,0,1,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/arm_fallback_run2.log
+DZIPC_SHM_CONTROL_SCHEDULER=1 ./build/bin/test_w05_stale_slot_gate,fallback,3,0,1,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/arm_fallback_run3.log

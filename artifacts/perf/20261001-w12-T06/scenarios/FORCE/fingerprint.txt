@@ -1,0 +1,8 @@
+arm            = FORCE
+lib_real_path  = /home/zwc/cpp_ipc_dds/build/T06/13e0fbea-b9d3-419a-92b9-92381b188d6a/lib/libipc.so.1.3.0
+lib_sha256     = ea8101d7f50e3dbdc489b6d1ef009ec79b4e5d61a208238c1cbaa8c2299e7c27
+probe_sha256   = f70017d2e8c5519fee28cac14ecc49eb3cda17a44c71b553c449423b75e66b11
+official_binary_sha256 = 08b803b169852c7e5c7bdcdf91060b3c8dd1199cd63578167ecd19d40818836f
+variant_diff   = build/T06/13e0fbea-b9d3-419a-92b9-92381b188d6a/src/FORCE.diff
+note           = 非法实验库（去掉素净门槛 + 段级探活恒判孤儿）：仅用于证明 fresh/live 判据有牙，⛔ 不是产品臂
+collect_end    = 2026-10-01 21:58:06 +0800

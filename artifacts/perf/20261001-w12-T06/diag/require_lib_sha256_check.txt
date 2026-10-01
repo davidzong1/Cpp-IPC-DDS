@@ -1,0 +1,17 @@
+== --require-lib-sha256 支持性实测（2026-10-01 21:54:31 +0800）
+-- 传错 SHA，看是否被接受/拒绝
+exit=0
+-- 输出里是否出现 require 相关字样
+0
+-- 二进制里是否含该串
+0
+-- 该参数属哪个驱动器（源码位置）
+test/perf/w11/w11_cpu_scan_sweep.sh
+test/perf/w10/w10_run_matrix.sh
+test/perf/w10/w10_r6b_extcpu.sh
+test/perf/w10/w10_matrix.cpp
+test/perf/w10/w10_r6b_cpu_sweep.sh
+test/perf/w10/w10_r5_matrix.cpp
+test/perf/w10/w10_r5_sweep.sh
+-- 测试本体是否解析未知参数
+0

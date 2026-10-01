@@ -1,0 +1,19 @@
+### 驱动调用点（实参以 * 开头的真调用，非注释）
+src/dzIPC/threepools/shm_control_scheduler.cc:340:            pub_control_tick(*e->pub, now, e->timing.peer_dead_timeout, e->stale);
+src/dzIPC/shm_pub_sub_ipc.cc:956:            dzIPC::shm_control::pub_control_tick(*pub_control_state_,
+
+count=2
+
+### has_peers() 的调用点（必须只在判据内部）
+src/dzIPC/shm_pub_sub_ipc.cc:719:    bool has_peers() const override
+include/dzIPC/threepools/shm_control_scheduler.h:120:    virtual bool has_peers() const = 0;
+include/dzIPC/threepools/shm_control_scheduler.h:203:        has = pub.has_peers();
+
+### on_pub_stale_scan / on_pub_heartbeat 的调用点
+src/dzIPC/shm_pub_sub_ipc.cc:684:    void on_pub_heartbeat(dzIPC::shm_control::ControlClock::time_point) override
+src/dzIPC/shm_pub_sub_ipc.cc:734:    void on_pub_stale_scan(dzIPC::shm_control::ControlClock::time_point now,
+include/dzIPC/threepools/shm_control_scheduler.h:116:    virtual void on_pub_heartbeat(ControlClock::time_point now) = 0;
+include/dzIPC/threepools/shm_control_scheduler.h:143:    virtual void on_pub_stale_scan(ControlClock::time_point now, std::chrono::nanoseconds dead_timeout) = 0;
+include/dzIPC/threepools/shm_control_scheduler.h:197:    pub.on_pub_heartbeat(now);
+include/dzIPC/threepools/shm_control_scheduler.h:221:        pub.on_pub_stale_scan(now, dead_timeout);
+include/dzIPC/threepools/shm_control_scheduler.h:231:    pub.on_pub_stale_scan(now, dead_timeout);

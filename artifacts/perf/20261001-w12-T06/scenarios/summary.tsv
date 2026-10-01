@@ -1,0 +1,8 @@
+arm	lib_sha256_16	lib_size	probe_sha256_16	official_bin_sha16	fresh_measer	fresh_probe_exit	live_measer	live_probe_exit	dead_measer	dead_probe_exit	race_measer	race_probe_exit	fresh_ok	fresh_rounds_with_reset	fresh_reset_lines	live_subject_ok	live_rounds_with_reset	live_holder_unchanged	live_same_id_rounds	dead_rounds_as_expected	dead_borrowed_full	dead_rounds_with_reset	dead_pre_chain	race_rounds	race_executed	race_bad_rounds	race_same_id_pairs	race_same_data_ptr	race_alias_hit_rounds	race_crash_rounds	race_first_alias_round	race_worker_reset_total	race_worker_rounds_with_reset	race_worker_rounds_without_reset
+FORCE	ea8101d7f50e3dbd		f70017d2e8c5519f	08b803b169852c7e	0		0		0		0		10	10	8	10	10	0	10															
+FIX	813fab5be886ef6e	1291248	f70017d2e8c5519f	08b803b169852c7e	0	0	0	0	0	0	0	0	10	0	0	10	0	10	0	10	10	10	37	1200	1200	0	0	0	0	0	-1	163	163	1037
+FIX_RB	c928deaa4f480ee3	1291248	f70017d2e8c5519f	08b803b169852c7e	0	0	0	0	0	0	0	0	10	0	0	10	0	10	0	10	10	10	37	1200	1200	0	0	0	0	0	-1	160	160	1040
+V2NEG	3380016ba38084d8	1291248	f70017d2e8c5519f	08b803b169852c7e	0	0	0	0	0	0	0	1	10	0	0	10	0	10	0	10	10	10	37	300	169	1	2	2	1	0	168	45	45	124
+FIXNEG	1e7d5d7f12c20919	1291248	f70017d2e8c5519f	08b803b169852c7e	0	0	0	0	0	0	0	1	10	0	0	10	0	10	0	10	10	10	37	300	1	1	2	2	1	0	0	1	1	0
+BASELINE	4fc0e95dc316ac01	1285504	f70017d2e8c5519f	08b803b169852c7e	0	0	0	0	0	1	0	0	10	0	0	10	0	10	0	0	0	0	37	300	300	0	0	0	0	0	-1	0	0	300
+ABLATE	52ccbe9e7e054aad	1285960	f70017d2e8c5519f	08b803b169852c7e	0	0	0	0	0	1	0	0	10	0	0	10	0	10	0	0	0	0	37	300	300	0	0	0	0	0	-1	0	0	300

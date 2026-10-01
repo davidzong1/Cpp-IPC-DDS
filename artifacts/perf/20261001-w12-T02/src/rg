@@ -1,0 +1,9 @@
+#!/bin/bash
+# rg shim —— 本机未安装 ripgrep（`which rg` 空、exit 127）。
+# 本 shim 只实现方案 §4.3.1 用到的子集：rg -n <pattern> <paths...>
+# 语义对齐：输出 path:line:content，递归搜索，跳过二进制文件。
+# 用法: rg -n "pat1|pat2" include/dzIPC src/dzIPC
+set -u
+[ "${1:-}" = "-n" ] && shift
+pat="${1:?pattern required}"; shift
+grep -rnE --binary-files=without-match -- "$pat" "$@"

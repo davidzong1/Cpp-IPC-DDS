@@ -1,0 +1,20 @@
+=== 闸门 6: 性能读数绑定采集时 fingerprint.txt ===
+--- T08 是否有 manifest 生成时字段被当采集时用（N1 形态）---
+33:| 批 | 裸 `binary_sha256.library` | `binary_sha256_at_collection.library` | `binary_sha256_at_manifest_generation.library` | `library_binding_authority` | `sub_run_fingerprints` |
+37:| DZFlat 新批 | `0298b1df0544b06b…` ← **错代** | `f0ebc3ef2df5b276…` ✅ = fp | `0298b1df0544b06b…` | ✅ 在位 | ⛔ null |
+42:3. ⚠️ **旧批** `20260930-r49-W11-dzflat/manifest.json` **确实未回填** `binary_sha256_at_collection` / `library_binding_authority`
+43:   （t82 已如实登记）。其裸 `binary_sha256 = cf209393…` 与 fp **恰好一致** ⇒ **无 N1 冲突**，仅缺新语义字段；
+45:4. ⚠️ 新批的**裸** `binary_sha256 = 0298b1df…` 与 fp **不等**（09:53 采集、10:10 生成，期间 `build/` 被他人重编）
+289:| `0298b1df0544b06b` | DZFlat 新批 manifest 的**首生成时**快照 | 10-01 10:07:52 | 报告 §10.5 `:664`/`:673` 自述 + manifest 的 `_at_manifest_generation` |
+297:     `cf209393 → f0ebc3ef → dbca161e → 0298b1df → d0f581d1 → 36c17c7b`，
+298:     但按**实物时间**：`0298b1df` 是 **10:07:52 / 10:10:39**（新批 manifest **首生成时**快照，字段可核），
+--- r49-W11 fingerprint.txt（权威）---
+# W11 串行配对实验（控制面 CPU + 扫描成本）
+started=2026-09-30 16:17:29 +0800
+harness=w10_r5_matrix（唯一工装；与 W10-R5/t38 同工装，可比）
+libipc.so.1.3.0 cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46
+--- 新批 r69 fingerprint（权威）---
+# W11 DZFlat TLV/A/B 串行配对（独占窗口，逐轮独立进程）
+harness=test_w08_dzflat_ab（W08 权威工装；本任务 ⛔ 未改其源码）
+libipc.so.1.3.0   f0ebc3ef2df5b276e35dd38a21183c0bbc59a51721b24aa2ef067783c07747c9
+test_w08_dzflat_ab 6bbc6367b2b1256a8f15f7e27274534d5701e0cb351b968b4dbda295f2d8dae5

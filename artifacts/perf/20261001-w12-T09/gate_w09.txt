@@ -1,0 +1,5 @@
+=== 闸门 4: W09 FIX/NEG 同二进制换库 ===
+--- T06 独立复核 verdict ---
+11:- **复核 verdict：`pass`**（§8 四类场景逐项成立；被测路径确实执行；库绑定只引用本 run 目录 `fingerprint.txt`）。
+166:  FIX：**10/10 轮 `subject_reset_lines=0`**；持有者 10/10 轮回报 `verdict=UNCHANGED`；
+201:    `gtest_verdict` + `reading` + `orphan_segment_reset_count`；② 每臂 `lib_binding.txt` 记

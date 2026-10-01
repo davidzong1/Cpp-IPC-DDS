@@ -1,0 +1,12 @@
+# nocraft 组是否真的无陈旧槽位的 ELF 级核验（防探针参数误用）
+frozen_lib_sha256=6dc1e3b292b0ba0cc60bb576d0e35446899fb3b6ba69ecc62de7473396862c30
+probe_v6_sha256=c0211aa073615f1aa34adf2fcb0e70416d12fa45a56ee6f20877d87a6d74f765
+probe_v6 是否含 CRAFT_DONE 字面量（该字面量只在 craft 分支打印，但同一字符串表里存在 ⇒ 单独用字面量判据不可靠）:
+1
+
+⇒ 因此改用**独立参数核验**：直接看日志首行的 craft= 字段（由 argv 决定）与是否出现 CRAFT_DONE 行。
+  artifacts/perf/20261001-w12-T04/logs/nocraft_L1_2.log : craft=0 CRAFT_DONE行数=0
+  artifacts/perf/20261001-w12-T04/logs/nocraft_L1_1.log : craft=0 CRAFT_DONE行数=0
+  artifacts/perf/20261001-w12-T04/logs/e400_L1_400_nocraft_load_1.log : craft=0 CRAFT_DONE行数=0
+
+## 参数遗留问题：late_discriminate.sh 的 g() 函数里 $A 未加引号（无害但写法不严谨），已在 src/ 中修正留档

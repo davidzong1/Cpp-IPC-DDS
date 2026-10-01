@@ -1,0 +1,15 @@
+=== 防回退核对：shm_control_scheduler.h/.cc 仍含 t84 修复判据 ===
+include/dzIPC/threepools/shm_control_scheduler.h:2
+src/dzIPC/threepools/shm_control_scheduler.cc:4
+src/dzIPC/shm_pub_sub_ipc.cc:7
+--- 旧门控 has_peers 总门控是否残留（应只在判据内部 1 处调用）---
+include/dzIPC/threepools/shm_control_scheduler.h:120:    virtual bool has_peers() const = 0;
+include/dzIPC/threepools/shm_control_scheduler.h:125:     * **原位语义（已废止）**：「`has_peers()==false` 时调度器**跳过**本回调」。
+include/dzIPC/threepools/shm_control_scheduler.h:135:     *   · `has_peers() == true`  ⇒ 按 `pub_heartbeat`（50ms）每拍调用；
+include/dzIPC/threepools/shm_control_scheduler.h:136:     *   · `has_peers() == false` ⇒ 按 `peer_dead_timeout`（2s）同量级**低频兜底**调用。
+include/dzIPC/threepools/shm_control_scheduler.h:177: *   · `has_peers() == true`  ⇒ **每拍**调 `on_pub_stale_scan`（周期 = 驱动方给的拍长）；
+include/dzIPC/threepools/shm_control_scheduler.h:178: *   · `has_peers() == false` ⇒ 按 `dead_timeout` **同量级低频兜底**调一次
+include/dzIPC/threepools/shm_control_scheduler.h:186: * ⚠️ `has_peers()` 抛出时**只放弃本拍的 stale 判定**，`owner heartbeat` 已先执行完
+include/dzIPC/threepools/shm_control_scheduler.h:208:        has = pub.has_peers();
+--- .h 非注释变更行数（应仍为仅注释）---
+0

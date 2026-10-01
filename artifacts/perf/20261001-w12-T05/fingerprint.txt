@@ -1,0 +1,51 @@
+# T05 run 总指纹（W12 §7 成员四 / 共享层负责人）
+run_id           = 20261001-w12-T05
+attempt_id       = 37e6b190-b12b-4128-b770-917b299297aa
+task             = t4 / T05 W09 reclaim 并发修复保护与五库换库矩阵
+collect_start    = 2026-10-01 20:42 +0800
+collect_end      = 2026-10-01 21:05:57 +0800
+HEAD             = f548cd71bf8b00cbf72fab0d8e0b72cdcf7ff34f
+branch           = dev
+product_ipc_cpp  = src/libipc/ipc.cpp
+product_ipc_sha256 = 9f936b25b5eb76d7207f982a4809063adf99fa1c4ef27b9e317260c868d5ebf4  (== git show HEAD:src/libipc/ipc.cpp)
+product_lib      = build/lib/libipc.so.1.3.0
+product_lib_sha256 = 813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a
+binary           = build/bin/test_chunk_capacity_backpressure
+binary_sha256    = 08b803b169852c7e5c7bdcdf91060b3c8dd1199cd63578167ecd19d40818836f
+probe_binary     = artifacts/perf/20261001-w12-T05/probe/t05_alias_probe
+probe_sha256     = 764366d22ce2954035bd6e436781e78b462577a6f8086294c9e4fcdbb44256ad
+probe_source_sha256 = 7b8123f44234c25a2f90df43b71a8fc824388f51c6c0a8d8ad3fcc2e2bd6e695
+host             = nproc=32 Linux 6.8.0-138-generic x86_64
+
+## 五库（run 目录内归档，第三方可离线重放）
+libipc.so.1.3.0.ABLATE sha256=52ccbe9e7e054aada32d5ec28f0ea97085ea7d6e1403e5dc756dc88878dde732 size=1285960
+libipc.so.1.3.0.BASELINE sha256=4fc0e95dc316ac01972edd7fe6efde4eb13de8f4793c08b05ea95eae29dd3a71 size=1285504
+libipc.so.1.3.0.FIX sha256=c928deaa4f480ee361e5974bf824c85c87658f2a6e9113bc0d3415568264b32d size=1291248
+libipc.so.1.3.0.FIXNEG sha256=1e7d5d7f12c20919e3994b9bdcd818375ba53afb11d99e8f74cb1a21c69dfc91 size=1291248
+libipc.so.1.3.0.FIX_PRODUCT sha256=813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a size=1291248
+libipc.so.1.3.0.V2NEG sha256=3380016ba38084d8071d00133096298c733e1ebc8de16dde969a58456353d791 size=1291248
+
+## 每臂 fingerprint.txt
+arms-run/ABLATE-1/fingerprint.txt
+arms-run/ABLATE-2/fingerprint.txt
+arms-run/ABLATE-3/fingerprint.txt
+arms-run/BASELINE-1/fingerprint.txt
+arms-run/BASELINE-2/fingerprint.txt
+arms-run/BASELINE-3/fingerprint.txt
+arms-run/FIX-1/fingerprint.txt
+arms-run/FIX-2/fingerprint.txt
+arms-run/FIX-3/fingerprint.txt
+arms-run/FIXNEG-1/fingerprint.txt
+arms-run/FIXNEG-2/fingerprint.txt
+arms-run/FIXNEG-3/fingerprint.txt
+arms-run/FIX_RB-1/fingerprint.txt
+arms-run/FIX_RB-2/fingerprint.txt
+arms-run/FIX_RB-3/fingerprint.txt
+arms-run/V2NEG-1/fingerprint.txt
+arms-run/V2NEG-2/fingerprint.txt
+arms-run/V2NEG-3/fingerprint.txt
+gtest-arm/ABLATE/fingerprint.txt
+gtest-arm/BASELINE/fingerprint.txt
+gtest-arm/FIX/fingerprint.txt
+gtest-arm/FIXNEG/fingerprint.txt
+gtest-arm/V2NEG/fingerprint.txt

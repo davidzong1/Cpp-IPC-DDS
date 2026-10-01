@@ -1,0 +1,17 @@
+### nm -DC (all dynamic symbols incl. UND) 集合比较
+prefix_lines=1736 post_lines=1736
+### pub_control_tick 是否为导出符号
+prefix: 0
+post:   0
+### 全符号表（含本地）
+prefix: 0
+post:   0
+### 目标文件级（判据为 inline 自由函数 ⇒ 无独立符号）
+post sched.o: 0
+post pubsub.o: 0
+### 导出符号名集合是否完全一致（-DC 全表逐行 diff）
+文件 build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/nm_all_prefix.txt 和 build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/nm_all_post.txt 不同
+DIFFERS
+### 动态符号表 .dynsym 大小对比
+  [ 4] .dynsym           DYNSYM           0000000000002ec8  00002ec8
+       000000000000a2d8  0000000000000018   A       5     1     8

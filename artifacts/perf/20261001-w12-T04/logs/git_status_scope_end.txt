@@ -1,0 +1,38 @@
+## T04 开工时（21:35:26）inScope 只读基线 vs 收工时再测
+--- 收工时 git status（inScope 三条路径） ---
+ M include/dzIPC/threepools/shm_control_scheduler.h
+--- 收工时 git diff --stat ---
+ include/dzIPC/threepools/shm_control_scheduler.h | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+--- 收工时 mtime ---
+include/dzIPC/threepools/shm_control_scheduler.h 28127 2026-10-01 21:26:27.698377931 +0800
+src/dzIPC/threepools/shm_control_scheduler.cc 44504 2026-10-01 14:21:56.678146906 +0800
+src/dzIPC/shm_pub_sub_ipc.cc 122149 2026-10-01 14:32:18.754486050 +0800
+src/libipc/ipc.cpp 101843 2026-10-01 13:42:03.611853288 +0800
+--- 该 M 文件的改动内容（全部 = 注释行？机械判定：非注释行变更数） ---
+changed_lines=11
+diff --git a/include/dzIPC/threepools/shm_control_scheduler.h b/include/dzIPC/threepools/shm_control_scheduler.h
+index bdbcab0..117193a 100644
+--- a/include/dzIPC/threepools/shm_control_scheduler.h
++++ b/include/dzIPC/threepools/shm_control_scheduler.h
+@@ -134,12 +134,17 @@ public:
+      * **现语义**：调度器**总是**在发布项的每拍里到达本回调的判定点，节奏为
+      *   · `has_peers() == true`  ⇒ 按 `pub_heartbeat`（50ms）每拍调用；
+      *   · `has_peers() == false` ⇒ 按 `peer_dead_timeout`（2s）同量级**低频兜底**调用。
+-     * ⛔ 低频兜底**不是**"降频优化/省 CPU"：扫 64 个槽位是**常数开销**（µs 级），
++     * ⛔ **无 peer 不得跳过 stale 扫描 —— 这是正确性要求，不是 CPU 优化**。
++     *    低频兜底**不是**"降频优化/省 CPU"：扫 64 个槽位是**常数开销**（µs 级），
+      *    它的全部意义是**正确性**；⛔ 不得据此声称任何 CPU/吞吐收益。
+      * 实现见 `src/dzIPC/threepools/shm_control_scheduler.cc` 的 `dispatch()`
+-     * （`Entry::next_stale_due`）。常驻判据：
++     * （`Entry::next_stale_due`）。常驻判据（W12 T03 起**均已登记进 CTest**）：
+      * `test/test_w05_stale_slot_gate.cpp`（端到端）与
+-     * `test/test_shm_control_scheduler.cpp:PublisherHeartbeatWithoutPeers`（周期语义）。 */
++     * `test/test_w05_stale_slot_gate_arm.cpp`（默认臂 + L1 回退臂双臂）为 `RUN_SERIAL TRUE TIMEOUT 120`；
++     * `test/test_shm_control_scheduler.cpp:PublisherHeartbeatWithoutPeers`（调度器侧周期语义）。
++     * ⚠️ 已知限制：L1 回退臂存在**未定位的偶发**（T02 实测 158 次中 1 次 `rx=99/100`；双臂 L1 臂 2/26 次 `rc=2`）
++     * ⇒ ⛔ 不得声称 ctest 恒全绿，⛔ 不得用 RETRY/--repeat until-pass 掩盖
++     * （证据 `artifacts/perf/20261001-w12-T02/{flake_observation.md,flake_stats.csv}`）。 */
+     virtual void on_pub_stale_scan(ControlClock::time_point now, std::chrono::nanoseconds dead_timeout) = 0;
+ 
+     /// 诊断用名字（可为空）。语义同 SubControlState::debug_name()。

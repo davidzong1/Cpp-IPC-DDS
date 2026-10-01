@@ -1,0 +1,5 @@
+== 实际加载库绑定（ldd + 探针运行时自报）
+arm=ABLATE-1 libdir=/home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/libs/ABLATE
+	libipc.so.3 => /home/zwc/cpp_ipc_dds/artifacts/perf/20261001-w12-T06/libs/ABLATE/libipc.so.3 (0x00007b9e0ca63000)
+-- 无 LD_LIBRARY_PATH 时（ctest 环境）:
+	libipc.so.3 => /home/zwc/cpp_ipc_dds/build/lib/libipc.so.3 (0x0000702e69c04000)

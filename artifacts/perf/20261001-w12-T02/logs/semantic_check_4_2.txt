@@ -1,0 +1,52 @@
+### §4.2-8 每个驱动方独立持有自己的 PubTickState
+--- 驱动方①：调度器入口 Entry::stale（每注册项一份）
+73:    PubTickState stale{};
+338:             * "按时拍一下"并把**自己那一份**排程状态 `e->stale` 传进去。
+340:            pub_control_tick(*e->pub, now, e->timing.peer_dead_timeout, e->stale);
+--- 驱动方②：回退臂 PubHeartbeatState::compat_tick_state（每话题一份，.cc 内完整定义）
+777:    dzIPC::shm_control::PubTickState compat_tick_state{};
+959:                                                 pub_control_state_->compat_tick_state);
+--- 跨驱动方共享检测：compat_tick_state 是否出现在调度器侧
+src/dzIPC/threepools/shm_control_scheduler.cc:0
+include/dzIPC/threepools/shm_control_scheduler.h:0
+
+### §4.2-7 不向 PubControlState 增加数据成员
+4:    virtual ~PubControlState() = default;
+10:    virtual void on_pub_heartbeat(ControlClock::time_point now) = 0;
+14:    virtual bool has_peers() const = 0;
+37:    virtual void on_pub_stale_scan(ControlClock::time_point now, std::chrono::nanoseconds dead_timeout) = 0;
+40:    virtual const char* debug_name() const noexcept { return nullptr; }
+(上面若只有 virtual 声明/空体，则无数据成员 ⇒ 布局仍为 vptr)
+
+### §4.2-6 进程级调度器与 compat_control_loop() 都只调 pub_control_tick()
+src/dzIPC/threepools/shm_control_scheduler.cc:72:     * `pub_control_tick()`（唯一一处，见 shm_control_scheduler.h）。t84，(B) 路线。 */
+src/dzIPC/threepools/shm_control_scheduler.cc:330:            /* ── 发布侧：**唯一**判据 `pub_control_tick()`（t84，(B) 路线）──────────
+src/dzIPC/threepools/shm_control_scheduler.cc:337:             * **结构修法**：判据收敛成唯一自由函数 `pub_control_tick()`，本函数只负责
+src/dzIPC/threepools/shm_control_scheduler.cc:340:            pub_control_tick(*e->pub, now, e->timing.peer_dead_timeout, e->stale);
+src/dzIPC/shm_pub_sub_ipc.cc:702:         * 「何时扫 stale」的判据已上收到 `pub_control_tick()`（**唯一**一处），
+src/dzIPC/shm_pub_sub_ipc.cc:705:         * `pub_control_tick()` 契约注释；端到端判据见
+src/dzIPC/shm_pub_sub_ipc.cc:725:    /* 由 `pub_control_tick()` 按**统一节拍**调用：
+src/dzIPC/shm_pub_sub_ipc.cc:732:     *    订阅者）。见 R1-W05-F1 / N1 与 shm_control_scheduler.h 的 `pub_control_tick()` 契约。
+src/dzIPC/shm_pub_sub_ipc.cc:773:     * ⛔ 判据在自由函数 `pub_control_tick()`（唯一一处）；这里只是**驱动方排程状态**。
+src/dzIPC/shm_pub_sub_ipc.cc:954:             * 现在两条驱动源**都只调同一个判据** `pub_control_tick()`（唯一一处），
+src/dzIPC/shm_pub_sub_ipc.cc:956:            dzIPC::shm_control::pub_control_tick(*pub_control_state_,
+include/dzIPC/shm_pub_sub_ipc.h:189:     * **不影响任何公开布局**。判据本身在自由函数 `pub_control_tick()`（唯一一处）。 */
+include/dzIPC/threepools/shm_control_scheduler.h:160: * **修法**：判据做成**唯一的自由函数** `pub_control_tick()`，两条驱动源都只调它；
+
+### §4.2-2 has_peers() 不再是 stale 扫描总门控（仅一处 if(has) 分支，含 else 兜底）
+    if (has)
+    {
+        /* 有 peer：每拍扫，并把兜底的下次到期点推后（刚扫过，不必紧接着再扫）。 */
+        st.next_stale_due = now + dead_timeout;
+        pub.on_pub_stale_scan(now, dead_timeout);
+        return;
+    }
+
+    /* 无 peer：低频兜底 —— 到期才扫。 */
+    if (now < st.next_stale_due)
+    {
+        return;
+    }
+    st.next_stale_due = now + dead_timeout;
+    pub.on_pub_stale_scan(now, dead_timeout);
+}

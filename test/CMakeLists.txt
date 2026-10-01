@@ -143,6 +143,57 @@ add_test(NAME test_shm_control_scheduler COMMAND test_shm_control_scheduler)
 # 阻塞构建机, 不是性能判据。
 set_tests_properties(test_shm_control_scheduler PROPERTIES TIMEOUT 120)
 
+# ================================================================
+# W05 控制面 stale 门控**承重用例**登记（W12 T03 / 架构负责人 = CTest 登记归口）
+# ----------------------------------------------------------------
+# 依据：方案 §5.2.4（架构与接口负责人）+ 队长裁定 §4.4 / R1-W05-F1(high) 的
+#       W04 接口修订路径（`has_peers()==false` 时**不得**跳过 stale 扫描, 只按
+#       `peer_dead_timeout`(2s) 同量级**低频兜底**扫一次）+ W05 的 add_test 需求
+#       （`W05/add_test需求_t77_stale门控用例.md`）。
+# ⛔ 低频兜底**不是**降频/省 CPU 优化：扫 64 个槽位是常数开销(µs 级), 它的全部
+#    意义是**正确性**（`collect_stale_peers()` 判死的是 PeerSlot 而非 peer_count;
+#    `remove_peer()`→`release_peer_slot()` 两步之间的窗口会留下
+#    `peer_count==0 + slot.in_use==1 + 心跳陈旧`, 整条跳过 ⇒ 永不回收并最终误断活订阅者）。
+#
+# 两个用例各守一层, 缺一不可：
+#   · test_w05_stale_slot_gate     : peer_count()==0 + 陈旧 in_use 槽位 ⇒ ①必须回收
+#                                    ②随后挂上的活订阅者**不得**被误断（端到端）；
+#   · test_w05_stale_slot_gate_arm : 同上两条判据, 但**按臂各跑一次**（默认臂 = 进程级
+#                                    调度器；L1 臂 = DZIPC_SHM_CONTROL_SCHEDULER=1 的
+#                                    每话题兼容线程）。两条驱动源共用唯一判据
+#                                    `pub_control_tick()` ⇒ 结构上不可再分叉。
+# 反向验证（"判据的判据"）：把任一驱动源的判据改回"无 peer 就跳过" ⇒ 对应用例**必须变红**
+# （消融实测见 artifacts/perf/20261001-t77-W05-F1/negative/ 与
+#  artifacts/perf/20261001-t84-W05-F1/negative/）。⛔ 本条是承重用例进入自动回路的唯一理由。
+#
+# 为什么 RUN_SERIAL：两用例都**真实建控制面段**并等到 `peer_dead_timeout`(2s) 量级
+# （占 /dev/shm 与 notify 唤醒），与其它建段用例并发跑会互相干扰（同 W04 对共享段类
+# 用例的结论, 见本文件上方 D-13 块）。TIMEOUT 120 只为卡死时 ctest 报超时而非永久
+# 阻塞构建机, **不是**性能判据。
+#
+# ⛔ 已知限制（如实登记, ⛔ 不得据此声称 ctest 恒全绿）────────────────────────────
+#   W12 T02(t3) 实测: **L1 回退臂**在 158 次中有 1 次返回 `rx=99/100`
+#   （判据①陈旧槽位回收**已通过**, 失败在判据②消息计数）；双臂用例的 L1 臂另有
+#   2/26 次 `rc=2`（活订阅者被误断）。判别实验（干净路径 50/50、门控逐条诊断
+#   52/52、32 路 CPU 加压 12/12）全部通过, **机制未定位, 未声称已修复**。
+#   证据: artifacts/perf/20261001-w12-T02/flake_observation.md、flake_stats.csv；
+#   默认臂 78/78 与 26/26 全通过。
+#   ⇒ 全量回归存在**已知的、非零的**偶发失败概率。⛔ **禁止**用 `RETRY` /
+#     `--repeat until-pass` / `set_tests_properties(... RETRY ...)` 等重试机制
+#     把该偶发掩盖成绿 —— 那正是"游戏化门禁"；本登记**不设**任何重试属性。
+#     偶发一旦在 ctest 中变红, 必须按 §13 如实上报, 不得重跑取绿后宣称通过。
+#
+# 登记方式：target 由本文件上方 file(GLOB)(test/*.cpp) 自动生成（源文件已在树内,
+# 故**不需** add_executable）；本条为**纯追加**, ⛔ 未改动任何既有行。
+# 计数口径：**原有 29 项 + 新增 2 项 = 31 项**（⛔ 不得为凑 29 删 add_test）。
+# ================================================================
+add_test(NAME test_w05_stale_slot_gate COMMAND test_w05_stale_slot_gate)
+add_test(NAME test_w05_stale_slot_gate_arm COMMAND test_w05_stale_slot_gate_arm)
+set_tests_properties(
+    test_w05_stale_slot_gate
+    test_w05_stale_slot_gate_arm
+    PROPERTIES RUN_SERIAL TRUE TIMEOUT 120)
+
 # 阶段 2 RouteSession 聚焦用例 (15 条, 见 test/test_shm_route_session.cpp 抬头注释)。
 # 必须进 CTest 的理由同上一项: 本用例守的是 lease 配对与「release 不得与 recv 并发」
 # 这两条**静默**失效 —— 漏配对 = wait_quiescent 永久挂死, 不等待在途 recv 就

@@ -1,0 +1,24 @@
+=== 闸门 3: W05 反向消融证据存在性 ===
+ablation_matrix.csv
+variant1_common_fallback_removed.diff
+variant2_default_driver_removed.diff
+variant3_l1_driver_removed.diff
+--- T02 消融矩阵结论 ---
+variant,ablation_point,default_arm,default_arm_rc,compat_L1_arm,compat_arm_rc,expected,observed_matches,log
+①,build/T02/<attempt>/ablate-branch-removed :: pub_control_tick() 无 peer 兜底分支删除,FAILED,1,FAILED,1,两臂同时失败,yes,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/ablate1_abs_armtest.log
+②,build/T02/<attempt>/ablate-driver1-removed :: ShmControlScheduler::Impl::dispatch() 默认臂驱动调用删除,FAILED,1,PASSED,-,只对应臂失败、另一臂通过,yes,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/ablate2_abs_armtest.log
+③,build/T02/<attempt>/ablate-driver2-removed :: shm_pub_ipc::compat_control_loop() L1 驱动调用删除,PASSED,-,FAILED,1,只对应臂失败、另一臂通过,yes,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/ablate3_abs_armtest.log
+fallback-branch-removed__shm_control_scheduler.cc.diff
+fallback-branch-removed__shm_control_scheduler.h.diff
+fallback-branch-removed__shm_pub_sub_ipc.cc.diff
+l1-driver-removed__shm_control_scheduler.cc.diff
+l1-driver-removed__shm_control_scheduler.h.diff
+l1-driver-removed__shm_pub_sub_ipc.cc.diff
+8:- **verdict：pass**（附 3 项已披露限制/未覆盖项 L-1/L-2/L-3，见 §7；needs_revision/reject 的触发条件均不成立）
+69:`RESULT arm=default-sched craft=1 n=400 received=400 misses=0 first_miss_at=-1 criterion1_reaped=1 reap_ms=2100 criterion2_pass=1`
+70:`RESULT arm=L1-compat    craft=1 n=400 received=400 misses=0 first_miss_at=-1 criterion1_reaped=1 reap_ms=2004 criterion2_pass=1`
+84:## 5. 验收项 6：消融库必须让至少一项承重判据变红
+86:两棵**新建**消融树（源码 diff 落 `ablation/*.diff`，逐文件指纹落 `fingerprint.txt` §5/§6）：
+88:| 变体 | 消融点 | 默认臂 | L1 臂 | 指纹 |
+140:`artifacts/perf/20261001-w12-T04/src/commands.sh`（逐条可粘贴；含冻结树导出、配置、构建、三条 verify、探针 400 条、消融、指纹）。
+147:- 合同 §6.3 交付物对照：独立复核报告 = 本文件；双臂日志 = `logs/gate_*_run*.log`、`logs/arm_run*.log`、`logs/probe_*_run*.log`；修复版/消融版指纹 = `fingerprint.txt` §1/§5；可复制复算命令 = `src/commands.sh`；完整性检查 = `logs/evidence_integrity_check.txt`。

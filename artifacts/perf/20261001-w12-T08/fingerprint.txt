@@ -1,0 +1,91 @@
+############################################################
+# T08 / W12 缺陷修复方案 §9（成员六：W11 验证与性能负责人）
+# 指纹登记 —— 只读复核（⛔ 本任务未重新采集、未改任何既有 run）
+############################################################
+run_id                 = 20261001-w12-T08
+task_id                = t9
+attempt_id             = ef264952-96a4-4d62-8fd2-f5e4ccb261cb
+member                 = w11-perf（W11 验证与性能负责人，方案 §9 成员六）
+role                   = 只读复核 + 状态同步记录（未实现、未复审、未重采）
+repo_root              = /home/zwc/cpp_ipc_dds
+git_HEAD               = f548cd71bf8b00cbf72fab0d8e0b72cdcf7ff34f
+branch                 = dev
+baseline_declared      = e800ccc496ac710b711c9346709e86a148c41241
+
+--- 采集窗口：本任务**不采集** ---
+collection             = NONE（方案 §9.2.4 默认路径：无新 CPU 批 ⇒ 不重跑）
+reason                 = 现行 CPU/扫描批（20260930-r49-W11）自身批内两两重叠 = 0（已独立复算）
+                         ⇒ 无重采正当理由；且重采会消耗新窗口、与其它 WP 抢机器。
+new_run_dir_written    = artifacts/perf/20261001-w12-T08/（本次新建，仅放复核记录）
+existing_runs_touched  = NONE（artifacts/perf/20260930-r49-W11*、20260930-r69-W11-dzflat-exclusive 逐文件未改）
+
+--- 被复核对象（一句冻结登记，⛔ 只读引用） ---
+object_report          = docs/消息接收架构改造/团队改造交付/W11/W11_串行配对性能对照_增量结案.md
+object_report_sha256   = 3c627a0d64350eb297845d0ea290138a0c4259fd7571b20974b5b560310d70b8
+object_report_mtime    = 2026-10-01 14:05:03.584223813 +0800
+object_report_bytes    = 73993
+object_verdict         = docs/消息接收架构改造/团队改造交付/R1/S4验收_W11_round4.md（t82, round-4 verdict = **pass**）
+
+--- 批 → 库指纹归属（**全部取自各 run 目录的 fingerprint.txt**，⛔ 不用 manifest 生成时快照） ---
+batch_CPU_SCAN_dir     = artifacts/perf/20260930-r49-W11
+batch_CPU_SCAN_lib     = cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46
+batch_CPU_SCAN_tool    = w10_r5_matrix 7f65579eeaca7217851b3d54addb3d80563415348cadc8937bdf7c119376d9b9
+batch_CPU_SCAN_started = 2026-09-30 16:17:29 +0800   （测量窗口 16:17:36.692 → 17:28:54.173，63 run）
+
+batch_DZFLAT_OLD_dir   = artifacts/perf/20260930-r49-W11-dzflat
+batch_DZFLAT_OLD_lib   = cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46
+batch_DZFLAT_OLD_tool  = test_w08_dzflat_ab 6bbc6367b2b1256a8f15f7e27274534d5701e0cb351b968b4dbda295f2d8dae5
+batch_DZFLAT_OLD_started = 2026-09-30 16:17:55 +0800 （6 轮，与 cpu-st1-n1000-W32-diagoff-r1 重叠 21 s）
+
+batch_DZFLAT_NEW_dir   = artifacts/perf/20260930-r69-W11-dzflat-exclusive
+batch_DZFLAT_NEW_lib   = f0ebc3ef2df5b276e35dd38a21183c0bbc59a51721b24aa2ef067783c07747c9
+batch_DZFLAT_NEW_tool  = test_w08_dzflat_ab 6bbc6367b2b1256a8f15f7e27274534d5701e0cb351b968b4dbda295f2d8dae5
+batch_DZFLAT_NEW_started = 2026-10-01 09:53:05 +0800 （6 轮真独占窗口，09:53:05.900 → 09:53:25.776）
+
+--- 当前（本任务时点）build/ 库与工装（**与上面任何一批都不同代**，故不可同库复跑） ---
+current_libipc_sha256  = 813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a
+current_libipc_path    = build/lib/libipc.so -> libipc.so.3 -> libipc.so.1.3.0（1291248 B）
+current_libipc_mtime   = 2026-10-01 14:33
+current_w10_r5_matrix  = build/bin/w10_r5_matrix 155288 B 2026-10-01 14:33（typ. lib sha 见下）
+current_w10_r5_tool_sha= 7dfd35244cdb8260e04cb1b45190a253f16d3443cd3aafe9e0d78f56aeb9642c（负控运行时实测）
+
+--- ⛔ 不可同库复跑的**负控实测**（本任务唯一一次执行二进制；只读、未产 run 目录） ---
+cmd = ./build/bin/w10_r5_matrix --n 10 --workers 32 --state 3 --diag off --window-s 1 --settle-s 0 \
+      --round 1 --run-id t08-negctl --out /tmp/w11_T08_negctl --require-lib-sha256 f0ebc3ef2df5b276…
+out = FINGERPRINT_MISMATCH lib: actual=813fab5be886ef6e… expected=f0ebc3ef2df5b276…
+      W10_R5_DONE verdict=FAIL failures=1
+exit = 1
+note = 门禁在**创建 --out 目录之前**返回 ⇒ /tmp/w11_T08_negctl **未创建**、工作区零副作用。
+       ⇒ 「现 build 库 ≠ f0ebc3ef」由机械判据证实 ⇒ ⛔ **不得声称「已同库复跑验证」**。
+
+--- 库指纹全仓分布（确认「没有第四个 W11 批 / 没有新 CPU 批」） ---
+fingerprint_txt 扫描（artifacts/perf/*/fingerprint.txt）：
+  558f47ede2419e14…  ← r38-W10-R5 / r40-W10-R5 / r46-W10-R4b（§6 引用链的外部批）
+  cf209393773d51ee…  ← r47-W10-R6b / r49-W11-dzflat / r49-W11
+  f0ebc3ef2df5b276…  ← r69-W11-dzflat-exclusive（唯一）
+  另有 5 个批的 fingerprint.txt 无 `libipc` 行（非 W11 系，不参与判定）
+含 cpu/ 子目录的批（= 可称「CPU 批」的批）：**仅** artifacts/perf/20260930-r49-W11/cpu
+⇒ **t68 之后没有任何新 CPU/扫描批**（现行 CPU 批仍是 r49-W11）。
+
+--- 本任务写入的文件 ---
+  artifacts/perf/20261001-w12-T08/fingerprint.txt        ← 本文件
+  artifacts/perf/20261001-w12-T08/T08_W11_round4状态同步.md
+  artifacts/perf/20261001-w12-T08/T08_检查原始输出与退出码.log
+  artifacts/perf/20261001-w12-T08/tables/T08_逐表批次归属判定.tsv
+  artifacts/perf/20261001-w12-T08/tables/T08_DZFlat_54格复算.tsv
+  build/w11/identity_check.json  build/w11/identity_check.stdout.log  build/w11/identity_check.stderr.log
+  build/w11/rate_claim_check.stdout.log  build/w11/rate_claim_check.stderr.log
+  build/w11/fingerprint_provenance.stdout.log
+  build/w11/batch_attribution.stdout.log  build/w11/batch_attribution.json  build/w11/batch_attribution.tsv
+  build/w11/negative_control_require_lib_sha256.log
+  build/w11/collect_t08.log
+  build/w11/w11_t08_fingerprint_provenance.py  build/w11/w11_t08_batch_attribution.py
+  （⛔ 未改产品代码、test/CMakeLists.txt、W05/W09 文档、W11 报告正文、既有 run、既有快照）
+
+--- 边界复核（本任务结束时实测） ---
+  W11 报告 sha256（复核前后一致）= 3c627a0d64350eb297845d0ea290138a0c4259fd7571b20974b5b560310d70b8
+  既有 run 目录被本任务改动的文件数 = 0（r49-W11 / r49-W11-dzflat / r69-W11-dzflat-exclusive 各 0）
+  唯一执行过的二进制 = build/bin/w10_r5_matrix（负控，被门禁前置拒绝）
+  /tmp/w11_T08_negctl = 不存在（门禁在 mkdir 之前返回 ⇒ 零副作用）
+  退出码：[A] identity_check=0 [B] rate_claim_check=0 [C] 负控=1（期望拒绝） [D]/[E] 复核脚本=0
+############################################################

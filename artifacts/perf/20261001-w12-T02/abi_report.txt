@@ -1,0 +1,51 @@
+### §4.3.5 ABI 对照（修复前 = dcaa0d9 前缀树；修复后 = 工作区 HEAD=f548cd7）
+
+--- sizeof / alignof（同一探针源码，两棵头文件树各编一次）
+--- prefix dcaa0d9 (修复前)
+sizeof(PubControlState)=8
+alignof(PubControlState)=8
+sizeof(SubControlState)=8
+sizeof(shm_pub_ipc)=336
+sizeof(ControlTiming)=24
+T02_ABI_SIZE_DONE
+--- post workspace (修复后)
+sizeof(PubControlState)=8
+alignof(PubControlState)=8
+sizeof(SubControlState)=8
+sizeof(shm_pub_ipc)=336
+sizeof(ControlTiming)=24
+T02_ABI_SIZE_DONE
+
+--- nm -DC 导出符号名集合
+prefix_names=495 post_names=495
+defined_export_diff_lines=0
+all_dynsym_name_diff: IDENTICAL
+
+### nm -DC (all dynamic symbols incl. UND) 集合比较
+prefix_lines=1736 post_lines=1736
+### pub_control_tick 是否为导出符号
+prefix: 0
+post:   0
+### 全符号表（含本地）
+prefix: 0
+post:   0
+### 目标文件级（判据为 inline 自由函数 ⇒ 无独立符号）
+post sched.o: 0
+post pubsub.o: 0
+### 导出符号名集合是否完全一致
+- `nm -DC --defined-only` 末列符号名排序集合：prefix=495 / post=495，`diff` **0 行**（logs/nm_export.diff 为空文件）。
+- `nm -DC` 全表（含 UND）末列符号名排序集合：1736 / 1736，`diff -q` = **IDENTICAL**（logs/nm_names_{prefix,post}.txt）。
+- ⛔ 如实说明：`nm -DC` 的**整行**文本（含地址列）在两棵独立构建树之间不同 ——
+  符号地址整体平移（例如 a0_cnd_broadcast 0x618c0 → 0x618e0），**符号名与个数一字不差**。
+  这是两次独立构建的正常现象，与本次修复无关；因此集合比较取**符号名**而非地址列。
+- `.dynsym` / `.dynstr` 节尺寸两棵树逐字节相同（0xa2d8 / 0x0）。
+### 动态符号表 .dynsym 大小对比
+  [ 4] .dynsym           DYNSYM           0000000000002ec8  00002ec8
+       000000000000a2d8  0000000000000018   A       5     1     8
+
+--- 动态符号表尺寸
+  [ 4] .dynsym           DYNSYM           0000000000002ec8  00002ec8
+  [ 5] .dynstr           STRTAB           000000000000d1a0  0000d1a0
+prefix:
+  [ 4] .dynsym           DYNSYM           0000000000002ec8  00002ec8
+  [ 5] .dynstr           STRTAB           000000000000d1a0  0000d1a0

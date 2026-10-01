@@ -1,0 +1,184 @@
+############################################################
+# W12 冻结窗口与基线指纹 (T01 / 方案 §2.1–§2.3, §11.1 第 1 步)
+############################################################
+run_id                 = 20261001-w12-freeze
+task_id                = t1
+attempt_id             = 194af692-c5b9-4318-95cb-8441b860f41e
+member                 = architecture (成员二：架构与接口负责人 / 基线登记归口)
+role                   = 只读登记 (read-only baseline registration)
+repo_root              = /home/zwc/cpp_ipc_dds
+build_dir              = build          (既有共享构建目录，本任务未重新配置/未重新构建)
+run_dir_baseline       = build/w12/194af692-c5b9-4318-95cb-8441b860f41e/baseline.txt
+run_dir_fingerprint    = artifacts/perf/20261001-w12-freeze/fingerprint.txt
+
+--- 采集窗口 (collection window) ---
+collect_start          = 2026-10-01T20:35:11+08:00
+collect_end            = 2026-10-01T20:35:11+08:00
+timezone               = CST
+epoch_start            = 1790858111
+epoch_end              = 1790858111
+
+--- 机器 / 工具链 (machine / toolchain) ---
+nproc                  = 32
+cpu_model              = Intel(R) Core(TM) i9-14900KF
+mem_total              = 62Gi
+kernel                 = 6.8.0-138-generic
+os                     = Ubuntu 22.04.5 LTS
+cmake                  = cmake version 3.22.1
+cxx_compiler           = c++ (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0
+make                   = GNU Make 4.3
+build_type             = Release
+cmake_generator        = Unix Makefiles
+CMAKE_HOME_DIRECTORY   = /home/zwc/cpp_ipc_dds
+cmakecache_mtime       = 2026-09-28 20:10:23.384737342 +0800
+
+--- git 基线 (baseline ancestry) ---
+worktree_path          = /home/zwc/cpp_ipc_dds
+branch                 = dev
+HEAD                   = f548cd71bf8b00cbf72fab0d8e0b72cdcf7ff34f
+HEAD_subject           = fix(shm):最终交付失败，生成失败分析报告
+HEAD_date              = 2026-10-01 15:36:52 +0800
+baseline_declared      = e800ccc496ac710b711c9346709e86a148c41241  (方案 §1 适用基线)
+baseline_resolved      = e800ccc496ac710b711c9346709e86a148c41241
+merge_base(baseline,HEAD) = e800ccc496ac710b711c9346709e86a148c41241
+is_ancestor(baseline,HEAD) = 0 (0=祖先可达 TRUE)
+
+git log --oneline -3:
+  f548cd7 fix(shm):最终交付失败，生成失败分析报告
+  dcaa0d9 docs(w12): 最终交付报告 + §14.3 条件性签认 + A7 断言修订（祖先可达）
+  b8289e0 perf(ipc): 补入 O-3 接线交付与全部被引用物证（修正 e48dc16 的排除误伤）
+
+--- §2.3 提交前完整性检查 (snapshot at collect time) ---
+$ git status --short
+  ?? artifacts/perf/20261001-w12-freeze/
+  ?? "docs/\346\266\210\346\201\257\346\216\245\346\224\266\346\236\266\346\236\204\346\224\271\351\200\240/\345\233\242\351\230\237\346\224\271\351\200\240\344\272\244\344\273\230/W12/\347\274\272\351\231\267\344\277\256\345\244\215\346\211\247\350\241\214\346\226\271\346\241\210.md"
+$ git diff --name-only HEAD
+  (empty => 工作区 tracked 文件与 HEAD 逐字节一致)
+$ git diff --cached --check
+  exit=0 (0 且无输出 => 通过)
+$ git diff --cached --stat
+  (empty => 无 staged 变更)
+
+--- 逐文件 SHA-256：工作区 vs git show HEAD:<path> ---
+  path                                               state    bytes    sha256(worktree) | sha256(HEAD)
+  src/dzIPC/shm_pub_sub_ipc.cc                       SAME     122149   067e79be378c12356e7be5c509097fcce5f39134ac3cab6586945f66ef0cec5d | 067e79be378c12356e7be5c509097fcce5f39134ac3cab6586945f66ef0cec5d
+  include/dzIPC/shm_pub_sub_ipc.h                    SAME     19467    354e17488089d16a8b002d6db0127d6df41fd449728ccd7ee98e89e010b94103 | 354e17488089d16a8b002d6db0127d6df41fd449728ccd7ee98e89e010b94103
+  src/dzIPC/threepools/shm_control_scheduler.cc      SAME     44504    acbf73ec6b01f8a6ac3c2c77ac62ee0c8dfc2727063ff59961d12feca7011779 | acbf73ec6b01f8a6ac3c2c77ac62ee0c8dfc2727063ff59961d12feca7011779
+  include/dzIPC/threepools/shm_control_scheduler.h   SAME     27517    eb6a7219bf959ff95171d8af4f4db34a980327f41305557aafc86c7d150cd2b3 | eb6a7219bf959ff95171d8af4f4db34a980327f41305557aafc86c7d150cd2b3
+  src/libipc/ipc.cpp                                 SAME     101843   9f936b25b5eb76d7207f982a4809063adf99fa1c4ef27b9e317260c868d5ebf4 | 9f936b25b5eb76d7207f982a4809063adf99fa1c4ef27b9e317260c868d5ebf4
+  test/test_w05_stale_slot_gate.cpp                  SAME     8217     31758502442ce5cd2d84d019f078144d70f3bb7d6dd4da9d2a8fce0e285a932c | 31758502442ce5cd2d84d019f078144d70f3bb7d6dd4da9d2a8fce0e285a932c
+  test/test_w05_stale_slot_gate_arm.cpp              SAME     9987     8e00fca0af758a81ffa41a8fada75d2be60356aa563e0e1d15d73eccdeb51188 | 8e00fca0af758a81ffa41a8fada75d2be60356aa563e0e1d15d73eccdeb51188
+  test/CMakeLists.txt                                SAME     54218    5a8a734826d9e5aafce0869c12a5d670f9cd2a114fa8cc2219cf814674337b51 | 5a8a734826d9e5aafce0869c12a5d670f9cd2a114fa8cc2219cf814674337b51
+
+  (state=SAME 表示工作区内容与 HEAD 逐字节一致；本任务全程未修改任何产品代码)
+
+--- 逐文件补充属性 ---
+  src/dzIPC/shm_pub_sub_ipc.cc                       mtime=2026-10-01 14:32:18.754486050 +0800  git_blob=557254beebacbc9d7ed2d4419cbb184679fda1b6  tracked=yes
+  include/dzIPC/shm_pub_sub_ipc.h                    mtime=2026-10-01 14:33:14.296393510 +0800  git_blob=61a227e0cff4ae28e760a3eb3e8303cc14eefd71  tracked=yes
+  src/dzIPC/threepools/shm_control_scheduler.cc      mtime=2026-10-01 14:21:56.678146906 +0800  git_blob=28c6c29ee3670eb6cd0e9f53f426d79e42b5521c  tracked=yes
+  include/dzIPC/threepools/shm_control_scheduler.h   mtime=2026-10-01 14:24:06.513511429 +0800  git_blob=bdbcab020a32155a5d5f159bb073d5237522ebbc  tracked=yes
+  src/libipc/ipc.cpp                                 mtime=2026-10-01 13:42:03.611853288 +0800  git_blob=b636e07c0202a7d20d94a0bc75ce5703be13dac6  tracked=yes
+  test/test_w05_stale_slot_gate.cpp                  mtime=2026-10-01 13:20:02.008638180 +0800  git_blob=c1af2993ab60a629e1054c59ac4be7a82f01a82b  tracked=yes
+  test/test_w05_stale_slot_gate_arm.cpp              mtime=2026-10-01 14:29:45.063668079 +0800  git_blob=af75021edd00fc930b590fb3d6f53eaef059b245  tracked=yes
+  test/CMakeLists.txt                                mtime=2026-09-30 14:31:12.472102998 +0800  git_blob=96290ffc05d9792e5ff8215e4a26398a0923f3ec  tracked=yes
+
+--- 产品库指纹 (product library) ---
+  build/lib/libipc.so          size=11        sha256=813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a  -> libipc.so.3  filetype=symbolic link to libipc.so.3
+  build/lib/libipc.so.3        size=15        sha256=813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a  -> libipc.so.1.3.0  filetype=symbolic link to libipc.so.1.3.0
+  build/lib/libipc.so.1.3.0    size=1291248   sha256=813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a  filetype=ELF 64-bit LSB shared object, x86-64, version 1 (GNU/Linux),
+  resolved_target        = /home/zwc/cpp_ipc_dds/build/lib/libipc.so.1.3.0
+  note                   = libipc.so / libipc.so.3 均为指向 libipc.so.1.3.0 的符号链接，三者内容同一
+
+--- 测试工装指纹 (test harness / binaries) ---
+  build/bin/test_w05_stale_slot_gate             size=483048    mtime=2026-10-01 14:33:31.374362600 +0800
+      sha256=4990720d9a48ba632c25f98bd7ef2196208f80fe8f510adf13edac5849ff2e80
+  build/bin/test_w05_stale_slot_gate_arm         size=468656    mtime=2026-10-01 14:33:31.380362589 +0800
+      sha256=3b84746174676de86e6354273986364e5507124af03e409cb9a7603719e6d63e
+  build/bin/test_shm_control_scheduler           size=647704    mtime=2026-10-01 14:33:27.414369866 +0800
+      sha256=aa6c3cc09faaff1443d6d480a824dba5c0759004f3ebac9691b9cf1c790c3b3c
+  build/bin/test_chunk_capacity_backpressure     size=522736    mtime=2026-10-01 14:33:25.166373964 +0800
+      sha256=08b803b169852c7e5c7bdcdf91060b3c8dd1199cd63578167ecd19d40818836f
+
+--- CTest 登记现状 (baseline registration state, 只读) ---
+  $ ctest --test-dir build -N | tail -1
+    Total Tests: 29
+  $ ctest --test-dir build -N | grep -i w05
+    (无匹配) ⇒ 基线 CTest 中 **尚未登记** test_w05_stale_slot_gate / test_w05_stale_slot_gate_arm
+  test/CMakeLists.txt add_test 计数 = 30
+  test/CMakeLists.txt 中 w05 双臂用例名出现次数 = 0
+  add_executable 中存在 test_w05_stale_slot_gate / _arm = 0 处引用
+  ⛔ 本任务不修改 test/CMakeLists.txt；CTest 登记是成员二 WP 的后续动作（方案 §5.2 步骤 4）
+
+--- 冻结窗口声明 (freeze declaration) ---
+  1. 已停止并发构建、性能采集与无关文件编辑；本任务为纯只读登记，未执行任何构建/测试/基准。
+  2. 采集结束时本机并发构建/基准进程快照（判据：无 cc1plus/make/cmake/ctest/benchmark 条目）：
+       PID     ELAPSED %CPU COMMAND
+     (以上无输出 ⇒ 冻结窗口内无并发构建/采集)
+     并发构建/基准进程数 = 0  (0 ⇒ 冻结窗口成立)
+  3. 每次复核使用独立目录：build/<task>/<attempt>/、artifacts/perf/<run-id>/。
+     本 run 目录：build/w12/194af692-c5b9-4318-95cb-8441b860f41e/ ；artifacts/perf/20261001-w12-freeze/
+  4. 不覆盖既有 artifacts/perf、历史报告、历史快照；本 run 目录创建前已确认不存在。
+  5. ⛔ 不向名字含 w05only 的目录写入修复后源码；本任务对 build/t58/w05only/
+     与 artifacts/perf/20261001-r58-W05-S4/r1_w05only/ 均为只读。
+     w05only 目录 SHA-256（只读留证）：
+       build/t58/w05only                                    files=5519  dirhash=4be394bfcd1e4d479589f8a242a9696b8069a7f8019a8a5b357adacd01fdea1f
+       artifacts/perf/20261001-r58-W05-S4/r1_w05only        files=6  dirhash=ee41a9c3b3878ca8928ec51eda2bdfa2baaba078d054f98bedde57095a8947d9
+
+--- 环境变量 (environment, 与本任务相关的全量关键项) ---
+  CMAKE_PREFIX_PATH=/opt/drake:
+  LD_LIBRARY_PATH=/opt/openrobots/lib:
+  PATH=/home/zwc/Agent/deepseek-harness/node_modules/.bin:/home/zwc/.local/share/pnpm/store/v11/links/@/pnpm/11.7.0/2925d75aab9810c8ee347d5663a06da09a1ab27a244811424e7c3a56423481f0/node_modules/pnpm/dist/node-gyp-bin:/home/zwc/Agent/deepseek-harness/node_modules/.bin:/home/zwc/.local/share/pnpm/store/v11/links/@/pnpm/11.7.0/2925d75aab9810c8ee347d5663a06da09a1ab27a244811424e7c3a56423481f0/bin:/home/zwc/cpp_ipc_dds/local/bin:/home/zwc/branch/leju-robot-core/bin:/opt/openrobots/bin:/home/zwc/.pyenv/shims:/home/zwc/.pyenv/bin:/home/zwc/.nvm/versions/node/v24.18.0/bin:/home/zwc/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/snap/bin:/usr/local/go/bin
+  PWD=/home/zwc/cpp_ipc_dds
+  SHELL=/bin/bash
+  env_total_entries      = 95
+  note                   = 本任务未设置任何 DZIPC_* 运行期开关；采集期间环境变量保持默认
+
+--- 完整命令行 (commands run, 本任务全部使用了只读取数) ---
+  git log --oneline -3
+  git rev-parse HEAD
+  git log -1 --format='%H|%ad|%an|%s' --date=iso
+  git rev-parse e800ccc
+  git merge-base --is-ancestor e800ccc HEAD
+  git merge-base e800ccc HEAD
+  git branch --show-current
+  git status --short
+  git diff --name-only HEAD
+  git diff --cached --check
+  git diff --cached --stat
+  sha256sum <worktree-file>            # 8 个目标文件
+  git show HEAD:<path> | sha256sum     # 同上 8 个文件
+  git hash-object <worktree-file>
+  git ls-files --error-unmatch test/test_w05_stale_slot_gate.cpp test/test_w05_stale_slot_gate_arm.cpp
+  sha256sum build/lib/libipc.so build/lib/libipc.so.3 build/lib/libipc.so.1.3.0
+  sha256sum build/bin/test_w05_stale_slot_gate build/bin/test_w05_stale_slot_gate_arm \
+            build/bin/test_shm_control_scheduler build/bin/test_chunk_capacity_backpressure
+  readlink -f build/lib/libipc.so build/lib/libipc.so.3
+  ldd build/bin/test_w05_stale_slot_gate
+  ctest --test-dir build -N
+  nproc; uname -a; cmake --version; c++ --version
+  grep -E '^(CMAKE_BUILD_TYPE|CMAKE_CXX_COMPILER|CMAKE_GENERATOR|CMAKE_HOME_DIRECTORY):' build/CMakeCache.txt
+  ps -eo pid,etime,pcpu,cmd --sort=-pcpu
+  find build/t58/w05only artifacts/perf/20261001-r58-W05-S4/r1_w05only -type f | sort -z | xargs -0 sha256sum | sha256sum
+
+--- 环境限制与观察 (limitations / observations) ---
+  [L1] build/ 是与历史 run 共用的既有构建目录（CMakeCache 2026-09-28 20:10，产物 2026-10-01 14:33）。
+       冻结窗口下本任务**不重新配置、不重新构建**，故 libipc.so 与工装指纹按现状登记。
+       若下游需要「同源重建」的库指纹，必须在 build/<task>/<attempt>/ 独立目录重建后另立 run。
+  [L2] 基线 CTest 共 29 个用例，**不含** test_w05_stale_slot_gate / test_w05_stale_slot_gate_arm。
+       方案 §5.2 步骤 4 的登记与 §11.3 闸门项「W05 双臂承重用例已进 CTest」当前**未满足**，
+       属成员二 WP 待办，本任务只如实登记，不做修改。
+  [L3] build/t58/w05only/ 为 W05 历史快照（§2.1 明令不得再写入修复后源码）。只读比对：
+       src/dzIPC/shm_pub_sub_ipc.cc、src/dzIPC/threepools/shm_control_scheduler.cc、
+       include/dzIPC/threepools/shm_control_scheduler.h 与工作区一致；
+       include/dzIPC/shm_pub_sub_ipc.h 与工作区**不同**（历史快照，保留原样，不得回写）。
+  [L4] 工作区唯一 untracked 项为方案文档本身（docs/.../W12/缺陷修复执行方案.md），非产品代码。
+  [L5] 本任务未做任何 ABI/符号/运行期断言；ABI 影响见成员二 WP（方案 §5.3）。
+
+--- 本任务写入的文件 (files written by this task) ---
+  build/w12/194af692-c5b9-4318-95cb-8441b860f41e/baseline.txt
+  build/w12/194af692-c5b9-4318-95cb-8441b860f41e/collect_baseline.sh
+  artifacts/perf/20261001-w12-freeze/fingerprint.txt
+  (无产品代码、无他人 WP 正文、无历史快照被修改)
+############################################################
+# 采集结束 (collect end)
+############################################################

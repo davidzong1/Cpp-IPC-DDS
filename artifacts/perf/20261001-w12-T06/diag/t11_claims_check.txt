@@ -1,0 +1,16 @@
+=== 12.4 断言复核（2026-10-01 22:04:24 +0800）
+-- ① V2NEG 各次运行（应有 4 次，全部 bad_rounds=1）：
+   V2NEG-1                            rc=1 bad_rounds=1
+   V2NEG-2                            rc=1 bad_rounds=1
+   POLDEMO-V2NEG                      rc=1 bad_rounds=1
+   POLDEMO2-V2NEG                     rc=1 bad_rounds=1
+-- ② FIXNEG-1:
+   official-matrix/FIXNEG-1           rc=1 bad_rounds=1
+   失败形态（探针侧 _ALIAS_HIT 而非崩溃）：0 次 _ALIAS_HIT；crash_rounds=crash_rounds=0
+-- ③ BASELINE/ABLATE 在 race 布景中的参与度（287/300 held=0）：
+   BASELINE  rounds=300 held=0: 287  held=8: 10
+   ABLATE    rounds=300 held=0: 287  held=8: 10
+-- ④ CTest 未设 RUN_SERIAL / 未设 RETRY：
+add_test(NAME test_chunk_capacity_backpressure COMMAND test_chunk_capacity_backpressure)
+set_tests_properties(test_chunk_capacity_backpressure PROPERTIES TIMEOUT 120)
+   RETRY 属性命中行（该用例）: 0

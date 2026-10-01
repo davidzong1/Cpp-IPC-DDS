@@ -1,0 +1,23 @@
+=== R-4 专项：假红判据是否可机械复现 ===
+① 官方用例跑一次后残留段存在（已实测，见 pollution_check.txt）
+② T06 的三连证据（V2NEG→BASELINE-polluted→BASELINE-clean）
+BASELINE-probe1
+BASELINE-probe2
+FIXNEG-timing1
+FIXNEG-timing2
+POLDEMO2-FIX-polluted
+POLDEMO2-V2NEG
+POLDEMO-BASELINE-clean
+POLDEMO-BASELINE-polluted
+POLDEMO-V2NEG
+README_superseded.md
+③ W09 交付文档 §12 已登记（t11）
+17
+478:## 12. 附录（t7 / T06 追加登记）：C9 用例的**跨臂段污染** —— 量具/用例卫生缺陷（severity=**low**，⛔ **不是产品缺陷**）
+④ 本次集成清理记录
+=== R-4：全量回归前清理（清理命令与时间显式登记）===
+2026-10-01T22:43:49+08:00
+rm -f /dev/shm/w09c9alias__IPC_SHM__*  (done)
+=== R-4：定向回归前清理 ===
+2026-10-01T22:45:01+08:00
+rm -f /dev/shm/w09c9alias__IPC_SHM__*  (done)

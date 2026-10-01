@@ -1,0 +1,7 @@
+arm,run,dom,crafted_peer_count,crafted_slot_in_use,after_hold_slot_in_use,after_hold_cc,live_slots,final_peer_count,published,received,mismatch,log
+default,1,9010,0,1,0,0,"[0]=cc1",1,400,400,0,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/harm400_default_run1.log
+default,2,9020,0,1,0,0,"[0]=cc1",1,400,400,0,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/harm400_default_run2.log
+default,3,9030,0,1,0,0,"[0]=cc1",1,400,400,0,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/harm400_default_run3.log
+compat,1,9110,0,1,0,0,"[0]=cc1",1,400,400,0,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/harm400_fallback_run1.log
+compat,2,9120,0,1,0,0,"[0]=cc1",1,400,400,0,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/harm400_fallback_run2.log
+compat,3,9130,0,1,0,0,"[0]=cc1",1,400,400,0,build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/logs/harm400_fallback_run3.log

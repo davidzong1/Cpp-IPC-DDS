@@ -1,0 +1,43 @@
+=== 复核用原始输出摘录（供报告引用） ===
+### A. 构造状态 + 判据①（默认臂，探针 t04_probe v2/v6）
+T04_PROBE topic=t04gate_7801_0 domain=7801 n=400 craft=1 arm=default-sched cc_id=1
+CRAFT_DONE slot=0 peer_count=0 slot_in_use=1 slot_cc_id=1 (release_peer_slot NOT called)
+REAP_OK t=2100ms peer_count=0 slot_in_use=0 last_seen_hb_age=2099ms in_use_samples=1962
+SUB_ATTACHED=1 peer_count=1 live_slots=[0]=cc1(hb_age=0ms)
+FINAL peer_count=1 slots=[0]=cc1
+RESULT arm=default-sched craft=1 n=400 received=400 misses=0 first_miss_at=-1 criterion1_reaped=1 reap_ms=2100 criterion2_pass=1
+T04_PROBE_DONE
+
+### B. L1 回退臂同判据
+CRAFT_DONE slot=0 peer_count=0 slot_in_use=1 slot_cc_id=1 (release_peer_slot NOT called)
+REAP_OK t=2004ms peer_count=0 slot_in_use=0 last_seen_hb_age=2003ms in_use_samples=1864
+SUB_ATTACHED=1 peer_count=1 live_slots=[0]=cc1(hb_age=0ms)
+FINAL peer_count=1 slots=[0]=cc1
+RESULT arm=L1-compat craft=1 n=400 received=400 misses=0 first_miss_at=-1 criterion1_reaped=1 reap_ms=2004 criterion2_pass=1
+
+### C. 消融 A（唯一判据的无 peer 兜底分支删除）：默认臂
+CRAFT_DONE slot=0 peer_count=0 slot_in_use=1 slot_cc_id=1 (release_peer_slot NOT called)
+REAP_FAIL timeout_6000ms last_seen_hb_age=6001ms
+SUB_ATTACHED=1 peer_count=1 live_slots=[0]=cc1(hb_age=6012ms)[1]=cc1(hb_age=0ms)
+RESULT arm=default-sched craft=1 n=400 received=36 misses=364 first_miss_at=36 criterion1_reaped=0 reap_ms=-1 criterion2_pass=0
+
+### D. 消融 A：L1 臂
+CRAFT_DONE slot=0 peer_count=0 slot_in_use=1 slot_cc_id=1 (release_peer_slot NOT called)
+REAP_FAIL timeout_6000ms last_seen_hb_age=6001ms
+SUB_ATTACHED=1 peer_count=1 live_slots=[0]=cc1(hb_age=6002ms)[1]=cc1(hb_age=0ms)
+RESULT arm=L1-compat craft=1 n=400 received=6 misses=394 first_miss_at=6 criterion1_reaped=0 reap_ms=-1 criterion2_pass=0
+
+### E. 消融 B（删除 L1 驱动调用）：L1 臂判据①变红、默认臂不变红
+CRAFT_DONE slot=0 peer_count=0 slot_in_use=1 slot_cc_id=1 (release_peer_slot NOT called)
+REAP_FAIL timeout_6000ms last_seen_hb_age=6001ms
+SUB_ATTACHED=1 peer_count=1 live_slots=[0]=cc1(hb_age=6002ms)[1]=cc1(hb_age=0ms)
+RESULT arm=L1-compat craft=1 n=400 received=400 misses=0 first_miss_at=-1 criterion1_reaped=0 reap_ms=-1 criterion2_pass=1
+CRAFT_DONE slot=0 peer_count=0 slot_in_use=1 slot_cc_id=1 (release_peer_slot NOT called)
+REAP_OK t=2100ms peer_count=0 slot_in_use=0 last_seen_hb_age=2099ms in_use_samples=1956
+RESULT arm=default-sched craft=1 n=400 received=400 misses=0 first_miss_at=-1 criterion1_reaped=1 reap_ms=2100 criterion2_pass=1
+
+### F. 偶发（首条丢失）原始行：干净路径 L1 臂
+MISS at index=0 rx=0 (extended_wait=1500ms exhausted)
+MISMATCH at index=1 got="t04-0" want="t04-1"
+RESULT arm=L1-compat craft=0 n=100 received=99 misses=1 first_miss_at=0 criterion1_reaped=0 reap_ms=-1 criterion2_pass=0
+WAIT_HIST us_buckets <1ms=0 1-5ms=99 5-20ms=0 20-50ms=0 50-100ms=0 100-200ms=0 >=200ms(miss)=1 max=200862us mean=3065us

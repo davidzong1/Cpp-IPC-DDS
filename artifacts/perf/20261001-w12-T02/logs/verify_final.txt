@@ -1,0 +1,5 @@
+### verify 四条命令的最终一次性复跑（exit code 为准）
+cmd1 ./build/bin/test_w05_stale_slot_gate exit=0
+cmd2 ./build/bin/test_w05_stale_slot_gate_arm exit=0
+cmd3 DZIPC_SHM_CONTROL_SCHEDULER=1 ./build/bin/test_w05_stale_slot_gate exit=1
+cmd4 rg -n "has_peers|on_pub_stale_scan|pub_control_tick" include/dzIPC src/dzIPC exit=0 (via run-local shim; 原生 rg 未安装)

@@ -20,6 +20,20 @@
  * 10ms / 50ms 是**调度周期**，不是硬实时保证；CI 负载下会抖动。判据取"周期量级
  * 正确 + 比例正确"（5:1），不取逐次精确值 —— 后者会变成 flaky 用例，而 flaky
  * 用例比没有用例更坏（它会训练人忽略红灯）。
+ *
+ * ── 旧门控断言已更正（W12 T03 / 架构与接口负责人，依方案 §5.2.3）────────────
+ * 本文件**不再**存在把「无 peer 不扫描」写成正确行为的**活动断言**。
+ * 原断言 `EXPECT_EQ(pub->stale_scan.load(), 0) << "peer_count()==0 时必须跳过 stale 扫描"`
+ * （t77 时代，见 `docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round2.md:86`）
+ * 已按队长裁定 §4.4 / R1-W05-F1(high) 更正为「不得整条跳过、只按 peer_dead_timeout 同量级
+ * 低频兜底」，现形式见下方 `ShmControlScheduler.PublisherHeartbeatWithoutPeers` 的两条判据：
+ *   ① 头 1.5s 内**不得**扫（证"低频"，而不是按 50ms 每拍扫）；
+ *   ② 到 2.5s 时**必须**扫过 ≥1 次（证兜底真的存在，而不是整条跳过）。
+ * 机械检查证据（W12 T03 复算）：剥离行注释与块注释后，模式
+ * `stale_scan.load(), 0` / `stale_scan.load() == 0` / `必须跳过` 的**活动命中均为 0**；
+ * 残留的旧文本只出现在第 184 行附近那段**标注"⛔ 本条于 t77 更正"的历史引文注释**里。
+ * 端到端判据（回收 + 活订阅者不被误断）由 `test/test_w05_stale_slot_gate.cpp` 与
+ * `test/test_w05_stale_slot_gate_arm.cpp` 独立守门，两者均已登记进 CTest（RUN_SERIAL）。
  */
 #include <algorithm>
 #include <atomic>
@@ -192,7 +206,13 @@ TEST(ShmControlScheduler, TimingSemanticsUnchanged)
  *   `test/test_w05_stale_slot_gate.cpp` 独立守门；本例只守**调度器侧的周期语义**：
  *     ① 头 1.5s 内**不得**扫 —— 证"低频"而不是按 pub_heartbeat(50ms) 每拍扫；
  *     ② 到 2.5s 时**必须**扫过 ≥1 次 —— 证兜底真的存在，而不是整条跳过。
- *   两条缺一不可：只留 ① 就是原来的错误门控，只留 ② 会放过"每拍都扫"的降频退化。 */
+ *   两条缺一不可：只留 ① 就是原来的错误门控，只留 ② 会放过"每拍都扫"的降频退化。
+ *
+ * ⚠️ W12 T03 复核（方案 §5.2.3）：本条**已**是更正后的形式，**无需再改**。
+ *   机械检查证据：剥离行注释与块注释后，`stale_scan.load(), 0` / `stale_scan.load() == 0` /
+ *   `必须跳过` 三条模式在本文件的活动命中均为 **0**；旧文本仅存于本段引文注释。
+ *   承重用例登记见 `test/CMakeLists.txt` 的 W05 块（`test_w05_stale_slot_gate{,_arm}`，
+ *   RUN_SERIAL TRUE TIMEOUT 120）；⛔ 不得用 RETRY/--repeat until-pass 掩盖已知偶发。 */
 TEST(ShmControlScheduler, PublisherHeartbeatWithoutPeers)
 {
     ShmControlScheduler sched;

@@ -1,0 +1,24 @@
+== 官方工装 §8.4 四类场景判定所依据的 bin 内证据位置（2026-10-01 21:56:07 +0800）
+-- ① 被测路径确实执行的证据（orphan segment reset 行）：
+   用例名: ChunkCapacityBackpressure.OrphanResetDoesNotAliasInflightLoansAcrossTopics
+   复位日志: 'chunk pool orphan segment reset: kind = attach, chunk_size = 9216, capacity = 40, count = 1'
+-- ② 反例（找错的段名 ⇒ 路径不执行）的字符串锚点：
+377:        pref, {"CHUNK_INFO__", ipc::to_string(chunk_size), "__C",
+635:   * (CHUNK_INFO__<chunk_size>, 见 chunk_storage_info), 而 calc_chunk_size 只按
+691:   * 池段名 = make_prefix(prefix, {"CHUNK_INFO__", chunk_size})(get_info,
+-- ③ §5.4 教训的机械形态（段名不含控制面前缀 ⇒ clear_storage 清不到池段）：
+197:    path += "CHUNK_INFO__" + std::to_string(chunk_class) + "__C"
+-- ④ clear_storage 清哪些段（不含 CHUNK_INFO__）：
+    static void clear_storage(char const *prefix, char const *name) noexcept
+    {
+      auto p = ipc::make_string(prefix);
+      auto n = ipc::make_string(name);
+      ipc::detail::waiter::clear_storage(
+          ipc::make_prefix(p, {"CC_CONN__", n}).c_str());
+      ipc::detail::waiter::clear_storage(
+          ipc::make_prefix(p, {"WT_CONN__", n}).c_str());
+      ipc::detail::waiter::clear_storage(
+          ipc::make_prefix(p, {"RD_CONN__", n}).c_str());
+      ipc::shm::handle::clear_storage(
+          ipc::make_prefix(p, {"AC_CONN__", n}).c_str());
+    }

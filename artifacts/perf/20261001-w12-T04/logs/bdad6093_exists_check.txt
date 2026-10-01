@@ -1,0 +1,156 @@
+# T04 历史库 bdad6093 存在性独立核验（⛔ 不伪造其可用性）
+target_sha256=bdad60939e9c75f80eff87c9f669268a09ea9b00e1539240e94a1167eb84a86c
+scan_roots=build/ artifacts/ (全仓 libipc.so* 实体)
+scan_at=2026-10-01T21:47:59+08:00
+
+## 所有 libipc.so* 实体与其 sha256（排除符号链接）
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+36c17c7ba941e44be47a07cb7ad653d885bf6582b415eaf121f998bca3dcee0c  artifacts/perf/20261001-t73-W09-F1/lib_fixed_t83/libipc.so
+36c17c7ba941e44be47a07cb7ad653d885bf6582b415eaf121f998bca3dcee0c  artifacts/perf/20261001-t73-W09-F1/lib_fixed_t83/libipc.so.3
+9365611342152d93928831fcaea7753163dd3a1f91c7772a283aebadd6f916dd  artifacts/perf/20261001-t73-W09-F1/lib_negative_t83/libipc.so
+9365611342152d93928831fcaea7753163dd3a1f91c7772a283aebadd6f916dd  artifacts/perf/20261001-t73-W09-F1/lib_negative_t83/libipc.so.3
+52ccbe9e7e054aada32d5ec28f0ea97085ea7d6e1403e5dc756dc88878dde732  artifacts/perf/20261001-w12-T05/arms/ABLATE/libipc.so.1.3.0
+4fc0e95dc316ac01972edd7fe6efde4eb13de8f4793c08b05ea95eae29dd3a71  artifacts/perf/20261001-w12-T05/arms/BASELINE/libipc.so.1.3.0
+813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a  artifacts/perf/20261001-w12-T05/arms/FIX/libipc.so.1.3.0
+1e7d5d7f12c20919e3994b9bdcd818375ba53afb11d99e8f74cb1a21c69dfc91  artifacts/perf/20261001-w12-T05/arms/FIXNEG/libipc.so.1.3.0
+c928deaa4f480ee361e5974bf824c85c87658f2a6e9113bc0d3415568264b32d  artifacts/perf/20261001-w12-T05/arms/FIX_RB/libipc.so.1.3.0
+3380016ba38084d8071d00133096298c733e1ebc8de16dde969a58456353d791  artifacts/perf/20261001-w12-T05/arms/V2NEG/libipc.so.1.3.0
+52ccbe9e7e054aada32d5ec28f0ea97085ea7d6e1403e5dc756dc88878dde732  artifacts/perf/20261001-w12-T05/libs/libipc.so.1.3.0.ABLATE
+4fc0e95dc316ac01972edd7fe6efde4eb13de8f4793c08b05ea95eae29dd3a71  artifacts/perf/20261001-w12-T05/libs/libipc.so.1.3.0.BASELINE
+c928deaa4f480ee361e5974bf824c85c87658f2a6e9113bc0d3415568264b32d  artifacts/perf/20261001-w12-T05/libs/libipc.so.1.3.0.FIX
+1e7d5d7f12c20919e3994b9bdcd818375ba53afb11d99e8f74cb1a21c69dfc91  artifacts/perf/20261001-w12-T05/libs/libipc.so.1.3.0.FIXNEG
+813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a  artifacts/perf/20261001-w12-T05/libs/libipc.so.1.3.0.FIX_PRODUCT
+3380016ba38084d8071d00133096298c733e1ebc8de16dde969a58456353d791  artifacts/perf/20261001-w12-T05/libs/libipc.so.1.3.0.V2NEG
+52ccbe9e7e054aada32d5ec28f0ea97085ea7d6e1403e5dc756dc88878dde732  artifacts/perf/20261001-w12-T06/libs/ABLATE/libipc.so.1.3.0
+4fc0e95dc316ac01972edd7fe6efde4eb13de8f4793c08b05ea95eae29dd3a71  artifacts/perf/20261001-w12-T06/libs/BASELINE/libipc.so.1.3.0
+813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a  artifacts/perf/20261001-w12-T06/libs/FIX/libipc.so.1.3.0
+1e7d5d7f12c20919e3994b9bdcd818375ba53afb11d99e8f74cb1a21c69dfc91  artifacts/perf/20261001-w12-T06/libs/FIXNEG/libipc.so.1.3.0
+c928deaa4f480ee361e5974bf824c85c87658f2a6e9113bc0d3415568264b32d  artifacts/perf/20261001-w12-T06/libs/FIX_RB/libipc.so.1.3.0
+3380016ba38084d8071d00133096298c733e1ebc8de16dde969a58456353d791  artifacts/perf/20261001-w12-T06/libs/V2NEG/libipc.so.1.3.0
+813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a  build/lib/libipc.so.1.3.0
+52f3e9634e89c34c1db2976617a79eeb0cdafb90ce05a7ad6f80aa09fcbd539c  build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-branch-removed/b/lib/libipc.so.1.3.0
+cb4913258083a62bb1b71f0bcbf0de6e56a05c2c2b37409b8c4e76ff3467009b  build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver1-removed/b/lib/libipc.so.1.3.0
+ee62d328a4948bd549c36368fcbf32252e7b6cbae319e86595c49a38b41555d6  build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver2-removed/b/lib/libipc.so.1.3.0
+1752798fc27c6bc49766ada9d15dba5d6d7a0234f8a6609537e6e62704e94fce  build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/baseline-prefix-dcaa0d9/b/lib/libipc.so.1.3.0
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-fallback-branch-removed/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+36c17c7ba941e44be47a07cb7ad653d885bf6582b415eaf121f998bca3dcee0c  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-fallback-branch-removed/artifacts/perf/20261001-t73-W09-F1/lib_fixed_t83/libipc.so.3
+9365611342152d93928831fcaea7753163dd3a1f91c7772a283aebadd6f916dd  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-fallback-branch-removed/artifacts/perf/20261001-t73-W09-F1/lib_negative_t83/libipc.so.3
+134c257cbb1929b05d6832c2dcdc3bd76954171cd76c52073eed54f1e72d9ecb  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-fallback-branch-removed/b/lib/libipc.so.1.3.0
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-l1-driver-removed/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+36c17c7ba941e44be47a07cb7ad653d885bf6582b415eaf121f998bca3dcee0c  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-l1-driver-removed/artifacts/perf/20261001-t73-W09-F1/lib_fixed_t83/libipc.so.3
+9365611342152d93928831fcaea7753163dd3a1f91c7772a283aebadd6f916dd  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-l1-driver-removed/artifacts/perf/20261001-t73-W09-F1/lib_negative_t83/libipc.so.3
+fb9d8a0c4189bfb5230d5ec935ecee7dbaa91721b26ee5448fd145f4f0110a1d  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/ablate-l1-driver-removed/b/lib/libipc.so.1.3.0
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/frozen/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+36c17c7ba941e44be47a07cb7ad653d885bf6582b415eaf121f998bca3dcee0c  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/frozen/artifacts/perf/20261001-t73-W09-F1/lib_fixed_t83/libipc.so.3
+9365611342152d93928831fcaea7753163dd3a1f91c7772a283aebadd6f916dd  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/frozen/artifacts/perf/20261001-t73-W09-F1/lib_negative_t83/libipc.so.3
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+36c17c7ba941e44be47a07cb7ad653d885bf6582b415eaf121f998bca3dcee0c  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/artifacts/perf/20261001-t73-W09-F1/lib_fixed_t83/libipc.so.3
+9365611342152d93928831fcaea7753163dd3a1f91c7772a283aebadd6f916dd  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/artifacts/perf/20261001-t73-W09-F1/lib_negative_t83/libipc.so.3
+6dc1e3b292b0ba0cc60bb576d0e35446899fb3b6ba69ecc62de7473396862c30  build/T04/84e13e6b-7a26-44d5-80fd-04a1365107d4/wt/b/lib/libipc.so.1.3.0
+52ccbe9e7e054aada32d5ec28f0ea97085ea7d6e1403e5dc756dc88878dde732  build/T05/37e6b190-b12b-4128-b770-917b299297aa/lib/libipc.so.1.3.0.ABLATE
+4fc0e95dc316ac01972edd7fe6efde4eb13de8f4793c08b05ea95eae29dd3a71  build/T05/37e6b190-b12b-4128-b770-917b299297aa/lib/libipc.so.1.3.0.BASELINE
+c928deaa4f480ee361e5974bf824c85c87658f2a6e9113bc0d3415568264b32d  build/T05/37e6b190-b12b-4128-b770-917b299297aa/lib/libipc.so.1.3.0.FIX
+1e7d5d7f12c20919e3994b9bdcd818375ba53afb11d99e8f74cb1a21c69dfc91  build/T05/37e6b190-b12b-4128-b770-917b299297aa/lib/libipc.so.1.3.0.FIXNEG
+3380016ba38084d8071d00133096298c733e1ebc8de16dde969a58456353d791  build/T05/37e6b190-b12b-4128-b770-917b299297aa/lib/libipc.so.1.3.0.V2NEG
+ea8101d7f50e3dbdc489b6d1ef009ec79b4e5d61a208238c1cbaa8c2299e7c27  build/T06/13e0fbea-b9d3-419a-92b9-92381b188d6a/lib/libipc.so.1.3.0
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/t58/gatesrc/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+c976944533cd25912e9f31deec404f14ea075a3a84b65e4738c52bf9d9d6028f  build/t58/gatesrc/b/lib/libipc.so.1.3.0
+ab967b9aae8f91d5e549b2a1334420a1bc974ca684db93ee59085d594d094926  build/t58/w05offsrc/b/lib/libipc.so.1.3.0
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/t58/w05only/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+5f5edfccdf9b86868adb9afe229571b97b58fee8f5bc92b56645f0a34d0247e7  build/t58/w05only/b/lib/libipc.so.1.3.0
+35354a744cc90fa8d0a67708a4f1539683c65b8a1a542d8edde135b23da8553e  build/t58/w05src/b/lib/libipc.so.1.3.0
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/t76/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+5616536c1f98cc8f3d12dc077fa6a958f7277cfc5ab5f5b8fd50cea74e00f46d  build/t76/b/lib/libipc.so.1.3.0
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/t78/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+a983237c54767b6c6c3a5717708ddd0f3ba386415a4cff4daa062257d788d715  build/t78/b/lib/libipc.so.1.3.0
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/t78/cur/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+7737a6a73611d3c40457079b7455c69e2660061347f170800de5f24c39e1358e  build/t78/cur/b/lib/libipc.so.1.3.0
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/t85/abl_compat/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+bcc448ba5c1c4cae923b90e4b3026c3413b2f3a9f26c4e3525317ce9a3e0b554  build/t85/abl_compat/b/lib/libipc.so.1.3.0
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/t85/abl_sched/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+91578ae5c84536f7624f5a3ced7807fa7b7537a65e67783dd9cf935c84ae5317  build/t85/abl_sched/b/lib/libipc.so.1.3.0
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/t85/abl_tick/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+7b7d6a5a67350ea687307827b853b2505870a4d8d05d20ef8d38610498f2db82  build/t85/abl_tick/b/lib/libipc.so.1.3.0
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/t85/cur/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+fdda980684e0261e923885189d5534cb897ab77f22eb838cc676e03e5fab9bd4  build/t85/cur/b/lib/libipc.so.1.3.0
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/t85/head/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+d43ebd55aca191d78207074adf881edc72fde9046df6c84f9f17e094cd6c6517  build/t85/head/b/lib/libipc.so.1.3.0
+17acf7a2388533617e461dd45f8597bc4b6e0148b220812c3ab73001b980048f  build/t85/w05repro/artifacts/perf/20260930-r29-libipc-loan-reason/lib_pre/libipc.so.1.3.0
+d07497afaf5b8734aad7a365beb15d88ce170403e03991a3f0828874cdadbbbb  build/t85/w05repro/b/lib/libipc.so.1.3.0
+b2c84570433105f904e54db9f5c7c3439cdc707394faa6374e8b1b266b0b32b4  build/uf004_verify/lib_landed_b7e3c9ca/libipc.so.3
+34e78bafcdafdc770c20c70538bf53979ff7dcb9da92fe2ea8e93e8546f11d27  build/uf004_verify/lib_preland_c54bf472/libipc.so.3
+f2456205d6c35ed194c1d2ead5f7b51ee82f2e1192a1246d47e0c69a1a1800fd  build/uf004_verify/lib_tree_12ae64ca/libipc.so.3
+34e78bafcdafdc770c20c70538bf53979ff7dcb9da92fe2ea8e93e8546f11d27  build/uf006_verify/armF2/libipc.so.3
+34e78bafcdafdc770c20c70538bf53979ff7dcb9da92fe2ea8e93e8546f11d27  build/uf006_verify/armF3/libipc.so.3
+066720d7766f7d0c4709e706a9edeee12bb09a06e84e430512ba55db7729e21e  build/uf006_verify/armR/libipc.so.3
+
+## 命中数（sha256 == target）
+hit_count=0
+
+## 文档中出现的 bdad6093（作为**历史读数**引用，非可用二进制）
+./artifacts/perf/20261001-r58-W05-S4/r1_w05only/analysis.txt
+./artifacts/perf/20261001-r58-W05-S4/selfbuild/rebuild_index.txt
+./artifacts/perf/20261001-r76-W05-S4R2/fingerprints.txt
+./artifacts/perf/20261001-r76-W05-S4R2/summary.txt
+./artifacts/perf/20261001-w12-T04/logs/bdad6093_exists_check.txt
+./artifacts/perf/20261001-w12-T04/src/collect_fingerprint.sh
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-branch-removed/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r58/analysis.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-branch-removed/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r58/rebuild_index.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-branch-removed/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r76/fingerprints.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-branch-removed/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r76/summary.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-branch-removed/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-branch-removed/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round2.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-branch-removed/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round3.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-branch-removed/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round4.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-branch-removed/docs/消息接收架构改造/团队改造交付/W05/控制面接入_交付.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-branch-removed/docs/消息接收架构改造/团队改造交付/W12/当前问题总清单.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-branch-removed/docs/消息接收架构改造/团队改造交付/W12/缺陷修复执行方案.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-branch-removed/docs/消息接收架构改造/团队改造交付/W12/任务失败与事故报告.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver1-removed/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r58/analysis.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver1-removed/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r58/rebuild_index.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver1-removed/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r76/fingerprints.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver1-removed/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r76/summary.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver1-removed/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver1-removed/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round2.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver1-removed/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round3.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver1-removed/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round4.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver1-removed/docs/消息接收架构改造/团队改造交付/W05/控制面接入_交付.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver1-removed/docs/消息接收架构改造/团队改造交付/W12/当前问题总清单.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver1-removed/docs/消息接收架构改造/团队改造交付/W12/缺陷修复执行方案.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver1-removed/docs/消息接收架构改造/团队改造交付/W12/任务失败与事故报告.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver2-removed/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r58/analysis.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver2-removed/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r58/rebuild_index.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver2-removed/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r76/fingerprints.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver2-removed/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r76/summary.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver2-removed/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver2-removed/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round2.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver2-removed/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round3.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver2-removed/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round4.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver2-removed/docs/消息接收架构改造/团队改造交付/W05/控制面接入_交付.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver2-removed/docs/消息接收架构改造/团队改造交付/W12/当前问题总清单.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver2-removed/docs/消息接收架构改造/团队改造交付/W12/缺陷修复执行方案.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/ablate-driver2-removed/docs/消息接收架构改造/团队改造交付/W12/任务失败与事故报告.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/baseline-prefix-dcaa0d9/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r58/analysis.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/baseline-prefix-dcaa0d9/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r58/rebuild_index.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/baseline-prefix-dcaa0d9/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r76/fingerprints.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/baseline-prefix-dcaa0d9/docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r76/summary.txt
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/baseline-prefix-dcaa0d9/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/baseline-prefix-dcaa0d9/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round2.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/baseline-prefix-dcaa0d9/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round3.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/baseline-prefix-dcaa0d9/docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round4.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/baseline-prefix-dcaa0d9/docs/消息接收架构改造/团队改造交付/W05/控制面接入_交付.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/baseline-prefix-dcaa0d9/docs/消息接收架构改造/团队改造交付/W12/当前问题总清单.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/baseline-prefix-dcaa0d9/docs/消息接收架构改造/团队改造交付/W12/缺陷修复执行方案.md
+./build/T02/43646d77-ba75-4eb1-b8f3-5cdf14bbdb56/baseline-prefix-dcaa0d9/docs/消息接收架构改造/团队改造交付/W12/任务失败与事故报告.md
+./docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r58/analysis.txt
+./docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r58/rebuild_index.txt
+./docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r76/fingerprints.txt
+./docs/消息接收架构改造/团队改造交付/R1/证据/S4_W05_r76/summary.txt
+./docs/消息接收架构改造/团队改造交付/R1/S4验收_W05.md
+./docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round2.md
+./docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round3.md
+./docs/消息接收架构改造/团队改造交付/R1/S4验收_W05_round4.md
+./docs/消息接收架构改造/团队改造交付/W05/控制面接入_交付.md
+./docs/消息接收架构改造/团队改造交付/W12/当前问题总清单.md
+./docs/消息接收架构改造/团队改造交付/W12/缺陷修复执行方案.md
+./docs/消息接收架构改造/团队改造交付/W12/任务失败与事故报告.md

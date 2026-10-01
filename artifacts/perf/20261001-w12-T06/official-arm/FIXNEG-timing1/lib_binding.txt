@@ -1,0 +1,3 @@
+== 实际加载库绑定（事后补录）
+arm=FIXNEG-timing1 libdir=libs/FIXNEG
+	libipc.so.3 => artifacts/perf/20261001-w12-T06/libs/FIXNEG/libipc.so.3 (0x00007b7cd890f000)

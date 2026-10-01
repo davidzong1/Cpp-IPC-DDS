@@ -1,0 +1,5 @@
+  Test #31: test_dzflat_fallback_semantics
+
+Total Tests: 31
+  Test  #3: test_w05_stale_slot_gate
+  Test  #4: test_w05_stale_slot_gate_arm

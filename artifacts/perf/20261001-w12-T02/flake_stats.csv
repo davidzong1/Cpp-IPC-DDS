@@ -1,0 +1,7 @@
+arm,runs,pass,fail,fail_mode,evidence
+默认臂 (test_w05_stale_slot_gate),78,78,0,,"logs/final/summary.txt; flake/flake{2,3,4}/summary.txt"
+L1 回退臂 (DZIPC_SHM_CONTROL_SCHEDULER=1 test_w05_stale_slot_gate),158,157,1,rc=1 rx=99/100 判据② 失败（判据①通过）,flake/flake1/FAILED_fallback_6.log; flake/flake{2,3,4}/summary.txt; logs/final/summary.txt
+双臂用例 (test_w05_stale_slot_gate_arm) 默认臂,26,26,0,,"flake/flake2/summary.txt; flake/flake3/summary.txt"
+双臂用例 (test_w05_stale_slot_gate_arm) L1 臂,26,24,2,rc=2 活订阅者被误断（沿用同一断言路径）,flake/flake2/arm_2.log; flake/flake2/arm_5.log
+干净路径对照 (w05_clean_baseline, L1 臂，无陈旧槽位),50,50,0,,"logs/clean/fallback_*.log; logs/flake4/clean_fb_*.log"
+门控逐条诊断 (w05_stale_gate_diag, L1 臂，含 32 路 CPU 加压 12 次),52,52,0,,"logs/diag/summary.txt; logs/load/fb_*.log"
