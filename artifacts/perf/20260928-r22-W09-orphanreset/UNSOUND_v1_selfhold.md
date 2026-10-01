@@ -13,6 +13,14 @@
 - `solo_chunk_capacity.log`：`test_chunk_capacity_backpressure` 5/5 FAILED，
   日志里能直接看到 `chunk pool orphan segment reset: ... prefix = 'w09_c1_0'`
   —— 复位发生在"本进程借空 40 块"的正当场景上；
+  > ⚠️ **更正（t73，按实物）**：上面这句「5/5 FAILED」与原始日志不符。实物
+  > `artifacts/perf/20260928-r22-W09-orphanreset/solo_chunk_capacity.log` 是
+  > **`[  PASSED  ] 5 tests` + `[  FAILED  ] 2 tests`** ⇒ 准确表述 = **7 条中 2 败**：
+  > `ChunkCapacityBackpressure.PerClassBlockCountIsLargeMsgCacheAndExhaustionIsRefusalNotBlock`
+  > 与 `ChunkCapacityBackpressure.SamePayloadLandsInDifferentSizeClassesForLoanAndTlvSend`
+  > （复算命令：`grep -oE '^\[  FAILED  \] +[A-Za-z][A-Za-z0-9_]*\.[A-Za-z0-9_]+' <log> | sort -u`）。
+  > 原句按「保留 + 紧随更正行」体例保留（同 D-20）。**结论不变**：v1 判据仍被证伪，那 2 条
+  > 失败的正是"本进程借空 40 块构造耗尽"的用例。
 - `solo_dzflat_transport.log`：`DzFlatTransport.ChunkPoolExhaustionFallsBackToTlv` FAILED
   （该用例正是"本进程借空 40 块构造耗尽场景"）。
 ⇒ 这两条失败不是"测试不适配"，而是**判据本身不安全**（自持借样被误判为孤儿）。

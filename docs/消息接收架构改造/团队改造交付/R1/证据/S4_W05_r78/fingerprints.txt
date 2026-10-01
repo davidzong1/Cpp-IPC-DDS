@@ -1,0 +1,18 @@
+# t78 (S4 独立验收 round 3 · W05/t77 修复复评)
+attempt: 8ea5d265-b0ed-484b-822b-5b4f61a7651a
+2026-10-01T13:31:37+0800
+
+## t77 触及文件指纹（复核起点）
+c3f921b55914b500785e5018701d18407e34185fcc1923794d943f0536eafd51  src/dzIPC/threepools/shm_control_scheduler.cc
+5c28ee4e6fb99433ee299fe0c61a3ad931e218f13de4c399ed50cdfa644365e4  include/dzIPC/threepools/shm_control_scheduler.h
+ceab50331f2a2449a7b425afa21c2f9a0e27e6a02016dbacc384a34dfdba0628  src/dzIPC/shm_pub_sub_ipc.cc
+e170b62e53483088c76b03b4eadb98582f1ea6d1e73fb1c4c4776f0ec22b9da3  include/dzIPC/shm_pub_sub_ipc.h
+805774c2ede55818b103a9ee893e90df282a847a470ef2f81d8945e6a3958a7d  test/test_shm_control_scheduler.cpp
+31758502442ce5cd2d84d019f078144d70f3bb7d6dd4da9d2a8fce0e285a932c  test/test_w05_stale_slot_gate.cpp
+36c17c7ba941e44be47a07cb7ad653d885bf6582b415eaf121f998bca3dcee0c  build/lib/libipc.so.1.3.0
+b8531ff084c45d0dd591f7850137bb171cb87b876b3c5ee42c2564ecab0cbfa0  docs/消息接收架构改造/团队改造交付/W05/控制面接入_交付.md
+f6e0ac824f022822a327e20ef5cc827fb03e8661906dc193ac34379918c7c3b4  docs/消息接收架构改造/团队改造交付/接口责任表.md
+
+## 归档快照（t77 声称已复原）
+256bab86edf181ce84a3eae170e425bb78748ea1cf23d2d2560446504fba3057  artifacts/perf/20260928-r23-W05/shm_pub_sub_ipc.cc.W05
+e8120b3ae7b48f9970239ce31526dd3fbb0a227a9ed8ccdec575d54e693b5a0e  artifacts/perf/20260928-r23-W05/binary-fingerprint.txt

@@ -1,0 +1,10 @@
+A1_baseline_fixed|0|9|0|0|0|lib_fixed
+A2_baseline_ablate|0|9|0|0|0|lib_ablate
+A3_baseline_HEAD|0|9|0|0|0|lib_baseline
+C_after_leak_ABL|1|8|1|1|0|lib_ablate
+E_after_clean_ABL|0|9|0|0|0|lib_ablate
+C_after_leak_BASE|1|8|1|1|0|lib_baseline
+E_after_clean_BASE|0|9|0|0|0|lib_baseline
+C_after_leak_FIX|0|9|0|0|1|lib_fixed
+E_after_clean_FIX|0|9|0|0|0|lib_fixed
+F2_solo_leaker_alive_fixed|1|8|1|1|0|lib_fixed

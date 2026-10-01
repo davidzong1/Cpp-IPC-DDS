@@ -1,0 +1,189 @@
+shm_pub_ipc::~shm_pub_ipc()
+    running.store(false, std::memory_order_release);
+    if (publish_thread_ != nullptr)
+        if (publish_thread_->joinable())
+            publish_thread_->join();
+        delete publish_thread_;
+        publish_thread_ = new std::thread(&shm_pub_ipc::pub_handshake, this);
+        // publish_thread_ = std::thread(&shm_pub_ipc::sub_listener, this);
+void shm_pub_ipc::pub_handshake()
+    bool had_subscriber = false;
+        control_plane_.heartbeat();
+        /* 死连接回收。
+         *
+         * libipc 的 force_push 以前在队列满时用 disconnect_receiver() 踢掉
+         * "还没读完这一格"的订阅者 —— 那个判据区分不了慢和死, 会把活的慢
+         * 订阅者永久摘下线。现在写路径只覆写不踢人, 回收改由这里驱动: 只有
+         * 心跳停了 kPeerDeadTimeout 的订阅者才被判死。
+         *
+         * 超时取 2s = 200 个心跳周期(订阅端 10ms 一次), 留足余量, 宁可晚回收
+         * 也不要误杀 —— 误杀正是这次要修掉的问题。 */
+        constexpr int64_t kPeerDeadTimeoutNs = 2'000'000'000LL;
+        const uint32_t stale = control_plane_.collect_stale_peers(kPeerDeadTimeoutNs);
+        if (stale != 0 && publisher_ && publisher_->valid())
+            publisher_->disconnect_receivers(stale);
+            if (verbose_)
+                std::cerr << "\033[33m[" << topic_name_
+                          << "PubInfo] reaped dead subscriber connection(s), cc_ids = 0x" << std::hex << stale
+                          << std::dec << "\033[0m" << std::endl;
+        const bool has_peer = control_plane_.peer_count() > 0;
+        subscribed_.store(has_peer, std::memory_order_release);
+        if (has_peer && !had_subscriber && verbose_)
+        {
+            std::cerr << "\033[32m[" << topic_name_
+                      << "PubInfo] Publisher detected a subscriber on topic: " << topic_name_ << "\033[0m"
+                      << std::endl;
+        }
+        had_subscriber = has_peer;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (publisher_->recv_count() == 0)
+            return publisher_->no_member_try_send(response_data.data(), response_data.size(), 0);
+        return publisher_->try_send(response_data.data(), response_data.size(), tm);
+        return publisher_->no_member_try_send(response_data.data(), response_data.size(), 0);
+/******************************************************************************************************/
+/******************************************************************************************************/
+shm_sub_ipc::~shm_sub_ipc()
+    // Deregister BEFORE stopping threads so fast-path publisher snapshots
+    // can no longer include this queue while we shut down.
+    {
+        std::lock_guard<std::mutex> lock(sub_state_->topic_msg_mtx);
+        if (local_registered_)
+        {
+            ChannelKey key{raw_topic_name_, domain_id_, msg_id_};
+            LocalPubSubRegistry::instance().unregister_subscriber(key, sub_state_->msg_queue);
+            local_registered_ = false;
+        }
+    }
+    /* 测试缝(阶段2_全量测试方案 §4.2): 记录"registry 注销发生在收包停止之前"这一条
+     * 因果序。默认钩子为空 ⇒ 只有一次 relaxed load。 */
+    detail::FireSeam({detail::SeamPoint::kDtorAfterUnregister, 0, nullptr, nullptr, 0});
+    /* 阶段 2 说明 §5: running = false 只能让循环在 recv 返回后退出; 卡在
+     * recv(50) 里时必须靠 stop_and_wake() 的 disconnect/quit_waiting 叫醒, 不能
+     * 只靠 50ms 超时。stop_and_wake 同时拒绝新 lease, 于是 inflight 只减不增。 */
+    running.store(false, std::memory_order_release);
+    route_session_.stop_and_wake();
+    /* §4.2 的承重点: 析构必须**叫醒**在途 recv, 不能只靠 recv(50) 超时。 */
+    detail::FireSeam({detail::SeamPoint::kDtorAfterStopAndWake, 0, nullptr, nullptr, 0});
+    /* 先 join 收包线程: 它退出前会做完最后一次 release_receive, 使 inflight 归零;
+     * 握手线程若正卡在 begin_rebuild 的等待里, 也由此得以推进并看到 running==false。
+     * 析构线程不得持有 RouteSession 锁时 join —— 这里没有持锁。 */
+    if (subscribe_thread_ != nullptr)
+    {
+        if (subscribe_thread_->joinable())
+        {
+            subscribe_thread_->join();
+        }
+        delete subscribe_thread_;
+        subscribe_thread_ = nullptr;
+    }
+    detail::FireSeam({detail::SeamPoint::kDtorAfterJoinSubscribe, 0, nullptr, nullptr, 0});
+    if (sub_handshake_thread_ != nullptr)
+        if (sub_handshake_thread_->joinable())
+        {
+            sub_handshake_thread_->join();
+        }
+        delete sub_handshake_thread_;
+        sub_handshake_thread_ = nullptr;
+    detail::FireSeam({detail::SeamPoint::kDtorAfterJoinHandshake, 0, nullptr, nullptr, 0});
+    /* 第 6-7 步: 两个线程都已退出 ⇒ 无在途 recv, 此刻对 current_route() 的拷贝调
+     * release() 与 recv 不并发(说明 §4 表格第 2 行)。disconnect 已由 stop_and_wake
+     * 做过, 这里只释放句柄; 对象本身的 shared_ptr 由 route_session_ 析构时放掉。 */
+    route_session_.wait_quiescent();
+    detail::FireSeam({detail::SeamPoint::kDtorAfterQuiescent, 0, nullptr, nullptr, 0});
+        std::shared_ptr<ipc::route> cur = route_session_.current_route();
+        if (cur && cur->valid())
+            cur->release();
+    }
+    detail::FireSeam({detail::SeamPoint::kDtorAfterRelease, 0, nullptr, nullptr, 0});
+    exit_flag.store(true, std::memory_order_release);
+}
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
+void shm_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
+{
+    if (!msg)
+    {
+        return;
+    }
+    std::shared_ptr<TopicData> new_msg;
+    new_msg.reset(msg->clone());
+    const uint32_t new_msg_id = new_msg->topic()->msg_id();
+    {
+        std::lock_guard<std::mutex> lock(sub_state_->topic_msg_mtx);
+        sub_state_->topic_msg = std::move(new_msg);
+        // If already registered (InitChannel completed) and msg_id changed,
+        // re-register under the new key so publishers using the new msg_id
+        // can find us via the fast path.
+        if (local_registered_ && msg_id_ != new_msg_id)
+            auto& reg = LocalPubSubRegistry::instance();
+            ChannelKey old_key{raw_topic_name_, domain_id_, msg_id_};
+            ChannelKey new_key{raw_topic_name_, domain_id_, new_msg_id};
+            reg.unregister_subscriber(old_key, sub_state_->msg_queue);
+            reg.register_subscriber(new_key, sub_state_->msg_queue);
+        msg_id_ = new_msg_id;
+        sub_state_->msg_id = new_msg_id;
+    }
+}
+/******************************************************************************************************/
+/******************************************************************************************************/
+/******************************************************************************************************/
+void shm_sub_ipc::sub_handshake()
+{
+    if (!control_plane_.open(topic_control_name_for(raw_topic_name_, domain_id_)))
+    {
+        std::cerr << "\033[31m[" << topic_name_ << "SubInfo] Error opening control plane for topic: " << topic_name_
+                  << "\033[0m" << std::endl;
+        throw std::runtime_error("Fatal error: control plane open failed");
+    }
+    uint32_t attached_generation = 0;
+    bool peer_registered = false;
+    while (running.load(std::memory_order_acquire))
+    {
+        const uint32_t generation = control_plane_.generation();
+        const TopicState state = control_plane_.state();
+            if (!handshake_completed.load(std::memory_order_acquire) || attached_generation != generation)
+                if (peer_registered)
+                    control_plane_.remove_peer(attached_generation);
+                    control_plane_.release_peer_slot(peer_slot_);
+                    peer_registered = false;
+                    route_session_.begin_rebuild(
+                        [this]()
+                            return std::make_shared<ipc::route>(topic_name_.c_str(), ipc::receiver, verbose_);
+                attached_generation = generation;
+                if (!control_plane_.add_peer(attached_generation))
+                    route_session_.stop_and_wake();
+                    route_session_.wait_quiescent();
+                    std::shared_ptr<ipc::route> cur = route_session_.current_route();
+                    continue;
+                peer_registered = true;
+                    std::shared_ptr<ipc::route> cur = route_session_.current_route();
+                    peer_slot_ = control_plane_.acquire_peer_slot(attached_generation, cc_id);
+                 * 不该要求开了调试开关才看得见。 */
+                        std::cerr << "\033[31m[" << topic_name_
+                    if (peer_registered)
+                        control_plane_.remove_peer(attached_generation);
+                        peer_registered = false;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                if (peer_slot_ < 0 && verbose_)
+                    std::cerr << "\033[33m[" << topic_name_
+                handshake_completed.store(true, std::memory_order_release);
+                if (verbose_)
+                    std::cerr << "\033[32m[" << topic_name_
+                              << "SubInfo] Subscriber has subscribed to topic: " << topic_name_ << "\033[0m"
+            if (handshake_completed.exchange(false, std::memory_order_acq_rel))
+                    route_session_.stop_and_wake();
+                    route_session_.wait_quiescent();
+                    std::shared_ptr<ipc::route> cur = route_session_.current_route();
+                if (peer_registered)
+                    control_plane_.remove_peer(attached_generation);
+                    control_plane_.release_peer_slot(peer_slot_);
+                    peer_registered = false;
+        control_plane_.peer_heartbeat(peer_slot_);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (peer_registered)
+        control_plane_.remove_peer(attached_generation);
+    control_plane_.release_peer_slot(peer_slot_);
+    peer_slot_ = -1;
+    sub_handshake_thread_ = new std::thread(&shm_sub_ipc::sub_handshake, this);

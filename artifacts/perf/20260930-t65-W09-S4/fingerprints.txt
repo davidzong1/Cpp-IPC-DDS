@@ -1,0 +1,39 @@
+== 三库指纹 ==
+lib_ablate c02b3c85467a5655fe68edf672914476f52e70ff7221caaf6ade92e4e0f1c065
+lib_fixed f0ebc3ef2df5b276e35dd38a21183c0bbc59a51721b24aa2ef067783c07747c9
+lib_baseline 314f20cf33a15d82a7f552b4dbc66e578c45182424baf8186e8f554e298a61c7
+
+== 消融库与修复库的源码差异（唯一变量）==
+    559,560d558
+    <         /* ⛔ t65 消融（counterfactual）：与主线唯一差异 = **不调用** reclaim_orphan_segment。
+    <          * 仅删这一个调用点；函数体、id_pool::reset_free_chain()、其余一切逐字不变。 */
+    563c561
+    <           (void)newly_attached;
+    ---
+    >           (void)reclaim_orphan_segment(info, pref, chunk_size, "attach");
+
+== 运行时容量常量（cap_probe）==
+large_msg_cache=40
+id_pool<>::max_count=40
+
+== W09 用例运行期打印 ==
+[W09-C1] 档 9216 可用块数=40（loan_size_class(8000)=8192 ⇒ calc=9216）
+[W09-C3] 载荷 10000 B：TLV 档=10240，loan 档=11264（loan_size_class=10240）
+[W09-C4] 广播 1 条 / 4 接收方：池占用 1 块（期望 1）
+[W09-C5] captured stderr:
+[W09-C6] 同池耗尽态：loan 无效=1，send 仍成功=1（两种不同失败类别）
+[W09-C7] 策略性回退=1（send 返回 true）｜越界风险=1（fragments=14400 > ring=256，独立类别，不计入回退）；大档=922624
+[W09-C8] 段尚未创建（本用例首次取块前）—— 基线按满值 40 处理
+[W09-C8] 档 9216 外部直读：借满=0 → 归还后空闲=40（满值 40）
+
+== 段名（空前缀 vs 命名前缀）==
+  空前缀: __IPC_SHM__CHUNK_INFO__132096__C40
+  命名前缀: w09_c2_0__IPC_SHM__CHUNK_INFO__9216__C40
+[W09-C1] 档 9216 可用块数=40（loan_size_class(8000)=8192 ⇒ calc=9216）
+[W09-C3] 载荷 10000 B：TLV 档=10240，loan 档=11264（loan_size_class=10240）
+[W09-C4] 广播 1 条 / 4 接收方：池占用 1 块（期望 1）
+[W09-C5] captured stderr:
+[W09-C6] 同池耗尽态：loan 无效=1，send 仍成功=1（两种不同失败类别）
+[W09-C7] 策略性回退=1（send 返回 true）｜越界风险=1（fragments=14400 > ring=256，独立类别，不计入回退）；大档=922624
+[W09-C8] 段尚未创建（本用例首次取块前）—— 基线按满值 40 处理
+[W09-C8] 档 9216 外部直读：借满=0 → 归还后空闲=40（满值 40）

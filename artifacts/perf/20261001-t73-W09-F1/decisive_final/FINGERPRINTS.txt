@@ -1,0 +1,16 @@
+# t73 · w09_decisive_repro.sh 终版复跑（A–G 全臂；唯一变量 = libipc.so.3）
+# 时点 2026-10-01 12:2x
+  tmp/t65/lib_fixed     d0f581d19f74c411866111b7c9918fa3
+  tmp/t65/lib_ablate    fd09f31ef013cef7054ba91682267508
+  tmp/t65/lib_baseline  cdf53085bb70b4b495b3d4c475364f99
+  tmp/t73/lib_negative  0186853e1eadb5eab881ce5d0b7ed8d3
+  tmp/t73/lib_base      f0ebc3ef2df5b276e35dd38a21183c0b
+  leaker            cc60b408a8129988ca27bb446093a5cb
+
+A 三库全 PASS（无泄漏无差异）
+C 注入残留段后 ABL/BASE rc=1(1 FAILED+chunk pool exhausted)、FIX rc=0(9 OK+orphan segment reset)
+E 清掉该段后三库全 PASS ⇒ 「清理后 100%」
+F leaker 活着 ⇒ FIX rc=1 且 orphan_reset=0 ⇒ 判据承重（非无差别清库）
+G 段级复位 vs 并发首借（1200 轮）：FIX/ABL/BASE(无 reclaim)=0；FIXV2(t22 v2)=1、FIXNEG(快照在 lock_ 外)=1
+
+⇒ 判决性判据在 T73 后不回归；且缺口恰由「快照位置」决定（t22 v2 有缺口、T73 无）。

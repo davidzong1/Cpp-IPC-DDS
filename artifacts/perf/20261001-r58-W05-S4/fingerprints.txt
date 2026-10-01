@@ -1,0 +1,35 @@
+# t58（S4 独立验收 · W05）运行元数据
+run_id: 20261001-r58-W05-S4
+task: t58    reviewed_task: t6 (W05)
+attempt_id: a71c3e60-a9a1-432f-a888-4c5ae1ed058a
+采集: 2026-10-01T09:55:48+0800  工作目录 /home/zwc/cpp_ipc_dds
+
+## 源码指纹（复核时刻）
+ceab50331f2a2449a7b425afa21c2f9a0e27e6a02016dbacc384a34dfdba0628  src/dzIPC/shm_pub_sub_ipc.cc
+40eeb7cc20570ac0e9f968eef4d69d8ede21ff178161295c134b1ada24568e7b  include/dzIPC/shm_pub_sub_ipc.h
+a3861af46e73ad670f2b731ed07454209d512da6d9bdc5770e9e9acb753eaef5  src/dzIPC/threepools/shm_control_scheduler.cc
+51c7c165317d7dc45474c2852639f776ee7b4852b7ed490641481e761f482d9b  include/dzIPC/threepools/shm_control_scheduler.h
+0186853e1eadb5eab881ce5d0b7ed8d30875ff4d702d3cd6285760c1a37734ad  build/lib/libipc.so.1.3.0
+
+## 被复核对象（W05 快照，⛔ 只读）
+256bab86edf181ce84a3eae170e425bb78748ea1cf23d2d2560446504fba3057  artifacts/perf/20260928-r23-W05/shm_pub_sub_ipc.cc.W05
+4148d65c6426bc84b88077bae2da4913ba9bfb74d8ed9479cd4c2c6e091a99f2  artifacts/perf/20260928-r23-W05/shm_pub_sub_ipc.h.W05
+e8120b3ae7b48f9970239ce31526dd3fbb0a227a9ed8ccdec575d54e693b5a0e  artifacts/perf/20260928-r23-W05/binary-fingerprint.txt
+
+## 基线（HEAD e800ccc）重建副本
+e6e53db8ea5891336d1bb1aac4fcbc857315cf7ff6fda9822a0dbdaac2d24634  build/t58/head_shm_pub_sub_ipc.cc
+b9ae81ce44c8b420e7734110371f4b88f471a1e979813cacc1da0ee3c08bad42  build/t58/head_shm_pub_sub_ipc.h
+
+## 探针二进制与源码
+f4f324dd8727daebf10696aff308d726c588806e661efccdbef04c291571c0e6  build/t58/bin/t58_timing_probe
+379d013c8771d37fdb718a4e3b400ce64882c4e7428b86d0845f3e6650c67d56  build/t58/bin/t58_polarity_probe
+3df849538731f66df3e0eb57f59c903c9ccfca2ece3a429b3da738148d702849  build/t58/bin/t58_attrib_probe
+751de66ff5fcc954bf851ec4fbe0658ab47cdd54e3775ac32b1eff28954ba9ce  build/t58/bin/t58_socket_polarity
+93e12456630c82cde0d4d54c7cbc3687eaa1a9c6ebd6cccf81d7bbcbfd597569  build/t58/bin/w05_control_probe
+
+## 测试用例数
+Total Tests: 29
+58ead1eb020b60c62d1b99c1349e825891d081ebd7eff93e78eae8bb7764cfc1  t58_attrib_probe.cpp
+434e8061d08671a3b4e9fe163808e4f75e19d2e372ff3483164f29341911f33a  t58_polarity_probe.cpp
+cde077abaa289abc8de6cd52c25dc74512d93ee3824c2d18e06f2b1872111328  t58_socket_polarity.cpp
+8b739a653fd1c26404447793c0a3e97082087f0db9cc373cb6948b1a82e1c705  t58_timing_probe.cpp

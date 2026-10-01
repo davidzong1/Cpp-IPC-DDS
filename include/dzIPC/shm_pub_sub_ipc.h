@@ -164,19 +164,29 @@ private:
      *     用**同一份回调体**（PubHeartbeatState::on_pub_heartbeat / on_pub_stale_scan），
      *     周期与判死超时同源。回退只换驱动源，不换语义。
      *
-     * ⚠️⚠️ **极性与 socket 侧相反，极易用错**（本行原先写作「=0 ⇒ 回退」，与实现相反，
-     * 已按实测更正；t6 记录见 团队改造交付/W05/控制面接入_交付.md §5）：
+     * ⚠️⚠️ **取值语义与 socket 侧「相同」，极易被误传为「极性与 socket 侧相反」**
+     * （本行原先写作「=0 ⇒ 回退」，与实现相反，已按实测更正；t6 记录见
+     * 团队改造交付/W05/控制面接入_交付.md §4.1；t75/t77 进一步把「极性相反」的措辞
+     * 更正为「语义相同」）：
      *   `DZIPC_SHM_CONTROL_SCHEDULER` —— **非空且非 "0" 的任何值 ⇒ 回退**（含 "1"/"compat"）；
      *   空 / 未设 / "0" ⇒ 新路径（进程级调度器）。
-     *   `DZIPC_SOCKET_COMPAT_THREAD` —— `=1` ⇒ 回退，但 socket 侧**没有**"显式启用新路径"
-     *   的取值 ⇒ 两者不是同一套约定，⛔ 不得照抄。
-     *   实测四值对照：未设→scheduler，`0`→scheduler，`1`→compat，`compat`→compat。
+     *   `DZIPC_SOCKET_COMPAT_THREAD` —— **同一张真值表**：未设 / "" / "0" ⇒ 新路径；
+     *   "1" / "compat" / "2" / "00" / "legacy" ⇒ 回退。
+     *   ⇒ **两侧取值语义相同**；SHM 侧**额外接受字面 `0` 作为显式新路径的写法**
+     *     （与 `unset` 同义，便于脚本统一写），⛔ 这只是多一个等价取值，
+     *     **不是**「两侧含义相反」—— 该说法会误导回滚手册作者。
+     *   实测四值对照：未设→scheduler，`0`→scheduler，`1`→compat，`compat`→compat；
+     *   socket 侧同值对照见 R1 证据 `polarity/two_sided_truth_table.log`（逐值相同）。
      *
      * ⛔ 生命周期纪律：调度器只持 shared_ptr<PubControlState>（本成员的派生对象），
      * 绝不持 shm_pub_ipc*。宿主析构体在销毁任何成员**之前**调用 stop_control_plane()
      * （同步注销 + join），因此"回调 → 已析构宿主"这条路径不存在。 */
     struct PubHeartbeatState;
     std::shared_ptr<PubHeartbeatState> pub_control_state_;
+    /* ⛔ 回退臂的「低频兜底下次到期点」**不放在这里** —— 那会改变 shm_pub_ipc 的尺寸
+     * （= 又一次 ③d 布局变更）。它放在 `PubHeartbeatState` 内部：该类在本头文件里只是
+     * **不完整类型**（仅被 shared_ptr 引用），其完整定义在 .cc ⇒ 加成员
+     * **不影响任何公开布局**。判据本身在自由函数 `pub_control_tick()`（唯一一处）。 */
     dzIPC::shm_control::RegistrationToken control_reg_;
     std::thread* compat_control_thread_{nullptr};
 

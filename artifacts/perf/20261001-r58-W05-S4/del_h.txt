@@ -1,0 +1,9 @@
+    void pub_handshake();
+    // void sub_listener();
+    std::thread* publish_thread_{nullptr};
+    void sub_handshake();
+private:
+    std::thread* sub_handshake_thread_{nullptr};
+    /* 本订阅者在控制面 PeerSlot 表中的槽位下标, -1 表示未登记。
+     * 由 sub_handshake() 线程独占访问。 */
+    int peer_slot_{-1};

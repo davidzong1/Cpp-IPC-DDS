@@ -1,0 +1,90 @@
+sha256:
+  HEAD.cc  e6e53db8ea5891336d1bb1aac4fcbc857315cf7ff6fda9822a0dbdaac2d24634  build/t58/head_shm_pub_sub_ipc.cc
+  W05.cc   256bab86edf181ce84a3eae170e425bb78748ea1cf23d2d2560446504fba3057  artifacts/perf/20260928-r23-W05/shm_pub_sub_ipc.cc.W05
+  NOW.cc   ceab50331f2a2449a7b425afa21c2f9a0e27e6a02016dbacc384a34dfdba0628  src/dzIPC/shm_pub_sub_ipc.cc
+  HEAD.h   b9ae81ce44c8b420e7734110371f4b88f471a1e979813cacc1da0ee3c08bad42  build/t58/head_shm_pub_sub_ipc.h
+  W05.h    4148d65c6426bc84b88077bae2da4913ba9bfb74d8ed9479cd4c2c6e091a99f2  artifacts/perf/20260928-r23-W05/shm_pub_sub_ipc.h.W05
+  NOW.h    40eeb7cc20570ac0e9f968eef4d69d8ede21ff178161295c134b1ada24568e7b  include/dzIPC/shm_pub_sub_ipc.h
+
+=== HEAD.cc -> W05.cc ===
+  return 计数: 50 -> 66  多重集相等=False
+  控制流关键字:if:85->116(+31)  else:5->14(+9)  for:1->1(+0)  while:4->4(+0)  switch:0->0(+0)  break:0->0(+0)  continue:5->3(-2)  goto:0->0(+0)  try:4->4(+0)  catch:4->4(+0)  throw:2->1(-1)  return:50->66(+16)  case:0->0(+0)  default:0->0(+0)
+  （去注释后行级 diff）新增行 516、删除行 200
+  删除行内容（原文，去空行）:
+    - if (publish_thread_ != nullptr)
+    - if (publish_thread_->joinable())
+    - publish_thread_->join();
+    - delete publish_thread_;
+    - publish_thread_ = new std::thread(&shm_pub_ipc::pub_handshake, this);
+    - // publish_thread_ = std::thread(&shm_pub_ipc::sub_listener, this);
+    - void shm_pub_ipc::pub_handshake()
+    - bool had_subscriber = false;
+    - * 也不要误杀 —— 误杀正是这次要修掉的问题。 */
+    - const uint32_t stale = control_plane_.collect_stale_peers(kPeerDeadTimeoutNs);
+    - if (stale != 0 && publisher_ && publisher_->valid())
+    - const bool has_peer = control_plane_.peer_count() > 0;
+    - if (has_peer && !had_subscriber && verbose_)
+    - << "PubInfo] Publisher detected a subscriber on topic: " << topic_name_ << "\033[0m"
+    - had_subscriber = has_peer;
+    - if (publisher_->recv_count() == 0)
+    - return publisher_->no_member_try_send(response_data.data(), response_data.size(), 0);
+    - return publisher_->try_send(response_data.data(), response_data.size(), tm);
+    - return publisher_->no_member_try_send(response_data.data(), response_data.size(), 0);
+    - // Deregister BEFORE stopping threads so fast-path publisher snapshots
+    - // can no longer include this queue while we shut down.
+    - * 握手线程若正卡在 begin_rebuild 的等待里, 也由此得以推进并看到 running==false。
+    - * 析构线程不得持有 RouteSession 锁时 join —— 这里没有持锁。 */
+    - if (sub_handshake_thread_ != nullptr)
+    - if (sub_handshake_thread_->joinable())
+
+=== W05.cc -> NOW.cc ===
+  return 计数: 66 -> 123  多重集相等=False
+  控制流关键字:if:116->155(+39)  else:14->20(+6)  for:1->1(+0)  while:4->5(+1)  switch:0->3(+3)  break:0->10(+10)  continue:3->1(-2)  goto:0->0(+0)  try:4->5(+1)  catch:4->6(+2)  throw:1->1(+0)  return:66->123(+57)  case:0->32(+32)  default:0->0(+0)
+  （去注释后行级 diff）新增行 702、删除行 50
+  删除行内容（原文，去空行）:
+    - /* 失败不在这里计数: 调用方随后那次 TLV publish() 会记一次回退。两边各记一次会把
+    - * fallback/(dzflat+fallback) 这个比值算歪 —— 那个比值是判断"收益有没有生效"的唯一
+    - * 指标(nodelet_config.h), 不能因为记账方式失真。 */
+    - * clear, 故旧 route 一律不再被操作。 */
+    - /* ---- 第 2 步（W05 新增，W04 §4.3 的"注销控制面调度器"）：同步摘除本项 ----
+    - * ⛔ W06 施工位：按 W04 §4.3 的完整顺序，`pool.remove_route(route_adapter)` 应在
+    - * **本步之前**（即紧接 registry 注销之后）、`begin_rebuild` 之前；今天的 W05 里
+    - * 该 route 尚未注册进 worker 池（接收池接入属 t7/W06），因此本步不存在
+    - * "wait-set 仍持有旧 route 的 seq 地址"这一风险面。W06 接入时在此行之前插入
+    - * remove_route，并在 begin_rebuild 之后插入 add_route。 */
+    - [this]()
+    - /* 进入订阅循环 */
+    - if (handshake_completed.load(std::memory_order_acquire))
+    - /* 阶段 2 说明 §3: 用 lease 取 route, 在**不持有 RouteSession 锁**
+    - * 的情况下 recv, recv 返回后立刻 release_receive(无论 buffer 是否
+    - * 为空)。lease 的 shared_ptr 在 recv 全程保活 route; release 旧 route
+    - * 只可能发生在 inflight 归零之后, 所以 recv 与 release 不再并发。
+    - * ⚠️ 不得因 lease.generation 落后于当前 generation 就丢掉已弹出的
+    - * buffer —— 字节已从旧 route 弹出, 丢掉就是丢消息(说明 §3)。 */
+    - auto lease = route_session_.acquire_receive();
+    - /* stopping / rebuilding / 尚无 route: 与未握手时同样睡 50ms
+    - * (说明 §3), 不再忙等自旋。 */
+    - raw_data = lease->route->recv(50);
+    - /* 阶段 2 说明 §2/§3: 每个成功 lease 必须配对释放，包括 recv
+    - * 抛异常的出口。单次 route 错误不应让工作线程因未配对 lease
+
+=== HEAD.h -> W05.h ===
+  return 计数: 8 -> 8  多重集相等=True
+  控制流关键字:if:4->5(+1)  else:0->0(+0)  for:0->0(+0)  while:0->0(+0)  switch:0->0(+0)  break:0->0(+0)  continue:0->0(+0)  goto:0->0(+0)  try:0->0(+0)  catch:0->0(+0)  throw:0->0(+0)  return:8->8(+0)  case:0->0(+0)  default:0->0(+0)
+  （去注释后行级 diff）新增行 29、删除行 10
+  删除行内容（原文，去空行）:
+    - void pub_handshake();
+    - // void sub_listener();
+    - std::thread* publish_thread_{nullptr};
+    - void sub_handshake();
+    - std::thread* sub_handshake_thread_{nullptr};
+    - /* 本订阅者在控制面 PeerSlot 表中的槽位下标, -1 表示未登记。
+    - * 由 sub_handshake() 线程独占访问。 */
+    - int peer_slot_{-1};
+
+=== W05.h -> NOW.h ===
+  return 计数: 8 -> 8  多重集相等=True
+  控制流关键字:if:5->6(+1)  else:0->0(+0)  for:0->0(+0)  while:0->0(+0)  switch:0->0(+0)  break:0->0(+0)  continue:0->0(+0)  goto:0->0(+0)  try:0->0(+0)  catch:0->0(+0)  throw:0->0(+0)  return:8->8(+0)  case:0->0(+0)  default:0->0(+0)
+  （去注释后行级 diff）新增行 54、删除行 0
+  删除行内容（原文，去空行）:
+    - /* 超出变长预算 —— lo 析构会归还 chunk。 */

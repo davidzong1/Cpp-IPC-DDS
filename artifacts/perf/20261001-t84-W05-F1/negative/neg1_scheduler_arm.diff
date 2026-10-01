@@ -1,0 +1,9 @@
+--- a/src/dzIPC/threepools/shm_control_scheduler.cc
++++ b/src/dzIPC/threepools/shm_control_scheduler.cc
+@@ dispatch() 发布侧 @@
+-e->pub->on_pub_tick(now, e->timing.peer_dead_timeout);
++e->pub->on_pub_heartbeat(now);
++if (e->pub->has_peers())
++{
++e->pub->on_pub_stale_scan(now, e->timing.peer_dead_timeout);
++}

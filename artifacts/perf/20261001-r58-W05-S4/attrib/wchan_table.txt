@@ -1,0 +1,11 @@
+=== wchan 归属直方图（W=4）===
+0|t58_attrib_prob=1 futex_wait_multiple|t58_attrib_prob=4 futex_wait_queue|t58_attrib_prob=1 
+0|t58_attrib_prob=1 futex_wait_multiple|t58_attrib_prob=4 futex_wait_queue|t58_attrib_prob=1 hrtimer_nanosleep|t58_attrib_prob=200 
+0|t58_attrib_prob=1 futex_wait_multiple|t58_attrib_prob=4 futex_wait_queue|t58_attrib_prob=1 
+0|t58_attrib_prob=1 futex_wait_multiple|t58_attrib_prob=4 futex_wait_queue|t58_attrib_prob=1 hrtimer_nanosleep|t58_attrib_prob=800 
+=== 池容量边界（W=1，N 跨 127）===
+N=126 threads_settled=3 pool_workers=1 pool_route_count=126 scheduler_entry_count=252 scheduler_worker_active=1
+N=127 threads_settled=3 pool_workers=1 pool_route_count=127 scheduler_entry_count=254 scheduler_worker_active=1
+N=128 threads_settled=4 pool_workers=1 pool_route_count=127 scheduler_entry_count=256 scheduler_worker_active=1
+N=129 threads_settled=5 pool_workers=1 pool_route_count=127 scheduler_entry_count=258 scheduler_worker_active=1
+N=500 threads_settled=376 pool_workers=1 pool_route_count=127 scheduler_entry_count=1000 scheduler_worker_active=1

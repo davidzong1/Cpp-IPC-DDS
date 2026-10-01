@@ -1,0 +1,11 @@
+# t73 · C9 五臂矩阵终稿（1200 轮；二进制固定 = build/bin/test_chunk_capacity_backpressure）
+# 唯一变量 = libipc.so.3；时点 2026-10-01 12:0x
+
+臂        库指纹          含义                                                     结果
+pre-t22    cdf53085bb70b4b4   e800ccc 的 ipc.cpp（无 reclaim，缺口不存在）      6 bad_rounds=0 
+ablate     fd09f31ef013cef7   有 reclaim 但不调用（消融臂）                     12 bad_rounds=0 
+base       f0ebc3ef2df5b276   HEAD 的 ipc.cpp（t22 v2，无 T73 修复）               12 bad_rounds=1 
+negative   0186853e1eadb5ea   T73 但快照在 lock_ 外                                  20 bad_rounds=1 
+fixed      d0f581d19f74c411   T73 修复（快照在 handles_ 的 lock_ 内）            20 bad_rounds=0 
+
+⇒ 因果闭环：无 reclaim 恒绿（缺口由 reclaim 引入）；有 reclaim 无 T73 恒红；有 T73 恒绿。

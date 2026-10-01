@@ -1,0 +1,181 @@
+# t58 独立复核：W05 声明与机械证据逐条比对（命令 + 读数）
+# 时间: 2026-10-01 09:00:35 +0800
+# 库指纹: f0ebc3ef2df5b276e35dd38a21183c0bbc59a51721b24aa2ef067783c07747c9
+
+## 1) W05 声明：'publish_thread_/sub_handshake_thread_ 已移除；subscribe_thread_ 保留'
+$ grep -n 'publish_thread_|sub_handshake_thread_' include/dzIPC/shm_pub_sub_ipc.h
+  (0 命中 ⇒ 已移除)
+$ grep -n 'subscribe_thread_' include/dzIPC/shm_pub_sub_ipc.h
+262:     *   true  = 数据面在共享 RecvWorker 上收包，**不**起 subscribe_thread_；
+314:    std::thread* subscribe_thread_{nullptr};
+318:     * false ⇒ 兼容 subscribe_thread_（**显式**回退，原因已打日志）。
+$ grep -c 'std::thread(' src/dzIPC/shm_pub_sub_ipc.cc   # 线程创建点
+9
+$ grep -n 'std::thread(' src/dzIPC/shm_pub_sub_ipc.cc
+873:                compat_control_thread_ = new std::thread(&shm_pub_ipc::compat_control_loop, this);
+882:                compat_control_thread_ = new std::thread(&shm_pub_ipc::compat_control_loop, this);
+890:                compat_control_thread_ = new std::thread(&shm_pub_ipc::compat_control_loop, this);
+901:                    compat_control_thread_ = new std::thread(&shm_pub_ipc::compat_control_loop, this);
+1984:        subscribe_thread_ = new std::thread(&shm_sub_ipc::compat_recv_loop, this);
+2224:            compat_control_thread_ = new std::thread(&shm_sub_ipc::compat_control_loop, this);
+2232:            compat_control_thread_ = new std::thread(&shm_sub_ipc::compat_control_loop, this);
+2238:            compat_control_thread_ = new std::thread(&shm_sub_ipc::compat_control_loop, this);
+2249:                compat_control_thread_ = new std::thread(&shm_sub_ipc::compat_control_loop, this);
+
+## 2) 行为变更面机械证据（HEAD e800ccc → W05 快照）
+sha256:
+  HEAD.cc  e6e53db8ea5891336d1bb1aac4fcbc857315cf7ff6fda9822a0dbdaac2d24634  build/t58/head_shm_pub_sub_ipc.cc
+  W05.cc   256bab86edf181ce84a3eae170e425bb78748ea1cf23d2d2560446504fba3057  artifacts/perf/20260928-r23-W05/shm_pub_sub_ipc.cc.W05
+  NOW.cc   ceab50331f2a2449a7b425afa21c2f9a0e27e6a02016dbacc384a34dfdba0628  src/dzIPC/shm_pub_sub_ipc.cc
+  HEAD.h   b9ae81ce44c8b420e7734110371f4b88f471a1e979813cacc1da0ee3c08bad42  build/t58/head_shm_pub_sub_ipc.h
+  W05.h    4148d65c6426bc84b88077bae2da4913ba9bfb74d8ed9479cd4c2c6e091a99f2  artifacts/perf/20260928-r23-W05/shm_pub_sub_ipc.h.W05
+  NOW.h    40eeb7cc20570ac0e9f968eef4d69d8ede21ff178161295c134b1ada24568e7b  include/dzIPC/shm_pub_sub_ipc.h
+
+=== HEAD.cc -> W05.cc ===
+  return 计数: 50 -> 66  多重集相等=False
+  控制流关键字:if:85->116(+31)  else:5->14(+9)  for:1->1(+0)  while:4->4(+0)  switch:0->0(+0)  break:0->0(+0)  continue:5->3(-2)  goto:0->0(+0)  try:4->4(+0)  catch:4->4(+0)  throw:2->1(-1)  return:50->66(+16)  case:0->0(+0)  default:0->0(+0)
+  （去注释后行级 diff）新增行 516、删除行 200
+  删除行内容（原文，去空行）:
+    - if (publish_thread_ != nullptr)
+    - if (publish_thread_->joinable())
+    - publish_thread_->join();
+    - delete publish_thread_;
+    - publish_thread_ = new std::thread(&shm_pub_ipc::pub_handshake, this);
+    - // publish_thread_ = std::thread(&shm_pub_ipc::sub_listener, this);
+    - void shm_pub_ipc::pub_handshake()
+    - bool had_subscriber = false;
+    - * 也不要误杀 —— 误杀正是这次要修掉的问题。 */
+    - const uint32_t stale = control_plane_.collect_stale_peers(kPeerDeadTimeoutNs);
+    - if (stale != 0 && publisher_ && publisher_->valid())
+    - const bool has_peer = control_plane_.peer_count() > 0;
+    - if (has_peer && !had_subscriber && verbose_)
+    - << "PubInfo] Publisher detected a subscriber on topic: " << topic_name_ << "\033[0m"
+    - had_subscriber = has_peer;
+    - if (publisher_->recv_count() == 0)
+    - return publisher_->no_member_try_send(response_data.data(), response_data.size(), 0);
+    - return publisher_->try_send(response_data.data(), response_data.size(), tm);
+    - return publisher_->no_member_try_send(response_data.data(), response_data.size(), 0);
+    - // Deregister BEFORE stopping threads so fast-path publisher snapshots
+    - // can no longer include this queue while we shut down.
+    - * 握手线程若正卡在 begin_rebuild 的等待里, 也由此得以推进并看到 running==false。
+    - * 析构线程不得持有 RouteSession 锁时 join —— 这里没有持锁。 */
+    - if (sub_handshake_thread_ != nullptr)
+    - if (sub_handshake_thread_->joinable())
+
+=== W05.cc -> NOW.cc ===
+  return 计数: 66 -> 123  多重集相等=False
+  控制流关键字:if:116->155(+39)  else:14->20(+6)  for:1->1(+0)  while:4->5(+1)  switch:0->3(+3)  break:0->10(+10)  continue:3->1(-2)  goto:0->0(+0)  try:4->5(+1)  catch:4->6(+2)  throw:1->1(+0)  return:66->123(+57)  case:0->32(+32)  default:0->0(+0)
+  （去注释后行级 diff）新增行 702、删除行 50
+  删除行内容（原文，去空行）:
+    - /* 失败不在这里计数: 调用方随后那次 TLV publish() 会记一次回退。两边各记一次会把
+    - * fallback/(dzflat+fallback) 这个比值算歪 —— 那个比值是判断"收益有没有生效"的唯一
+    - * 指标(nodelet_config.h), 不能因为记账方式失真。 */
+    - * clear, 故旧 route 一律不再被操作。 */
+    - /* ---- 第 2 步（W05 新增，W04 §4.3 的"注销控制面调度器"）：同步摘除本项 ----
+    - * ⛔ W06 施工位：按 W04 §4.3 的完整顺序，`pool.remove_route(route_adapter)` 应在
+    - * **本步之前**（即紧接 registry 注销之后）、`begin_rebuild` 之前；今天的 W05 里
+    - * 该 route 尚未注册进 worker 池（接收池接入属 t7/W06），因此本步不存在
+    - * "wait-set 仍持有旧 route 的 seq 地址"这一风险面。W06 接入时在此行之前插入
+    - * remove_route，并在 begin_rebuild 之后插入 add_route。 */
+    - [this]()
+    - /* 进入订阅循环 */
+    - if (handshake_completed.load(std::memory_order_acquire))
+    - /* 阶段 2 说明 §3: 用 lease 取 route, 在**不持有 RouteSession 锁**
+    - * 的情况下 recv, recv 返回后立刻 release_receive(无论 buffer 是否
+    - * 为空)。lease 的 shared_ptr 在 recv 全程保活 route; release 旧 route
+    - * 只可能发生在 inflight 归零之后, 所以 recv 与 release 不再并发。
+    - * ⚠️ 不得因 lease.generation 落后于当前 generation 就丢掉已弹出的
+    - * buffer —— 字节已从旧 route 弹出, 丢掉就是丢消息(说明 §3)。 */
+    - auto lease = route_session_.acquire_receive();
+    - /* stopping / rebuilding / 尚无 route: 与未握手时同样睡 50ms
+    - * (说明 §3), 不再忙等自旋。 */
+    - raw_data = lease->route->recv(50);
+    - /* 阶段 2 说明 §2/§3: 每个成功 lease 必须配对释放，包括 recv
+    - * 抛异常的出口。单次 route 错误不应让工作线程因未配对 lease
+
+=== HEAD.h -> W05.h ===
+  return 计数: 8 -> 8  多重集相等=True
+  控制流关键字:if:4->5(+1)  else:0->0(+0)  for:0->0(+0)  while:0->0(+0)  switch:0->0(+0)  break:0->0(+0)  continue:0->0(+0)  goto:0->0(+0)  try:0->0(+0)  catch:0->0(+0)  throw:0->0(+0)  return:8->8(+0)  case:0->0(+0)  default:0->0(+0)
+  （去注释后行级 diff）新增行 29、删除行 10
+  删除行内容（原文，去空行）:
+    - void pub_handshake();
+    - // void sub_listener();
+    - std::thread* publish_thread_{nullptr};
+    - void sub_handshake();
+    - std::thread* sub_handshake_thread_{nullptr};
+    - /* 本订阅者在控制面 PeerSlot 表中的槽位下标, -1 表示未登记。
+    - * 由 sub_handshake() 线程独占访问。 */
+    - int peer_slot_{-1};
+
+=== W05.h -> NOW.h ===
+  return 计数: 8 -> 8  多重集相等=True
+  控制流关键字:if:5->6(+1)  else:0->0(+0)  for:0->0(+0)  while:0->0(+0)  switch:0->0(+0)  break:0->0(+0)  continue:0->0(+0)  goto:0->0(+0)  try:0->0(+0)  catch:0->0(+0)  throw:0->0(+0)  return:8->8(+0)  case:0->0(+0)  default:0->0(+0)
+  （去注释后行级 diff）新增行 54、删除行 0
+  删除行内容（原文，去空行）:
+    - /* 超出变长预算 —— lo 析构会归还 chunk。 */
+
+## 3) kControlTiming 运行期生效值
+mode=inproc arm=process-scheduler n=1 win=4.0 topic=t58t_9900_0
+pub_heartbeat_changes=80 rate_per_s=20.00 implied_period_ms=50.00
+sub_heartbeat_changes=400 rate_per_s=100.00 implied_period_ms=10.00 slot=0
+mode=inproc arm=compat-per-topic-thread n=1 win=4.0 topic=t58t_9901_0
+pub_heartbeat_changes=79 rate_per_s=19.75 implied_period_ms=50.63
+sub_heartbeat_changes=398 rate_per_s=99.50 implied_period_ms=10.05 slot=0
+artifacts/perf/20260930-t58-W05-S4/timing/fork-sched.log:slot_reclaimed_ms=2038.67 in_use_after=0 peer_count_after=1 child_alive=1
+artifacts/perf/20260930-t58-W05-S4/timing/fork-compat.log:slot_reclaimed_ms=1995.61 in_use_after=0 peer_count_after=1 child_alive=1
+
+## 4) 环境变量极性（SHM）五值实测
+unset    env_DZIPC_SHM_CONTROL_SCHEDULER=<unset> n=100 dom=9031 threads_settled=34 scheduler_entry_count=200 rx_sent=300 rx_ok=300 rx_mismatch=0 expected=300 arm=process-scheduler threads_per_topic=0.300 
+empty    env_DZIPC_SHM_CONTROL_SCHEDULER=<empty> n=100 dom=9198 threads_settled=34 scheduler_entry_count=200 rx_sent=300 rx_ok=300 rx_mismatch=0 expected=300 arm=process-scheduler threads_per_topic=0.340 
+v0       env_DZIPC_SHM_CONTROL_SCHEDULER=0 n=100 dom=9362 threads_settled=34 scheduler_entry_count=200 rx_sent=300 rx_ok=300 rx_mismatch=0 expected=300 arm=process-scheduler threads_per_topic=0.340 
+v1       env_DZIPC_SHM_CONTROL_SCHEDULER=1 n=100 dom=9513 threads_settled=234 scheduler_entry_count=0 rx_sent=300 rx_ok=300 rx_mismatch=0 expected=300 arm=compat-per-topic-thread threads_per_topic=2.320 
+vcompat  env_DZIPC_SHM_CONTROL_SCHEDULER=compat n=100 dom=9669 threads_settled=234 scheduler_entry_count=0 rx_sent=300 rx_ok=300 rx_mismatch=0 expected=300 arm=compat-per-topic-thread threads_per_topic=2.300 
+
+## 4b) socket 侧对照（极性声明核对）
+n20-0.log              fallback_lines=0   threads_after=21
+n20-1.log              fallback_lines=20  threads_after=21
+n20-2.log              fallback_lines=20  threads_after=21
+n20-compat.log         fallback_lines=20  threads_after=21
+n20-empty.log          fallback_lines=0   threads_after=11
+n20-UNSET.log          fallback_lines=0   threads_after=13
+
+## 5) per-route 归属证明（W=1 / W=4，池规模钉死）
+W=1 N=10   sched    3 pool_workers=1 pool_route_count=10 scheduler_entry_count=20 scheduler_worker_active=1
+W=1 N=10   compat   23 pool_workers=1 pool_route_count=10 scheduler_entry_count=0 scheduler_worker_active=1
+W=1 N=100  sched    3 pool_workers=1 pool_route_count=100 scheduler_entry_count=200 scheduler_worker_active=1
+W=1 N=100  compat   203 pool_workers=1 pool_route_count=100 scheduler_entry_count=0 scheduler_worker_active=1
+W=1 N=400  sched    276 pool_workers=1 pool_route_count=127 scheduler_entry_count=800 scheduler_worker_active=1
+W=1 N=400  compat   1076 pool_workers=1 pool_route_count=127 scheduler_entry_count=0 scheduler_worker_active=1
+W=4 N=10   sched    6 pool_workers=4 pool_route_count=10 scheduler_entry_count=20 scheduler_worker_active=1
+W=4 N=10   compat   26 pool_workers=4 pool_route_count=10 scheduler_entry_count=0 scheduler_worker_active=1
+W=4 N=100  sched    6 pool_workers=4 pool_route_count=100 scheduler_entry_count=200 scheduler_worker_active=1
+W=4 N=100  compat   206 pool_workers=4 pool_route_count=100 scheduler_entry_count=0 scheduler_worker_active=1
+W=4 N=400  sched    6 pool_workers=4 pool_route_count=400 scheduler_entry_count=800 scheduler_worker_active=1
+W=4 N=400  compat   806 pool_workers=4 pool_route_count=400 scheduler_entry_count=0 scheduler_worker_active=1
+
+## 5b) 默认池（32 worker）线程数
+N=20    34 pool_workers=32 pool_route_count=20 scheduler_entry_count=40 scheduler_worker_active=1
+N=100   34 pool_workers=32 pool_route_count=100 scheduler_entry_count=200 scheduler_worker_active=1
+N=1000  34 pool_workers=32 pool_route_count=1000 scheduler_entry_count=2000 scheduler_worker_active=1
+
+## 6) R-1 机制：Σ vs 默认路径 vs 回退路径
+--- default-arm
+state=3 n=1000 domain=9721 pool running=1 workers=32 route_count=1000 threads=34
+0,3,15.000,34,0.57266,9254.5,9.2545,0,0,4800,0,0,0,0
+1,3,15.000,34,0.56200,9472.6,9.4726,0,0,4800,0,0,0,0
+2,3,15.000,34,0.56733,9329.2,9.3292,0,0,4799,0,0,0,0
+--- fallback-arm
+state=3 n=1000 domain=9722 pool running=1 workers=32 route_count=1000 threads=2033
+0,3,15.000,2034,0.33067,119976.4,119.9764,0,0,4800,0,0,0,0
+1,3,15.000,2034,0.31933,119960.5,119.9605,0,0,4808,0,0,0,0
+2,3,15.000,2034,0.32333,119966.4,119.9664,0,0,4810,0,0,0,0
+--- pooloff-fallback
+state=3 n=1000 domain=9723 pool running=0 workers=0 route_count=0 threads=1002
+0,3,15.000,1002,0.87800,30178.3,30.1783,0,0,0,0,0,0,0
+1,3,15.000,1002,0.89666,30890.9,30.8909,0,0,0,0,0,0,0
+2,3,15.000,1002,0.90800,31777.3,31.7773,0,0,0,0,0,0,0
+--- cellD-bothoff
+state=3 n=1000 domain=9724 pool running=0 workers=0 route_count=0 threads=3001
+0,3,15.000,3002,0.67800,143104.7,143.1047,0,0,0,0,0,0,0
+1,3,15.000,3002,0.56133,140893.7,140.8937,0,0,0,0,0,0,0
+2,3,15.000,3002,0.58200,140986.6,140.9866,0,0,0,0,0,0,0

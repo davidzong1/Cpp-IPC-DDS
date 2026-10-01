@@ -68,6 +68,9 @@ struct Entry
     std::atomic<bool> inactive{false};
     bool tick_inflight{false};
     ControlClock::time_point next_due{};
+    /* 「低频兜底的下次到期点」——**属于驱动方的排程状态**，判据本身在
+     * `pub_control_tick()`（唯一一处，见 shm_control_scheduler.h）。t84，(B) 路线。 */
+    PubTickState stale{};
 
     std::chrono::milliseconds period() const
     {
@@ -324,25 +327,17 @@ struct ShmControlScheduler::Impl
             {
                 return;
             }
-            /* owner heartbeat 无条件执行；stale 扫描仅在**已有 peer** 时做
-             * （需求 §3.1：可在 peer_count()==0 时跳过 stale 扫描）。 */
-            e->pub->on_pub_heartbeat(now);
-            /* has_peers() 是**查询**，不是控制动作：它抛出时不能让 owner heartbeat
-             * 一起被丢弃（那正是需求 §3.1 要求"无条件维持"的东西）。单独一层 try。 */
-            bool has_peers = false;
-            try
-            {
-                has_peers = e->pub->has_peers();
-            }
-            catch (...)
-            {
-                quarantine(e, "has_peers() threw");
-                return;
-            }
-            if (has_peers)
-            {
-                e->pub->on_pub_stale_scan(now, e->timing.peer_dead_timeout);
-            }
+            /* ── 发布侧：**唯一**判据 `pub_control_tick()`（t84，(B) 路线）──────────
+             *
+             * ⛔ 本条曾把「何时扫 stale」判在本函数里（t77 只修好了默认臂），而 W05 的
+             * **L1 回退臂**（`DZIPC_SHM_CONTROL_SCHEDULER=1`）走的是每话题的
+             * `shm_pub_ipc::compat_control_loop()` —— 它**自带一份同样判断**且是修复前
+             * 的形态 ⇒ 回退臂比基线更差（400 发 **0 收** vs 400/400）。
+             * **根因**：同一判据被**复制**到两条驱动路径。
+             * **结构修法**：判据收敛成唯一自由函数 `pub_control_tick()`，本函数只负责
+             * "按时拍一下"并把**自己那一份**排程状态 `e->stale` 传进去。
+             * ⇒ 两条驱动源不可能再分叉（N1 要求的结构性防复发）。 */
+            pub_control_tick(*e->pub, now, e->timing.peer_dead_timeout, e->stale);
         }
         catch (const std::exception& ex)
         {

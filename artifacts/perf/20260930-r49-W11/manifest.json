@@ -29,7 +29,95 @@
     "<phase>/<sub>/{manifest.json,windows.csv,windows.jsonl,counters.json,threestate.json,phases.csv,verdict.md}"
   ],
   "generated_at": "2026-09-30T17:31:00.307943+08:00",
+  "domains": {
+    "source": "runs_annotated.tsv + input_manifest_hash 反推（补齐复核轮）",
+    "count": 63,
+    "unique": 63,
+    "min": 660001,
+    "max": 700060,
+    "all_unique": true,
+    "per_sub_run": {
+      "cpu-st1-n1000-W32-diagoff-r1": 700001,
+      "cpu-st1-n1000-W32-diagoff-r2": 700002,
+      "cpu-st1-n1000-W32-diagoff-r3": 700003,
+      "cpu-st1-n1000-W32-diagoff-r4": 700004,
+      "cpu-st1-n1000-W32-diagoff-r5": 700005,
+      "cpu-st2-n100-W32-diagoff-r1": 700006,
+      "cpu-st2-n100-W32-diagoff-r2": 700007,
+      "cpu-st2-n100-W32-diagoff-r3": 700008,
+      "cpu-st2-n100-W32-diagoff-r4": 700009,
+      "cpu-st2-n100-W32-diagoff-r5": 700010,
+      "cpu-st2-n500-W32-diagoff-r1": 700011,
+      "cpu-st2-n500-W32-diagoff-r2": 700012,
+      "cpu-st2-n500-W32-diagoff-r3": 700013,
+      "cpu-st2-n500-W32-diagoff-r4": 700014,
+      "cpu-st2-n500-W32-diagoff-r5": 700015,
+      "cpu-st2-n1000-W32-diagoff-r1": 700016,
+      "cpu-st2-n1000-W32-diagoff-r2": 700017,
+      "cpu-st2-n1000-W32-diagoff-r3": 700018,
+      "cpu-st2-n1000-W32-diagoff-r4": 700019,
+      "cpu-st2-n1000-W32-diagoff-r5": 700020,
+      "cpu-st3-n100-W32-diagoff-r1": 700021,
+      "cpu-st3-n100-W32-diagoff-r2": 700022,
+      "cpu-st3-n100-W32-diagoff-r3": 700023,
+      "cpu-st3-n100-W32-diagoff-r4": 700024,
+      "cpu-st3-n100-W32-diagoff-r5": 700025,
+      "cpu-st3-n500-W32-diagoff-r1": 700026,
+      "cpu-st3-n500-W32-diagoff-r2": 700027,
+      "cpu-st3-n500-W32-diagoff-r3": 700028,
+      "cpu-st3-n500-W32-diagoff-r4": 700029,
+      "cpu-st3-n500-W32-diagoff-r5": 700030,
+      "cpu-st3-n1000-W32-diagoff-r1": 700031,
+      "cpu-st3-n1000-W32-diagoff-r2": 700032,
+      "cpu-st3-n1000-W32-diagoff-r3": 700033,
+      "cpu-st3-n1000-W32-diagoff-r4": 700034,
+      "cpu-st3-n1000-W32-diagoff-r5": 700035,
+      "cpu-st3-n1000-W4-diagoff-r1": 700036,
+      "cpu-st3-n1000-W4-diagoff-r2": 700037,
+      "cpu-st3-n1000-W4-diagoff-r3": 700038,
+      "cpu-st3-n1000-W4-diagoff-r4": 700039,
+      "cpu-st3-n1000-W4-diagoff-r5": 700040,
+      "scan-st3-n1-W32-diagon-r1": 700041,
+      "scan-st3-n1-W32-diagon-r2": 700042,
+      "scan-st3-n1-W32-diagon-r3": 700043,
+      "scan-st3-n1-W32-diagon-r4": 700044,
+      "scan-st3-n1-W32-diagon-r5": 700045,
+      "scan-st3-n100-W32-diagon-r1": 700046,
+      "scan-st3-n100-W32-diagon-r2": 700047,
+      "scan-st3-n100-W32-diagon-r3": 700048,
+      "scan-st3-n100-W32-diagon-r4": 700049,
+      "scan-st3-n100-W32-diagon-r5": 700050,
+      "scan-st3-n500-W32-diagon-r1": 700051,
+      "scan-st3-n500-W32-diagon-r2": 700052,
+      "scan-st3-n500-W32-diagon-r3": 700053,
+      "scan-st3-n500-W32-diagon-r4": 700054,
+      "scan-st3-n500-W32-diagon-r5": 700055,
+      "scan-st3-n1000-W32-diagon-r1": 700056,
+      "scan-st3-n1000-W32-diagon-r2": 700057,
+      "scan-st3-n1000-W32-diagon-r3": 700058,
+      "scan-st3-n1000-W32-diagon-r4": 700059,
+      "scan-st3-n1000-W32-diagon-r5": 700060,
+      "recheck-r2": 660002,
+      "recheck-r1": 660001,
+      "recheck-r3": 660003
+    }
+  },
   "measurement": "control-plane CPU（tick 率归一化）+ 扫描成本（§10.2）",
+  "binary_sha256_at_manifest_generation": {
+    "library": "cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46",
+    "w10_r5_matrix": "7f65579eeaca7217851b3d54addb3d80563415348cadc8937bdf7c119376d9b9",
+    "_semantics": "**首生成时快照**（历史事实，重生成时**继承**不改写）：manifest.json 首次写入的那一刻对 build/ 现场求 sha。⛔ **不得**当作采集时库指纹（采集可能早得多，期间 build 可能被重编）。"
+  },
+  "binary_sha256_at_collection": {
+    "library": "cf209393773d51ee4762dd95bfd1b04f873ec54aa8f61cf5a7ed92be2990fa46",
+    "tools": {
+      "w10_r5_matrix": "7f65579eeaca7217851b3d54addb3d80563415348cadc8937bdf7c119376d9b9"
+    },
+    "source": "artifacts/perf/20260930-r49-W11/fingerprint.txt",
+    "started": "2026-09-30 16:17:29 +0800",
+    "_semantics": "**采集时快照**（R0-A1 权威）：来自本 run 目录的 fingerprint.txt（采集脚本写的）。⛔ 引用「本批读数用了哪个库」时必须用这一组。"
+  },
+  "library_binding_authority": "fingerprint.txt —— ⛔ 库绑定的**唯一权威**是 `binary_sha256_at_collection.source` 指向的 fingerprint.txt；`binary_sha256*` 只是**生成时**快照，语义不同、⛔ 不可互相替代。",
   "caliber": {
     "frozen_triple": {
       "window": "--window-s 60 + --settle-s 4（窗口前静置，不含启动瞬态；外部采样器须完整落在窗口内）",
@@ -127,5 +215,17 @@
       "7f65579eeaca7217851b3d54addb3d80563415348cadc8937bdf7c119376d9b9"
     ],
     "consistent": true
+  },
+  "manifest_regeneration": {
+    "at": "2026-10-01T13:45:38.186140+08:00",
+    "reason": "t81/N1：修正 binary_sha256 语义（生成时 vs 采集时）；⛔ 不重跑采集、只重写 manifest 字段",
+    "source_revision_now": "dcaa0d9796173a7f2eb453f60a6c77429a1d09af",
+    "config_hash_now": "8d49fa8b833825fb6ec0e8ca465452f59b76d0e5c688daeebe023da14f3128ea",
+    "superseded_generated_at": "2026-09-30T17:31:00.307943+08:00",
+    "current_build_snapshot": {
+      "library": "36c17c7ba941e44be47a07cb7ad653d885bf6582b415eaf121f998bca3dcee0c",
+      "w10_r5_matrix": "7dfd35244cdb8260e04cb1b45190a253f16d3443cd3aafe9e0d78f56aeb9642c"
+    },
+    "_note": "顶层 source_revision/config_hash/generated_at/binary_sha256 保持为**采集/首生成时**的值（⛔ 未被本次重生成改写）；重生成时刻的现场 sha 放在 current_build_snapshot。"
   }
 }

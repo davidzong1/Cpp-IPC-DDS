@@ -1,0 +1,453 @@
+# chunk 容量、队列与背压联动（W09 交付物）
+
+> 工作包：**W09**（P1，内存/容量）；任务 `t10`；attempt_id `dc68a512-8a5e-491b-ab4f-c2408d3cbcd9`。
+> 负责人：共享层负责人（同时是 `threepools/recv_worker.*` / `socket_recv_worker.*`、`ipc_info_pool.*`、`control_plane.h`、`shm_route_session.*` 的文件责任人）。
+> 基线提交：`e800ccc496ac710b711c9346709e86a148c41241`；本轮读数取自本次重编库（指纹见 §9.1）。
+> 上游依据：方案 §4 W09、§10.5（容量边界六类分别列账）、§13.3（失败归类 + 首个失败资源）、§6.3（资源门槛）、§10.7；
+> W00《基线与门槛.md》§5.2/§6.2/§7.2；`docs/shm_chunk_pool_occupancy_plan.md`（步骤①-③ 与四项发现）；`docs/dzflat_shm.md` §5.1/§5.3/§9.5；
+> W08 交付 `W08/DZFlat_A推广与B专项验证_交付.md`（三路径计数、A/B 实测、B 不按尺寸自动切换）。
+> 队长裁决：D-3（DZFlat 默认策略共同输入）、D-4（`ipc_info_pool` 容量由 W07 落地，本文件只引用）、D-11（W04-F1/F3 归共享层）、D-14（t22：`reclaim_dead_chunks` 谓词判定）。
+
+---
+
+## 0. 一分钟结论
+
+| 要求（任务书） | 结论 |
+|---|---|
+| (1) 尺寸档位共享范围 / 可用块数 / 队列持样上限 / 归还点 | ✅ 每档 **40 块**（`large_msg_cache`）；归属键 = **`(prefix, chunk_size)`**；默认 prefix 为空 ⇒ **同一档全机共享**；view 队列与 adopt 借样各钉 **10**；归还点 4 个（见 §1.4） |
+| (2) 按在途 chunk 数预算容量 | ✅ 给出公式与目标负载数值（§2）：默认命名 + 32 worker、1000 路、单进程 ≤5 订阅/档时余量充足；**跨进程同档争抢是主要风险**（实测 4 对即把 40 块吃满，§3 臂 D） |
+| (3) 多发布者 / 慢消费者 / 淘汰 / adopt 上限 / 尺寸档竞争 | ✅ 全部有可执行判据：新增 **7 条**用例（覆盖 C1–C8 判据，其中 C5+C6 合为一条）+ t73 在 `test/perf/w09/w09_decisive_repro.sh` **G 臂**补入 C9 段级复位并发（⚠️ C9 的 gtest 变体待范围授权，见 §7.5）+ 4 条压测臂（§3）；adopt 上限与淘汰由既有 `test_adopt_loan_quota` 5 条守门 |
+| (4) 池耗尽策略 | ✅ 冻结为**「显式拒绝借样 + 静默分片降级 + 零丢失背压」三分**（§4）；⛔ 不改既有默认语义 |
+| (5) A/TLV 发送回退 vs B 贷款失败 | ✅ **机制上可区分**且已用可执行判据钉死（§5）：`loan` 返回无效（拒绝）；`send` 返回 true 但降级（分片） |
+| (6) DZFlat 默认策略建议（与 W08 共同） | ✅ 建议：**维持 `g_dzflat_enabled=false` 默认**；A 按类型兼容显式启用；**B 不按尺寸自动切换**（§6，与 W08 §1-3 一致） |
+| 附带（队长 D-11） | ✅ W04-F1 收敛（改注释 + debug `assert` + grep 判据）；W04-F3 修复（假就绪退避：**1.31 M 次/s → 32 次/s**，恢复延迟 1 ms） |
+| 附带（队长 D-14/t22 输入） | ✅ `reclaim_dead_chunks` 的 `published()==0` 跳过**有文档记录的、必要的**保护理由（防 use-after-free）；**但 loan 路径的死悬挂上界（≤1 块/档位）在复核下不成立**（§7） |
+
+---
+
+## 1. 容量事实（要求 1）
+
+### 1.1 每尺寸档可用块数与共享范围
+
+| 项 | 值 | 唯一出处 |
+|---|---|---|
+| 每尺寸档 chunk 块数 | **40** | `include/libipc/def.h:49` `large_msg_cache = 40` ⇒ `id_pool<>::max_count = min(40, 255)` |
+| 尺寸档粒度 | `calc_chunk_size(size)`：`align16(align1K(16 + size))` | `src/libipc/ipc.cpp:237-244` |
+| 借样档位（**两层取整**） | `calc_chunk_size(loan_size_class(size))` | `ipc.cpp:438-458`（`loan_size_class`）+ `:1530`（`loan`）+ `:665`（`acquire_storage`） |
+| **归属键** | **`(prefix, chunk_size)`** —— 段名 `make_prefix(prefix, {"CHUNK_INFO__", chunk_size, "__C", large_msg_cache})` | `ipc.cpp:330-380`（`get_info` / `chunk_storage_info`）；`documents/shm_chunk_pool_occupancy_plan.md` §1 结论 3 |
+| 默认 prefix | **空串** ⇒ 段名无话题/进程区分 ⇒ **同一档全机共享** | `connect(ph, {nullptr}, …)`；上同 |
+| 环槽位数 | **256**（不是瓶颈；池 40 < 环 256） | `src/libipc/prod_cons.h:25-26` |
+| 池段字节数（实测） | `52 + 40 × chunk_size`；**实测 9216 档 = 368 692 B**（= 52 + 40×9216） | 实测 `/dev/shm/__IPC_SHM__CHUNK_INFO__9216__C40` |
+
+> ⚠️ **文档口径不一致（登记）**：`docs/dzflat_shm.md` §5.3、`include/libipc/ipc.cpp:461` 的注释与 `include/dzIPC/common/loaned_message.h` 头注仍写「32 块/档位」，而代码是 **40**（2026-09-20 自 32 扩容）。W01 已把同类不一致登记为 UF-05。**本文件与全部判据一律以代码 40 为准，并由常量导出**（`ipc::large_msg_cache`），⛔ 不写死魔数。
+
+### 1.2 尺寸档的实测映射（双重取整的后果）
+
+| 逻辑载荷 | TLV `send` 档 | 借样 `loan` 档 | 说明 |
+|---|---|---|---|
+| 8 000 B | 9 216 | 9 216 | **同档**（1KB 对齐巧合） |
+| 8 192 B | 9 216 | 9 216 | 同档 |
+| 10 000 B | **10 240** | **11 264** | **不同档** ⇒ 同进程两个池（C3 实测） |
+| 0.88 MB | 922 624 | 922 624 | 同档（大档按 2 的幂） |
+
+⇒ **读错档位不会报错，只会静默量到另一个池**。本文件的全部压测与用例都显式按 `borrowed_chunk_class()` / `calc_chunk_size()` 算出段名（不靠"看着像"），并在必要时先断言两路径同档。
+
+### 1.3 各队列的持样上限
+
+| 队列 | 容量 | 是否钉 chunk | 出处 |
+|---|---|---|---|
+| `view_queue_`（DZFlat + typed 借样） | `min(queue_size, ViewQueueCap()=10)`；`EnableViewQueuePin(false)` 可恢复 `queue_size` | **钉**（每个 Sample 持 `buff_t`） | `shm_pub_sub_ipc.cc:656-663`；`nodelet_config.h:118-152` |
+| `msg_queue_`：TLV 物化消息 | `queue_size`（不钉） | **不钉**（物化拷贝进消息自身 vector） | `shm_chunk_pool_occupancy_plan.md` §5 发现 (c) |
+| `msg_queue_`：schema-less DZFlat **adopt 借样** | 借样配额 = **10**（= `ViewQueueCap()`），超出即物化 + `dzflat_adopt_spilled` 计数 | **钉**（配额内） | `shm_pub_sub_ipc.cc:132-136/668`；UF-012 |
+| socket / UDP 侧 view 队列 | `queue_size` | **不钉**（Sample 持独立堆块，不占 chunk 池） | `socket_pub_sub_ipc.cc` 借样注释 |
+| SHM ser/cli 有界请求 FIFO | 64 条 / 8 MiB（+ 空队列时允许一条超限） | 不占 chunk（`ipc::buffer` 独立） | `shm_ser_cli_ipc.cc:126-133`；`test_shm_ser_backpressure` |
+
+### 1.4 chunk 归还点（**四个，缺一即泄漏**）
+
+| # | 触发 | 调用 | 出处 |
+|---|---|---|---|
+| 1 | 接收方最后一个 `buff_t` 析构 | `recycle_storage` → `sub_rc` 归零才 `pool.release(id)` | `ipc.cpp:865-905`（`recycle_storage`）、`:629-637` |
+| 2 | 写方 `force_push` 覆写槽位（被套圈的收方永远不会来取） | `discard_storage`（按 `rem_cc` 判"位图是否还该归零"） | `ipc.cpp:937-996` |
+| 3 | `push` 失败（消息没进队列） | `return_unpublished`（位图直接归零 + 还池） | `ipc.cpp:643-655`；调用点 `:1360`/`:1507` |
+| 4 | 应用显式放弃借样 / `publish_loan` 失败 | `discard_loan` | `ipc.cpp:1935+`；`publish_loan` 失败路径 `:1919-1926` |
+| （5） | 池穷尽时对**已发布且持有者确定已死**的悬挂块 | `reclaim_dead_chunks` → CAS 位图→0 → 还池 | `ipc.cpp:556-590`（UF-003） |
+
+**可执行判据**：新增 `ChunkCapacityBackpressure.PoolOccupancyReturnsToBaselineAfterRelease` 用**外部直读**（沿 `next_[]` 空闲链数块，⛔ 不用 `capacity - cursor_`，那个公式在空池时读反）核到「借满 = 0 空闲 → 全归还 = 40 空闲」。
+
+---
+
+## 2. 容量预算模型（要求 2）
+
+### 2.1 公式
+
+对**单一尺寸档**（`(prefix, chunk_size)` 一个池，40 块）：
+
+```text
+40 ≥  P_unpub  +  P_queue  +  P_app  +  P_ring  +  M
+       ①            ②            ③          ④        ⑤
+
+① P_unpub = 发布者已 loan 但尚未 publish_loan 的块数
+             上界 = 同时借样的发布者线程数（每线程至多 1 块在飞）
+② P_queue = 该档被**用户态队列**钉住的块数
+             上界 = Σ_订阅者 min(queue_size, ViewQueueCap=10)   [view]
+                  + Σ_订阅者 min(adopt_cap=10, queue_size)      [adopt 借样]
+③ P_app   = 应用已 try_get 但尚未析构 Sample 的块数（无上限，靠应用纪律）
+④ P_ring  = 已发布、仍在环里、接收方尚未 recv 的块数（实测 ≈0，见下）
+⑤ M       = 并发余量（同机其他进程/其他话题/其他用例）
+```
+
+**广播**：一条消息占 **1** 块，与该话题的订阅者数无关（`conns` 是**位图快照**不是引用计数）。
+⇒ ⛔ **不得**按订阅者数重复计数。**但**慢消费者会**延长保留时间**（位到 `recycle_storage` 才清）—— 这是"时间维度的占用"，不是"数量维度的占用"。可执行判据：`BroadcastMessagePinsOneChunkRegardlessOfReceiverCount`（1 条 / 4 接收方 ⇒ 池占用 **1**）。
+
+### 2.2 目标负载数值（1000 路 / 32 worker / 默认命名）
+
+| 项 | 值 | 依据 |
+|---|---|---|
+| 每 worker route 数 | 23–40（≈1.18–1.28× 均值） | **引用 W00 §5.2，不重推** |
+| 同档订阅者数（单进程） | 由话题尺寸分布决定；**保守取 4** | 池共享范围 = `(prefix, chunk_size)` |
+| 单进程 4 订阅者同档的钉住量 | `4 × 10 = 40` ⇒ **刚好吃满一整档** | 与 W00 §5.2 的"4 个订阅者满钉 = 池容量"完全一致 |
+| ⇒ 同进程**同档**订阅者 > 4 | **必然出现借样拒绝（B 贷款失败）** | 由 `ViewQueueCap = 池容量/4` 的设计意图（`plan §3 步骤③`）决定 |
+| 跨进程争抢 | 各进程各自 40 上限**不叠加** ⇒ 全机同档总需求 = Σ 各进程 | 默认 prefix 为空 |
+| `ipc_info_pool` 条目 | **4096**（W07/D-4 落地，段名带版本后缀 + `kLayoutVersion=2`） | ⛔ **直接引用 W07 值，不另立常量** |
+| fd | W07 实测 1000 路 `openfds=2071`（≈2.07 fd/route，门槛 ≤3.5） | W07 交付 |
+| 每档池 `/dev/shm` 占用 | `52 + 40 × chunk_size`：1 KiB 档 41 KB、9 KiB 档 369 KB、65 KiB 档 2.6 MB、1 MiB 档 42 MB | 实测 + 公式 |
+
+### 2.3 「单进程配额」≠「全机共享容量」（队长 D-14 第 3 点，**必须分开列账**）
+
+| 概念 | 范围 | 上限 | 能否代替另一个 |
+|---|---|---|---|
+| `EnableViewQueuePin` + `ViewQueueCap()=10` | **单进程自身**的持样上限（view 10 + adopt 10） | 进程内 | ⛔ **不能**防跨进程/跨用例争抢 |
+| `large_msg_cache=40` + 空 prefix | **全机**同档总容量 | 全机 | ⛔ **不能**被前者替代记账 |
+
+⇒ 本文件的容量表**两行都写**（§8）；⛔ 不得用"钉到 10 了"当作"全机不耗尽"的证据（`plan §3 步骤③` 的 ⚠️ 已明写，本文件复述并引为口径）。
+
+---
+
+## 3. 压力测试（要求 3）
+
+### 3.1 新增可执行判据：`test/test_chunk_capacity_backpressure.cpp`（**7 条**，已进 CTest，覆盖 C1–C8 判据；C9「段级复位与同进程并发首借」由 t73 补在 `w09_decisive_repro.sh` 的 G 臂 —— 见 §7.5）
+
+| # | 用例 | 判据 | 测得的量 |
+|---|---|---|---|
+| C1 | `PerClassBlockCountIsLargeMsgCacheAndExhaustionIsRefusalNotBlock` | 可用块数 == `large_msg_cache`；第 N+1 次 loan **返回无效**（拒绝，不阻塞不崩）；全归还后恢复到 N | 40 → 拒绝 → 40 |
+| C2 | `PoolIsSharedAcrossTopicsOfTheSameSizeClassButSeparatedByPrefix` | 同 `(prefix, 档)` 的两个**不同话题**共用一池（A 借满 ⇒ B 借不到；A 归还 ⇒ B 立刻可借）；**不同 prefix 同档是独立池** | 归属键的直接证据 |
+| C3 | `SamePayloadLandsInDifferentSizeClassesForLoanAndTlvSend` | 载荷 10 000 B：loan 档耗尽后 **TLV send 仍成功** ⇒ 两路径落**不同档**（10 240 vs 11 264） | 双重取整的陷阱 |
+| C4 | `BroadcastMessagePinsOneChunkRegardlessOfReceiverCount` | 1 条广播 / 4 接收方 ⇒ 池占用 **恰好 1 块** | 40 → 39 |
+| C5+C6 | `UnconsumedHoldingDrainsPoolAndBorrowFailureIsNotFragmentFallback` | 慢消费者（不 recv）逐条钉块直到池空；池空后 **`send` 仍返回 true**（静默分片）而 **`loan` 返回无效**（拒绝）；stderr 出现 `chunk pool exhausted … kind = send … chunk_size = <实际档>` | 40 条钉满 + 第 41 条降级 |
+| C7 | `DegradeFragmentCountSeparatesStrategicFallbackFromRingOverwrite` | 0.88 MB 载荷池空 ⇒ **策略性回退 = 1（send true）** 与 **越界风险 = 1（fragments 14 400 > 环 256）两个独立类别**，后者不计入回退 | 14 400 fragments |
+| C8 | `PoolOccupancyReturnsToBaselineAfterRelease` | **外部直读**池空闲链：借满 = 0 → 全归还 = **40**（满值） | 独立于进程内计数的归还证据 |
+
+### 3.2 压测臂（`build/w09/pressure_arms.txt`，`pool_attribution_benchmark`）
+
+| 臂 | 参数 | `L_p50`（池外块数） | `fb`（池空回退） | `rx_acc`（零拷贝收下） | 读法 |
+|---|---|---|---|---|---|
+| A | 1 对 / `queue=1024` / 慢消费者 | **10** | 258 | 39 768 | 钉生效：队列请求 1024 被钉到 10 |
+| B | 1 对 / `queue=4` | **4** | 464 | 39 562 | `L = min(queue_size, cap)` ⇒ 队列主导 |
+| C | **4 对** / `queue=4` | **16** | 251 | 39 782 | 4 订阅者各 4 块 ⇒ 线性叠加（同档共享的直接证据） |
+| D | 4 对 / `queue=16` / 每对 +3 发布线程（**过载**） | **40**（满） | **39 790** | **247** | 池被吃满 ⇒ 借样大面积失败、零拷贝几乎归零 |
+
+⇒ 与 `plan §3 步骤②` 的归因结论一致（**队列是主导者**，环内在飞 `R ≈ 0`）；本文件新增的是**多对/过载**一侧：过载时池 100% 被钉住，`fb` 从数百跳到近 4 万 —— 这就是 §4 策略要覆盖的现场。
+
+### 3.3 既有用例（本包不重做，全部复跑绿）
+
+`test_chunk_hold`（3）、`test_adopt_loan_quota`（5：配额封顶 / pop 递减 / 满队驱逐递减 / 常态零拷贝）、`test_alloc_fault_inject`（3，需 `LD_PRELOAD` 工装，未加载时 SKIP 而非假绿）、`test_shm_ser_backpressure`（2：单条超字节上限仍被应答 / 慢 callback 零丢失）、`test_pool_exhaust_observability`（2：阳性可观测 + 阴性不误报）。
+
+---
+
+## 4. 池耗尽策略（要求 4，**冻结**）
+
+| 路径 | 现状行为 | 策略定性 | 是否改变默认语义 |
+|---|---|---|---|
+| `loan`（B 借样） | 返回**无效 `loan_t`**（拒绝） | **显式拒绝**（背压信号，不是错误） | ❌ 不改 |
+| `send` / `no_member_send`（A / TLV） | 退化成 **64 B 分片**（+ 环覆写），**返回 true** | **静默降级**（既有语义） | ❌ 不改（改动需单独评审，见下） |
+| `publish_loan` 失败 | 自归还 chunk 并返回 false | **显式拒绝 + 归还** | ❌ 不改 |
+| `acquire_storage` 池空 | 先做一次**死持有者清扫**再重试一次 | **有限重试**（有界） | ❌ 不改 |
+| SHM ser/cli 请求 FIFO 满 | **不收取**（请求留在通道里）+ `backpressure_hits` 计数 | **零丢失背压** | ❌ 不改 |
+| 队列满（view/msg） | drop-oldest + `queue_evicted` 计数 | **丢弃最旧**（可核算、内存有界） | ❌ 不改 |
+
+**为什么"池空 ⇒ 分片"不能改成本文档内拒绝**：它是既有语义，且**改它会让 `send` 的调用方全部要处理新失败态**（接口级变更）。本轮立场：**登记为已知悬崖 + 显式可观测**（`note_pool_exhausted` 按 `(kind, chunk_size)` 各计一份 + 首报原文带 `prefix` 归因），并把「越界风险」单列（§5.3）。若未来要改，须走接口变更流程 + 单独评审（方案 §4 W09 第 4 条）。
+
+**观测口径（冻结）**：`chunk pool exhausted` 报文字段固定为 `kind / chunk_size / size / pool capacity / count (本进程) / prefix`，空 prefix 额外点明「本档池无话题/进程区分，全机共享，归因须查其他进程」。首个失败资源 = **池槽位**（该档第 41 块）。
+
+---
+
+## 5. A/TLV 发送回退 vs B 贷款失败（要求 5）
+
+### 5.1 机制上的区别（**不同失败类别，不得混计**）
+
+| 维度 | A / TLV 发送回退 | B 贷款失败 |
+|---|---|---|
+| 触发点 | `acquire_storage` 池空 ⇒ `send` 的 chunk 分支失败 | 同一处池空 ⇒ `loan` 直接返回 `{}` |
+| 返回值 | **`send` 仍返回 `true`**（已退化为分片并进环） | **`loan.valid() == false`**（调用方**必须**回退 `publish`） |
+| 数据是否交付 | 交付（分片重组） | 未交付（消息还没构造） |
+| 调用方义务 | 无（对调用方透明） | 必须回退 A/TLV 路径（`loaned_message.h` 契约 ③） |
+| 计入 | `note_pool_exhausted(kind="send"…)`；W03 `chunk_exhausted` | `note_pool_exhausted(kind="loan"…)`；W03 `chunk_alloc_failed`；模块侧 `DzFlatPath` 不记 B 成功 |
+| ⛔ 禁止 | 记成 `fallback_*` 一次（它是**降级交付**，不是"没走 DZFlat"） | 记成 TLV 路径一次（同一条消息的回退会在 A/TLV 调用点再记一次 ⇒ 比值算歪） |
+
+**可执行判据**：C5+C6 在**同一次池耗尽**里同时断言「`loan` 无效」与「`send` 成功」，并打印两者；stderr 必须出现 `kind = send`（不是 `kind = loan`），且 `chunk_size` 等于**实际档位**（算出来的，不是猜的）。
+
+### 5.2 不得假定"所有失败都能转成 64 B 分片"
+
+三条反例（都在本包判据内）：
+1. **B 贷款失败** → 走的是调用方回退 `publish`（A 或 TLV 路径），**不是**分片；
+2. **`size ≤ large_msg_limit(64)`** 的消息**本来就不走 chunk**（直接占 1 环槽）⇒ 池空对它无影响；
+3. **`publish_loan` 失败** → 归还 chunk 并返回 false，**不产生任何分片**。
+
+### 5.3 「策略性回退」与「内存安全越界」**分开判定**（队长要求 + 任务书硬要求）
+
+```text
+越界风险（独立类别，不计入回退计数）：
+    fragments = ceil(size / data_length(64))
+    ring_overwrite_risk = (fragments > kRingSlots(256))
+```
+
+| 类别 | 本次实测（0.88 MB 载荷、池空） | 定性 |
+|---|---|---|
+| 策略性回退 | `send` 返回 **true**（1 次） | **既有语义**（已批准），可观测、可核算 |
+| 越界风险 | `fragments = 14 400 > 256` ⇒ **1** | **缺陷类别**（`docs/dzflat_shm.md` §5.1/§9.5 末尾的既存内存安全问题），⛔ **不是**性能现象 |
+
+⛔ 本包**不修**该缺陷（任务书明示"不在你包内修，勿用它解释自身失败"），只把它做成**独立可判定类别**：`DegradeFragmentCountSeparatesStrategicFallbackFromRingOverwrite` 只做判定与对账，**不 drain**（读被套圈的槽位会踩进该缺陷）。真实过载现场实测到覆写告警原文：`force_push: overwriting slot still held by reader(s): k=0, cc=3, rem_cc=3`。
+
+---
+
+## 6. DZFlat 默认策略建议（要求 6，与 W08 共同）
+
+**结论（与 W08 §1-3 一致）**：
+
+1. **维持默认 OFF**（`g_dzflat_enabled=false`，W00 §6.2 第 7 行冻结）。理由：DZFlat 段对**未升级**订阅方不可解析（按 TLV 读段尾 msg_id 几乎必然失配而**静默丢弃**）⇒ 必须两端确认版本后由部署方显式 `EnableDzFlat(true)`。
+2. **A 级启用条件** = 类型兼容（`dzflat_supported()`）× 载荷扫描收益（W08 实测：发布路径 TLV 6.3/17.1/179.8 → A 3.8/6.9/20.1 µs；e2e TLV 41.3/152.5/744.6 → A 34.4/114.5/384.5 µs；**小载荷档被应用自身构造/读取淹没**）。
+3. **B 级不按尺寸自动切换**：`loan → 应用原地构造 → publish_loaned` 要求**生产者改写构造方式**（代码级迁移）；B 在发布路径省一次 0.88 MB 拷贝（≈18.7 µs）而 e2e 相对 A 仅 −7.6%，因为应用仍要填/读载荷。
+4. **本包补充的 B 侧容量约束（W08 未覆盖的那一半）**：
+   - 借样失败**是常态**（§4），调用方**必须**能回退 A/TLV —— 这是 `loaned_message.h` 契约 ③ 的容量依据；
+   - 单进程同档借样峰值受 `ViewQueueCap()` 与并发发布线程数约束；**过载时 `fb` 从数百跳到近 4 万**（§3.2 臂 D），此时 B 的"收益"会被回退吃掉 —— 因此 **B 的启用必须绑定"目标负载无非预期回退"**，而不是绑定消息尺寸；
+   - 广播话题的 B 借样**不会**按订阅者重复占块（§2.1），但**慢消费者会延长保留时间** ⇒ 同档容量要按"最慢消费者"预留。
+
+⇒ **默认策略提案条件（保留给 W12）**：`类型兼容` ∧ `目标负载 fallback_count == 0` ∧ `5 轮中位数 p50 改善 ≥1.3× 且 p99 退化 ≤ +25%` 三条同时成立，才允许提交默认启用；⛔ **B 的启用必须由生产者改构造方式，禁止按 ≥64 KiB 自动切 B**（与 W00 门槛 7 逐字一致）。
+
+---
+
+## 7. 附带判定：`reclaim_dead_chunks` 的 `published()==0` 跳过（队长 D-14 输入）
+
+### 7.1 结论
+
+| 问 | 答 |
+|---|---|
+| (a) 该跳过是**必要保护**吗？ | **是**，且有文档记录的理由（见下）。 |
+| (b) 竞态区间与同步点 | 见 §7.2：窗口是 `acquire_storage` 置位图（`:704-705`）→ `mark_published`（`:1360`/`:1507`/`:1925`）之间；**该窗口内回收 = 发布者手里的指针被立刻复用 = use-after-free**。 |
+| (c) 该文档是否已知此谓词 | **已知且有意保留**：`docs/uf003_crash_reclaim_decision.md` §5「published 标记 —— 清扫射程仅限"已发布"的悬挂」逐条论证；`docs/uf003_crash_reclaim_fix.md` §2 登记了残余泄漏（item 2）。⇒ **不是新发现**。 |
+| **更正** | 初版据此提出的「上界不成立」**已撤回**（证据不支持，见 §7.3 的更正说明）。重测表明：未发布借样的 chunk 占用**逐点符合 `40 − N`**（朴素上界成立）；初版观测到的 `PARENT_CAN_LOAN=0` 实为**同一 route 名**导致的**单生产端 sender flag 暴死泄漏**（另一条缺陷，§7.3 条目 2）。 |
+
+### 7.2 精确竞态区间与所需同步原语
+
+```text
+acquire_storage(inf, size, conns, kind, …)                          ipc.cpp:658-712
+  :673  pool_.acquire()                      // 借出 id
+  :704  chunk->published().store(0, relaxed) // ← 清 0（"尚未发布"）
+  :705  chunk->route_tag().store(tag, relaxed)
+  :706  chunk->conns().store(conns, release)
+  …返回 {id, data} 给调用方（send/loan）
+                                        ← ★ 窗口：位图已置、published==0
+  send   :1356 mark_published() / loan  :1925 mark_published()   // ← 置 1
+
+reclaim_dead_chunks(inf, info, chunk_size, bitmap_semantics, kind)  ipc.cpp:556-590
+  :564  proven_dead_bits(all)                // 读 /proc 判死
+  :577  if (published()==0) continue;        // ← 本谓词：封死上面的窗口
+  :583  CAS conns → 0; pool_.release(id)
+```
+
+- **同步点**：`published` 是 `std::atomic<uint8_t>`；`acquire_storage` 用 `relaxed` 清 0、`mark_published` 用 `release` 置 1、清扫方用 `acquire` 读。`conns` 的 `release` store 与清扫方的 `acquire` load（`:580`）构成"看到新位图 ⇒ 必然也看到 `published==0`"的 happens-before（`ipc.cpp:698-705` 的注释原文）。
+- ⇒ **修复"未发布也回收"需要的原语**：不是再加一把锁，而是**把"借出者是否仍活着"变成可判定信息**（例如把 owner 存活判据也用于 unpublished 块，或给借出加租约/世代标记）。这属**共享段布局变更** ⇒ 必须走"版本 + 互通性 + 混合版本拒绝"三件套（与 W07 `kLayoutVersion` 同一纪律），因此**不在 W09 射程**（队长 D-14 已给替代方案路径）。
+
+### 7.3 ⚠️ 已更正：`loan` 借样后暴死**不是**"上界被打破"，而是两条不同缺陷
+
+> **更正说明（2026-09-28，队长 D-16 第 3 条）**：本节初版（探针 `w09_probe_loan_dead_hold_*`）断言
+> 「上界『每进程每档位至多 1 块』在 `loan` 路径不成立」——**该结论证据不支持，已撤回**。
+> 初版探针两端用**完全相同的 route 名**，观测到的 `PARENT_CAN_LOAN=0` 伴随
+> `fail: loan, que->ready_sending() == false` —— 而 `loan()` 里 `ready_sending()` 的判定
+> （`src/libipc/ipc.cpp:1818-1822`）**发生在任何 chunk 借用之前**，单生产端策略下它是
+> `atomic_flag.test_and_set()` 的**互斥占用**（`src/libipc/queue.h:143-146` →
+> `src/libipc/circ/elem_array.h:62-68`），`_exit(0)` 不跑析构 ⇒ `disconnect_sender()` 从不执行
+> ⇒ sender flag **永久置位**。因此初版测到的是**另一个**缺陷（下表条目 2）。
+
+重做后（各配复现件与原始输出 `W09/证据/t19_leak_experiments.out.txt`）：
+
+**条目 1：未发布借样的 chunk 占用（重测，逐点符合朴素上界）**
+
+构造：子进程在 `prefix=空`、**全新 route 名**上借 N 块后不发布 `_exit`；父进程用**另一个 route 名**
+（避开 sender flag）借同一尺寸档。
+
+| `CHILD_HELD` (N) | 1 | 4 | 20 | 39 | 40 |
+|---|---|---|---|---|---|
+| `PARENT_CAN_LOAN` | **39** | **36** | **20** | **1** | **0** |
+| `40 − N` | 39 | 36 | 20 | 1 | 0 |
+
+⇒ **逐点精确符合 `40 − N`**：未发布借样**确实**占住 chunk（`published()==0` 使
+`reclaim_dead_chunks` 逐块 `continue`），但上界就是"**该进程在飞的借样数**"这一朴素关系，
+**没有**超出 UF-003 已登记的语义（`uf003_crash_reclaim_decision.md:163`「死路由孤儿块直到
+同名路由再现才可回收」仍是准确登记）。**「上界不成立」的表述作废。**
+
+**条目 2：单生产端 sender flag 暴死泄漏（新条目；属"route 生产端声明"而非 chunk 容量）**
+
+| 实验 | 子进程行为 | 父进程（**同 route 名**）能否借到 |
+|---|---|---|
+| A | 借 1 块后 `_exit`（不跑析构） | **0 / 40**（stderr：`fail: loan, que->ready_sending() == false`） |
+| B | 借 1 块后**正常返回**（跑析构 ⇒ `disconnect_sender()`） | **40 / 40** |
+
+⇒ 同一 route 上，**暴死进程把生产端 flag 永久占住**，此后任何生产端都无法再借样
+（`send()` 不受此限——它不走 `ready_sending()`）。这是**route 生产端声明（sender flag）的
+崩溃回收**缺口，与 chunk 池有多少块**无关**，也**不属** UF-003 的 `published`/清扫射程。
+判定：归 **t22** 另行裁定（本包只给可复现事实，不擅自定性优先级）。
+
+### 7.4 替代缓解（已评估，不改产品语义）
+
+| 方案 | 可行性 | 说明 |
+|---|---|---|
+| 应用 `EnableViewQueuePin(true)`（默认 ON）+ `ViewQueueCap=10` | ✅ 现成 | 限**单进程自身**持样（view 10 + adopt 10）；⛔ **不能**防跨进程争抢（§2.3） |
+| 用例/压测用**独立 prefix** | ✅ 本包已采用 | 段名不同 ⇒ 物理不同池 ⇒ 互不污染（⚠️ t73 的 C9 用**专属前缀 `w09c9alias`**、⚠️ **不用空前缀**：空前缀 9216 段全机共享，实测会被并发邻居污染；它靠每轮**种子进程 + 测试进程各 fork 一次**隔离，见 §7.5） |
+| 进程退出主动归还 | ⚠️ 需产品改动 | `ipc::loan_t` 无 RAII；`LoanedMessage<Flat>` 有 RAII 但只在 dzIPC 层、且崩溃路径仍不走析构 |
+| 借样加租约/世代 + 清扫扩展 | ⚠️ 共享段布局变更 | 需版本 + 互通性 + 混合版本拒绝三件套 ⇒ 归 `t22` |
+| 默认非空 prefix（按话题/进程隔离池） | ⚠️ 影响互通 | 改段名 ⇒ 新旧进程不共用池；属部署决策，不在本包 |
+
+---
+
+## 7.5 段级复位的前提① 与其 F1 反例（t73 登记；与 §7.3 的池消费无关，但同属池可用性）
+
+t22 的段级复位（`reclaim_orphan_segment()`，见 `死进程借样泄漏收口_D14.md`）声称前提①
+「首次 attach 一个 **已被用过**的段时，本进程必然尚未持有本档 chunk」**天然满足**。
+⚠️ **该说法在 t73 被作废**：S4 复核给出可执行反例，**命中率 4/120**
+（`R1/S4验收_W09.md` §2.2–§2.4；复现件 `R1/S4验收_W09_证据/repro_alias.cpp`）。
+
+- **窗口位置** = `handles_` 的 `lock_` **解锁（`ipc.cpp:544`）**与 `reclaim_orphan_segment()` 取池快照**之间**；
+- **形态** = 同进程 8 个不同话题共用 `(prefix='', 9216)` 池并**并发首次借样** ⇒ 另一线程借出的 id#0 被复位重新发出；
+- **t73 已修**：把「素净判定 + 取快照」移入 `handles_` 的 `lock_` 临界区 ⇒ **0/120**（×3 轮）；
+- **常驻判据**（落在 t73 in-scope 的 `test/perf/w09/w09_decisive_repro.sh` **G 臂**）：内嵌自包含探针，
+  每轮「种子进程 + 测试进程」各 fork 一次，专属前缀 + 8 话题并发首借 ×1200 轮，断言无同 id / 同 data 指针；
+  实测 FIX/ABL/BASE(无 reclaim)=0、**FIXV2(t22 v2)=1**、FIXNEG(快照在 lock_ 外)=1 ⇒ 有牙且缺口恰由快照位置
+  决定（`FIX` 臂日志内 `orphan segment reset` 233 次 vs `BASE` 0 次 ⇒ 复位路径确实被走到）；原始输出 `decisive_final/`；
+- ⛔ **本节的容量结论不受影响**：段级复位只动**空闲链**，不改容量常量、段名、`published()` 门与正常借用/发布语义。
+
+---
+
+## 8. 容量表：六类分别列账（方案 §10.5，要求 3 的前置）
+
+| # | 资源 | 容量 | 归属键 / 范围 | 越界时的契约行为 | 首个失败资源判定 | 出处 |
+|---|---|---|---|---|---|---|
+| 1 | **控制项**（`TopicControl` peer slots） | **64 / topic** | topic + domain | `acquire_peer_slot` 返回 -1 ⇒ **不宣布握手完成**、退 peer、下一轮重试；**不受 `verbose_` 约束告警** | `control_plane` 槽位 | `control_plane.h:65-85`；`shm_pub_sub_ipc.cc:846-880` |
+| 2 | **route**（libipc 连接位） | **32 / topic** | `cc_t=uint32_t` 位图 | `connect()` 返回 `cc_id==0` ⇒ 不进入"假成功态" | 连接位 | `test_shm_receiver_cap` |
+| 3 | **等待 token** | **127 / worker**（Windows 63） | worker | `add_route` 返回 `wait_set_full` ⇒ 模块**显式回退**兼容线程 | 该 worker 的 wait-set | `recv_wait_set.cpp:23-28`；W04 §7.1（126/127/128 实测） |
+| 4 | **fd** | `ulimit -n`=1048576；**门槛 ≤3.5 fd/route**；硬上限 4096（高 fd 路径已由 W07 改 poll） | 进程 | `EMFILE` ⇒ 显式失败 | `fd_limit` | W07 交付（实测 1000 路 `openfds=2071`） |
+| 5 | **`ipc_info_pool` 条目** | **4096**（`kLayoutVersion=2`，段名带版本后缀，attach 拒绝性校验） | **全机共享** | 第 4097 次 `register_entry` 返回 -1 + 限流诊断（表满/回收后仍满） | 池槽位 | `ipc_info_pool.h:52-80`（**引用 W07 值**） |
+| 6 | **chunk（各尺寸档）** | **40 / 档**；段字节 = `52 + 40×chunk_size` | **`(prefix, chunk_size)`，默认 prefix 空 ⇒ 全机共享** | `loan` 拒绝 / `send` 分片降级（§4） | **该档池槽位** | `def.h:49`；本文件 §1-§4 |
+
+**另有两条与 W09 相邻、但归其他包的口径（⛔ 不得合并进上表）**：
+
+| 资源 | 容量 | 归属 |
+|---|---|---|
+| SHM ser/cli 请求 FIFO | 64 条 / 8 MiB（+空队列一条超限） | W09 相邻（`shm_ser_backpressure` 守门），队列内存归本包，**不含 chunk** |
+| 环槽位 | 256 / route | libipc（W09 只引用；`fragments > 256 ⇒ 越界风险`，§5.3） |
+
+---
+
+## 9. 计数实现、验收与残余风险
+
+### 9.1 复现前提与指纹
+
+```bash
+cd /home/zwc/cpp_ipc_dds
+cmake -S . -B build && make -C build -j$(nproc)      # aux_source_directory/file(GLOB) 是配置期展开，必须重配
+cd build && env -u DZIPC_SOCKET_COMPAT_THREAD -u DZIPC_SOCKET_RECV_WORKERS ctest --output-on-failure -j4
+```
+
+| 项 | 值 |
+|---|---|
+| `libipc.so.1.3.0` sha256（本轮读数所用，**含本包 F3/F1 改动**） | `2af82d372fbacdd11ad6052260fcac7dfc31486d29574f3dfceb214c32d4ff95` |
+| ctest | **24/24 Passed**（`-j4`，25.3–25.6 s，exit 0，含本包新增 `test_chunk_capacity_backpressure`） |
+| 新增用例单跑 | 7/7 Passed ×5 轮（111–115 ms，无 flaky） |
+| **并发串扰归因（A/B 对照，各 6–8 轮 `ctest -j4`）** | **含** W09 用例：8 轮 3 pass / 5 fail；**排除** W09 用例：6 轮 3 pass / 3 fail ⇒ **失败率无差别**；失败项**恒为** `test_dzflat_builder`（`test_dzflat_builder.cpp:260 published==false` + `chunk pool exhausted: 132096 / prefix=''`）与 `test_w08_dzflat_ab`（`dzflat_a_messages=0`）。⇒ **本包新增用例不是失败源**：它每条用例用**独立 prefix**（段名不同 ⇒ 物理不同池）并在开头/结尾 `clear_storage`，不占用默认池任何一档。该并发串扰属**全机共享池**问题，已由队长立 `t23`（架构负责人）处置 |
+| W09 相关既有用例 | `test_chunk_hold` 3/3、`test_adopt_loan_quota` 5/5、`test_shm_ser_backpressure` 2/2、`test_pool_exhaust_observability` 2/2、`test_alloc_fault_inject`（工装未加载 ⇒ 3 SKIP，⛔ 不作证据） |
+
+### 9.2 计数实现（本包落地）
+
+| 计数 | 位置 | 口径 |
+|---|---|---|
+| 池空（按 `(kind, chunk_size)` 各一份） | `ipc.cpp:500-543` `note_pool_exhausted` | 首报全文 + 每 1024 非节流；`kind ∈ {send, no_member_send, loan}`；带 `prefix` 归因 |
+| 死持有者清扫归还 | `ipc.cpp:592+` `note_reclaimed` | 同款首报/节流 |
+| 重复入池拦截 | `ipc.cpp:775-790` `note_double_return` | 拦下即计数（**不**二次入池） |
+| 假就绪退避（W04-F3） | `recv_worker.h` `RecvWorkerStats{fruitless_backoffs, rearm_events}`；`socket_recv_worker.cc` | 进入退避次数 / 到期重挂次数；只增不减 |
+| 队列淘汰 / adopt 溢出 | `queue_evicted`（W03 口径）/ `dzflat_adopt_spilled` | 既有 |
+| SHM ser FIFO 背压 | `backpressure_hits` / `fifo_peak_*` | 既有 |
+
+> ⚠️ **W03 计数族里 `chunk_exhausted` / `chunk_alloc_failed` / `queue_backpressure` / `publish_blocked` 目前仍无写入点**（`grep` 全仓 src 命中 0）。本包的 `note_pool_exhausted` 是**产品侧事实来源**，但**尚未**接到 W03 的 `CounterRegistry`。接线口径与"三种回退语义分离"归 **`t19`**（队长已建、依赖 t4）；⛔ 本文件不越界改 `measure/counters.h`，也不重复 t19 的射程。
+
+### 9.3 残余风险与未决项
+
+| # | 严重度 | 项 | 处置 |
+|---|---|---|---|
+| W09-F1 | **high** | 空 prefix ⇒ 同档池**全机共享**；任一进程的慢消费者/过载会饿死其他进程（压测臂 D：`fb` 3.98 万） | ⛔ 不改产品默认；容量表两行分列（§2.3）+ 首报带 `prefix` 归因；长期方案是默认非空 prefix（属部署/互通决策） |
+| W09-F2 | medium（**已更正归因**） | ~~`loan` 借样后崩溃的死悬挂上界不成立~~ → **撤回**。重测：未发布借样的 chunk 占用 = `40 − N`（朴素上界成立）。真正的独立缺陷是 **单生产端 sender flag 暴死泄漏**（同 route 名 ⇒ 后续生产端永久无法借样；`send()` 不受影响），属 route 生产端声明回收，**非** chunk 容量问题 | 两条各配复现件与原始输出（`W09/证据/t19_leak_*`）；定性优先级归 `t22` |
+| W09-F3 | medium | 池空 ⇒ `send` 静默分片 + 环覆写（`docs/dzflat_shm.md` §9.5 末尾的既存内存安全缺陷） | ✅ 已做成**独立可判定类别**（§5.3），⛔ 不在本包修 |
+| W09-F4 | medium | `docs/dzflat_shm.md`/`ipc.cpp` 注释仍写"32 块"，代码是 **40** | 本文件与判据一律以代码为准并登记；建议 W01/W12 一并纠偏 |
+| W09-F5 | medium | W03 的 `chunk_exhausted` 等计数**未接线** ⇒ `counters.json` 里为恒 0 的假证据 | 归 `t19`；W10 判定"回退/容量"前必须先接线（队长已把 t19 加进 t11 依赖） |
+| W09-F6 | low | `test_alloc_fault_inject` 需 `LD_PRELOAD` 工装，未加载即 SKIP | 已如实标注，⛔ 不作证据引用 |
+| W09-F7 | low | 应用已 try_get 但未析构的 Sample **无上限**（`P_app`） | 依赖应用纪律 + 池观测；`plan §4` 的"解钉 + 世代校验"（步骤④）已判定**不做**（钉到 1 已够） |
+| W09-F8 | medium | **`ctest -j4` 下 `test_dzflat_builder` / `test_w08_dzflat_ab` 约 50% 失败**（全机共享池 132096 档被 `prefix=''` 的残留占用） | **不属本包**：A/B 对照已证与本包用例无关（见 §9.1）；已由队长立 `t23`（架构负责人）以 RUN_SERIAL + 门槛修订收敛。⛔ 本包不把它写成"ctest 已稳定" |
+
+> ⚠️ **并行工作包状态（不影响本包读数）**：本包全部读数取自 **20:47 的 `libipc.so`（sha256 `2af82d37…`）**；其上 `ctest` = 24/24（含 8 轮 A/B 对照，§9.1）。此后 `src/dzIPC/shm_pub_sub_ipc.cc` 由 **W05/W06**（SHM接入负责人）在改（当前该文件编译失败：`pub_handshake` 声明/定义不匹配 —— 属其进行中状态，⛔ 不属本包、本包未触碰该文件）。因此**引用本包读数必须同带 `2af82d37…` 指纹**；重建后若指纹变化，须按方案 §12 新建 run_id 再复跑本包判据。
+
+### 9.4 本包命令与结果
+
+| 命令 | 结果 |
+|---|---|
+| `cmake -S . -B build && make -C build -j16` | exit 0，无 error |
+| `ctest -j4`（清空两 env） | **24/24 Passed**（25.34 s） |
+| `./build/bin/test_chunk_capacity_backpressure` ×5 | **7/7 Passed**（111–115 ms） |
+| `./build/bin/test_chunk_hold` / `test_adopt_loan_quota` / `test_shm_ser_backpressure` / `test_pool_exhaust_observability` | 3/3、5/5、2/2、2/2 |
+| `pool_attribution_benchmark` ×4 臂（§3.2） | 原始输出 `build/w09/pressure_arms.txt` |
+| 条目 1 重测（N=1/4/20/39/40，父进程**不同 route 名**） | `PARENT_CAN_LOAN` = 39/36/20/1/0 = `40 − N` 逐点符合 |
+| 条目 2（同 route 名；暴死 vs 正常退出） | 0/40 vs 40/40 ⇒ sender flag 暴死泄漏 |
+| 假就绪探针（修复前后） | **1 302 599 / 1 326 816 / 1 314 465 次/s** → **32 次/s**（§10） |
+
+---
+
+## 10. 附带：W04-F1 / W04-F3 收敛（队长 D-11）
+
+### 10.1 W04-F3（假就绪忙转 1.31 M 次/s）—— 已修，且**不牺牲恢复延迟**
+
+| 项 | 修复前 | 修复后 |
+|---|---|---|
+| 机制 | `fruitless ≥ 4` → `remove+add` 重挂 + **清零计数** ⇒ fd 仍 LT 可读 ⇒ `wait(0)` 立刻再报就绪 | 达到阈值 ⇒ 该 token **摘出**等待集合 + 记 `backoff_until`（1→2→4→8→16→32→**50 ms** 封顶）；到期由 `loop()` 重挂 |
+| 循环速率（同一探针） | **1 302 599 / 1 326 816 / 1 314 465 次/s** | **32 次/s**（3 轮一致） |
+| 真数据恢复延迟 | —（忙转"顺带"很快） | **1 ms**（判据 ≤200 ms） |
+| 计数 | 无 | `fruitless_backoffs` / `rearm_events`（`RecvWorkerStats` 追加字段，SHM 侧恒 0） |
+| 守门用例 | — | `LifecycleContract.SocketFruitlessReadinessBacksOffWithBoundedCycleRateAndFastRecovery`（4 条腿：速率有上界 / 退避确实发生 / 到期确实重挂 / 真数据恢复 ≤200 ms） |
+
+**机制要点（两处易错，都有实测）**：
+- ⛔ 重挂后**必须**让 `fruitless` 清零、退避**级数**另计（`Entry::backoff_level`）。第一版把 `fruitless` 保留 ⇒ 重挂后第一次上报立刻又 ≥ 阈值 ⇒ 该通道**永远轮不到一次 `recv_once`** ⇒ 真数据到达也收不到（实测恢复延迟 2000 ms 超时）。
+- ⛔ 退避期内必须把该 entry 从等待集合**真摘出**；只"标记"不摘出 ⇒ `wait` 仍被它唤醒 ⇒ 速率不变。
+
+### 10.2 W04-F1（同线程 `remove_route` 的虚假承诺）—— 已按裁决收敛
+
+- 头文件两处注释改为**如实陈述**：实现**没有**同线程旁路；该用法不被支持，只是"不会永久死锁"（边界 = `kQuiesceTimeout` 2000 ms + 诊断日志）。
+- `recv_worker.cc` / `socket_recv_worker.cc` 的 `remove_route` 入口加 debug 断言：`assert(thread.get_id() != this_thread::get_id() && "…(see W04-F1)")`。
+- 判据升级为**可机械核对**：`grep -c "this_thread::get_id" <file>` 期望 **3**（`stop()`/析构各 1 + `remove_route` 入口 assert），实测 **3 / 3**；⛔ 期望值 2 是"无旁路但也没断言"的旧形态。
+- 契约纪律案例已记入 `接口与生命周期.md` §9 R-02（「注释即条款」的复发形态与本次收敛结果）。
+
+---
+
+## 11. 交付物清单与回滚
+
+| 文件 | 说明 |
+|---|---|
+| 本文件（`团队改造交付/W09/容量与背压_交付.md`） | W09 主交付：容量模型 / 配置与兼容设计 / 计数实现 / 压测结果 |
+| `test/test_chunk_capacity_backpressure.cpp`（**7 条**）+ `test/CMakeLists.txt` 追加块 | **可执行判据**主体，已进 CTest；t73 的 C9 在 `test/perf/w09/w09_decisive_repro.sh` **G 臂**（自包含探针，1200 轮 ≈6.5 s） |
+| `build/w09/pressure_arms.txt`（不入库，`build/**` 已忽略） | 4 条压测臂原始输出（判决数据已抄进 §3.2） |
+| ~~`build/w09/{leak_child,leak_parent}`~~ → `W09/证据/t19_leak_{child_unpublished,parent_diff_route,child_clean_exit}.cpp` + `t19_leak_experiments.out.txt` | §7.3 两条缺陷的复现件与**更正后**的原始输出（初版探针的结论已撤回） |
+| `src/dzIPC/threepools/socket_recv_worker.cc` + `recv_worker.h` | W04-F3 修复 + `RecvWorkerStats` 追加字段 |
+| `include/dzIPC/threepools/{recv_worker.h,socket_recv_worker.h}` | W04-F1 注释收敛 + grep 判据 |
+| `test/test_lifecycle_contract.cpp` | W04-F3 守门用例（第 9 条） |
+
+**回滚**：
+- 判据回滚 = 删 `test_chunk_capacity_backpressure.cpp` + `test/CMakeLists.txt` 的 W09 块（仅失去本包判据）；
+- F3 回滚 = 恢复 `requeue_ready` 的 `remove+add` + 清零计数（⚠️ 会把 1.31 M 次/s 忙转带回来，并让 W00 门槛 3 假失败）；
+- F1 断言回滚 = 删两处 `assert`（不影响 Release 行为）；
+- ⛔ 容量常量/段名**不在本包改动范围**（`large_msg_cache` 与 `(prefix, chunk_size)` 归属键均为既有契约；若要改须走"版本 + 互通性 + 混合版本拒绝"三件套）。

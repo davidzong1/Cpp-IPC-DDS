@@ -1,0 +1,16 @@
+run_id: 20260930-r59-R1-W06
+date: 2026-10-01T08:16:58+08:00
+--- 被复核对象（当前工作树）---
+3754116cd495e2f252f1505f0ae5a0e3aadb5316bb64d29b49e5540dcea40ba3  src/dzIPC/threepools/recv_worker.cc
+ceab50331f2a2449a7b425afa21c2f9a0e27e6a02016dbacc384a34dfdba0628  src/dzIPC/shm_pub_sub_ipc.cc
+40eeb7cc20570ac0e9f968eef4d69d8ede21ff178161295c134b1ada24568e7b  include/dzIPC/shm_pub_sub_ipc.h
+f0ebc3ef2df5b276e35dd38a21183c0bbc59a51721b24aa2ef067783c07747c9  build/lib/libipc.so.1.3.0
+--- W06 交付声明的值 ---
+  | `src/dzIPC/shm_pub_sub_ipc.cc` | +1486/−259（含 W05 之后本线全部接入） | `12131d8c354b868f…` |
+  | `src/dzIPC/threepools/recv_worker.cc` | +93/−5（**W06-F1 顺序修复 + 63 行追加字段**；余量为共享层既有改动 `#include <cassert>` 等） | `8031f9aced716704…` |
+  修复前 sha256 `c79758698c20af60…` / 修复后 `8031f9aced716704ed…`（脚本断言"还原后与运行前逐字一致"）。
+  `12131d8c354b868f…` 且用例复绿（`arm=worker unregister_rounds=10`）。⇒ 上述按臂判据不是"跑绿即过"。
+  证据 `logs/negative_control_teardown.log`（含还原后 sha256 `12131d8c354b868f…` 与还原后复绿的读数）。
+3754116cd495e2f252f1505f0ae5a0e3aadb5316bb64d29b49e5540dcea40ba3  src/dzIPC/threepools/recv_worker.cc
+ceab50331f2a2449a7b425afa21c2f9a0e27e6a02016dbacc384a34dfdba0628  src/dzIPC/shm_pub_sub_ipc.cc
+f0ebc3ef2df5b276e35dd38a21183c0bbc59a51721b24aa2ef067783c07747c9  build/lib/libipc.so.1.3.0

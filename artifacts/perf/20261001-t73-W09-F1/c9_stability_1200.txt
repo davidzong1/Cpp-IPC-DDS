@@ -1,0 +1,9 @@
+# C9 稳定性终测（1200 轮 / 专属前缀 + 每轮种子进程）
+# 二进制固定 = build/bin/test_chunk_capacity_backpressure
+lib_fixed    = d0f581d19f74c411  (快照在 handles_ 的 lock_ 内 = T73)
+lib_negative = 0186853e1eadb5ea  (快照在 lock_ 外 = T73 之前)
+
+--- lib_fixed ×20 ---
+     20 bad_rounds=0
+--- lib_negative ×20 ---
+     20 bad_rounds=1

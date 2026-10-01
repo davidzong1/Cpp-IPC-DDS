@@ -1,0 +1,17 @@
+# t84 (W05 S4 round-4 独立复审 · 复核 (B) 路线双臂闭合)
+attempt: f4a9c132-3d24-4f9b-8509-6ea3c31d4863
+2026-10-01T14:54:15+0800
+
+## 被复核对象指纹（复核起点）
+acbf73ec6b01f8a6ac3c2c77ac62ee0c8dfc2727063ff59961d12feca7011779  src/dzIPC/threepools/shm_control_scheduler.cc
+sha256sum: src/dzIPC/threepools/shm_control_scheduler.h: 没有那个文件或目录
+067e79be378c12356e7be5c509097fcce5f39134ac3cab6586945f66ef0cec5d  src/dzIPC/shm_pub_sub_ipc.cc
+354e17488089d16a8b002d6db0127d6df41fd449728ccd7ee98e89e010b94103  include/dzIPC/shm_pub_sub_ipc.h
+eb6a7219bf959ff95171d8af4f4db34a980327f41305557aafc86c7d150cd2b3  include/dzIPC/threepools/shm_control_scheduler.h
+31758502442ce5cd2d84d019f078144d70f3bb7d6dd4da9d2a8fce0e285a932c  test/test_w05_stale_slot_gate.cpp
+8e00fca0af758a81ffa41a8fada75d2be60356aa563e0e1d15d73eccdeb51188  test/test_w05_stale_slot_gate_arm.cpp
+805774c2ede55818b103a9ee893e90df282a847a470ef2f81d8945e6a3958a7d  test/test_shm_control_scheduler.cpp
+813fab5be886ef6e27d31043f4610fce886fc465fbbfa5e648773de32ba0c52a  build/lib/libipc.so.1.3.0
+352fca97ac1ee6e4607917868d09de5f27c5014b06fbddb23403107c5aed62b5  docs/消息接收架构改造/团队改造交付/W05/控制面接入_交付.md
+f142574da343069222ed7212c93ab7a259d0dbc14e7431dadf6101ccb1916766  docs/消息接收架构改造/团队改造交付/接口责任表.md
+256bab86edf181ce84a3eae170e425bb78748ea1cf23d2d2560446504fba3057  artifacts/perf/20260928-r23-W05/shm_pub_sub_ipc.cc.W05

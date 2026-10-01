@@ -1,0 +1,22 @@
+# t76 (S4 独立验收 round 2 · W05/t75 修复复评)
+任务: t76  attempt_id: 414fcbff-ce43-44b3-89e5-b7b45eb52180
+复核对象: t75 对 R1-W05-F1..F6 的闭合
+采集: 2026-10-01T12:46:10+0800
+
+## 被复核对象指纹（t75 编辑后）
+fe675f56343cacd65f12ac7a99c684a6aab5547a90793344159ad3bf1f8db751  docs/消息接收架构改造/团队改造交付/W05/控制面接入_交付.md
+46f60f7d9bcb9d780250cc7cedfde5ee136cc0ab2219ff865143274f03d5d2fe  artifacts/perf/20260928-r23-W05/shm_pub_sub_ipc.cc.W05
+
+## t75 编辑前的快照（我 round-1 保留的未编辑副本，= 我当时的被复核对象）
+256bab86edf181ce84a3eae170e425bb78748ea1cf23d2d2560446504fba3057  build/t58/w05only/src/dzIPC/shm_pub_sub_ipc.cc
+4148d65c6426bc84b88077bae2da4913ba9bfb74d8ed9479cd4c2c6e091a99f2  build/t58/w05only/include/dzIPC/shm_pub_sub_ipc.h
+
+## 三变体库（round-1 建立，round-2 复用）
+w05only    bdad60939e9c75f80eff87c9f669268a09ea9b00e1539240e94a1167eb84a86c
+w05offsrc  ab967b9aae8f91d5e549b2a1334420a1bc974ca684db93ee59085d594d094926
+gatesrc    c976944533cd25912e9f31deec404f14ea075a3a84b65e4738c52bf9d9d6028f
+
+## 工作区现状
+ceab50331f2a2449a7b425afa21c2f9a0e27e6a02016dbacc384a34dfdba0628  src/dzIPC/shm_pub_sub_ipc.cc
+40eeb7cc20570ac0e9f968eef4d69d8ede21ff178161295c134b1ada24568e7b  include/dzIPC/shm_pub_sub_ipc.h
+d0f581d19f74c411866111b7c9918fa30dd028c7bc3db1d2a31f39b0467f5967  build/lib/libipc.so.1.3.0

@@ -1,0 +1,21 @@
+判据：每个**被删除的原判据行**（非注释）必须能在当前文件的 else/compat 分支里逐字找回。
+
+=== test/test_wakeup_artifact.cpp：删除 3 行（非注释）
+  ✅ 全部逐字找回（= 不是删除判据，而是移入另一臂分支）
+     [EXPECT_GT(dzIPC::WakeupArtifactCount(), 0u)] → 位于 compat/else 分支或其它
+     [<< kRounds << " 轮重建都没观测到伪影 ⇒ 本用例前提不成立（收包线程没卡在 recv 里），"] → 位于 compat/else 分支或其它
+     ["主判据 A/B 因此没有牙";] → 位于 compat/else 分支或其它
+
+=== test/test_shm_ready_transition.cpp：删除 9 行（非注释）
+  ⛔ 未能在现文件中找回 2 行：
+      if (ev.point == dzIPC::detail::SeamPoint::kAfterRecvRelease && instance() != nullptr)
+      instance()->n.fetch_add(1, std::memory_order_relaxed);
+     [RecvTick ticks;] → 位于 compat/else 分支或其它
+
+=== test/test_shm_sub_dtor_gate.cpp：删除 7 行（非注释）
+  ✅ 全部逐字找回（= 不是删除判据，而是移入另一臂分支）
+     [dzIPC::shm::shm_sub_ipc keeper{keeper_td, topic, 0, /*queue_] → 位于 compat/else 分支或其它
+     [keeper.InitChannel();] → 位于 compat/else 分支或其它
+     [EXPECT_GT(woke, 0L)] → 位于 compat/else 分支或其它
+
+总判定： ⛔ 存在真正被删掉的判据

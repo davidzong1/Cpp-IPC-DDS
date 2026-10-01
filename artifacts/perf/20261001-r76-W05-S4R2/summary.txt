@@ -1,0 +1,36 @@
+## 汇总（t76 round-2）
+### 按 t75 §10.3 的复跑命令逐字执行（含清段）
+## 1) 三变体 hold=4500（>2×peer_dead）
+on    crafted peer_count=0 slot=0 in_use=1 cc_id=1|after_hold(4500ms) peer_count=0 slot_in_use=1 cc=1|live_slots: [1]=cc1|published=400 received=0 mismatch=0|
+off   crafted peer_count=0 slot=0 in_use=1 cc_id=1|after_hold(4500ms) peer_count=0 slot_in_use=0 cc=0|live_slots: [0]=cc1|published=400 received=400 mismatch=0|
+gate  crafted peer_count=0 slot=0 in_use=1 cc_id=1|after_hold(4500ms) peer_count=0 slot_in_use=0 cc=0|live_slots: [0]=cc1|published=400 received=400 mismatch=0|
+## 2) 阴性对照 nocraft（t75 §10.3 第 4 条）
+on    after_hold(4500ms) peer_count=0 slot_in_use=0 cc=0|live_slots: [0]=cc1|published=400 received=400 mismatch=0|
+gate  after_hold(4500ms) peer_count=0 slot_in_use=0 cc=0|live_slots: [0]=cc1|published=400 received=400 mismatch=0|
+built gate_case_on  hdr=4148d65c lib=bdad6093
+built gate_case_off  hdr=b9ae81ce lib=ab967b9a
+built gate_case_gate  hdr=4148d65c lib=c9769445
+### 复评我 round-1 的六条核心结论是否仍成立（精确快照库 bdad6093；t75 只改注释 ⇒ 库不变）
+
+## ① per-route 归属（threads + wchan）
+n=20    auto    n=20 total_threads=22 wchan[0]=1 wchan[futex_wait_queue]=21 
+n=20    compat  n=20 total_threads=61 wchan[0]=1 wchan[futex_wait_queue]=20 wchan[hrtimer_nanosleep]=40 
+n=100   auto    n=100 total_threads=102 wchan[0]=1 wchan[futex_wait_queue]=101 
+n=100   compat  n=100 total_threads=301 wchan[0]=1 wchan[futex_wait_queue]=100 wchan[hrtimer_nanosleep]=200 
+n=1000  auto    n=1000 total_threads=1002 wchan[0]=1 wchan[futex_wait_queue]=1001 
+n=1000  compat  n=1000 total_threads=3001 wchan[0]=1 wchan[futex_wait_queue]=1000 wchan[hrtimer_nanosleep]=2000 
+sched   pub_heartbeat_changes=80 rate_per_s=20.00 implied_period_ms=50.00 sub_heartbeat_changes=400 rate_per_s=100.00 implied_period_ms=10.00 slot=0 
+compat  pub_heartbeat_changes=79 rate_per_s=19.75 implied_period_ms=50.63 sub_heartbeat_changes=398 rate_per_s=99.50 implied_period_ms=10.05 slot=0 
+### ④ 极性（精确快照库 bdad6093；SHM 侧五值 + socket 侧同值对照）
+UNSET    SHM=process-scheduler          socket=新路径(0 行)
+EMPTY    SHM=process-scheduler          socket=新路径(0 行)
+0        SHM=process-scheduler          socket=新路径(0 行)
+1        SHM=compat-per-topic-thread    socket=回退(40 行)
+compat   SHM=compat-per-topic-thread    socket=回退(40 行)
+### F6 独立复测：test_recv_worker × ConcurrentAddRouteRestartsThreadExactlyOnce
+## 口径 A（串行 24 次，逐次单跑）
+W05-ON 串行失败 = 0/24
+W05-OFF 串行失败 = 0/24
+## 口径 B（真并发 4 份 × 6 轮）
+W05-ON 并发失败 = 10/24
+W05-OFF 并发失败 = 13/24

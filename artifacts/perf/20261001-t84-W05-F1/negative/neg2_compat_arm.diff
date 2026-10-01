@@ -1,0 +1,10 @@
+--- a/src/dzIPC/shm_pub_sub_ipc.cc
++++ b/src/dzIPC/shm_pub_sub_ipc.cc
+@@ compat_control_loop() @@
+-pub_control_state_->on_pub_tick(dzIPC::shm_control::ControlClock::now(),
+                                           kControlTiming.peer_dead_timeout);
++pub_control_state_->on_pub_heartbeat(dzIPC::shm_control::ControlClock::now());
++if (pub_control_state_->has_peers())
++{
++pub_control_state_->on_pub_stale_scan(dzIPC::shm_control::ControlClock::now(),
++kControlTiming.peer_dead_timeout);

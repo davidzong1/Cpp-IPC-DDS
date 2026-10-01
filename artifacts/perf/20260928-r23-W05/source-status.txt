@@ -11,3 +11,8 @@ src/dzIPC/threepools/shm_control_scheduler.cc    : 与 HEAD 一致(W05 未改)
  include/dzIPC/threepools/socket_recv_worker.h |  11 +-
  src/dzIPC/shm_pub_sub_ipc.cc                  | 846 ++++++++++++++++++++------
  4 files changed, 735 insertions(+), 206 deletions(-)
+
+# ── t77 追加（只追加体例）──────────────────────────────────────────────
+# 上面 --stat 的「846」是**改动行合计**列（654+192），不是条形图宽度；「202」是两文件删除数之和（192+10）。
+# 上表「4 files changed, 735 insertions(+), 206 deletions(-)」是**四个文件**的合计；本包只对其中两个负责
+# （.cc = 654/192、.h = 49/10）。逐值复算见 artifacts/perf/20261001-t77-W05-F1/recompute/。

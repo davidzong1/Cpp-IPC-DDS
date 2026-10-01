@@ -1,0 +1,45 @@
+### 订阅端 HEAD .cc:762-925  vs  W05 .cc:971-1148
+HEAD 语句 49，W05 语句 52，交集 31
+
+仅在 HEAD（须逐条归因）:
+   - attached_generation=generation;
+   - boolpeer_registered=false;
+   - continue;
+   - control_plane_.remove_peer(attached_generation);
+   - if(!control_plane_.add_peer(attached_generation)){
+   - if(!handshake_completed.load(std::memory_order_acquire)||attached_generation!=generation){
+   - if(peer_registered){
+   - peer_registered=false;
+   - peer_registered=true;
+   - peer_slot_=control_plane_.acquire_peer_slot(attached_generation,cc_id);
+   - route_session_.begin_rebuild(generation,[this](){
+   - std::cerr<<"\033[31m["<<topic_name_<<"SubInfo]Erroropeningcontrolplanefortopic:"<<topic_name_<<"\033[0m"<<std::endl;
+   - std::this_thread::sleep_for(std::chrono::milliseconds(10));
+   - std::this_thread::sleep_for(std::chrono::milliseconds(100));
+   - throwstd::runtime_error("Fatalerror:controlplaneopenfailed");
+   - uint32_tattached_generation=0;
+   - voidshm_sub_ipc::sub_handshake(){
+   - while(running.load(std::memory_order_acquire)){
+
+仅在 W05（须逐条归因，前 30）:
+   + attached_generation_=generation;
+   + backoff_until_=now+std::chrono::milliseconds(100);
+   + control_plane_.remove_peer(attached_generation_);
+   + if(!control_plane_.add_peer(attached_generation_)){
+   + if(!handshake_completed.load(std::memory_order_acquire)||attached_generation_!=generation){
+   + if(!open_warned_){
+   + if(!opened_){
+   + if(h==nullptr)return;
+   + if(now<backoff_until_){
+   + if(peer_registered_){
+   + open_warned_=true;
+   + opened_=true;
+   + peer_registered_=false;
+   + peer_registered_=true;
+   + peer_slot_=control_plane_.acquire_peer_slot(attached_generation_,cc_id);
+   + return;
+   + route_session_.begin_rebuild(generation,[h](){
+   + shm_sub_ipc*h=host_;
+   + std::cerr<<"\033[31m["<<topic_name_<<"SubInfo]Erroropeningcontrolplanefortopic:"<<topic_name_<<";
+   + voidon_sub_heartbeat(dzIPC::shm_control::ControlClock::time_pointnow)override{
+   + willretryevery100ms(thissubscriberreceivesnocontrol-plane""actionuntilitsucceeds)\033[0m"<<std::endl;

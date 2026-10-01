@@ -1,0 +1,10 @@
+== 消融矩阵（每库 120 次，3 轮 × 8 话题，空前缀同档并发首借）==
+FIX=当前库 f0ebc3ef…  4/120 命中
+UNDERSAME=影子变体（reclaim 移入同一 lock_） c0…  0/120
+NORECHECK=消融（只删重锁 memcmp）  100% 命中
+ABLATE=消融（删整个调用）  0 命中
+BASELINE=HEAD 基线  0 命中
+
+== diag 直读（命中时 pristine 值）==
+[DIAG] reclaim enter prefix='' size=9216 pristine=0 cursor=1
+  ⇒ 同进程另一线程**已借出**（cursor=1）时判据仍成立 ⇒ 前提①不成立

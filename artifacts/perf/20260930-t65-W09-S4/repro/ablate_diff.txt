@@ -1,0 +1,7 @@
+    559,560d558
+    <         /* ⛔ t65 消融（counterfactual）：与主线唯一差异 = **不调用** reclaim_orphan_segment。
+    <          * 仅删这一个调用点；函数体、id_pool::reset_free_chain()、其余一切逐字不变。 */
+    563c561
+    <           (void)newly_attached;
+    ---
+    >           (void)reclaim_orphan_segment(info, pref, chunk_size, "attach");

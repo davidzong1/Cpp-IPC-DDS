@@ -1,0 +1,3 @@
+include/dzIPC/shm_pub_sub_ipc.h: 去注释+折叠空白后相等=True  (len 6131 vs 6131)
+include/dzIPC/threepools/shm_control_scheduler.h: 去注释+折叠空白后相等=False  (len 3962 vs 4590)
+  首个差异 @ 957 'st char* debug_name() const noexcept { return nullptr; } }; class IPC_EXPORT ShmControlScheduler { public: using EntryId' ||| 'st char* debug_name() const noexcept { return nullptr; } }; struct PubTickState { ControlClock::time_point next_stale_du'

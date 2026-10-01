@@ -1,0 +1,53 @@
+run_id: 20261001-r60-W04-R01
+date: 2026-10-01T08:42:50+08:00
+HEAD: dcaa0d9
+libipc: f0ebc3ef2df5b276
+test_bin: 88e0a507f3dab633
+
+=== mode1（不安全顺序）× 20 ===
+bash: 第 1 行：    13 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=1 rc=139
+bash: 第 1 行：    16 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=2 rc=139
+bash: 第 1 行：    19 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=3 rc=139
+bash: 第 1 行：    22 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=4 rc=139
+bash: 第 1 行：    25 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=5 rc=139
+bash: 第 1 行：    28 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=6 rc=139
+bash: 第 1 行：    31 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=7 rc=139
+bash: 第 1 行：    34 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=8 rc=139
+bash: 第 1 行：    37 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=9 rc=139
+bash: 第 1 行：    40 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=10 rc=139
+bash: 第 1 行：    43 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=11 rc=139
+bash: 第 1 行：    46 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=12 rc=139
+bash: 第 1 行：    49 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=13 rc=139
+bash: 第 1 行：    52 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=14 rc=139
+bash: 第 1 行：    55 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=15 rc=139
+bash: 第 1 行：    58 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=16 rc=139
+bash: 第 1 行：    61 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=17 rc=139
+bash: 第 1 行：    64 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=18 rc=139
+bash: 第 1 行：    67 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=19 rc=139
+bash: 第 1 行：    70 段错误               timeout 120 ./build/w04/w04repro_r60 1 > /dev/null 2>&1
+mode1 run=20 rc=139
+=== mode9（安全顺序）× 5 ===
+mode9 run=1 rc=0 | received=2
+mode9 run=2 rc=0 | received=2
+mode9 run=3 rc=0 | received=2
+mode9 run=4 rc=0 | received=2
+mode9 run=5 rc=0 | received=2

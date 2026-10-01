@@ -1,0 +1,17 @@
+# t73 · C9 四臂矩阵（1200 轮；二进制固定，只换库）
+# 二进制 = build/bin/test_chunk_capacity_backpressure（唯一变量 = libipc.so.3）
+# 时点 2026-10-01 11:4x
+
+lib_ablate    fd09f31ef013cef7  (**不调用 reclaim**：消融臂)
+lib_base      f0ebc3ef2df5b276  (HEAD 的 ipc.cpp = t22 v2，**无 T73 修复**)
+lib_negative  0186853e1eadb5ea  (T73 但把快照放在 lock_ 外)
+lib_fixed     d0f581d19f74c411  (T73 修复)
+
+--- lib_ablate ×12 ---
+     12 bad_rounds=0
+--- lib_base ×12 ---
+     12 bad_rounds=1
+--- lib_negative ×12 ---
+     12 bad_rounds=1
+--- lib_fixed ×12 ---
+     12 bad_rounds=0

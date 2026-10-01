@@ -10,7 +10,12 @@
  *   L5 一次耗时的 `recv_once` 不能被时间预算抢占 ⇒ 同 worker 邻居确定性延迟
  *      （方案 §10.3 的"部分分片/长组包队头阻塞"最小可判定构造）；
  *   L6 add/remove churn 下单消费者互斥与 owner 归还契约（每次 remove 后 owner==none）；
- *   L7 `stop()` **不**释放 owner（模块必须先 remove_route）—— 记录契约义务，不是判 bug。
+ *   L7 `stop()` **不**释放 owner（模块必须先 remove_route）—— 记录契约义务，不是判 bug；
+ *   L8 进程级池的"首次 start() 决定 worker 数与预算"（模块不得依赖自己那次 start 生效）；
+ *   L9 归属 key 只由稳定量（段名 + domain）构成，拼 generation 会大面积换 worker；
+ *   L10 **R-01 的常驻回归**（t60 补）：generation 重建的两种顺序 —— 不安全顺序必须有
+ *       可观测失败（SIGSEGV **或** 重建后停收），安全顺序必须重建后继续收包。这是
+ *       `W04/证据/w04_repro_generation_switch.cpp` 之外**唯一进入自动回路**的 R-01 判据。
  *
  * 为什么这些必须常驻自动回路：W04 是 W05/W06 的**共同前置**，而它的失效方式全部是
  * 静默的 —— 偏斜导致的 `wait_set_full` 若不归还 owner，重新注册会永久返回 busy
@@ -31,7 +36,9 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <signal.h>
 #include <string>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -867,5 +874,179 @@ TEST(LifecycleContract, RouteKeyMustNotCarryGenerationBecauseAffinityIsPureFunct
         const std::string n = "stable_" + std::to_string(i);
         EXPECT_EQ(RecvWorkerPool::worker_for(n.c_str(), 3, kWorkers),
                   RecvWorkerPool::worker_for(n.c_str(), 3, kWorkers));
+    }
+}
+
+/* --------------------- L10 R-01 的**常驻回归**（t60 补，缺口 ⑥） ----------------
+ *
+ * 背景：R-01（generation 重建与已注册 route）在 W04 交付里**只有一次性复现件**
+ * （`W04/证据/w04_repro_generation_switch.cpp`，手工运行、不入 CTest）⇒ 它一旦回归
+ * **没有任何常驻判据会变红**。本用例把该复现件的两种顺序收进自动回路。
+ *
+ * 判据（照抄 w04_repro_generation_switch.cpp 文件头的契约陈述）：
+ *   · **不安全顺序**（未先 remove_route 就 rebuild/release）⇒ 必须**可观测失败**：
+ *     worker 在 `recv_wait_set::wait` 里 SIGSEGV（实测 20/20 rc=139），或退一步"重建后停收"；
+ *   · **安全顺序**（remove_route → rebuild → add_route）⇒ 必须 rc=0 且**重建后继续收到消息**。
+ *
+ * ⛔ 为什么"不安全顺序"放在**子进程**：它会真的 SIGSEGV，放在测试进程里会把整个套件的
+ * 后续用例一起带走（且 gtest 不会给出可读的失败）。子进程只回报**退出码**，父进程据此判定。
+ * ⛔ 为什么判据是"SIGSEGV **或**停收"而不是只认 SIGSEGV：崩溃是**实现相关的时序后果**，
+ * 把它写成硬断言会让用例随环境变红/变绿；而契约要求的是"不安全顺序**不得静默正常工作**"，
+ * 两种可观测失败形式都满足该要求，且两者都**反**对应"静默地工作得很好"这一真实危险态。
+ */
+namespace {
+
+/* 子进程行为：返回退出码（父进程解释）。 */
+int child_unsafe_order_outcome()
+{
+    RouteName rn{"r01_unsafe"};
+    auto src = std::make_shared<TestRouteSource>(rn);
+    auto pub = make_sender(rn);
+    RecvWorker w(0, RecvBudget{});
+    if (!w.start())
+    {
+        return 3;   // setup 失败 ⇒ 父进程按"不确定"跳过，不判红
+    }
+    const auto st = w.add_route(src);
+    if (st != RecvRegisterStatus::ok)
+    {
+        return 3;
+    }
+    if (!send_messages(pub, {"warm"}))
+    {
+        return 3;
+    }
+    bool warmed = false;
+    for (int i = 0; i < 100 && !warmed; ++i)
+    {
+        warmed = (src->received_count() > 0);
+        if (!warmed)
+        {
+            std::this_thread::sleep_for(10ms);
+        }
+    }
+    if (!warmed)
+    {
+        return 3;
+    }
+
+    /* ---- 不安全顺序：**不**先 remove_route，直接 rebuild（begin_rebuild 会 release 旧 route）
+     * ⇒ wait-set 里那条 entry 仍指向已解映射的 seq 字 ⇒ worker 下一轮 wait 即崩。 ---- */
+    pub.reset();
+    std::this_thread::sleep_for(50ms);
+    src->rebuild();
+    std::this_thread::sleep_for(200ms);
+
+    /* 到这里若还活着，说明崩溃形态没出现：再给一次机会"重建后收包"。
+     * 收得到 ⇒ 不安全顺序被静默容忍了（**判红**）；收不到 ⇒ 停收（**可观测失败**，判绿）。 */
+    auto pub2 = make_sender(rn);
+    (void)send_messages(pub2, {"after"});
+    const std::size_t before = src->received_count();
+    for (int i = 0; i < 200 && src->received_count() == before; ++i)
+    {
+        std::this_thread::sleep_for(10ms);
+    }
+    const bool got_after = (src->received_count() > before);
+    std::fflush(nullptr);
+    return got_after ? 7 : 0;   // 7 = 静默正常工作（危险） ; 0 = 停收（可观测失败）
+}
+
+}   // namespace
+
+TEST(LifecycleContract, GenerationRebuildRequiresRemoveRouteFirstOrCrashStall)
+{
+    /* ---------------- ① 安全顺序（在测试进程内，确定性） ---------------- */
+    {
+        RouteName rn{"r01_safe"};
+        auto src = std::make_shared<TestRouteSource>(rn);
+        auto pub = make_sender(rn);
+        RecvWorker w(0, RecvBudget{});
+        ASSERT_TRUE(w.start());
+        if (!require_backend(w, src))
+        {
+            w.stop();
+            GTEST_SKIP() << "recv_wait_set backend unavailable on this platform/kernel";
+            return;
+        }
+        ASSERT_TRUE(send_messages(pub, {"a", "b"})) << "预热发送失败";
+        ASSERT_TRUE(wait_for([&] { return src->received_count() >= 2; }, 5000))
+            << "预热未收到 2 条 ⇒ 后面的结论不成立";
+        const std::size_t before = src->received_count();
+
+        /* 承重顺序（§4.2/§7.2）：先同步摘除 wait 项 → 再 rebuild/release → 再注册。 */
+        w.remove_route(src.get());
+        src->rebuild();
+        ASSERT_EQ(w.add_route(src), RecvRegisterStatus::ok)
+            << "安全顺序重新注册必须返回 ok（否则该 route 静默不再收包）";
+        ASSERT_TRUE(send_messages(pub, {"c", "d"})) << "重建后发送失败";
+        EXPECT_TRUE(wait_for([&] { return src->received_count() >= before + 2; }, 5000))
+            << "安全顺序（remove_route → rebuild → add_route）之后**必须继续收包**；"
+            << "收到 " << src->received_count() << " / 期望 " << (before + 2);
+        ::testing::Test::RecordProperty("safe_order_received_after_rebuild",
+                                        std::to_string(src->received_count() - before));
+        w.remove_route(src.get());
+        w.stop();
+    }
+
+    /* ---------------- ② 不安全顺序（子进程：崩溃或停收都必须可观测） ---------------- */
+    int pfd[2] = {-1, -1};
+    ASSERT_EQ(::pipe(pfd), 0) << "pipe() failed";
+    const ::pid_t pid = ::fork();
+    ASSERT_GE(pid, 0) << "fork() failed";
+    if (pid == 0)
+    {
+        ::close(pfd[0]);
+        const int code = child_unsafe_order_outcome();
+        ::_exit(code);
+    }
+    ::close(pfd[1]);
+
+    int status = 0;
+    bool reaped = false;
+    for (int i = 0; i < 300; ++i)   // 30 s 硬超时：无论崩/停收都远快于此
+    {
+        const ::pid_t r = ::waitpid(pid, &status, WNOHANG);
+        if (r == pid)
+        {
+            reaped = true;
+            break;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    if (!reaped)
+    {
+        ::kill(pid, SIGKILL);
+        (void)::waitpid(pid, &status, 0);
+        ::close(pfd[0]);
+        FAIL() << "不安全顺序的子进程既没崩也没在 30 s 内结束（疑似挂死）—— 这本身是一种失败形态";
+    }
+    ::close(pfd[0]);
+
+    if (WIFSIGNALED(status))
+    {
+        const int sig = WTERMSIG(status);
+        ::testing::Test::RecordProperty("unsafe_order_signal", std::to_string(sig));
+        EXPECT_EQ(sig, SIGSEGV)
+            << "不安全顺序应当崩在 worker 线程的 wait 里（实测 SIGSEGV）；收到信号 " << sig;
+        return;   // 崩 = 危险态**可观测** ⇒ 判据成立
+    }
+    ASSERT_TRUE(WIFEXITED(status)) << "子进程状态不可解释";
+    const int code = WEXITSTATUS(status);
+    ::testing::Test::RecordProperty("unsafe_order_exit_code", std::to_string(code));
+    switch (code)
+    {
+    case 0:
+        /* 停收：可观测失败 ⇒ 判据成立（契约要求"不得静默正常工作"）。 */
+        break;
+    case 7:
+        FAIL() << "不安全顺序（未先 remove_route 就 rebuild）**静默地正常工作**了 —— "
+                  "这正是 W04-F2 要禁止的形态：该顺序不可依赖，且实现随时可能改回崩溃";
+        break;
+    case 3:
+        GTEST_SKIP() << "子进程 setup 未成功（预热/后端），不安全顺序本环境不可判定";
+        break;
+    default:
+        FAIL() << "子进程返回未预期退出码 " << code;
+        break;
     }
 }

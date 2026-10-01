@@ -1,0 +1,17 @@
+A-sched-pool rc=0
+B-compat-pool rc=0
+C-sched-nopool rc=0
+D-compat-nopool rc=0
+Σ = 120000 /s  池项结构值 = 320 /s
+格                   threads       ctx/s    tick/s  池 wait_timeout/s   ctx-(tick+池)    ctx/Σ
+A-sched-pool             34      9283.4    8951.5            4800.0        -4468.1   0.0774
+B-compat-pool          2034    119962.6       0.0            4807.0       115155.6   0.9997
+C-sched-nopool         1002     31077.3    8718.9               0.0        22358.4   0.2590
+D-compat-nopool        3002    141052.8       0.0               0.0       141052.8   1.1754
+
+回退臂（池 ON，B 格）ctx = 119962.6 /s  ⇒ 与 Σ 偏差 -0.031%
+回退臂（池 OFF，D 格）ctx = 141052.8 /s ⇒ 与 Σ+池 偏差 +17.231%
+默认臂（A 格）ctx = 9283.4 /s ⇒ 隐含批均因子 B = Σ/(ctx-池项) = 13.39（须 ≥ B_min=6.0）
+R-1b 默认臂阈值 = 30480 /s ；回退臂阈值 = 180480 /s
+判定：A 格 9283 ≤ 30480 ? True；B 格 119963 ≤ 180480 ? True
+T58_R1_DONE

@@ -1,0 +1,8 @@
+=== shm_pub_sub_ipc.cc ===
+numstat 1519/262   删除 262 含代码 194   新增 1519 含代码 983
+return 多重集相等: False  基线 34 条 / 现树 81 条
+控制流关键字 基线→现树: {'if': 86, 'else': 5, 'return': 50, 'continue': 5, 'while': 5} → {'if': 156, 'else': 21, 'return': 125, 'continue': 3, 'while': 5}
+=== shm_control_scheduler.cc ===
+numstat 39/2   删除 2 含代码 0   新增 39 含代码 8
+return 多重集相等: True  基线 19 条 / 现树 19 条
+控制流关键字 基线→现树: {'if': 35, 'else': 2, 'return': 31, 'continue': 5, 'while': 1} → {'if': 37, 'else': 3, 'return': 31, 'continue': 5, 'while': 1}

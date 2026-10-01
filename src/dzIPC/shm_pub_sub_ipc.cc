@@ -698,11 +698,13 @@ struct shm_pub_ipc::PubHeartbeatState : dzIPC::shm_control::PubControlState
          * 超时取 2s = 200 个心跳周期(订阅端 10ms 一次), 留足余量, 宁可晚回收
          * 也不要误杀 —— 误杀正是这次要修掉的问题。
          *
-         * ⚠️ 与旧实现的一处**有意的次序调整**：旧版无条件调 collect_stale_peers，
-         * 新版把它挪到 `has_peers()` 之后（调度器只在 has_peers() 为真时才调
-         * on_pub_stale_scan，见 shm_control_scheduler.h:118-124）。无 peer 时扫描
-         * 全部槽位的结果必然是 0（没有 in_use 槽位可判死），因此**行为等价**；
-         * 差别只在"无 peer 时不白扫 64 个槽位"。时间语义（50ms/2s）与判死判据不变。 */
+         * ⛔ 本节**不再**复述已被证伪的"行为等价"及其代价（R1-W05-F1/N1，已由 t77/t84 修）：
+         * 「何时扫 stale」的判据已上收到 `pub_control_tick()`（**唯一**一处），
+         * 两条驱动源（进程级调度器 / 本话题兼容线程）都只调它 ⇒ 结构上不可能分叉。
+         * 完整语义与历史根因见 include/dzIPC/threepools/shm_control_scheduler.h 的
+         * `pub_control_tick()` 契约注释；端到端判据见
+         * test/test_w05_stale_slot_gate.cpp（双臂）与
+         * test_shm_control_scheduler.cpp::PublisherHeartbeatWithoutPeers。 */
         const bool has_peer = h->control_plane_.peer_count() > 0;
         h->subscribed_.store(has_peer, std::memory_order_release);
         if (has_peer && !had_subscriber_ && h->verbose_)
@@ -720,7 +722,15 @@ struct shm_pub_ipc::PubHeartbeatState : dzIPC::shm_control::PubControlState
         return (h != nullptr) && h->control_plane_.peer_count() > 0;
     }
 
-    /* 仅当 has_peers() 为真时被调用（调度器契约）。 */
+    /* 由 `pub_control_tick()` 按**统一节拍**调用：
+     *   · `has_peers() == true`  ⇒ **每拍**调用（周期 = 驱动方拍长）；
+     *   · `has_peers() == false` ⇒ 按 `dead_timeout` 同量级**低频兜底**调用。
+     * ⛔ 本函数**不再**是"仅当 has_peers() 为真时才被调用" —— 该前提已被证伪
+     *    （`collect_stale_peers()` 判死的是 **PeerSlot** 而非 `peer_count`；且
+     *    `remove_peer()`→`release_peer_slot()` 之间存在窗口，会留下 `peer_count==0`
+     *    + `slot.in_use==1` + 心跳陈旧的槽位；整条跳过会让它永不回收并最终误断活
+     *    订阅者）。见 R1-W05-F1 / N1 与 shm_control_scheduler.h 的 `pub_control_tick()` 契约。
+     * ⛔ 也不得把"无 peer 时低频"说成省 CPU：扫 64 槽是常数开销。 */
     void on_pub_stale_scan(dzIPC::shm_control::ControlClock::time_point now,
                            std::chrono::nanoseconds dead_timeout) override
     {
@@ -759,6 +769,12 @@ struct shm_pub_ipc::PubHeartbeatState : dzIPC::shm_control::PubControlState
      * 这里显式写出它持的是**宿主裸指针**，并说明其生命周期由宿主析构序保证（见上）。 */
     shm_pub_ipc* host_{nullptr};
     bool had_subscriber_{false};
+    /* 回退臂（每话题兼容线程）自持的「低频兜底下次到期点」（t84，(B) 路线）。
+     * ⛔ 判据在自由函数 `pub_control_tick()`（唯一一处）；这里只是**驱动方排程状态**。
+     * 放在本 structure 内（本类是 .cc 内的完整定义，头文件里只是不完整类型）
+     * ⇒ ⛔ **不改变 shm_pub_ipc 的布局**，不引入新的 ③d 面。
+     * 只在 compat_control_loop() 所在线程读写 ⇒ 无需加锁。 */
+    dzIPC::shm_control::PubTickState compat_tick_state{};
 };
 
 /******************************************************************************************************/
@@ -932,12 +948,15 @@ void shm_pub_ipc::compat_control_loop()
     {
         if (pub_control_state_ != nullptr)
         {
-            pub_control_state_->on_pub_heartbeat(dzIPC::shm_control::ControlClock::now());
-            if (pub_control_state_->has_peers())
-            {
-                pub_control_state_->on_pub_stale_scan(dzIPC::shm_control::ControlClock::now(),
-                                                      kControlTiming.peer_dead_timeout);
-            }
+            /* ⛔ 这里**曾经**自己写了一遍 `if (has_peers()) { stale_scan(); }` ——
+             * 那正是 F1 修复被复制到两条驱动路径的根源（t78/N1）：修好了调度器臂，
+             * 回退臂却带着修复前的错误判据 ⇒ **L1 运行时回退比基线更差**（400 发 0 收 vs 400/400）。
+             * 现在两条驱动源**都只调同一个判据** `pub_control_tick()`（唯一一处），
+             * 各自只持有自己的排程状态（见 include/dzIPC/threepools/shm_control_scheduler.h）。 */
+            dzIPC::shm_control::pub_control_tick(*pub_control_state_,
+                                                 dzIPC::shm_control::ControlClock::now(),
+                                                 kControlTiming.peer_dead_timeout,
+                                                 pub_control_state_->compat_tick_state);
         }
         std::this_thread::sleep_for(kControlTiming.pub_heartbeat);
     }

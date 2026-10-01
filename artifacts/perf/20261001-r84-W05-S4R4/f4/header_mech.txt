@@ -1,0 +1,7 @@
+=== include/dzIPC/shm_pub_sub_ipc.h ===
+  -5/+15 行；删除行全注释/空行=True；新增行全注释/空行=True
+  去注释后整体逐字符相等: False
+=== include/dzIPC/threepools/shm_control_scheduler.h ===
+  -4/+108 行；删除行全注释/空行=True；新增行全注释/空行=False
+  ⚠️ 非注释行: ['};', 'struct PubTickState', '{', '    ControlClock::time_point next_stale_due{};', '    bool init{false};']
+  去注释后整体逐字符相等: False

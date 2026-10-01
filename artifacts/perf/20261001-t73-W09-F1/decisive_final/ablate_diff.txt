@@ -1,0 +1,198 @@
+    438,441c438,447
+    <    *   ① **本进程此刻尚未持有本档任何 chunk**。取"首次 attach"这一刻即天然满足:
+    <    *      要持有本段的 chunk, 必须先映射本段; 而本函数只在 handles_[prefix] 由
+    <    *      "无效"变为"有效"的那一次被调用 ⇒ 此前本进程不可能从本段借出过任何东西,
+    <    *      也不可能持有接收侧的 buff_t(那同样要求先映射)。
+    ---
+    >    *   ① **本进程此刻尚未持有本档任何 chunk** —— ⛔ 这条**不是"天然满足"的**, 必须靠
+    >    *      **取快照的位置**机械保证(T73 修正, 见下):
+    >    *      · **检验点 = `get_info()` 里 `handles_` 的 `lock_` 临界区内部**: "素净判定 +
+    >    *        空闲链字节快照"与"把 `handles_[prefix]` 置为 valid"发生在**同一个临界区**内
+    >    *        (同一把 `lock_`)。同进程任何其它线程要拿到本段 `info`, 都必须先过这把
+    >    *        `lock_` 且看到 `valid()` ⇒ 它在快照**之后**才可能借出, 其借出必然改动空闲链
+    >    *        ⇒ 被第 ③ 步的持锁复核挡下(放弃复位)。
+    >    *      · 取消该保障(把快照挪到 `lock_` 之外, 即 T73 之前的写法)⇒ 同进程另一线程可在
+    >    *        释放瞬间借出 id#0 且不被复核发现 ⇒ **同一 chunk 被两块借样同时持有**
+    >    *        (F1 反例, 命中率 4/120; 见 W09 交付 §12)。
+    449a456,461
+    >    * ⚠️ **仍然存在的窄窗口(如实登记, 不声称已封死)**: 复核判据是"字节镜像相等" ⇒
+    >    *    若某线程在"快照"与"复核"之间完成了一次 **借出并归还**(A→B→A 的 ABA), 字节可能
+    >    *    回到相同值而复核通过。T73 的修正把该窗口从"`lock_` 释放后即可借出"缩到
+    >    *    "快照之后、复核之前恰好完成一整个借还周期", 但**未消除**。彻底修法 = 引入
+    >    *    "本进程本档在飞借样数"这类**可直接判定**的量(见 W09 交付 §12 的登记)。
+    >    *
+    452a465,468
+    >   /* T73/F1：`pristine` 与 `snap` 由**调用方在 `handles_` 的 `lock_` 临界区内**取好并传入 ——
+    >    * 这是前提①的机械保障(见上方注释)：本函数自己**不再**去读池做"素净判定 + 取快照"，
+    >    * 因为那时 `lock_` 已释放、同进程别的线程可能已经借出。
+    >    * ⛔ 本函数仍**不触碰** `published()`，也不改 reclaim_dead_chunks 的射程。 */
+    454c470,472
+    <                               std::size_t chunk_size, char const *kind) noexcept
+    ---
+    >                               std::size_t chunk_size, char const *kind,
+    >                               bool orphan_candidate,
+    >                               ipc::id_pool<> const *snap_in) noexcept
+    456a475,478
+    >     /* 全新段(zero-filled ⇒ id_pool::invalid()) 或未取到快照：早退 ⇒ 正常首次建段不付
+    >      * /proc 扫描成本。 */
+    >     if (!orphan_candidate || snap_in == nullptr) return false;
+    >     ipc::id_pool<> const snap = *snap_in;
+    458,475c480
+    <     /* 全新段(zero-filled ⇒ id_pool::invalid()): 空闲链本来就是空的, prepare() 会 init,
+    <      * ⛔ 不需要复位 ⇒ 这条早退让**正常首次建段完全不付 /proc 扫描的成本**。 */
+    <     {
+    <       info->lock_.lock();
+    <       bool const pristine = info->pool_.invalid();
+    <       info->lock_.unlock();
+    <       if (pristine) return false;
+    <     }
+    < 
+    <     /* ① 一致快照(持池锁)。 */
+    <     ipc::id_pool<> snap;
+    <     {
+    <       info->lock_.lock();
+    <       std::memcpy(&snap, &info->pool_, sizeof(snap));
+    <       info->lock_.unlock();
+    <     }
+    < 
+    <     /* ② 段级探活(锁外: 读 /proc 是毫秒级操作, 不得在自旋锁内做)。 */
+    ---
+    >     /* ① 段级探活(锁外: 读 /proc 是毫秒级操作, 不得在自旋锁内做)。 */
+    479c484,485
+    <     /* ③ 持锁复核 + 复位(与借出/归还互斥)。 */
+    ---
+    >     /* ② 持锁复核 + 复位(与借出/归还互斥)。复核的基线 = `handles_` 临界区内取的快照
+    >      * ⇒ 同进程任何"快照之后才发生"的借出都会让字节不一致 ⇒ 放弃。 */
+    536a543,550
+    >         /* T73/F1：前提①的机械保障 —— "素净判定 + 空闲链快照"必须与"把 handles_[pref]
+    >          * 置为 valid"处在**同一个 `lock_` 临界区**内。否则同进程另一线程在 `lock_` 释放后
+    >          * 立刻经同一 `handles_[pref]` 借出 id#0, 而本函数随后的"字节镜像复核"看到的正是
+    >          * 那份被改动过的池 ⇒ 会把在飞借样当成孤儿段残留而整体复位 ⇒ 同一 chunk 被两块
+    >          * 借样同时持有(实测 4/120)。快照移进临界区后, 该线程的借出必然发生在快照之后
+    >          * ⇒ 复核必然不一致 ⇒ 放弃复位。 */
+    >         bool orphan_candidate = false;
+    >         ipc::id_pool<> orphan_snap;
+    544a559,574
+    >           if (newly_attached)
+    >           {
+    >             auto *probe = static_cast<chunk_info_t *>(h->get());
+    >             if (probe != nullptr)
+    >             {
+    >               /* 锁序与热路径一致：handles_.lock_ → info->lock_（见 acquire_storage）。 */
+    >               probe->lock_.lock();
+    >               bool const pristine = probe->pool_.invalid();
+    >               if (!pristine)
+    >               {
+    >                 std::memcpy(&orphan_snap, &probe->pool_, sizeof(orphan_snap));
+    >                 orphan_candidate = true;
+    >               }
+    >               probe->lock_.unlock();
+    >             }
+    >           }
+    559,560d588
+    <         /* ⛔ t65 消融（counterfactual）：与主线唯一差异 = **不调用** reclaim_orphan_segment。
+    <          * 仅删这一个调用点；函数体、id_pool::reset_free_chain()、其余一切逐字不变。 */
+    563c591,592
+    <           (void)newly_attached;
+    ---
+    >           (void)reclaim_orphan_segment(info, pref, chunk_size, "attach",
+    >                                        orphan_candidate, &orphan_snap);
+    438,441c438,447
+    <    *   ① **本进程此刻尚未持有本档任何 chunk**。取"首次 attach"这一刻即天然满足:
+    <    *      要持有本段的 chunk, 必须先映射本段; 而本函数只在 handles_[prefix] 由
+    <    *      "无效"变为"有效"的那一次被调用 ⇒ 此前本进程不可能从本段借出过任何东西,
+    <    *      也不可能持有接收侧的 buff_t(那同样要求先映射)。
+    ---
+    >    *   ① **本进程此刻尚未持有本档任何 chunk** —— ⛔ 这条**不是"天然满足"的**, 必须靠
+    >    *      **取快照的位置**机械保证(T73 修正, 见下):
+    >    *      · **检验点 = `get_info()` 里 `handles_` 的 `lock_` 临界区内部**: "素净判定 +
+    >    *        空闲链字节快照"与"把 `handles_[prefix]` 置为 valid"发生在**同一个临界区**内
+    >    *        (同一把 `lock_`)。同进程任何其它线程要拿到本段 `info`, 都必须先过这把
+    >    *        `lock_` 且看到 `valid()` ⇒ 它在快照**之后**才可能借出, 其借出必然改动空闲链
+    >    *        ⇒ 被第 ③ 步的持锁复核挡下(放弃复位)。
+    >    *      · 取消该保障(把快照挪到 `lock_` 之外, 即 T73 之前的写法)⇒ 同进程另一线程可在
+    >    *        释放瞬间借出 id#0 且不被复核发现 ⇒ **同一 chunk 被两块借样同时持有**
+    >    *        (F1 反例, 命中率 4/120; 见 W09 交付 §12)。
+    449a456,461
+    >    * ⚠️ **仍然存在的窄窗口(如实登记, 不声称已封死)**: 复核判据是"字节镜像相等" ⇒
+    >    *    若某线程在"快照"与"复核"之间完成了一次 **借出并归还**(A→B→A 的 ABA), 字节可能
+    >    *    回到相同值而复核通过。T73 的修正把该窗口从"`lock_` 释放后即可借出"缩到
+    >    *    "快照之后、复核之前恰好完成一整个借还周期", 但**未消除**。彻底修法 = 引入
+    >    *    "本进程本档在飞借样数"这类**可直接判定**的量(见 W09 交付 §12 的登记)。
+    >    *
+    452a465,468
+    >   /* T73/F1：`pristine` 与 `snap` 由**调用方在 `handles_` 的 `lock_` 临界区内**取好并传入 ——
+    >    * 这是前提①的机械保障(见上方注释)：本函数自己**不再**去读池做"素净判定 + 取快照"，
+    >    * 因为那时 `lock_` 已释放、同进程别的线程可能已经借出。
+    >    * ⛔ 本函数仍**不触碰** `published()`，也不改 reclaim_dead_chunks 的射程。 */
+    454c470,472
+    <                               std::size_t chunk_size, char const *kind) noexcept
+    ---
+    >                               std::size_t chunk_size, char const *kind,
+    >                               bool orphan_candidate,
+    >                               ipc::id_pool<> const *snap_in) noexcept
+    456a475,478
+    >     /* 全新段(zero-filled ⇒ id_pool::invalid()) 或未取到快照：早退 ⇒ 正常首次建段不付
+    >      * /proc 扫描成本。 */
+    >     if (!orphan_candidate || snap_in == nullptr) return false;
+    >     ipc::id_pool<> const snap = *snap_in;
+    458,475c480
+    <     /* 全新段(zero-filled ⇒ id_pool::invalid()): 空闲链本来就是空的, prepare() 会 init,
+    <      * ⛔ 不需要复位 ⇒ 这条早退让**正常首次建段完全不付 /proc 扫描的成本**。 */
+    <     {
+    <       info->lock_.lock();
+    <       bool const pristine = info->pool_.invalid();
+    <       info->lock_.unlock();
+    <       if (pristine) return false;
+    <     }
+    < 
+    <     /* ① 一致快照(持池锁)。 */
+    <     ipc::id_pool<> snap;
+    <     {
+    <       info->lock_.lock();
+    <       std::memcpy(&snap, &info->pool_, sizeof(snap));
+    <       info->lock_.unlock();
+    <     }
+    < 
+    <     /* ② 段级探活(锁外: 读 /proc 是毫秒级操作, 不得在自旋锁内做)。 */
+    ---
+    >     /* ① 段级探活(锁外: 读 /proc 是毫秒级操作, 不得在自旋锁内做)。 */
+    479c484,485
+    <     /* ③ 持锁复核 + 复位(与借出/归还互斥)。 */
+    ---
+    >     /* ② 持锁复核 + 复位(与借出/归还互斥)。复核的基线 = `handles_` 临界区内取的快照
+    >      * ⇒ 同进程任何"快照之后才发生"的借出都会让字节不一致 ⇒ 放弃。 */
+    536a543,550
+    >         /* T73/F1：前提①的机械保障 —— "素净判定 + 空闲链快照"必须与"把 handles_[pref]
+    >          * 置为 valid"处在**同一个 `lock_` 临界区**内。否则同进程另一线程在 `lock_` 释放后
+    >          * 立刻经同一 `handles_[pref]` 借出 id#0, 而本函数随后的"字节镜像复核"看到的正是
+    >          * 那份被改动过的池 ⇒ 会把在飞借样当成孤儿段残留而整体复位 ⇒ 同一 chunk 被两块
+    >          * 借样同时持有(实测 4/120)。快照移进临界区后, 该线程的借出必然发生在快照之后
+    >          * ⇒ 复核必然不一致 ⇒ 放弃复位。 */
+    >         bool orphan_candidate = false;
+    >         ipc::id_pool<> orphan_snap;
+    544a559,574
+    >           if (newly_attached)
+    >           {
+    >             auto *probe = static_cast<chunk_info_t *>(h->get());
+    >             if (probe != nullptr)
+    >             {
+    >               /* 锁序与热路径一致：handles_.lock_ → info->lock_（见 acquire_storage）。 */
+    >               probe->lock_.lock();
+    >               bool const pristine = probe->pool_.invalid();
+    >               if (!pristine)
+    >               {
+    >                 std::memcpy(&orphan_snap, &probe->pool_, sizeof(orphan_snap));
+    >                 orphan_candidate = true;
+    >               }
+    >               probe->lock_.unlock();
+    >             }
+    >           }
+    559,560d588
+    <         /* ⛔ t65 消融（counterfactual）：与主线唯一差异 = **不调用** reclaim_orphan_segment。
+    <          * 仅删这一个调用点；函数体、id_pool::reset_free_chain()、其余一切逐字不变。 */
+    563c591,592
+    <           (void)newly_attached;
+    ---
+    >           (void)reclaim_orphan_segment(info, pref, chunk_size, "attach",
+    >                                        orphan_candidate, &orphan_snap);

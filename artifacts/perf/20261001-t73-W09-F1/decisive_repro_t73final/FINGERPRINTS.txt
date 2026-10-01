@@ -1,0 +1,11 @@
+# t73 · w09_decisive_repro.sh 完整复跑（三库均对当前测试二进制对齐）
+# 时点 2026-10-01 12:0x
+  tmp/t65/lib_ablate     fd09f31ef013cef7054ba91682267508
+  tmp/t65/lib_fixed      d0f581d19f74c411866111b7c9918fa3
+  tmp/t65/lib_baseline   cdf53085bb70b4b495b3d4c475364f99
+  leaker            cc60b408a8129988ca27bb446093a5cb
+
+判读：A 三库全 PASS ⇒ 无泄漏时无差异；
+      C 注入残留段后 ABL/BASE rc=1(1 FAILED + chunk pool exhausted)、FIX rc=0(9 OK + orphan segment reset) ⇒ 修复能力生效；
+      E 清掉该段后三库全 PASS ⇒ 「清理后 100%」；
+      F leaker 活着 ⇒ FIX rc=1 且 orphan_reset=0 ⇒ 判据承重（不是无差别清库）。

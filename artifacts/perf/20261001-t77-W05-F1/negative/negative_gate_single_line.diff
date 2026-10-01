@@ -1,0 +1,19 @@
+--- /tmp/sched_fixed.cc	2026-10-01 13:20:18.372061231 +0800
++++ src/dzIPC/threepools/shm_control_scheduler.cc	2026-10-01 13:20:18.435059036 +0800
+@@ -367,15 +367,10 @@
+              *     （2s）—— 与判死超时同量级，够抓住"peer 全没了但槽位还挂着"的状态。
+              * ⛔ 这不是"降频优化"：扫 64 个槽位是**常数开销**（µs 级），
+              *    ⛔ **不得**据此声称任何 CPU/吞吐收益；它的全部意义是**正确性**。 */
++            /* ⛔ t77 反向验证（判据的判据）：把门控改回修复前的形态（唯一差异 = 删掉 else 分支）。 */
+             if (has_peers)
+             {
+                 e->pub->on_pub_stale_scan(now, e->timing.peer_dead_timeout);
+-                /* 顺势把低频兜底的下次到期点推后：刚扫过，不必紧接着再扫一遍。 */
+-                e->next_stale_due = now + e->timing.peer_dead_timeout;
+-            }
+-            else if (now >= e->next_stale_due)
+-            {
+-                e->pub->on_pub_stale_scan(now, e->timing.peer_dead_timeout);
+                 e->next_stale_due = now + e->timing.peer_dead_timeout;
+             }
+         }

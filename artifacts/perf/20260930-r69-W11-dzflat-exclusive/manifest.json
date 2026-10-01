@@ -1,0 +1,141 @@
+{
+  "run_id": "20260930-r69-W11-dzflat-exclusive",
+  "work_package": "W11",
+  "source_revision": "dcaa0d9796173a7f2eb453f60a6c77429a1d09af",
+  "working_tree_clean": false,
+  "build_dir": "/home/zwc/cpp_ipc_dds/build",
+  "binary_sha256": {
+    "library": "0298b1df0544b06b3801469b7b44341afb5faf7988e26d02c86ec4e52bfb3202",
+    "test_w08_dzflat_ab": "6bbc6367b2b1256a8f15f7e27274534d5701e0cb351b968b4dbda295f2d8dae5"
+  },
+  "loaded_library_paths": [
+    "/home/zwc/cpp_ipc_dds/build/lib/libipc.so"
+  ],
+  "transport": "tlv|dzflat-a|dzflat-b（同轮内三档并列；⛔ 不跨档比较）",
+  "process_model": "cross-process（生产端 = fork 子进程；消费端 = 父进程）",
+  "topic_count": 1,
+  "unique_topic_count": 1,
+  "worker_count": 0,
+  "fallback_count": 0,
+  "registered_count": null,
+  "valid_rx_count": null,
+  "sample_count": 4320,
+  "config_hash": "1d597dad274e14d21e87e935bcd065a251d1aa0108aeb60b6911ec92cf0ef482",
+  "result_files": [
+    "fingerprint.txt",
+    "C_dzflat_ab.md",
+    "round<K>/{<log>,artifacts/perf/<run_id>/{samples.csv,samples.jsonl,manifest.json,counters_*.json,README.md}}"
+  ],
+  "generated_at": "2026-10-01T10:10:39+08:00",
+  "measurement": "§10.7 三实验组：① 传输机制 transport_ns ② 完整读取 app_read_ns ③ 生产到消费 e2e_ns",
+  "binary_sha256_at_manifest_generation": {
+    "library": "0298b1df0544b06b3801469b7b44341afb5faf7988e26d02c86ec4e52bfb3202",
+    "test_w08_dzflat_ab": "6bbc6367b2b1256a8f15f7e27274534d5701e0cb351b968b4dbda295f2d8dae5",
+    "_semantics": "**首生成时快照**（历史事实，重生成时**继承**不改写）：manifest.json 首次写入的那一刻对 build/ 现场求 sha。⛔ **不得**当作采集时库指纹（W11 新批：采集 09:53、生成 10:10，期间 build 被他人重编过）。"
+  },
+  "binary_sha256_at_collection": {
+    "library": "f0ebc3ef2df5b276e35dd38a21183c0bbc59a51721b24aa2ef067783c07747c9",
+    "tools": {
+      "test_w08_dzflat_ab": "6bbc6367b2b1256a8f15f7e27274534d5701e0cb351b968b4dbda295f2d8dae5"
+    },
+    "source": "artifacts/perf/20260930-r69-W11-dzflat-exclusive/fingerprint.txt",
+    "started": "2026-10-01 09:53:05 +0800",
+    "_semantics": "**采集时快照**（R0-A1 权威）：来自本 run 目录的 fingerprint.txt（采集脚本写的）。⛔ 引用「本批读数用了哪个库」时必须用这一组。"
+  },
+  "library_binding_authority": "fingerprint.txt —— ⛔ 库绑定的**唯一权威**是 `binary_sha256_at_collection.source` 指向的 fingerprint.txt；`binary_sha256*` 只是**生成时**快照，语义不同、⛔ 不可互相替代。",
+  "caliber": {
+    "experiment_groups": {
+      "1_transport": "transport_done_ns − publish_enter_ns（⛔ **不是**完整应用端到端延迟）",
+      "2_full_read": "fully_consumed_ns − app_obtained_ns",
+      "3_produced_to_consumed": "fully_consumed_ns − produced_ns（跨进程 CLOCK_MONOTONIC）",
+      "extra_delivery": "app_obtained_ns − transport_done_ns（通知与交付，不计入三组）"
+    },
+    "dzflat_b_claim_rule": "⛔ 不得宣称「N 倍提升」；B 的收益只能表述为「仅省掉一次 0.88 MB 拷贝」+ e2e B vs A ≈ −7%",
+    "cross_package_rule": "两套基准：W02 xproc_benchmark（A/B **合并**计数）vs W08 test_w08_dzflat_ab（A/B **分列**）。A/B 可分性**只在发布侧**；消费者侧两档同形（各 via_view=13500、via_object=0）",
+    "tool_version": "test_w08_dzflat_ab（W08 权威工装；⛔ 本任务未改其源码）",
+    "round_isolation": "每轮独立进程 + W08_ARTIFACT_ROOT 指向本轮的 round<K>/（⛔ 不改工装内嵌 run_id）"
+  },
+  "rounds": [
+    "round1",
+    "round2",
+    "round3",
+    "round4",
+    "round5",
+    "round6"
+  ],
+  "round_count": 6,
+  "round_windows": [
+    {
+      "round": "round1",
+      "rc": "0",
+      "wall_s": "3",
+      "loadavg_before": "1.98 2.09 2.02",
+      "loadavg_after": "1.98 2.09 2.02",
+      "birth_epoch": "1790819585",
+      "end_epoch": "1790819588",
+      "samples": "720"
+    },
+    {
+      "round": "round2",
+      "rc": "0",
+      "wall_s": "4",
+      "loadavg_before": "1.98 2.09 2.02",
+      "loadavg_after": "2.06 2.11 2.03",
+      "birth_epoch": "1790819588",
+      "end_epoch": "1790819592",
+      "samples": "720"
+    },
+    {
+      "round": "round3",
+      "rc": "0",
+      "wall_s": "3",
+      "loadavg_before": "2.06 2.11 2.03",
+      "loadavg_after": "2.06 2.11 2.03",
+      "birth_epoch": "1790819592",
+      "end_epoch": "1790819595",
+      "samples": "720"
+    },
+    {
+      "round": "round4",
+      "rc": "0",
+      "wall_s": "3",
+      "loadavg_before": "2.06 2.11 2.03",
+      "loadavg_after": "2.14 2.12 2.03",
+      "birth_epoch": "1790819595",
+      "end_epoch": "1790819598",
+      "samples": "720"
+    },
+    {
+      "round": "round5",
+      "rc": "0",
+      "wall_s": "4",
+      "loadavg_before": "2.14 2.12 2.03",
+      "loadavg_after": "2.37 2.17 2.05",
+      "birth_epoch": "1790819598",
+      "end_epoch": "1790819602",
+      "samples": "720"
+    },
+    {
+      "round": "round6",
+      "rc": "0",
+      "wall_s": "3",
+      "loadavg_before": "2.37 2.17 2.05",
+      "loadavg_after": "2.37 2.17 2.05",
+      "birth_epoch": "1790819602",
+      "end_epoch": "1790819605",
+      "samples": "720"
+    }
+  ],
+  "manifest_regeneration": {
+    "at": "2026-10-01T13:45:37.702491+08:00",
+    "reason": "t81/N1：修正 binary_sha256 语义（生成时 vs 采集时）；⛔ 不重跑采集、只重写 manifest 字段",
+    "source_revision_now": "dcaa0d9796173a7f2eb453f60a6c77429a1d09af",
+    "config_hash_now": "1d597dad274e14d21e87e935bcd065a251d1aa0108aeb60b6911ec92cf0ef482",
+    "superseded_generated_at": "2026-10-01T10:10:39+08:00",
+    "current_build_snapshot": {
+      "library": "36c17c7ba941e44be47a07cb7ad653d885bf6582b415eaf121f998bca3dcee0c",
+      "test_w08_dzflat_ab": "6bbc6367b2b1256a8f15f7e27274534d5701e0cb351b968b4dbda295f2d8dae5"
+    },
+    "_note": "顶层 source_revision/config_hash/generated_at/binary_sha256 保持为**采集/首生成时**的值（⛔ 未被本次重生成改写）；重生成时刻的现场 sha 放在 current_build_snapshot。"
+  }
+}

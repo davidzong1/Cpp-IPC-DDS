@@ -1,0 +1,10 @@
+# C9 稳定性测量（当前用例：专属前缀 + 种子进程 + 600 轮）
+# 二进制固定 = build/bin/test_chunk_capacity_backpressure
+lib_fixed    = d0f581d19f74c411
+lib_negative = 0186853e1eadb5ea
+
+--- lib_fixed ×20 ---
+     20 bad_rounds=0
+--- lib_negative ×20 ---
+      3 bad_rounds=0
+     17 bad_rounds=1
