@@ -230,11 +230,11 @@ namespace
 
     auto acc() { return static_cast<acc_t *>(acc_h_.get()); }
 
-    auto &recv_cache()
-    {
-      thread_local ipc::unordered_map<msg_id_t, cache_t> tls;
-      return tls;
-    }
+    // 缓存属于连接；不同话题的消息序号可以相同，不能共用线程级序号表。
+    // disconnect 可以从控制线程调用，清理与收包的分片访问必须互斥。
+    std::mutex recv_cache_mutex_;
+    ipc::unordered_map<msg_id_t, cache_t> recv_cache_;
+    auto &recv_cache() { return recv_cache_; }
   };
 
   IPC_CONSTEXPR_ std::size_t align_chunk_size(std::size_t size) noexcept
@@ -1395,6 +1395,7 @@ namespace
         this->quit_waiting();
         if (dis)
         {
+          std::lock_guard<std::mutex> lock(this->recv_cache_mutex_);
           this->recv_cache().clear();
         }
       }
@@ -2034,6 +2035,8 @@ namespace
             continue;
           }
         }
+        // 分片缓存仅在本连接内查找；锁不跨共享队列等待，也不进入共享 chunk 快路径。
+        std::lock_guard<std::mutex> cache_lock(inf->recv_cache_mutex_);
         // find cache with msg.id_
         auto cac_it = rc.find(msg.id_);
         if (cac_it == rc.end())

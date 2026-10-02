@@ -96,8 +96,8 @@ struct RecvWorker::Impl
         ipc::recv_wait_token token;
         const RecvRouteSource* key{nullptr};
 
-        /* worker 侧 level-triggered 判据：**最后一次确认"已读空"时看到的 seq**。
-         * 只有 recv_once() 返回 0 且 has_pending() == false 才推进它，因此
+        /* worker 侧 level-triggered 判据：稳定空读之前的序号快照。
+         * 空读前后序号一致且 has_pending() == false 才确认此前的快照，因此
          *   · 预算耗尽让出的 route 下一轮仍会被选中（不会因为 wait-set 内部的
          *     last 已更新而永远漏掉）；
          *   · 消息到达与断开都通过同一个 seq 变化体现（需求 §5）。 */
@@ -202,6 +202,9 @@ struct RecvWorker::Impl
      * 线程纪律：只由拥有本 worker 的那条线程在 `collect_pending()` 内使用（单消费者），
      * 故内部全为 relaxed 原子、无锁。 */
     dzIPC::measure::ScanRoundAccumulator scan_acc_;
+
+    // 仅由 worker 线程访问；空读期间真实发生的新序号需要及时复查。
+    bool sequence_progress{false};
 
     void loop();
     void thread_main(std::uint64_t epoch) noexcept;
@@ -371,6 +374,7 @@ void RecvWorker::Impl::run_budget(const std::shared_ptr<Entry>& entry)
     std::size_t bytes = 0;
     std::size_t empty_polls = 0;
     bool more = false;
+    bool confirmed_empty = false;
     const auto deadline = Clock::now() + budget.max_processing_time_per_route;
 
     for (;;)
@@ -382,6 +386,7 @@ void RecvWorker::Impl::run_budget(const std::shared_ptr<Entry>& entry)
          * remove_route 第 4 步（等 in_flight 归零）的职责。 */
         if (entry->removed.load(std::memory_order_acquire)) break;
 
+        const auto seq_before = entry->token.sequence()->load(std::memory_order_acquire);
         std::size_t n = 0;
         /* W06（方案 §10.3）：单次 recv_once 耗时**单独**记录。
          * 计时边界 = 完整的一次 recv_once() 调用（含宿主侧组包/分流/入队）。这不是
@@ -426,10 +431,22 @@ void RecvWorker::Impl::run_budget(const std::shared_ptr<Entry>& entry)
 
         if (n == 0)
         {
-            /* 契约：0 = 无数据/断开。has_pending() 为真说明还有可收数据
-             * （level-triggered 重检），再取一次；但它恒真时必须有上限，
-             * 否则一个坏实现就能把整个 worker 钉死在这条 route 上。 */
-            if (entry->route->has_pending() && ++empty_polls < kMaxEmptyPollsPerBudget) continue;
+            // 只能确认本次空读之前的序号。发布可以发生在 recv 返回空之后；
+            // 把此刻最新的序号写回会把仍在共享队列中的消息误认为已消费。
+            const auto seq_after = entry->token.sequence()->load(std::memory_order_acquire);
+            if (seq_after != seq_before)
+            {
+                sequence_progress = true;
+                more = true;
+                break;  // 留给下一轮，先让同 worker 的其他 route 获得服务
+            }
+            const bool pending = entry->route->has_pending();
+            if (pending && ++empty_polls < kMaxEmptyPollsPerBudget) continue;
+            if (!pending)
+            {
+                entry->last_seq.store(seq_before, std::memory_order_release);
+                confirmed_empty = true;
+            }
             break;
         }
         empty_polls = 0;
@@ -447,13 +464,11 @@ void RecvWorker::Impl::run_budget(const std::shared_ptr<Entry>& entry)
         }
     }
 
-    /* 只有确认读空才推进 last_seq。否则保持 seq 不等，下一轮 collect_pending
-     * 会重新选中它 —— 这就是"预算耗尽不是丢弃"的第二道保险。 */
-    if (!more && !entry->route->has_pending())
-        entry->last_seq.store(entry->token.sequence()->load(std::memory_order_acquire),
-                              std::memory_order_release);
-    else
-        more = true;
+    // 预算耗尽、异常与生命周期退出都不等于确认读空。
+    // 稳定空读后的新发布仍与 last_seq 不同，由下一次就绪检查发现。
+    if (!confirmed_empty)
+        more = !stopping.load(std::memory_order_acquire)
+            && !entry->removed.load(std::memory_order_acquire);
 
     if (messages > 0)
     {
@@ -559,33 +574,13 @@ void RecvWorker::Impl::loop()
             return;
         }
 
-        /* W06-F1（承重顺序）：**已有待处理项时不得先睡**。
-         *
-         * 原实现此处无条件 `wait_once(budget.wait_timeout)` 再 drain，等于"上一步刚用
-         * `collect_pending()` 把就绪 route 排进了队列，却先阻塞一个等待切片再服务它"。
-         * 直接后果（实测，反事实实验见 W06 证据 `logs/f1_counterfactual.log`）：
-         *   · idle route 上单条消息的交付延迟地板恒等于 `wait_timeout`（默认 100 ms）：
-         *     反事实 mean **90.1 ms** / max **100.2 ms**；同一时刻 `wait_wakeups` 基本不增
-         *     （就绪提示来自 collect_pending 的 seq 全扫，而不是内核唤醒）。
-         *   · 更糟的是它会把"延迟"变成"延迟 + 丢一次发现"：`run_budget` 结尾那次
-         *     `last_seq.store(当前 seq)` 读的是**调用返回那一刻**的值，若真实数据正好落在
-         *     "recv_once 读到 0"与"写 last_seq"之间，这次 seq 变化就被吞掉，该 route 直到
-         *     **下一次** seq 变化才被重新选中（同进程 generation 重建只有一次 seq 变化）。
-         *     这是"看起来像偶发丢包/偶发慢"的成因。
-         * 修后同探针 mean **0.16 ms** / max **0.18 ms**（同一二进制、同一域，仅改此处顺序）。
-         *
-         * 但"直接 drain"不能是无条件的：宿主 `has_pending()` 恒真的**病态**实现会让该
-         * route 每轮都 requeue 自己（每轮 kMaxEmptyPollsPerBudget=4 次空读）⇒ 无上限自旋
-         * （实测 947 次/s，而 W04 的 `test_lifecycle_contract` L4 判据是 ≤ 200 次/s）。
-         * 因此：
-         *   · 这一轮 drain **取到了数据** ⇒ 立刻进入下一轮（热路径不再被 wait_timeout 拖慢）；
-         *   · 一条都没取到（队列里只剩"预算耗尽但读不到数据"的项）⇒ **阻塞让出**
-         *     `wait_timeout`，把速率上界还给等待，而不是忙转。
-         * 让出不会吞掉唤醒：`wait_once()` 返回后重新 `collect_pending()` 全扫，level-triggered
-         * 判据才是事实来源。 */
+        /* 有待处理项先 drain。收到数据或空读期间序号真正变化时及时复查；
+         * 只有不含新事件的无进展轮才阻塞退避，避免 has_pending 恒真忙转。
+         * wait-set 记录的是通知观察进度，不能替代 worker 的消费确认边界。 */
+        sequence_progress = false;
         const std::uint64_t msgs_before = messages_received.load(std::memory_order_relaxed);
         drain_deferred();
-        if (messages_received.load(std::memory_order_relaxed) == msgs_before)
+        if (!sequence_progress && messages_received.load(std::memory_order_relaxed) == msgs_before)
         {
             wait_once(budget.wait_timeout);
         }
