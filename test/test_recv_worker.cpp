@@ -139,6 +139,12 @@ public:
     const char* route_name() const noexcept override { return name_.c_str(); }
     std::uint32_t domain_id() const noexcept override { return 0; }
 
+    bool has_pending() const noexcept override
+    {
+        if (after_pending_) after_pending_();
+        return false;
+    }
+
     ipc::recv_wait_token read_wait_token() const noexcept override
     {
         if (force_invalid_token_.load(std::memory_order_acquire))
@@ -171,6 +177,7 @@ public:
 
         if (is_wakeup_artifact(buf))
         {
+            if (after_empty_) after_empty_();
             return 0;
         }
         {
@@ -224,6 +231,10 @@ public:
         std::lock_guard<std::mutex> lock(sink_mtx_);
         return sink_;
     }
+
+    // 仅在注册前设置；钩子在真实空读且 lease 已释放后执行。
+    std::function<void()> after_empty_;
+    std::function<void()> after_pending_;
 
     void throw_on_next_recv() { throw_once_.store(true, std::memory_order_release); }
     void force_invalid_token(bool on) { force_invalid_token_.store(on, std::memory_order_release); }
@@ -909,4 +920,98 @@ TEST(RecvWorker, MessagesArrivingWhileThreadIsIdleExitingAreNotLost)
         << "注册前已在队列里的消息不得静默丢弃（seq 基线已包含它，只靠 seq 变化判据会漏）";
 
     worker.remove_route(src_second.get());
+}
+
+
+/* 空读已经完成、worker 尚未确认序号时提交唯一一条消息。
+ * 使用真实 route/token；钩子位于 lease 释放之后，不阻塞生命周期。
+ * 没有后续业务消息、补发或测试唤醒可以替 worker 恢复进展。 */
+TEST(RecvWorker, PublishAfterEmptyReadIsNotAcknowledgedAsConsumed)
+{
+    RouteName rn{"empty_publish"};
+    auto pub = make_sender(rn);
+    auto src = std::make_shared<TestRouteSource>(rn);
+    std::atomic<bool> injected{false}, sent{false};
+    src->after_empty_ = [&] {
+        if (!injected.exchange(true)) {
+            const std::string msg = "only-message-after-empty";
+            sent.store(pub->try_send(msg.data(), msg.size(), 0));
+        }
+    };
+    RecvBudget budget;
+    budget.wait_timeout = 1000ms;
+    RecvWorker worker(0, budget);
+    ASSERT_TRUE(worker.start());
+    if (!require_backend(worker, src)) {
+        worker.stop();
+        GTEST_SKIP() << "等待后端不可用";
+        return;
+    }
+    const bool delivered = wait_for([&] { return src->received_count() == 1; }, 200);
+    EXPECT_TRUE(injected.load());
+    EXPECT_TRUE(sent.load());
+    EXPECT_TRUE(delivered) << "唯一消息的序号不得被空读后的确认吞掉";
+    worker.remove_route(src.get());
+    worker.stop();
+    if (delivered) EXPECT_EQ(src->received().front(), "only-message-after-empty");
+}
+
+
+TEST(RecvWorker, PublishAfterStableEmptyCheckRemainsVisible)
+{
+    RouteName rn{"stable_empty_publish"};
+    auto pub = make_sender(rn);
+    auto src = std::make_shared<TestRouteSource>(rn);
+    std::atomic<bool> injected{false}, sent{false};
+    src->after_pending_ = [&] {
+        if (!injected.exchange(true)) {
+            const std::string msg = "after-stable-check";
+            sent.store(pub->try_send(msg.data(), msg.size(), 0));
+        }
+    };
+    RecvBudget budget;
+    budget.wait_timeout = 1000ms;
+    RecvWorker worker(0, budget);
+    ASSERT_TRUE(worker.start());
+    if (!require_backend(worker, src)) {
+        worker.stop();
+        GTEST_SKIP() << "等待后端不可用";
+        return;
+    }
+    EXPECT_TRUE(wait_for([&] { return src->received_count() == 1; }, 200));
+    EXPECT_TRUE(sent.load());
+    worker.remove_route(src.get());
+    worker.stop();
+}
+
+TEST(RecvWorker, EmptyReadPublishAcrossSequenceWrapIsNotLost)
+{
+    RouteName rn{"empty_sequence_wrap"};
+    auto pub = make_sender(rn);
+    auto src = std::make_shared<TestRouteSource>(rn);
+    auto token = src->read_wait_token();
+    ASSERT_TRUE(token.valid());
+    // 无接收者运行时设置共享计数，仅用例使用；发布后真实 release 递增到零。
+    const_cast<std::atomic<std::uint32_t>*>(token.sequence())->store(UINT32_MAX);
+    std::atomic<bool> injected{false}, sent{false};
+    src->after_empty_ = [&] {
+        if (!injected.exchange(true)) {
+            const std::string msg = "wrapped-sequence";
+            sent.store(pub->try_send(msg.data(), msg.size(), 0));
+        }
+    };
+    RecvBudget budget;
+    budget.wait_timeout = 1000ms;
+    RecvWorker worker(0, budget);
+    ASSERT_TRUE(worker.start());
+    if (!require_backend(worker, src)) {
+        worker.stop();
+        GTEST_SKIP() << "等待后端不可用";
+        return;
+    }
+    EXPECT_TRUE(wait_for([&] { return src->received_count() == 1; }, 200));
+    EXPECT_TRUE(sent.load());
+    EXPECT_EQ(token.sequence()->load(), 0u);
+    worker.remove_route(src.get());
+    worker.stop();
 }

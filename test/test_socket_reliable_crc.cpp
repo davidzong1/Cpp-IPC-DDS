@@ -1,6 +1,11 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <algorithm>
+#include <cstring>
+#include "ipc_msg/std_msgs/std_image.hpp"
+#include "ipc_msg/ipc_msg_base/udp_rtps_ack_msg.hpp"
+#include "dzIPC/common/topic_data.h"
 #include "dzIPC/common/crc32c.h"
 #include "dzIPC/common/data_rev.h"
 #include "dzIPC/common/hash.h"
@@ -121,4 +126,46 @@ TEST(SocketReliable, ReportedCrcMatchesWireBytes)
     const uint32_t wire_crc = dzIPC::common::crc32c(data.data(), data.size());
     EXPECT_EQ(report.crc32c, wire_crc)
         << "发送端 CRC 与线上字节不符 —— 多半是 CRC 算在了 write_now_page 之前";
+}
+
+
+/* 有意漏掉 A 的后续页，在 A 的 final HB 后排入同尺寸 B。
+ * A 的缺页不能由 B 填满；允许丢弃 A，但不得把混合字节交给应用。 */
+TEST(SocketBestEffort, FinalHeartbeatCannotMixFollowingMessagePages)
+{
+    const std::string name="socket_best_effort_frame_boundary";
+    const auto ip=dzIPC::common::udp_discovery_addr_calculate(name);
+    const auto port=dzIPC::common::udp_discovery_port_calculate(name, 185);
+    auto rx=std::make_shared<ipc::socket::UDPNode>("boundary_rx",ip.c_str(),port,ipc::socket::NodeRole::RecvOnly);
+    auto tx=std::make_shared<ipc::socket::UDPNode>("boundary_tx",ip.c_str(),port,ipc::socket::NodeRole::SendOnly);
+    ASSERT_TRUE(rx->connect());
+    ASSERT_TRUE(tx->connect());
+    dzIPC::Msg::StdImage a,b;
+    a.set_msg_id(77);b.set_msg_id(77);
+    a.width=1;b.width=2;
+    a.data.assign(8192,0x11);b.data.assign(8192,0x22);
+    auto wa=a.serialize(), wb=b.serialize();
+    constexpr std::size_t mtu=1472;
+    auto send_page=[&](ipc::buffer& wire,std::size_t offset) {
+        const auto n=std::min(mtu,wire.size()-offset);
+        auto* ptr=static_cast<std::uint8_t*>(wire.data())+offset;
+        const std::uint16_t page=offset/mtu+1;
+        ptr[n-10]=page>>8;ptr[n-9]=page&255;
+        ipc::buffer fragment(ptr,n);
+        return tx->send(fragment);
+    };
+    ASSERT_TRUE(send_page(wa,0));
+    IpcRtpsHeartbeatMsg hb;
+    hb.page_cnt=(wa.size()+mtu-1)/mtu;hb.total_size=wa.size();hb.data_msg_id=77;
+    hb.sequence=1;hb.flags=IpcRtpsHeartbeatMsg::kFlagFinal;
+    auto control=hb.serialize();
+    ASSERT_TRUE(tx->send(control));
+    for(std::size_t offset=0;offset<wb.size();offset+=mtu) ASSERT_TRUE(send_page(wb,offset));
+    auto result=std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::Msg::StdImage>(),77);
+    const bool first=dzIPC::socket::chunk_rev_topic(rx,result,100,tx);
+    EXPECT_FALSE(first) << "已终止的不完整 A 不得借用 B 的分片交付";
+    ASSERT_TRUE(dzIPC::socket::chunk_rev_topic(rx,result,100,tx));
+    auto received=std::static_pointer_cast<dzIPC::Msg::StdImage>(result->topic());
+    EXPECT_EQ(received->width,2u);
+    EXPECT_EQ(received->data,b.data);
 }

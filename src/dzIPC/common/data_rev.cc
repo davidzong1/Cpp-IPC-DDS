@@ -1833,6 +1833,13 @@ bool recv_chunk_common_impl(ipc::socket::UDPNode& node, ipc::socket::UDPNode* ac
                     meta.sequence = hb_msg.sequence;
                     sender_reliable = (hb_msg.flags & IpcRtpsHeartbeatMsg::kFlagReliable) != 0;
                     hb_final = (hb_msg.flags & IpcRtpsHeartbeatMsg::kFlagFinal) != 0;
+                    // final HB 已结束当前消息，继续收页会混入下一条同尺寸消息。
+                    // 无重传承诺时丢弃不完整消息，不能交付跨消息拼接的数据。
+                    if (hb_final)
+                    {
+                        record_fragment_gaps(received, meta.page_cnt, false);
+                        return false;
+                    }
                     sender_bitmap_ok = (hb_msg.flags & IpcRtpsHeartbeatMsg::kFlagBitmapNack) != 0;
                     sender_feedback_ok = (hb_msg.flags & IpcRtpsHeartbeatMsg::kFlagRateFeedback) != 0;
                     if (!hb_seen)
