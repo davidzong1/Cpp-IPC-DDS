@@ -13,13 +13,13 @@ public:
     sniffer(sniffer const&) = delete;
     sniffer& operator=(sniffer const&) = delete;
 
-    sniffer(const std::string& topic_name, int domain_id, bool ser_or_topic, bool shm_or_socket, uint32_t msg_id,
+    sniffer(const std::string& topic_name, std::uint64_t domain_id, bool ser_or_topic, bool shm_or_socket, uint32_t msg_id,
             bool watch_handshake = false)
     {
         create_sniffer(topic_name, domain_id, ser_or_topic, shm_or_socket, msg_id, watch_handshake);
     }
 
-    void create_sniffer(const std::string& topic_name, int domain_id, bool ser_or_topic, bool shm_or_socket,
+    void create_sniffer(const std::string& topic_name, std::uint64_t domain_id, bool ser_or_topic, bool shm_or_socket,
                         uint32_t msg_id, bool watch_handshake = false)
     {
         if (shm_or_socket)

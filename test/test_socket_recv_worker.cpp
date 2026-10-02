@@ -471,7 +471,7 @@ TEST(SocketRecvWorkerPool, FixedAffinityAndRouteDelegation)
 
 namespace {
 
-constexpr std::size_t kWirePage = 1'472;
+constexpr std::size_t kWirePage = ipc::wire_packet_size;
 constexpr std::size_t kWireTail = 12;
 constexpr std::size_t kWirePayloadPerPage = kWirePage - kWireTail;   // 1460, 与 ipc_msg_base 一致
 constexpr std::uint32_t kWireMsgId = 0x5A000001u;

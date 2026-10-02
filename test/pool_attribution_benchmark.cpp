@@ -1,59 +1,7 @@
-/* 步骤② 归因量测: chunk 池 32 块的占用到底是谁钉的
- * (docs/shm_chunk_pool_occupancy_plan.md §3 步骤②)
- *
- * 上位文档把这一步的产物定成一个**归因结论**: 池空发生时, 三个持有者谁占主导 ——
- *   ① 用户态队列 `view_queue_` / `msg_queue_`(每个未消费 Sample 钉一块)
- *   ② 环内在飞(已 loan 但订阅线程还没 recv 的)
- *   ③ 订阅线程回调中(瞬态)
- * 并给了硬闸门: **这一步之前不许动架构** —— 若主导者是②, 步骤④(解钉)全部白做。
- *
- * ⛔ 为什么必须扫 `queue_size` 而不是只跑默认值
- *    `CircularQueue::push_owned` 满时 drop-oldest **且永不阻塞**
- *    (include/dzIPC/common/circularqueue.h:91-113), 丢弃的 MsgPtr 析构即还池。
- *    于是队列是个**能吸收一切的汇**: `queue_size >= 32` 时 L 恒为 32, 队列主导与
- *    环主导给出**同一个读数**。唯一能分开两者的是 `queue_size < 32` —— 队列主导
- *    预测 L ≈ queue_size, 环主导预测 L ≈ 32 且与 queue_size 无关。
- *    ⇒ `--queue` 是主变量, 单点读数没有判别力。
- *
- * ⛔ 为什么必须在生产进行中连续采样, 不能读终态
- *    停发之后再读, 订阅线程会把环里剩下的条目继续 recv 进队列(drop-oldest 也在
- *    还池), 环必然被读空 —— 那是"我停了"造成的, 不是稳态。本基准在生产持续的
- *    采样窗内逐点取数, 报分布(p50/p95/max), 不报单点终值。
- *
- * ⛔ 尺寸档怎么算(2026-09-19 实测订正, 决定读哪个段)
- *    借样 chunk 的档位**不是** `calc_chunk_size(dzflat_size())` —— 借样路径有**两层**取整:
- *      ipc.cpp:1530  `cap = loan_size_class(size)`     // 先按 large_msg_align(1024) 向上取整
- *      ipc.cpp:510   `chunk_size = calc_chunk_size(cap)` // 再走一次 calc_chunk_size(又 +1024)
- *    ⇒ **档位 = calc_chunk_size(loan_size_class(dzflat_size()))**。
- *    实拍坐实: dzflat_size() = 7600 ⇒ cap = 8192 ⇒ 档位 = 9216。而按
- *    `calc_chunk_size(7600)` 会算成 8192 —— 那其实是 **TLV 回落**用的档
- *    (`no_member_send` 报 `size = 7716, chunk_size = 8192`), 读它会读到另一个池。
- *    两个池在同一个进程里同时存在, 读错了不会报错, 只会安静地量错对象。
- *
- * ⛔ 为什么默认 payload 取 11000
- *    档位 = ceil1024(D) + 1024(见上), 故 payload=D 要落在独占档就得避开别的用例:
- *    test_pool_exhaust_observability(7168/5120/3072/4096)、test_chunk_hold(5120/9216/13312)、
- *    test_uf007(13312) 已占。D = 11000 ⇒ dzflat_size ≈ 11096 ⇒ 档位 12288, 独占。
- *    同档池被别的用例钉干时, 本基准会把别人的占用读成自己的 —— 所以这条是硬要求。
- *
- * ── 两条独立通道(交叉验证, 不是"两条都非零"就算过)────────────────────────────
- *   通道 A(外部, 零产品码改动): 直读池段文件, 走一遍空闲链得 free, L = 32 - free。
- *   通道 B(插桩, 临时):         订阅循环里 store 的 view_queue_->size() / msg_queue_->size()。
- *   判据见文件末尾 report() 里的三条断言 —— 其中 Q_B <= min(queue_size,32) 用的是
- *   **静态属性**(队列容量), 与两条读法都无关, 所以它是一条真判据而不是自证。
- *
- * ⛔ 通道 A 的读法订正(2026-09-19): 上位文档 §2 写的 `L = 32 - cursor_` **符号反了**。
- *    `id_pool::cursor_` 是**空闲链表头**不是借出计数(src/libipc/utility/id_pool.h:51-88):
- *    fresh 池 `init()` 令 next_[i] = i+1(末尾 next_[31] = 32)且 cursor_ = 0 ⇒ fresh 态
- *    `32 - cursor_` 会给出 32(满占), 恰好读反; 而 release(id) 把 cursor_ 设成被释放的
- *    id, 于是它连"近似计数"都不是。正解是**沿 next_ 走链数空闲块**:
- *    `free = 从 cursor_ 出发走到 >= 32 的步数`, `L = 32 - free`。
- *    (docs/probe_teardown.cpp 的 `cursor_ == 32` 只在"一口气钉干、从不归还"的单调场景
- *     下与 free == 0 等价 —— 步骤① 的探针正好只在该场景用过它, 所以没暴露。)
- *
- * 用法: pool_attribution_benchmark --queue=2 --msgs=200000 --drain=0 --pairs=1
- * 输出: 一行机器可读的 `RESULT ...`, 供 docs/pool_attribution_run.sh 汇总成表。
- */
+#include "libipc/memory/resource.h"
+#include "dzIPC/common/name_operator.h"
+// 逐话题读取十块池空闲链，聚合占用后与订阅队列插桩交叉核对。
+
 #include <unistd.h>
 
 #include <algorithm>
@@ -93,17 +41,13 @@ namespace {
 
 using namespace std::chrono_literals;
 
-/* 每档 chunk 池容量 = ipc::large_msg_cache(当前 40, include/libipc/def.h)。
+/* 每档 chunk 池容量 = ipc::topic_msg_cache(当前 10, include/libipc/def.h)。
  * ⛔ 由常量导出而非写死: 容量一变, 写死魔数会让判据失真(同 test_uf007 的教训)。
  * 池空即 cursor_ 走到底 —— 见 id_pool::empty()。 */
-constexpr int kPoolCap = static_cast<int>(ipc::large_msg_cache);
+constexpr int kPoolCap = static_cast<int>(ipc::topic_msg_cache);
 constexpr std::size_t kLargeMsgAlign = 1024;
 constexpr std::uint32_t kMsgId = 31;
 
-/* 其他回归用例占用的尺寸类: test_pool_exhaust_observability(7168/5120/3072/4096)、
- * test_chunk_hold(5120/9216/13312)、test_uf007(13312)。本基准必须落在别的档位,
- * 否则同档池被那些用例钉干时会读成"本基准把池用满了"。 */
-constexpr std::size_t kForeignClasses[] = {3072, 4096, 5120, 7168, 9216, 13312};
 
 /* calc_chunk_size / loan_size_class 的本地副本(照抄 src/libipc/ipc.cpp:229-241 与 :402-419)。
  * ⛔ 抄写而非调用: 那两个函数在 ipc.cpp 的**匿名 namespace** 里, 没有对外链接。
@@ -120,28 +64,28 @@ constexpr std::size_t calc_chunk_size(std::size_t size) noexcept
                        alignof(std::max_align_t));
 }
 /* 借样路径的第一层取整(ipc.cpp:402, 只覆盖 <= 64KB 那一支 —— 本基准的负载远小于此)。 */
-constexpr std::size_t loan_size_class(std::size_t size) noexcept
+inline std::size_t loan_size_class(std::size_t size) noexcept
 {
-    return align_up_to(size, kLargeMsgAlign);
+    return ipc::pool_size_class(size);
 }
 
 /* 借样 chunk 的档位 = 两层取整叠加。见文件头注释的实测订正。 */
-constexpr std::size_t borrowed_chunk_class(std::size_t dzflat_size) noexcept
+inline std::size_t borrowed_chunk_class(std::size_t dzflat_size) noexcept
 {
     return calc_chunk_size(loan_size_class(dzflat_size));
 }
 
-std::string pool_segment_path(std::size_t chunk_class)
+std::string pool_segment_path(std::size_t chunk_class, const std::string& topic)
 {
     /* ⛔ 与 ipc.cpp get_info 的段名构造同步(含容量分量 __C<cap>)。 */
-    return "/dev/shm/__IPC_SHM__CHUNK_INFO__" + std::to_string(chunk_class) +
-           "__C" + std::to_string(static_cast<std::size_t>(ipc::large_msg_cache));
+    const auto key=ipc::topic_pool_prefix({},ipc::make_string(topic.c_str()));
+    return "/dev/shm/"+std::string(key.c_str())+"CHUNK_INFO__"+std::to_string(chunk_class)+"__C10";
 }
 
 /* ── 通道 A: 直读池段, 走一遍空闲链 ──────────────────────────────────────────
  * 段是 tmpfs 文件, 进程 mmap 的同时可按文件读同一份内存(步骤① 已实测)。
- * 段内布局: chunk_info_t 首成员 id_pool<>, 其 next_[40] 占偏移 0..39(每项 1 字节,
- * 见 id_type<0,AlignSize>), cursor_ 在偏移 40 ⇒ 读 [0,41) 就是读整条空闲链。
+ * 段内布局: chunk_info_t 首成员 id_pool<>, 身份头后 next_[10] 占 10 字节(每项 1 字节,
+ * 见 id_type<0,AlignSize>), cursor_ 紧随 next_；跳过身份头读 11 字节。
  *
  * 段不存在 ⇒ 从未取过块 ⇒ 全空闲(libipc 的段是首次 acquire 时懒创建的, 建 route
  * 本身不建段 —— 步骤① §5 环境事实 1)。 */
@@ -180,6 +124,7 @@ PoolSnap read_pool_snapshot(const std::string& path)
         std::FILE* f = std::fopen(path.c_str(), "rb");
         if (f == nullptr) return s;   // 段不存在 ⇒ fresh, 全空闲
         unsigned char b[kPoolCap + 1];
+        std::fseek(f, sizeof(ipc::pool_identity_header), SEEK_SET);
         const std::size_t got = std::fread(b, 1, sizeof(b), f);
         std::fclose(f);
         if (got < sizeof(b)) { s.ok = false; s.bad = PoolSnap::Bad::kShort; }
@@ -274,7 +219,7 @@ void usage()
         "                  环反臂: 生产端压过订阅端时, R = L - Qv 是否上升\n"
         "  --hold=N        持续 drain, 但把前 N 个 Sample 一直留在应用侧(默认 0)\n"
         "                  用来证明 L - Qv 是活量: 应用持有的 chunk 不在任何队列里\n"
-        "  --pairs=K       独立 pub/sub 对的数量(共享同一档池, 默认 1)\n"
+        "  --pairs=K       独立 pub/sub 对的数量(各自独享池, 默认 1)\n"
         "  --no-pin=1      关掉步骤③ 的 view 队列容量钉\n"
         "                  钉默认 ON: view_queue 容量 = min(queue_size, ViewQueueCap()=8)。\n"
         "                  本开关复现\"钉前\"行为, 使 steps ③ 的 A/B 出自同一个二进制。\n"        "  --payload=N     图像 data 字节数(默认 7500)\n"
@@ -377,17 +322,12 @@ int main(int argc, char** argv)
     }
     const std::size_t cap = loan_size_class(need);
     const std::size_t cls = borrowed_chunk_class(need);
-    for (std::size_t c : kForeignClasses) {
-        if (c == cls) {
-            std::fprintf(stderr,
-                "尺寸档 %zu 被其他回归用例占用, 换 --payload"
-                "(当前 need=%zu cap=%zu cls=%zu)\n", cls, need, cap, cls);
-            return 2;
-        }
-    }
-    const std::string segpath = pool_segment_path(cls);
-    const std::string segname = "__IPC_SHM__CHUNK_INFO__" + std::to_string(cls) +
-                                "__C" + std::to_string(static_cast<std::size_t>(ipc::large_msg_cache));
+    const std::string tag = std::to_string(::getpid());
+    std::vector<std::string> segpaths;
+    for (std::size_t i=0;i<a.pairs;++i)
+        segpaths.push_back(pool_segment_path(cls, shm_topic_segment_name("/pool_attr/"+tag+"_"+std::to_string(i),0)));
+    for(const auto& segpath:segpaths) {
+    const auto segname=segpath.substr(std::string("/dev/shm/").size());
 
     /* ── 起始 fresh 检查(硬失败, 不许静默降级)──────────────────────────────
      * 残池会让"容量 32"这个前提消失, 之后所有读数都退化成恒真。
@@ -409,7 +349,9 @@ int main(int argc, char** argv)
                     "⛔ 段 %s 仍有活持有者 —— 拒绝清池(会打断那些进程)\n", segname.c_str());
                 return 5;
             }
-            ipc::shm::handle::clear_storage(segname.c_str());
+            const auto index=static_cast<std::size_t>(&segpath-segpaths.data());
+            const auto topic=shm_topic_segment_name("/pool_attr/"+tag+"_"+std::to_string(index),0);
+            ipc::route::clear_storage(topic.c_str());
             PoolSnap s2 = read_pool_snapshot(segpath);
             if (!s2.ok || s2.free_n != kPoolCap) {
                 std::fprintf(stderr, "清池后仍非 fresh(free=%d) —— 拒绝继续\n", s2.free_n);
@@ -418,13 +360,14 @@ int main(int argc, char** argv)
         }
     }
 
+    }
+
     /* ── 拓扑 ──────────────────────────────────────────────────────────────── */
     dzIPC::EnableDzFlat(true);
     dzIPC::ResetDzFlatCounters();
     dzIPC::ResetDzFlatRxCounters();
 
     std::vector<Pair> pairs(a.pairs);
-    const std::string tag = std::to_string(::getpid());
     for (std::size_t i = 0; i < a.pairs; ++i) {
         const std::string topic = "/pool_attr/" + tag + "_" + std::to_string(i);
         auto pub_td = std::make_shared<dzIPC::TopicData>(
@@ -530,14 +473,19 @@ int main(int argc, char** argv)
     int q_gt_l    = 0;   /* 通道 B 读数 > 通道 A 读数的样本数(交叉验证的硬失败计数) */
 
     for (std::size_t k = 0; k < a.samples; ++k) {
-        const PoolSnap s = read_pool_snapshot(segpath);
+        PoolSnap s;s.free_n=0;
+        for(const auto& path:segpaths) {
+            const auto one=read_pool_snapshot(path);
+            s.free_n+=one.free_n;
+            if(!one.ok){s.ok=false;s.bad=one.bad;}
+        }
         if (!s.ok) {
             ++bad_snaps;
             if (s.bad == PoolSnap::Bad::kLoop) ++bad_loop;
             else                               ++bad_unstab;
         }
         else {
-            const int L = kPoolCap - s.free_n;
+            const int L = kPoolCap * static_cast<int>(segpaths.size()) - s.free_n;
             Ls.push_back(L);
             if (instr) {
                 /* ⛔ Q 只取 **view 队列**。2026-09-19 实测(插桩)坐实 msg 队列不钉 chunk:

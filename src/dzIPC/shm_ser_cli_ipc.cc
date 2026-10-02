@@ -1,3 +1,4 @@
+#include "libipc/memory/resource.h"
 #include "dzIPC/shm_ser_cli_ipc.h"
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -458,7 +459,7 @@ bool try_send_dzflat(const std::shared_ptr<ipc::server>& ch, const std::shared_p
     {
         return false;
     }
-    auto lo = ch->loan_topic(need);
+    auto lo = ch->loan(need);
     if (!lo.valid())
     {
         return false;   // 池耗尽 —— 背压, 不是错误
@@ -691,6 +692,9 @@ void shm_ser_ipc::InitChannel(std::string extra_info)
     control_plane_.begin_rebuild();
     ipc::server::clear_storage(r_name.c_str());
     ipc::server::clear_storage(w_name.c_str());
+    request_pool_lifetime_ = ipc::acquire_topic_pool({}, ipc::make_string(r_name.c_str()));
+    response_pool_lifetime_ = ipc::acquire_topic_pool({}, ipc::make_string(w_name.c_str()));
+    if (!request_pool_lifetime_ || !response_pool_lifetime_) throw std::runtime_error("service pool identity unavailable");
     ipc_r_ptr_ = std::make_shared<ipc::server>(r_name.c_str(), ipc::receiver, verbose_);
     ipc_w_ptr_ = std::make_shared<ipc::server>(w_name.c_str(), ipc::sender, verbose_);
     control_plane_.set_ready();
@@ -706,7 +710,7 @@ void shm_ser_ipc::InitChannel(std::string extra_info)
             : std::string{};
     request_type_name = extract_last_segment(request_type_name);
     pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmServer, topic_name_, request_type_name, "shm",
-                      static_cast<int32_t>(domain_id_), extra_info});
+                      static_cast<uint64_t>(domain_id_), extra_info});
     std::cerr << "\033[32m[" << topic_name_ << "_SerInfo] Server channel created for topic: " << topic_name_
               << "\033[0m" << std::endl;
 
@@ -1298,6 +1302,10 @@ shm_cli_ipc::~shm_cli_ipc()
 
 void shm_cli_ipc::InitChannel(std::string extra_info)
 {
+    const auto prefix = service_prefix_for(topic_name_, domain_id_);
+    request_pool_lifetime_ = ipc::acquire_topic_pool({}, ipc::make_string((prefix + "_ser_r").c_str()));
+    response_pool_lifetime_ = ipc::acquire_topic_pool({}, ipc::make_string((prefix + "_ser_w").c_str()));
+    if (!request_pool_lifetime_ || !response_pool_lifetime_) throw std::runtime_error("service pool identity unavailable");
     // 等待服务端创建通道
     handshake_thread_ = new std::thread(&shm_cli_ipc::cli_handshake, this);
     // 等待握手完成
@@ -1312,7 +1320,7 @@ void shm_cli_ipc::InitChannel(std::string extra_info)
             : std::string{};
     response_type_name = extract_last_segment(response_type_name);
     pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmClient, topic_name_, response_type_name, "shm",
-                      static_cast<int32_t>(domain_id_), extra_info});
+                      static_cast<uint64_t>(domain_id_), extra_info});
     if (verbose_)
     {
         std::cerr << "\033[32m[" << topic_name_ << "_CLiInfo] Client connected to server topic: " << topic_name_

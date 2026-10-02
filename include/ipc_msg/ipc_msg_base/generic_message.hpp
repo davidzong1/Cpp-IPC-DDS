@@ -358,12 +358,12 @@ public:
 private:
     // 跳过页尾标记（反序列化时使用）
     static inline void skip_tail_if_needed(uint32_t& offset) {
-        constexpr uint32_t PAGE_SIZE = 1460;
+        constexpr uint32_t PAGE_SIZE = ipc::wire_packet_size - 12;
         constexpr uint32_t TAIL = 12;
         if (offset >= PAGE_SIZE && (offset - PAGE_SIZE) % (PAGE_SIZE + TAIL) < PAGE_SIZE) {
             // offset 恰好落在数据结束处，下一页之前需要跳过 tail
         }
-        // 检查是否需要跳过 tail：offset % (1460+12) >= 1460
+        // 检查是否需要跳过 tail：offset % (1428+12) >= 1460
         uint32_t pos_in_block = offset % (PAGE_SIZE + TAIL);
         if (pos_in_block >= PAGE_SIZE) {
             offset += (PAGE_SIZE + TAIL) - pos_in_block; // 跳到下一页数据开始
@@ -373,7 +373,7 @@ private:
     // 从 buffer 中按页读数据（对应 adapt_memcpy_tods 的逻辑）
     template<typename T>
     static T read_paged(const uint8_t* buf, uint32_t buf_size, uint32_t& offset) {
-        constexpr uint32_t PAGE_SIZE = 1460;
+        constexpr uint32_t PAGE_SIZE = ipc::wire_packet_size - 12;
         constexpr uint32_t TAIL = 12;
         T val{};
         uint8_t* dst = reinterpret_cast<uint8_t*>(&val);
@@ -406,7 +406,7 @@ private:
         std::string result;
         if (str_size <= 0) return result;
         result.resize(str_size);
-        constexpr uint32_t PAGE_SIZE = 1460;
+        constexpr uint32_t PAGE_SIZE = ipc::wire_packet_size - 12;
         constexpr uint32_t TAIL = 12;
         uint32_t passed_tails = offset / (PAGE_SIZE + TAIL);
         uint32_t pure_data_offset = offset - passed_tails * TAIL;
@@ -436,7 +436,7 @@ private:
         std::vector<uint8_t> result;
         if (data_size <= 0) return result;
         result.resize(data_size);
-        constexpr uint32_t PAGE_SIZE = 1460;
+        constexpr uint32_t PAGE_SIZE = ipc::wire_packet_size - 12;
         constexpr uint32_t TAIL = 12;
         uint32_t passed_tails = offset / (PAGE_SIZE + TAIL);
         uint32_t pure_data_offset = offset - passed_tails * TAIL;
@@ -797,7 +797,7 @@ inline void GenericMessage::deserialize(const ipc::buffer& buffer) {
 
     deserialize_data_cut(buf_size);
 
-    constexpr uint32_t PAGE_SIZE = 1460;
+    constexpr uint32_t PAGE_SIZE = ipc::wire_packet_size - 12;
     constexpr uint32_t TAIL = 12;
 
     while (offset + TAIL < buf_size) {

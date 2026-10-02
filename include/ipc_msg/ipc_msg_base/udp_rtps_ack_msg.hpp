@@ -127,14 +127,14 @@ class IpcRtpsNackBitmapMsg : public IpcMsgBase
 public:
     static constexpr uint32_t kRtpsNackBitmapMsgId = 0x44'5A'4E'42;   // "DZNB"
 
-    /* 单页上限。IpcMsgBase 的 correct_total_size 在 total_data_len >= 1460 时就会
+    /* 单页上限。IpcMsgBase 的 correct_total_size 在 total_data_len >= 1428 时就会
      * 切成两页, 而分片后的 NACK 到达发送端会被逐个 datagram 处理, 每片都过
      * check_id(尾部 msg_id 相同, 都能通过)然后 deserialize 出半截垃圾。
      * 所以这个上限是正确性要求, 不是优化。 */
-    static constexpr std::size_t kMaxWireBytes = 1'459;
+    static constexpr std::size_t kMaxWireBytes = ipc::wire_packet_size - 13;
     static constexpr std::size_t kFixedFieldBytes = 2 + 4 + 4 + 4 + 4 + 2 + 2;   // 22
-    static constexpr std::size_t kMaxBitmapBytes = kMaxWireBytes - kFixedFieldBytes;   // 1437
-    static constexpr std::size_t kMaxBitmapBits = kMaxBitmapBytes * 8;                 // 11496
+    static constexpr std::size_t kMaxBitmapBytes = kMaxWireBytes - kFixedFieldBytes;   // 1405
+    static constexpr std::size_t kMaxBitmapBits = kMaxBitmapBytes * 8;                 // 11240
 
     IpcRtpsNackBitmapMsg() { set_msg_id(kRtpsNackBitmapMsgId); }
 

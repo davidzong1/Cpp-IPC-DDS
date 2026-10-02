@@ -9,7 +9,7 @@
 
 namespace dzIPC {
 #define TAIL_MSG_SIZE 12         // total cnt(2 bytes)+ now page(2 bytes)+total_size(4byte) + dz_ipc_msg_id(4 bytes)
-#define IPC_MSG_MAX_SIZE 1'460   // 1472-12
+#define IPC_MSG_MAX_SIZE (static_cast<uint32_t>(ipc::wire_packet_size) - 12u)
 #define IPC_MSG_
 
 enum MsgType : uint8_t {
@@ -233,7 +233,7 @@ inline std::string msg_to_string(ipc::buffer& raw_data)
         {
             break;
         }
-        else if (offset % 1'472 == IPC_MSG_MAX_SIZE)
+        else if (offset % ipc::wire_packet_size == IPC_MSG_MAX_SIZE)
         {
             page++;
             offset += TAIL_MSG_SIZE;   // 跳过尾部特征字节

@@ -1,3 +1,4 @@
+#include "dzIPC/common/channel_scope.h"
 #pragma once
 /* ser-cli 握手通道(端口 = base + kUdpPortOffsetHandshake, 即 base+2)的**只读**观测探针。
  *
@@ -155,7 +156,7 @@ public:
 
     /* 只读打开 base+2。失败(端口冲突/组地址非法/无网络)返回 false 并由调用方
      * 降级为"无观测" —— 观测不可用绝不能影响嗅探器本身能不能工作。 */
-    bool open(const std::string& topic_name, int domain_id) noexcept
+    bool open(const std::string& topic_name, std::uint64_t domain_id) noexcept
     {
         if (opened_)
         {
@@ -163,13 +164,14 @@ public:
         }
         try
         {
-            const std::string group = common::udp_discovery_addr_calculate(topic_name);
-            port_ = static_cast<uint16_t>(common::udp_discovery_port_calculate(topic_name, domain_id)
+            const std::string group = common::socket_scope_address(topic_name, domain_id, common::ScopeKind::Service);
+            port_ = static_cast<uint16_t>(common::socket_scope_port(topic_name, domain_id, common::ScopeKind::Service)
                                           + common::kUdpPortOffsetHandshake);
             node_ = std::make_unique<ipc::socket::UDPNode>(topic_name.c_str(), group.c_str(), port_,
                                                            ipc::socket::NodeRole::RecvOnly);
             /* connect() 在 libipc 里是"建 socket + bind 组地址 + 入组", **不发任何报文**
              * (全文件没有 ::connect 系统调用, send 才走 sendto)。 */
+            node_->set_scope(common::channel_scope_token(topic_name, domain_id, common::ScopeKind::Service));
             if (!node_->connect())
             {
                 node_.reset();

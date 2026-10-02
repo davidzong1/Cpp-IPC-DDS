@@ -1,3 +1,4 @@
+#include "dzIPC/common/channel_scope.h"
 #include "socket_sniffer.h"
 #include <string>
 #include "dzIPC/common/data_rev.h"
@@ -14,15 +15,18 @@ socket_sniffer::~socket_sniffer()
     }
 }
 
-void socket_sniffer::create_sniffer(const std::string& topic_name, int domain_id, bool ser_or_topic, uint32_t msg_id)
+void socket_sniffer::create_sniffer(const std::string& topic_name, std::uint64_t domain_id, bool ser_or_topic, uint32_t msg_id)
 {
     stop_.store(false, std::memory_order_release);
     this->ser_or_topic_ = ser_or_topic;
     this->msg_id_ = msg_id;
-    std::string ip_hash = dzIPC::common::udp_discovery_addr_calculate(topic_name);
-    uint16_t port_hash = dzIPC::common::udp_discovery_port_calculate(topic_name, domain_id);
+    const auto kind=ser_or_topic ? common::ScopeKind::Service : common::ScopeKind::PubSub;
+    const auto token=common::channel_scope_token(topic_name,domain_id,kind);
+    std::string ip_hash = common::socket_scope_address(topic_name,domain_id,kind);
+    uint16_t port_hash = common::socket_scope_port(topic_name,domain_id,kind);
     req_ = std::make_unique<ipc::socket::UDPNode>();
-    req_->create(topic_name.c_str(), ip_hash.c_str(), port_hash);
+    req_->create(topic_name.c_str(), ip_hash.c_str(), port_hash, ipc::socket::NodeRole::RecvOnly);
+    req_->set_scope(token);
     while (!req_->connect() && !stop_.load(std::memory_order_acquire))
     {
         std::fprintf(stderr, "\033[31m[%s sniffer] failed to connect req socket on %s:%u, retry in 1s...\033[0m\n",
@@ -32,7 +36,8 @@ void socket_sniffer::create_sniffer(const std::string& topic_name, int domain_id
     if (ser_or_topic_)
     {
         res_ = std::make_unique<ipc::socket::UDPNode>();
-        res_->create(topic_name.c_str(), ip_hash.c_str(), port_hash + 1);
+        res_->create(topic_name.c_str(), ip_hash.c_str(), port_hash + 1, ipc::socket::NodeRole::RecvOnly);
+        res_->set_scope(token);
         while (!res_->connect() && !stop_.load(std::memory_order_acquire))
         {
             std::fprintf(stderr, "\033[31m[%s sniffer] failed to connect res socket on %s:%u, retry in 1s...\033[0m\n",

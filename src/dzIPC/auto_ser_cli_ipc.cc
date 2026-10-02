@@ -57,7 +57,7 @@ bool find_peer(const std::string& topic_name, size_t domain_id, info_pool::Entry
         {
             continue;
         }
-        if (e.topic_name != topic_name || e.domain_id != static_cast<int32_t>(domain_id))
+        if (e.topic_name != topic_name || e.domain_id != static_cast<uint64_t>(domain_id))
         {
             continue;
         }
@@ -107,7 +107,7 @@ bool shm_channel_occupied(const std::string& topic_name, size_t domain_id, int32
         {
             continue;
         }
-        if (e.topic_name != topic_name || e.domain_id != static_cast<int32_t>(domain_id))
+        if (e.topic_name != topic_name || e.domain_id != static_cast<uint64_t>(domain_id))
         {
             continue;
         }
@@ -377,14 +377,7 @@ void auto_ser_ipc::supervise()
                 /* 这次连接已经完成一次切换判定。占用拒绝也是一次终态，必须锁住；
                  * 否则 supervise 每轮都会重复递增 attempts/fallbacks 并重复公告。 */
                 attempted_this_connection = true;
-                /* F1 收口: 占用判定问的是**派生段名**, 不是 topic 名 —— 而派生规则会把
-                 * '/' 清成 '_'(name_operator.cc 的 minimal_segment_sanitize), 于是
-                 * "_foo" 与 "/foo" 是**同一个段**的两个别名。拒绝的真因在段名上, 光看
-                 * topic 名字面看不出来: 同一份日志里两次运行、两个不同的 topic 名, 却指向
-                 * 同一个段 —— 没有这条日志就只能去 /dev/shm 里按 topic 名找一个
-                 * **根本不存在的段**(而真正占用的那一段名字完全不同)。
-                 * ⛔ 门控在 verbose_ 上: 默认关(与仓内所有诊断输出一致), 打开时把
-                 * **原始 topic** 与**派生段名**一起打出来, 让"别名"这件事在日志里可见。 */
+                /* 对完整作用域派生的通道做占用判定，拒绝接管其他进程的活跃服务。 */
                 if (verbose_)
                 {
                     std::cerr << "\033[33m[" << topic_name_ << "SerInfo] 拒绝切换: 目标 SHM 通道被占用; 原始 topic=\""

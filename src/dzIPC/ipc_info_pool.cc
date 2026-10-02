@@ -32,20 +32,12 @@
 namespace dzIPC {
 namespace info_pool {
 namespace {
-/* ---- W07 容量与跨版本（共享布局/版本兼容说明见头文件同名段）--------------------
- * 容量: kMaxEntries 512 → 4096（依据: 1000 路独立话题 × 两端 = 2000 条, 见头文件）。
- * 版本: 段名 → dz_ipc_info_pool_v2, kLayoutVersion → 2。**必须同时换名** —— 本仓
- *   libipc 的 shm acquire 对既有段也会按调用方请求的 size 做 ftruncate, 同名段在新旧
- *   二进制之间会互相 resize/截断, 且引用计数落在各自 mapped 区间末尾(不同地址)。
- * 旧段处置: 新二进制只认 v2, 旧二进制只认 v1 ⇒ 不可能互相错解; 滚动升级期间观测面
- *   短暂分成两代(各自的 dzipc info 只看到自己那一代)。v1 段在最后一个使用它的进程退出
- *   时按既有引用计数 unlink; 确认无进程映射后可 `rm -f /dev/shm/dz_ipc_info_pool_v1`
- *   或调 IpcInfoPool::reset_storage() 清本代段。回滚 = 还原本文件与头文件, 之后重新
- *   使用 v1, v2 段在无映射后同样可清。
- * ⛔ 语义保持: 表满 → 同锁内回收死条目 + 一次重试 → 仍失败返回 -1 并限流诊断。 */
-constexpr char kShmName[] = "dz_ipc_info_pool_v2";
+/* 域作用域 V3：domain 由 int32 扩为 uint64，条目仍为 296 字节，extra 偏移已改变。
+ * 因而必须换段名/版本，不读取或重置旧版注册池。容量仍为 4096。
+ * 表满时回收死条目并重试，行为保持不变。 */
+constexpr char kShmName[] = "dz_ipc_info_pool_v3";
 #if defined(_WIN32)
-constexpr char kMutexName[] = "Global\\dz_ipc_info_pool_v2_mtx";
+constexpr char kMutexName[] = "Global\\dz_ipc_info_pool_v3_mtx";
 #endif
 
 constexpr uint32_t kInitUninit = 0;
@@ -62,7 +54,7 @@ struct PoolEntry
     std::atomic<int64_t> heartbeat_ns;
     char topic_name[kMaxTopicName];
     char type_name[kMaxTypeName];
-    int32_t domain_id;
+    uint64_t domain_id;
     char extra[kMaxExtra];
 };
 
@@ -700,7 +692,7 @@ std::vector<EntrySnapshot> IpcInfoPool::snapshot(bool gc_dead_flag)
         int64_t heartbeat_ns;
         char topic_name[kMaxTopicName];
         char type_name[kMaxTypeName];
-        int32_t domain_id;
+        uint64_t domain_id;
         char extra[kMaxExtra];
         bool in_use;
         bool alive;

@@ -100,7 +100,7 @@ public:
         {
             return {};
         }
-        auto lo = publisher_->loan_topic(Flat::loan_size(varlen_budget));
+        auto lo = publisher_->loan(Flat::loan_size(varlen_budget));
         if (!lo.valid())
         {
             return {};
@@ -211,6 +211,8 @@ private:
     bool verbose_{false};
     std::atomic<bool> running{true};
     std::string topic_name_;
+    std::uint64_t topic_pool_id_;
+    std::shared_ptr<void> topic_pool_lifetime_;
     std::string raw_topic_name_;
     std::shared_ptr<ipc::route> publisher_;
     dzIPC::info_pool::ScopedRegistration pool_reg_;
@@ -313,6 +315,8 @@ private:
     bool data_update_{false};
     bool verbose_{false};
     std::string topic_name_;
+    std::uint64_t topic_pool_id_;
+    std::shared_ptr<void> topic_pool_lifetime_;
     std::string raw_topic_name_;
     /* 收包 route 的生命周期协议(阶段 2)。取代原先的 subscriber_ + channel_mtx_:
      * 收包线程只经 acquire_receive/release_receive 取用 route, 握手线程只经

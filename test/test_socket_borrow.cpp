@@ -1,3 +1,4 @@
+#include "dzIPC/common/channel_scope.h"
 /* T1: 话题发布/订阅的 UDP 订阅接收端 —— try_get 走内部借样, try_get_clone 保持拷贝。
  *
  * 背景(为什么 socket 侧也需要一条视图路径): SHM 订阅端有两支互补队列 —— DZFlat 段进
@@ -46,7 +47,7 @@ using namespace std::chrono_literals;
 
 constexpr std::uint32_t kMsgId = 37;
 constexpr std::size_t kDomain = 0;
-constexpr std::size_t kPageSize = 1'472;
+constexpr std::size_t kPageSize = ipc::wire_packet_size;
 constexpr std::size_t kTailSize = 12;
 constexpr std::size_t kDataPerPage = kPageSize - kTailSize;   // 与 data_rev.cc 一致
 
@@ -152,8 +153,8 @@ struct Endpoint
 
 Endpoint endpoint_for(const std::string& topic)
 {
-    return Endpoint{dzIPC::common::udp_discovery_addr_calculate(topic),
-                    dzIPC::common::udp_discovery_port_calculate(topic, kDomain)};
+    return Endpoint{dzIPC::common::socket_scope_address(topic,kDomain,dzIPC::common::ScopeKind::PubSub),
+                    dzIPC::common::socket_scope_port(topic,kDomain,dzIPC::common::ScopeKind::PubSub)};
 }
 
 /* 按约定把一帧 DZFlat 段从 UDP 发出去。返回 false = 环境没有组播, 用例应跳过。 */
@@ -161,6 +162,7 @@ bool send_segment(const std::string& topic, const std::vector<std::uint8_t>& seg
 {
     const Endpoint ep = endpoint_for(topic);
     ipc::socket::UDPNode tx("borrow_tx", ep.ip.c_str(), ep.port, ipc::socket::NodeRole::SendOnly);
+    tx.set_scope(dzIPC::common::channel_scope_token(topic,kDomain,dzIPC::common::ScopeKind::PubSub));
     if (!tx.connect())
     {
         return false;

@@ -137,7 +137,7 @@ public:
 
 protected:
 #define TAIL_MSG_SIZE 12         // total cnt(2 bytes)+ now page(2 bytes)+total_size(4byte) + dz_ipc_msg_id(4 bytes)
-#define IPC_MSG_MAX_SIZE 1'460   // 1472-12
+#define IPC_MSG_MAX_SIZE (static_cast<uint32_t>(ipc::wire_packet_size) - 12u)
 
     size_info correct_total_size(uint32_t total_data_len) const
     {

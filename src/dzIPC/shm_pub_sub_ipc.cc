@@ -1,3 +1,5 @@
+#include "libipc/memory/resource.h"
+#include "dzIPC/common/hash.h"
 #include <dzIPC/shm_pub_sub_ipc.h>
 #include <fcntl.h>
 #if defined(_WIN32)
@@ -784,6 +786,7 @@ shm_pub_ipc::shm_pub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
                          bool verbose, bool enable_thread_qos, int cpu_id, int thread_priority)
     : pub_ipc_base(msg, topic_name, domain_id, verbose)
     , topic_name_(shm_name_for_topic(topic_name, domain_id))
+    , topic_pool_id_(dzIPC::common::fnv1a64(topic_name_.c_str()))
     , raw_topic_name_(topic_name)
     , domain_id_(domain_id)
     , verbose_(verbose)
@@ -874,6 +877,9 @@ void shm_pub_ipc::InitChannel(std::string extra_info)
         }
         control_plane_.begin_rebuild();
         ipc::route::clear_storage(topic_name_.c_str());
+        auto pool = ipc::acquire_topic_pool({}, ipc::make_string(topic_name_.c_str()));
+        if (!pool || pool->identity() != topic_pool_id_) throw std::runtime_error("topic pool identity unavailable");
+        topic_pool_lifetime_ = std::move(pool);
         publisher_ = std::make_shared<ipc::route>(topic_name_.c_str(), ipc::sender, verbose_);
         control_plane_.set_ready();
         /* W05：控制面驱动。默认进程级调度器（线程数 O(1)）；显式回退每话题兼容线程。
@@ -923,7 +929,7 @@ void shm_pub_ipc::InitChannel(std::string extra_info)
                                           : std::string{};
         topic_type_name = extract_last_segment(topic_type_name);
         pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmPub, raw_topic_name_, topic_type_name, "shm",
-                          static_cast<int32_t>(domain_id_), extra_info});
+                          static_cast<uint64_t>(domain_id_), extra_info});
     }
     catch (const std::exception& e)
     {
@@ -1157,7 +1163,7 @@ bool shm_pub_ipc::try_publish_dzflat(const std::shared_ptr<IpcMsgBase>& msg, std
     {
         return false;
     }
-    auto lo = publisher_->loan_topic(need);
+    auto lo = publisher_->loan(need);
     if (!lo.valid())
     {
         return false;   // 池耗尽 / 无接收方 —— 回退整包
@@ -1207,7 +1213,7 @@ bool shm_pub_ipc::publish_prebuilt_segment(const void* seg, std::size_t len)
     {
         return false;
     }
-    auto lo = publisher_->loan_topic(h.total_size);
+    auto lo = publisher_->loan(h.total_size);
     if (!lo.valid())
     {
         return false;   // 池耗尽 —— 背压, 回退整包
@@ -1328,6 +1334,7 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
                          int thread_priority)
     : sub_ipc_base(msg, topic_name, domain_id, queue_size, verbose)
     , topic_name_(shm_name_for_topic(topic_name, domain_id))
+    , topic_pool_id_(dzIPC::common::fnv1a64(topic_name_.c_str()))
     , raw_topic_name_(topic_name)
     , domain_id_(domain_id)
     , verbose_(verbose)
@@ -1354,13 +1361,15 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
      * 不设配额一个慢消费者就能把整档池钉干。计数三条路径: adopt 入队 +1,
      * pop(get_clone/try_get_clone) -1, 满队挤最老(evict 回调) -1。 */
     sub_state_->adopt_cap = view_cap;
-    const auto state = sub_state_;
+    // 队列属于 SubState，回调不能强持有 SubState，否则形成环并永久钉住池。
+    const std::weak_ptr<SubState> weak_state = sub_state_;
     sub_state_->msg_queue->set_evict_cb(
-        [state](const std::shared_ptr<IpcMsgBase> &dropped)
+        [weak_state](const std::shared_ptr<IpcMsgBase> &dropped)
         {
             if (dropped && dropped->dzflat_is_borrowed())
             {
-                state->adopt_borrowed.fetch_sub(1, std::memory_order_relaxed);
+                if (auto state = weak_state.lock())
+                    state->adopt_borrowed.fetch_sub(1, std::memory_order_relaxed);
             }
         });
 }
@@ -2203,6 +2212,9 @@ void shm_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
 /******************************************************************************************************/
 void shm_sub_ipc::InitChannel(std::string extra_info)
 {
+    auto pool = ipc::acquire_topic_pool({}, ipc::make_string(topic_name_.c_str()));
+    if (!pool || pool->identity() != topic_pool_id_) throw std::runtime_error("topic pool identity unavailable");
+    topic_pool_lifetime_ = std::move(pool);
     std::shared_ptr<TopicData> topic_template;
     {
         std::lock_guard<std::mutex> lock(sub_state_->topic_msg_mtx);
@@ -2214,7 +2226,7 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
             : std::string{};
     topic_type_name = extract_last_segment(topic_type_name);
     pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmSub, raw_topic_name_, topic_type_name, "shm",
-                      static_cast<int32_t>(domain_id_), extra_info});
+                      static_cast<uint64_t>(domain_id_), extra_info});
     /* ===== W05：控制面驱动（取代 per-route `sub_handshake_thread_`）=====
      *
      * 顺序承重：控制面驱动必须**先于**收包线程就绪。原因有两个，都跟"接管窗口"有关：

@@ -17,7 +17,7 @@ public:
 
     /* watch_handshake 默认 false: 不打开时与历史行为逐字一致(不多占端口、
      * 不多输出一行)。见 handshake_probe.h 的说明与实测证据。 */
-    socket_sniffer(const std::string& topic_name, int domain_id, bool ser_or_topic, uint32_t msg_id,
+    socket_sniffer(const std::string& topic_name, std::uint64_t domain_id, bool ser_or_topic, uint32_t msg_id,
                    bool watch_handshake = false)
         : sniffer_base(topic_name, domain_id, ser_or_topic, msg_id)
     {
@@ -25,7 +25,7 @@ public:
         create_sniffer(topic_name, domain_id, ser_or_topic, msg_id);
     }
 
-    void create_sniffer(const std::string& topic_name, int domain_id, bool ser_or_topic, uint32_t msg_id) override;
+    void create_sniffer(const std::string& topic_name, std::uint64_t domain_id, bool ser_or_topic, uint32_t msg_id) override;
     sniffer_info try_recv() noexcept override;
 
 private:

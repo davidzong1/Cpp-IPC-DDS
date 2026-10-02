@@ -196,7 +196,7 @@ TEST(AdoptLoanQuota, WarnsWhenQueueExceedsPinCap)
     /* 补充项③: 钉上限对齐 ROS 2 默认 depth —— 视图/adopt 共用 ViewQueueCap()。 */
     EXPECT_EQ(dzIPC::ViewQueueCap(), 10u)
         << "钉上限应为 topic_msg_cache = 10(对齐默认队列长度)";
-    EXPECT_EQ(static_cast<std::size_t>(ipc::large_msg_cache), 40u);
+    EXPECT_EQ(static_cast<std::size_t>(ipc::topic_msg_cache), 10u);
 
     DzFlatSwitch on{true};
     const std::string topic = unique_topic("warn");

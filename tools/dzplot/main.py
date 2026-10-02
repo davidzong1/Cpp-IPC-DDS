@@ -941,7 +941,7 @@ class LiveSniffSource:
     Channel naming follows the same convention as dzipc_topic_cat and the
     publisher internals.  唯一出处是 dzIPC/common/name_operator.h —— 本类只是它的
     Python 转写(该头文件的注释把本文件列为"已知复刻点", 改 C++ 规则时须同步此处):
-      shm_topic_segment_name(topic, domain) = "dz_ipc_d<domain>_<sanitized>_topic"
+      shm_topic_segment_name(topic, domain) = "dz_ipc_d<domain>_s2_<scope128>_topic"
       shm_topic_control_name(topic, domain) = 上面那个 + "_control2"
     domain 参与命名: 漏掉它就没有 domain 隔离(见 docs/shm_defect_fixes.md 第 1 条)。
 
@@ -1076,8 +1076,15 @@ class LiveSniffSource:
         on SHM at all (see docs/shm_defect_fixes.md item 1).  A mismatch here is
         silent — Sniffer.open() just fails and the topic shows as empty.
         """
-        return ("dz_ipc_d" + str(domain) + "_"
-                + LiveSniffSource._sanitize_topic_name(topic) + "_topic")
+        raw = topic.encode("utf-8")
+        key = f"DZSC2:1:{domain}:{len(raw)}:".encode("ascii") + raw
+        def fnv(data):
+            value = 14695981039346656037
+            for byte in data:
+                value = ((value ^ byte) * 1099511628211) & ((1 << 64) - 1)
+            return value
+        suffix = f"{fnv(key):016x}{fnv(b'identity:' + key):016x}"
+        return f"dz_ipc_d{domain}_s2_{suffix}_topic"
 
     @staticmethod
     def _control_plane_name_for_topic(topic: str, domain: int = 0) -> str:

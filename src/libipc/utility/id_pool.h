@@ -38,7 +38,7 @@ template <std::size_t DataSize  = 0,
 class id_pool {
 
     static constexpr std::size_t limited_max_count() {
-        return ipc::detail::min<std::size_t>(large_msg_cache, (std::numeric_limits<uint_t<8>>::max)());
+        return ipc::detail::min<std::size_t>(topic_msg_cache, (std::numeric_limits<uint_t<8>>::max)());
     }
 
 public:
@@ -53,18 +53,16 @@ private:
     bool prepared_ = false;
 
 public:
-    void prepare(std::size_t count = max_count) {
-        if (!prepared_ && this->invalid()) this->init(count);
+    void prepare() {
+        if (!prepared_ && this->invalid()) this->init();
         prepared_ = true;
     }
 
-    void init(std::size_t count = max_count) {
+    void init() {
         for (storage_id_t i = 0; i < max_count;) {
             i = next_[i] = (i + 1);
         }
-        // 元数据布局保持不变；短池只将前 count 个槽加入空闲链。
-        if (count == 0) cursor_ = max_count;
-        else if (count < max_count) next_[count - 1] = max_count;
+
     }
 
     bool invalid() const {
@@ -102,9 +100,9 @@ public:
      * ⛔ 调用方必须：①确认段级无活映射者；②在**池锁内**调用（与借出/归还互斥）。
      * 详见 ipc.cpp 的 reclaim_orphan_segment 安全性论证。
      */
-    void reset_free_chain(std::size_t count = max_count) {
+    void reset_free_chain() {
         cursor_ = 0;
-        init(count);
+        init();
         prepared_ = true;
     }
 

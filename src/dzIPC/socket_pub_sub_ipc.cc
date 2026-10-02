@@ -1,3 +1,4 @@
+#include "dzIPC/common/channel_scope.h"
 #include "dzIPC/common/sample_message.h"
 #include "dzIPC/socket_pub_sub_ipc.h"
 #include <unistd.h>
@@ -554,8 +555,8 @@ socket_pub_ipc::socket_pub_ipc(const std::shared_ptr<TopicData>& msg, const std:
     , thread_options_(dzIPC::ThreadDispatch::make_realtime_options(enable_thread_qos, cpu_id, thread_priority))
 {
     this->topic_msg_.reset(msg->clone());
-    this->port_hash_ = dzIPC::common::udp_discovery_port_calculate(topic_name, domain_id);
-    this->ipaddr_ = dzIPC::common::udp_discovery_addr_calculate(topic_name);
+    this->port_hash_ = dzIPC::common::socket_scope_port(topic_name_, domain_id_, dzIPC::common::ScopeKind::PubSub);
+    this->ipaddr_ = dzIPC::common::socket_scope_address(topic_name_, domain_id_, dzIPC::common::ScopeKind::PubSub);
     dzIPC::ThreadDispatch::apply_current_thread_options(thread_options_, verbose_, topic_name_ + "_SocketPubOwnerThread");
 }
 
@@ -617,11 +618,13 @@ void socket_pub_ipc::InitChannel(std::string extra_info)
          * 会让本机所有进程都收不到, 同机 IPC 直接失效。详见 libipc/udp.h。 */
         publisher_ = std::make_shared<ipc::socket::UDPNode>(this->topic_name_.c_str(), this->ipaddr_.c_str(),
                                                             this->port_hash_, ipc::socket::NodeRole::SendOnly);
+        publisher_->set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::PubSub));
         /* ACK 回传通道: 订阅端把 ACK/NACK 发到这个端口, 上面没有自己的数据。 */
         ack_rx_ = std::make_shared<ipc::socket::UDPNode>(
             this->topic_name_.c_str(), this->ipaddr_.c_str(),
             static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetAckData),
             ipc::socket::NodeRole::RecvOnly);
+        ack_rx_->set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::PubSub));
         if (verbose_)
             std::cerr << "\033[32m[" << topic_name_ << "PubInfo] Publisher initialized on IP: " << this->ipaddr_
                       << " Port: " << this->port_hash_ << " for topic: " << topic_name_ << "\033[0m" << std::endl;
@@ -650,7 +653,7 @@ void socket_pub_ipc::InitChannel(std::string extra_info)
                                           : std::string{};
         topic_type_name = extract_last_segment(topic_type_name);
         pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketPub, topic_name_, topic_type_name, "socket",
-                          static_cast<int32_t>(domain_id_), extra_info});
+                          static_cast<uint64_t>(domain_id_), extra_info});
         /* 本进程的 SocketPub 条目注册完成后再启动发现线程, 避免它先于
          * rebind 拿到不完整的池快照。重复 InitChannel 不再重复起线程。 */
         if (discovery_thread_ == nullptr)
@@ -686,7 +689,7 @@ void socket_pub_ipc::discovery_loop()
             for (auto& entry : pool_snap)
             {
                 if (entry.kind == info_pool::EntryKind::SocketSub && entry.topic_name == topic_name_
-                    && entry.domain_id == static_cast<int32_t>(domain_id_) && entry.alive && entry.in_use)
+                    && entry.domain_id == static_cast<uint64_t>(domain_id_) && entry.alive && entry.in_use)
                 {
                     ++total_subs;
                 }
@@ -778,7 +781,7 @@ bool socket_pub_ipc::publish_best_effort(std::shared_ptr<IpcMsgBase> msg)
             {
                 if (entry.kind == info_pool::EntryKind::SocketSub
                     && entry.topic_name == topic_name_
-                    && entry.domain_id == static_cast<int32_t>(domain_id_)
+                    && entry.domain_id == static_cast<uint64_t>(domain_id_)
                     && entry.alive && entry.in_use)
                 {
                     ++total_socket_subs;
@@ -972,7 +975,7 @@ bool socket_pub_ipc::publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg)
 /******************************************************************************************************/
 /* 预构造段发布(见 pub_ipc_base.h): 段由调用方按自己的 schema 写好, 原样当作 UDP 载荷送出。
  *
- * 分帧完全复用既有腿 —— 与 publish_best_effort 的 UDP 分支逐行同构(同一套 1460+12 页尾、
+ * 分帧完全复用既有腿 —— 与 publish_best_effort 的 UDP 分支逐行同构(同一套 1428+12 页尾、
  * 同一套 BestEffort/None), 所以 wire 格式没变, 变的只是"载荷是平坦段还是 TLV"。接收侧
  * 认得出它: 段首 magic 的分流闸在 data_rev.cc(socket 侧的 T1)。
  *
@@ -1000,11 +1003,11 @@ bool socket_pub_ipc::publish_prebuilt_segment(const void* seg, std::size_t len)
         return false;
     }
 
-    /* UDP 的 wire 是"每 1460 字节数据后跟 12 字节页尾", 所以段在 wire 上**不连续** ——
+    /* UDP 的 wire 是"每 1428 字节数据后跟 12 字节页尾", 所以段在 wire 上**不连续** ——
      * 接收端正是按这个格式去帧还原成连续段的(data_rev.cc 的 de_frame_dzflat), 而
      * chunk_send_ex 要求载荷自带页尾(它只就地改写 now_page 字段)。所以这里必须先铺帧:
      * 这一跳拷贝是 UDP 平坦段的固有成本(TLV 路径的那一份由 serialize() 付)。 */
-    constexpr std::size_t kDataPerPage = 1'460;   /* == IPC_MSG_MAX_SIZE */
+    constexpr std::size_t kDataPerPage = ipc::wire_packet_size - 12;   /* == IPC_MSG_MAX_SIZE */
     constexpr std::size_t kTailSize = 12;         /* == TAIL_SIZE */
     /* 接收端 valid_chunk_meta 的上界(data_rev.cc 的 MAX_RECV_TOTAL_SIZE), 超出必被丢。 */
     constexpr std::size_t kMaxWireBytes = 64 * 1'024 * 1'024;
@@ -1091,8 +1094,8 @@ socket_sub_ipc::socket_sub_ipc(const std::shared_ptr<TopicData>& msg, const std:
     , thread_options_(dzIPC::ThreadDispatch::make_realtime_options(enable_thread_qos, cpu_id, thread_priority))
 {
     this->topic_msg_.reset(msg->clone());
-    this->port_hash_ = dzIPC::common::udp_discovery_port_calculate(topic_name, domain_id);
-    this->ipaddr_ = dzIPC::common::udp_discovery_addr_calculate(topic_name);
+    this->port_hash_ = dzIPC::common::socket_scope_port(topic_name_, domain_id_, dzIPC::common::ScopeKind::PubSub);
+    this->ipaddr_ = dzIPC::common::socket_scope_address(topic_name_, domain_id_, dzIPC::common::ScopeKind::PubSub);
     this->msg_queue_ = std::make_shared<CircularQueue<IpcMsgBase>>(queue_size);
     /* 视图队列与物化队列同容量: 两条队列各自承接一种 wire, 单条上的压力不会超过总入流。 */
     this->view_queue_ = std::make_shared<CircularQueue<Sample>>(queue_size);
@@ -1192,12 +1195,14 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
     {
         subscriber_ = std::make_shared<ipc::socket::UDPNode>(this->topic_name_.c_str(), this->ipaddr_.c_str(),
                                                              this->port_hash_, ipc::socket::NodeRole::RecvOnly);
+        subscriber_->set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::PubSub));
         /* ACK 发送通道 (端点分离): 发到发布端 ack_rx_ 监听的端口。
          * SendOnly 不入组, 所以自己发的 ACK 不会回绕进 subscriber_。 */
         ack_tx_ = std::make_shared<ipc::socket::UDPNode>(
             this->topic_name_.c_str(), this->ipaddr_.c_str(),
             static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetAckData),
             ipc::socket::NodeRole::SendOnly);
+        ack_tx_->set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::PubSub));
         if (verbose_)
             std::cerr << "\033[32m[" << topic_name_ << "SubInfo] Subscriber initialized on IP: " << this->ipaddr_
                       << " Port: " << this->port_hash_ << " for topic: " << topic_name_ << "\033[0m" << std::endl;
@@ -1231,7 +1236,7 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
                                           : std::string{};
         topic_type_name = extract_last_segment(topic_type_name);
         pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketSub, topic_name_, topic_type_name, "socket",
-                          static_cast<int32_t>(domain_id_), extra_info});
+                          static_cast<uint64_t>(domain_id_), extra_info});
         /* ---- 接收路径：worker 优先；任何非 ok / 后端不可用 / 开关 / nodelet / fork 闸
          *      ⇒ start_receive_path() 已打显式原因，回退兼容 subscribe_thread_。---- */
         auto state = std::make_shared<socket_sub_receive_state>();

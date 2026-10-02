@@ -1,3 +1,4 @@
+#include "dzIPC/common/channel_scope.h"
 #include "dzIPC/socket_ser_cli_ipc.h"
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -447,8 +448,8 @@ socket_ser_ipc::socket_ser_ipc(const std::string& topic_name, const std::shared_
     , thread_options_(dzIPC::ThreadDispatch::make_realtime_options(enable_thread_qos, cpu_id, thread_priority))
 {
     message_.reset(msg->clone());
-    this->port_hash_ = dzIPC::common::udp_discovery_port_calculate(topic_name, domain_id_);
-    this->ipaddr_ = dzIPC::common::udp_discovery_addr_calculate(topic_name);
+    this->port_hash_ = dzIPC::common::socket_scope_port(topic_name_, domain_id_, dzIPC::common::ScopeKind::Service);
+    this->ipaddr_ = dzIPC::common::socket_scope_address(topic_name_, domain_id_, dzIPC::common::ScopeKind::Service);
     dzIPC::ThreadDispatch::apply_current_thread_options(thread_options_, verbose_, topic_name_ + "_SocketSerOwnerThread");
 }
 
@@ -573,7 +574,7 @@ void socket_ser_ipc::InitChannel(std::string extra_info)
                 : std::string{};
         request_type_name = extract_last_segment(request_type_name);
         pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketServer, topic_name_, request_type_name, "socket",
-                          static_cast<int32_t>(domain_id_), extra_info});
+                          static_cast<uint64_t>(domain_id_), extra_info});
         /* 接收路径：优先接入共享层固定 socket worker；任何非 ok / 后端不可用 / 被开关或
          * fork 闸禁止 ⇒ start_receive_path() 已打显式原因，这里退回兼容 response 线程。 */
         const bool worker_mode = start_receive_path();
@@ -610,20 +611,24 @@ bool socket_ser_ipc::open_data_plane()
     ipc_r_ptr_ = std::make_shared<ipc::socket::UDPNode>(this->topic_name_.c_str(), this->ipaddr_.c_str(),
                                                         static_cast<uint16_t>(this->port_hash_),
                                                         ipc::socket::NodeRole::RecvOnly);
+    ipc_r_ptr_->set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::Service));
     ipc_w_ptr_ = std::make_shared<ipc::socket::UDPNode>(
         this->topic_name_.c_str(), this->ipaddr_.c_str(),
         static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetResponse),
         ipc::socket::NodeRole::SendOnly);
+    ipc_w_ptr_->set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::Service));
     /* 请求方向的 ACK: 服务端发出 -> 客户端收 */
     ack_r_tx_ = std::make_shared<ipc::socket::UDPNode>(
         this->topic_name_.c_str(), this->ipaddr_.c_str(),
         static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetAckData),
         ipc::socket::NodeRole::SendOnly);
+    ack_r_tx_->set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::Service));
     /* 响应方向的 ACK: 客户端发出 -> 服务端收 */
     ack_w_rx_ = std::make_shared<ipc::socket::UDPNode>(
         this->topic_name_.c_str(), this->ipaddr_.c_str(),
         static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetAckResponse),
         ipc::socket::NodeRole::RecvOnly);
+    ack_w_rx_->set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::Service));
     if (verbose_)
     {
         std::cerr << "\033[32m[" << topic_name_ << "SerInfo] Request initialized on IP: " << this->ipaddr_
@@ -742,6 +747,7 @@ void socket_ser_ipc::server_handshake()
 {
     uint64_t handshake_timeout_ms = 100;   // 100 ms
     ipc::socket::UDPNode ser_hs(topic_name_.c_str(), ipaddr_.c_str(), port_hash_ + dzIPC::common::kUdpPortOffsetHandshake);
+    ser_hs.set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::Service));
     std::shared_ptr<IpcPubSubIdInitMsg> hs_msg = std::make_shared<IpcPubSubIdInitMsg>();
     /* R4: 连接失败必须可被 running 打断, 否则析构/切换的 join 永久阻塞。 */
     if (!connect_with_retry(&ser_hs, running, topic_name_, "SerInfo"))
@@ -1155,8 +1161,8 @@ socket_cli_ipc::socket_cli_ipc(const std::string& topic_name, const std::shared_
     , thread_options_(dzIPC::ThreadDispatch::make_realtime_options(enable_thread_qos, cpu_id, thread_priority))
 {
     message_.reset(msg->clone());
-    this->port_hash_ = dzIPC::common::udp_discovery_port_calculate(topic_name_, domain_id);
-    this->ipaddr_ = dzIPC::common::udp_discovery_addr_calculate(topic_name_);
+    this->port_hash_ = dzIPC::common::socket_scope_port(topic_name_, domain_id_, dzIPC::common::ScopeKind::Service);
+    this->ipaddr_ = dzIPC::common::socket_scope_address(topic_name_, domain_id_, dzIPC::common::ScopeKind::Service);
     dzIPC::ThreadDispatch::apply_current_thread_options(thread_options_, verbose_, topic_name_ + "_SocketCliOwnerThread");
 }
 
@@ -1214,7 +1220,7 @@ void socket_cli_ipc::InitChannel(std::string extra_info)
             : std::string{};
     response_type_name = extract_last_segment(response_type_name);
     pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketClient, topic_name_, response_type_name, "socket",
-                      static_cast<int32_t>(domain_id_), extra_info});
+                      static_cast<uint64_t>(domain_id_), extra_info});
     if (handshake_thread_ == nullptr)
     {
         handshake_thread_ = new std::thread(&socket_cli_ipc::client_handshake, this);
@@ -1236,20 +1242,24 @@ bool socket_cli_ipc::open_data_plane()
     ipc_r_ptr_ = std::make_shared<ipc::socket::UDPNode>(this->topic_name_.c_str(), this->ipaddr_.c_str(),
                                                         static_cast<uint16_t>(this->port_hash_),
                                                         ipc::socket::NodeRole::SendOnly);
+    ipc_r_ptr_->set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::Service));
     ipc_w_ptr_ = std::make_shared<ipc::socket::UDPNode>(
         this->topic_name_.c_str(), this->ipaddr_.c_str(),
         static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetResponse),
         ipc::socket::NodeRole::RecvOnly);
+    ipc_w_ptr_->set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::Service));
     /* 请求方向的 ACK: 服务端发出 -> 客户端收 */
     ack_r_rx_ = std::make_shared<ipc::socket::UDPNode>(
         this->topic_name_.c_str(), this->ipaddr_.c_str(),
         static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetAckData),
         ipc::socket::NodeRole::RecvOnly);
+    ack_r_rx_->set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::Service));
     /* 响应方向的 ACK: 客户端发出 -> 服务端收 */
     ack_w_tx_ = std::make_shared<ipc::socket::UDPNode>(
         this->topic_name_.c_str(), this->ipaddr_.c_str(),
         static_cast<uint16_t>(this->port_hash_ + dzIPC::common::kUdpPortOffsetAckResponse),
         ipc::socket::NodeRole::SendOnly);
+    ack_w_tx_->set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::Service));
     if (verbose_)
     {
         std::cerr << "\033[32m[" << topic_name_ << "CliInfo] Request initialized on IP: " << this->ipaddr_
@@ -1328,6 +1338,7 @@ void socket_cli_ipc::client_handshake()
 {
     uint64_t handshake_timeout_ms = 100;   // 100 ms
     ipc::socket::UDPNode cli_hs(topic_name_.c_str(), ipaddr_.c_str(), port_hash_ + dzIPC::common::kUdpPortOffsetHandshake);
+    cli_hs.set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::Service));
     std::shared_ptr<IpcPubSubIdInitMsg> hs_msg = std::make_shared<IpcPubSubIdInitMsg>();
     /* R4: 连接失败必须可被 running 打断。 */
     if (!connect_with_retry(&cli_hs, running, topic_name_, "CliInfo"))

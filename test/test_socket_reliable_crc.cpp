@@ -145,7 +145,7 @@ TEST(SocketBestEffort, FinalHeartbeatCannotMixFollowingMessagePages)
     a.width=1;b.width=2;
     a.data.assign(8192,0x11);b.data.assign(8192,0x22);
     auto wa=a.serialize(), wb=b.serialize();
-    constexpr std::size_t mtu=1472;
+    constexpr std::size_t mtu=ipc::wire_packet_size;
     auto send_page=[&](ipc::buffer& wire,std::size_t offset) {
         const auto n=std::min(mtu,wire.size()-offset);
         auto* ptr=static_cast<std::uint8_t*>(wire.data())+offset;

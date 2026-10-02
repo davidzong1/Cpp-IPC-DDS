@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <memory>
 
 #include "libipc/export.h"
 #include "libipc/def.h"
@@ -34,19 +35,22 @@ namespace ipc
    *       正是这个容量值 —— 真实负载长度由负载自身的头部承载。
    *
    * \note 生命周期: loan() 成功后, 要么 publish_loan()(所有权转移给队列, 由最后一个
-   *       接收方的 buff_t 析构归还), 要么 discard_loan()(立刻归还)。两者都不调用即为
-   *       泄漏 —— 每个尺寸档位只有 32 块。
+   *       接收方的 buff_t 析构归还), 要么 discard_loan()(立刻归还)。两者都不调用时，
+   *       最后一个 loan_t 副本析构自动归还；每话题每尺寸档只有 10 块。
    */
+  namespace detail { struct loan_lifetime; }
+
   struct loan_t
   {
     ipc::storage_id_t id = -1;
     void *data = nullptr;
     std::size_t size = 0;   ///< 借到的容量(>= 请求值)
+    std::shared_ptr<detail::loan_lifetime> lifetime; // 保活池，最后副本自动归还未发布借样
 
     bool valid() const noexcept { return (id >= 0) && (data != nullptr); }
   };
   /**
-   * \brief `loan()` **失败原因**的只读出口（t46 新增, 不改变 `loan_t` 布局）。
+   * \brief `loan()` **失败原因**的只读出口（t46 新增, 失败原因分类）。
    *
    * 为什么需要它：`loan_t::valid()` 把四种完全不同的处境压成一个 false, 而调用方的
    * 处置义务**并不相同** ——
@@ -57,8 +61,8 @@ namespace ipc
    * 在只有 bool 的年代, 上层只能把它们统一记成 `reason_unknown`（见 W03 的
    * `note_dzflat_borrow_failed` 注释与 t46 交付 §4 的"分类器 vs 落点分歧"实测）。
    *
-   * \note 这是**加法**接口：`loan(size)` 原样保留, 新出口走独立重载 ⇒ 既有二进制
-   *       与既有源码都不受影响（`sizeof(loan_t)` 不变, 旧符号仍在）。
+   * \note `loan(size)` 与失败分类重载保持源码调用形式。
+   *       本版 loan_t 新增生命周期成员，ABI 不兼容，要求重新构建客户端。
    */
   enum class loan_status : std::uint8_t
   {
@@ -150,23 +154,19 @@ namespace ipc
      * \brief 借一块共享 chunk 供调用方就地写入。
      * \return 无效 loan_t 表示失败(无接收方 / chunk 池耗尽 / size 过小)。
      *
-     * 失败时**必须**回退到 send/try_send —— 借样不是必成的, 池子只有 32 块/档位。
-     * 成功后必须以 publish_loan 或 discard_loan 之一结束, 否则泄漏。
+     * 失败时**必须**回退到 send/try_send —— 借样不是必成的, 池子只有 10 块/档位。
+     * 成功后可发布、显式归还，或由最后一个未发布副本析构归还。
      */
     static ipc::loan_t loan(ipc::handle_t h, std::size_t size, bool verbose);
 
     /** \brief 带**失败原因出口**的 loan（t46）。`*st` 为空指针时与上面那条逐位等价。
-     *  ⛔ 不改变 `loan_t` 布局, 也不改变 `loan(size)` 的任何行为（除 "size_too_large"
+     *  ⛔ 失败原因分类, 也不改变 `loan(size)` 的任何行为（除 "size_too_large"
      *  这一条**只对溢出请求**生效的安全修复, 见 t46 交付 §4.3）。 */
     static ipc::loan_t loan(ipc::handle_t h, std::size_t size,
                             ipc::loan_status *st, bool verbose);
 
-    /// 话题专用池借样：每个 (prefix, name, 尺寸档) 10 块；需新版本接收器。
-    static ipc::loan_t loan_topic(ipc::handle_t h, std::size_t size,
-                                 ipc::loan_status *st, bool verbose);
-
     /// \brief 把已借出的 chunk 作为一条消息投递(单条, 不拆包)。
-    /// 失败时 chunk 已被本函数归还, 调用方不得再 discard_loan。
+    /// 投递失败会归还 chunk；重复 discard_loan 不会再次归还。
     static bool publish_loan(ipc::handle_t h, ipc::loan_t const &lo,
                              std::uint64_t tm, bool verbose);
 
@@ -366,7 +366,7 @@ namespace ipc
     /**
      * \brief 借一块共享 chunk 就地写入, 省掉 send() 的那次 memcpy。
      *
-     * 典型用法(失败必须能回退, 池子只有 32 块/档位):
+     * 典型用法(失败必须能回退, 池子只有 10 块/档位):
      * \code
      *   auto lo = ch.loan(need);
      *   if (lo.valid()) {
@@ -384,14 +384,6 @@ namespace ipc
     loan_t loan(std::size_t size, loan_status &st)
     {
       return detail_t::loan(h_, size, &st, verbose_);
-    }
-
-    /// DzFlat 使用的话题专用池；归还/发布仍用 discard_loan / publish_loan。
-    loan_t loan_topic(std::size_t size) {
-      return detail_t::loan_topic(h_, size, nullptr, verbose_);
-    }
-    loan_t loan_topic(std::size_t size, loan_status &st) {
-      return detail_t::loan_topic(h_, size, &st, verbose_);
     }
 
     bool publish_loan(loan_t const &lo, std::uint64_t tm = default_timeout)

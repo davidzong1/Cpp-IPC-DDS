@@ -15,6 +15,7 @@
 #include <array>
 #include <cassert>
 #include <mutex>
+#include <sys/stat.h>
 
 /* F1/t35：把池穷尽这个**产品侧事实**接到 W03 的计数注册表（只引用既有 ID）。
  * ⛔ 只读引用，不改 counters.h；counters.h 是 header-only，其单例是 inline 函数局部
@@ -37,6 +38,16 @@
 #include "libipc/memory/resource.h"
 #include "libipc/platform/detail.h"
 #include "libipc/circ/elem_array.h"
+
+namespace ipc::detail {
+struct loan_lifetime {
+    std::mutex mutex;
+    std::shared_ptr<ipc::topic_pool_context> pool;
+    std::function<void()> give_back;
+    bool finished = false;
+    ~loan_lifetime() { if (give_back) give_back(); }
+};
+}
 
 namespace
 {
@@ -156,7 +167,8 @@ namespace
   {
     ipc::string prefix_;
     ipc::string name_;
-    ipc::string topic_prefix_; // 每话题池键，构造时计算
+    ipc::string topic_prefix_;
+    std::shared_ptr<ipc::topic_pool_context> topic_pool_;
     msg_id_t cc_id_; // connection-info id
     ipc::detail::waiter cc_waiter_, wt_waiter_, rd_waiter_;
     ipc::shm::handle acc_h_;
@@ -170,6 +182,7 @@ namespace
         : prefix_{ipc::make_string(prefix)},
           name_{ipc::make_string(name)},
           topic_prefix_{ipc::topic_pool_prefix(prefix_, name_)},
+          topic_pool_{ipc::acquire_topic_pool(prefix_, name_)},
           cc_id_{} {}
 
     void init()
@@ -239,17 +252,14 @@ namespace
     auto &recv_cache() { return recv_cache_; }
   };
 
-  ipc::string const& storage_prefix(conn_info_head const* inf, ipc::storage_id_t id) {
-    return ipc::detail::is_topic_storage(id) ? inf->topic_prefix_ : inf->prefix_;
-  }
-
   IPC_CONSTEXPR_ std::size_t align_chunk_size(std::size_t size) noexcept
   {
     return (((size - 1) / ipc::large_msg_align) + 1) * ipc::large_msg_align;
   }
 
-  IPC_CONSTEXPR_ std::size_t calc_chunk_size(std::size_t size) noexcept
+  std::size_t calc_chunk_size(std::size_t size) noexcept
   {
+    size = ipc::pool_size_class(size);
     return ipc::make_align(
         alignof(std::max_align_t),
         align_chunk_size(ipc::make_align(alignof(std::max_align_t),
@@ -273,7 +283,7 @@ namespace
           sizeof(std::atomic<ipc::circ::cc_t>));
     }
 
-    /* UF-003: 借出者路由标签(0 = 未标记), 同样落在空洞内(偏移 8)。共享池里
+    /* UF-003: 借出者路由标签(0 = 未标记), 同样落在空洞内(偏移 8)。话题池里
      * 位号只在同路由 owner 表里有意义, 清扫方据此只处置本路由的块。 */
     std::atomic<std::uint32_t> &route_tag() noexcept
     {
@@ -298,13 +308,14 @@ namespace
                                     sizeof(std::atomic<ipc::circ::cc_t>)),
                 "UF-003: chunk header padding too small for published/route_tag");
 
-  struct chunk_info_t
+  struct alignas(8) chunk_info_t
   {
+    ipc::pool_identity_header identity_;
     ipc::id_pool<> pool_;
     ipc::spin_lock lock_;
 
     IPC_CONSTEXPR_ static std::size_t chunks_mem_size(
-        std::size_t chunk_size, std::size_t count = ipc::large_msg_cache) noexcept
+        std::size_t chunk_size, std::size_t count = ipc::topic_msg_cache) noexcept
     {
       return count * chunk_size;
     }
@@ -315,7 +326,7 @@ namespace
     }
 
     chunk_t *at(std::size_t chunk_size, ipc::storage_id_t id,
-                std::size_t count = ipc::large_msg_cache) noexcept
+                std::size_t count = ipc::topic_msg_cache) noexcept
     {
       if (id < 0 || static_cast<std::size_t>(id) >= count)
         return nullptr;
@@ -338,305 +349,12 @@ namespace
   static_assert(sizeof(chunk_info_t) % 8 == 0,
                 "chunk payload must stay 8-byte aligned: see docs/dzflat_shm.md 3.6");
 
-  /* ── W09/D-14: 陈旧池段（崩溃遗留段）的段级回收 ───────────────────────────
-   *
-   * 判决性实验(团队改造交付/W09/死进程借样泄漏收口_D14.md §1): 发布者被 SIGKILL 时
-   * 既不 unlink 段、也不归还它借走的 chunk —— 尤其 published()==0 的未发布借样, 按
-   * UF-003 §5 的窗口论证⛔不得被 reclaim_dead_chunks 清扫。于是**段仍在**期间该尺寸档
-   * 的池永久不可用: 单跑也挂、同话题重开也救不回(owner 位仍在 + published==0 两道门),
-   * 删段即恢复。
-   *
-   * 为什么不能逐块回收未发布借样(本包的关键判定):
-   *   chunk 的位图 `conns` 是**接收方**集合(acquire_storage 在借出时就写好了发送时刻的
-   *   收方位图), 而 owner_table 记的也是**接收方**身份。未发布借样的持有者是**发送方**,
-   *   它的身份**没有记在任何地方** ⇒ "证明发送方已死"没有依据 ⇒ 逐块回收不可能安全。
-   *   同时 `proven_dead_bits` 也救不了它: 那些收方是活的(它们在等一条永远不会来的消息),
-   *   所以 `(cur & ~dead) != 0` 这一条本来就会让它放弃。⛔ 这也解释了为什么"调换
-   *   :577/:578 谓词顺序"是错的(除 UAF 之外, 谓词本身也不足以判定)。
-   *
-   * 能做的是**段级**判定: 段内任何一个持有者(发送方或接收方)都必须先 mmap 该段才能
-   * 拿到载荷指针 ⇒ **除本进程外没有任何进程映射该段** ⟺ 段内不存在在飞持有者。
-   *
-   * ── 安全性论证(published 写入 vs 判定的同步分析)─────────────────────────
-   * 要安全复位池, 必须保证"段内没有任何进程还能执行代码去 mark_published"。
-   * 三条合起来给出该保证:
-   *   ① **段级无活映射者**(扫 /proc/<pid>/maps, 排除本进程)。持有 chunk 指针者必须先
-   *      映射本段; 一个进程死了就不再执行任何代码 ⇒ 死者不可能再 mark_published。
-   *      不可判(opendir 失败 / 某个 maps 因权限读不到)⇒ 一律放弃(保守, 退化为现状)。
-   *   ② **池的字节镜像在窗口内未被改动**(①快照 → 探活 → ③复核, 两次都在池锁内)。
-   *      借出必然从空闲链摘掉一个 id ⇒ 链就与镜像不同; 于是"①与③之间有人借出"必被
-   *      抓住并放弃。这条把"新进程在探活之后才映射并借出"的窗口封死。
-   *   ③ 真正的复位在 ③ 的**同一把池锁内**完成 ⇒ 复位与任何借出/归还互斥。
-   *   ⇒ 复位时池内空闲链上不存在任何活进程持有的 id; 死进程持有的 id 可以安全重新
-   *      发放(它已不可能再访问)。⛔ 与 UF-003 §5 的"published=0 让路"不冲突: 那段
-   *      论证的射程是"段内还有活持有者"的情形, 而本函数的前提恰恰是**没有**活持有者。
-   *
-   * 触发与代价: 仅在**池穷尽**路径上、且**每进程每尺寸档至多一次**(见
-   * orphan_reset_first_attempt)。正常负载不触发, 探活不进热路径。 */
-  enum class seg_scan : std::uint8_t { orphaned, live, unknown };
-
-  /* 段名构造收口 —— get_info 与段级探活必须用**同一个**名字, 否则探针会去扫一个
-   * 不存在的路径(静默失效)。⛔ 与 sniffer.cpp 的同款构造保持逐字一致。 */
-  inline ipc::string chunk_segment_name(ipc::string const &pref,
-                                        std::size_t chunk_size,
-                                        std::size_t count = ipc::large_msg_cache)
-  {
-    return ipc::make_prefix(
-        pref, {"CHUNK_INFO__", ipc::to_string(chunk_size), "__C",
-               ipc::to_string(count)});
-  }
-
-  /* 扫 /proc/<pid>/maps 找"除本进程外"映射了该段文件的活进程。
-   * unclear = 无法判定(保守: 调用方必须放弃)。 */
-  inline seg_scan scan_segment_mappers(char const *shm_name) noexcept
-  {
-#if defined(_WIN32)
-    (void)shm_name;
-    return seg_scan::unknown;   /* 无 /proc: 一律不可判 ⇒ 永不回收 */
-#else
-    if (shm_name == nullptr || shm_name[0] == '\0') return seg_scan::unknown;
-    char const *base = std::strrchr(shm_name, '/');
-    base = (base == nullptr) ? shm_name : (base + 1);
-    if (base[0] == '\0') return seg_scan::unknown;
-
-    DIR *d = ::opendir("/proc");
-    if (d == nullptr) return seg_scan::unknown;
-    bool complete = true;
-    bool live = false;
-    struct ::dirent *e = nullptr;
-    while (!live && ((e = ::readdir(d)) != nullptr))
-    {
-      if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
-      std::uint32_t const pid = static_cast<std::uint32_t>(std::atoi(e->d_name));
-      if (pid == ipc::circ::current_pid()) continue;   /* 自己不算"别人" */
-      char maps_path[64];
-      std::snprintf(maps_path, sizeof(maps_path), "/proc/%s/maps", e->d_name);
-      std::FILE *f = std::fopen(maps_path, "r");
-      if (f == nullptr)
-      {
-        /* ENOENT: 进程已退出 —— 不构成持有者, 正常。其它 errno(权限/隔离):
-         * 无法判定 ⇒ 本轮整体按"不可判"处理。 */
-        if (errno != ENOENT) complete = false;
-        continue;
-      }
-      char buf[4096];
-      while (std::fgets(buf, sizeof(buf), f) != nullptr)
-      {
-        if (std::strstr(buf, base) != nullptr) { live = true; break; }
-      }
-      std::fclose(f);
-    }
-    ::closedir(d);
-    if (!complete) return seg_scan::unknown;
-    return live ? seg_scan::live : seg_scan::orphaned;
-#endif
-  }
-
-  void note_orphan_reset(char const *kind, std::size_t chunk_size,
-                         ipc::string const &prefix);
-
-  /* ── v2：陈旧池段的复位点 = **首次 attach 该段的那一刻** ─────────────────────
-   *
-   * v1 的错误(已被本包自己的对照实验证伪, 见 W09/证据/UNSOUND_v1_selfhold.md):
-   * v1 把复位放在"池穷尽"路径上, 判据只排除本进程 ⇒ 当池是被**本进程自己**借空时
-   * (完全正当: test_chunk_capacity_backpressure / dzflat_transport 都这么构造耗尽),
-   * 判据照样成立 ⇒ 把本进程正持有的 id 重新发出去。实测两条用例立即转红。
-   *
-   * v2 的两个前提必须**同时**成立:
-   *   ① **本进程此刻尚未持有本档任何 chunk** —— ⛔ 这条**不是"天然满足"的**, 必须靠
-   *      **取快照的位置**机械保证(T73 修正, 见下):
-   *      · **检验点 = `get_info()` 里 `handles_` 的 `lock_` 临界区内部**: "素净判定 +
-   *        空闲链字节快照"与"把 `handles_[prefix]` 置为 valid"发生在**同一个临界区**内
-   *        (同一把 `lock_`)。同进程任何其它线程要拿到本段 `info`, 都必须先过这把
-   *        `lock_` 且看到 `valid()` ⇒ 它在快照**之后**才可能借出, 其借出必然改动空闲链
-   *        ⇒ 被第 ③ 步的持锁复核挡下(放弃复位)。
-   *      · 取消该保障(把快照挪到 `lock_` 之外, 即 T73 之前的写法)⇒ 同进程另一线程可在
-   *        释放瞬间借出 id#0 且不被复核发现 ⇒ **同一 chunk 被两块借样同时持有**
-   *        (F1 反例, 命中率 4/120; 见 W09 交付 §12)。
-   *   ② **除本进程外没有活进程映射本段**。持有载荷指针者必须先 mmap; 死者不再执行
-   *      任何代码 ⇒ 死者不可能再 mark_published。不可判(opendir 失败 / maps 读不出)
-   *      ⇒ 一律放弃, 退化为现状行为。
-   *
-   * ①②之间仍有"别的进程在我们探活之后才 mmap 并借出"的窗口, 由**字节镜像复核**封死:
-   * 探活前取一次池的字节快照(持池锁), 探活后持锁复核; 借出/归还都会改动空闲链,
-   * 字节不一致即放弃。真正的复位与复核在**同一把池锁内** ⇒ 与任何借出/归还互斥。
-   *
-   * ⚠️ **仍然存在的窄窗口(如实登记, 不声称已封死)**: 复核判据是"字节镜像相等" ⇒
-   *    若某线程在"快照"与"复核"之间完成了一次 **借出并归还**(A→B→A 的 ABA), 字节可能
-   *    回到相同值而复核通过。T73 的修正把该窗口从"`lock_` 释放后即可借出"缩到
-   *    "快照之后、复核之前恰好完成一整个借还周期", 但**未消除**。彻底修法 = 引入
-   *    "本进程本档在飞借样数"这类**可直接判定**的量(见 W09 交付 §12 的登记)。
-   *
-   * ⛔ 与 UF-003 §5"published==0 让路"不冲突: 那段论证的射程是"段内还有活持有者";
-   *    本函数的两个前提恰恰排除了活持有者。⛔ 也不改任何正常路径语义 —— 只在
-   *    "首次 attach 一个**已被用过**的段"这一非热路径上做一次判定。 */
-  /* T73/F1：`pristine` 与 `snap` 由**调用方在 `handles_` 的 `lock_` 临界区内**取好并传入 ——
-   * 这是前提①的机械保障(见上方注释)：本函数自己**不再**去读池做"素净判定 + 取快照"，
-   * 因为那时 `lock_` 已释放、同进程别的线程可能已经借出。
-   * ⛔ 本函数仍**不触碰** `published()`，也不改 reclaim_dead_chunks 的射程。 */
-  bool reclaim_orphan_segment(chunk_info_t *info, ipc::string const &prefix,
-                              std::size_t chunk_size, char const *kind,
-                              bool orphan_candidate,
-                              ipc::id_pool<> const *snap_in, std::size_t count) noexcept
-  {
-    if (info == nullptr) return false;
-    /* 全新段(zero-filled ⇒ id_pool::invalid()) 或未取到快照：早退 ⇒ 正常首次建段不付
-     * /proc 扫描成本。 */
-    if (!orphan_candidate || snap_in == nullptr) return false;
-    ipc::id_pool<> const snap = *snap_in;
-
-    /* ① 段级探活(锁外: 读 /proc 是毫秒级操作, 不得在自旋锁内做)。 */
-    ipc::string const name = chunk_segment_name(prefix, chunk_size, count);
-    if (scan_segment_mappers(name.c_str()) != seg_scan::orphaned) return false;
-
-    /* ② 持锁复核 + 复位(与借出/归还互斥)。复核的基线 = `handles_` 临界区内取的快照
-     * ⇒ 同进程任何"快照之后才发生"的借出都会让字节不一致 ⇒ 放弃。 */
-    info->lock_.lock();
-    if (std::memcmp(&snap, &info->pool_, sizeof(snap)) != 0)
-    {
-      info->lock_.unlock();
-      return false;
-    }
-    info->pool_.reset_free_chain(count);
-    info->lock_.unlock();
-
-    note_orphan_reset(kind, chunk_size, prefix);
-    return true;
-  }
-
-  auto &chunk_storages()
-  {
-    class chunk_handle_t
-    {
-      ipc::unordered_map<ipc::string, ipc::shm::handle> handles_;
-      std::mutex lock_;
-
-      static bool make_handle(ipc::shm::handle &h, ipc::string const &shm_name,
-                              std::size_t chunk_size, std::size_t count)
-      {
-        if (!h.valid() &&
-            !h.acquire(shm_name.c_str(),
-                       sizeof(chunk_info_t) +
-                           chunk_info_t::chunks_mem_size(chunk_size, count)))
-        {
-          ipc::error(
-              "[chunk_storages] chunk_shm.id_info_.acquire failed: chunk_size = "
-              "%zd\n",
-              chunk_size);
-          return false;
-        }
-        return true;
-      }
-
-    public:
-      /* 前缀**按值**传进来, 不传 conn_info_head*。
-       *
-       * 本函数会被"最后一条大消息的 buff_t 析构"调用(recycle_storage), 而那时
-       * 接收方的 conn_info 可能早已 mem::free —— 传指针就是 use-after-free:
-       * inf->prefix_ 读到被 tcache fd/key 覆盖的字节, "字符串长度"变成一个指针
-       * 值(实测 ~1.35e14) → allocate() 因 huge count 返回空(noexcept, 不抛) →
-       * libstdc++ 在 nullptr 上 memmove → SIGSEGV at 0 (error 6, in libc.so.6),
-       * 内核日志只留一个 ip。详见 docs/shm_defect_fixes.md 第 7 条。 */
-      chunk_info_t *get_info(ipc::string const &pref, std::size_t chunk_size, std::size_t count)
-      {
-        /* 段名编码池容量(__C<cap>): 容量决定段内布局(sizeof(chunk_info_t) 与
-         * chunks_mem_size 都随 max_count 伸缩), 名字带上它, 新旧容量版本的段
-         * 天然隔离 —— 旧容量(32)的残段不会被新容量(40)的代码挂上越界读,
-         * 反之亦然。这也是 UF-003 登记过的 "CHUNK_INFO 无版本标记" 缺口
-         * (unfixed_defects_full_v1.md:607)的收口。改容量时本名自动跟随;
-         * ⛔ sniffer.cpp 的同款构造必须同步修改(两处 chunk_info_t 定义同源)。 */
-        ipc::string const shm_name = chunk_segment_name(pref, chunk_size, count);
-        ipc::shm::handle *h;
-        bool newly_attached = false;
-        /* T73/F1：前提①的机械保障 —— "素净判定 + 空闲链快照"必须与"把 handles_[pref]
-         * 置为 valid"处在**同一个 `lock_` 临界区**内。否则同进程另一线程在 `lock_` 释放后
-         * 立刻经同一 `handles_[pref]` 借出 id#0, 而本函数随后的"字节镜像复核"看到的正是
-         * 那份被改动过的池 ⇒ 会把在飞借样当成孤儿段残留而整体复位 ⇒ 同一 chunk 被两块
-         * 借样同时持有(实测 4/120)。快照移进临界区后, 该线程的借出必然发生在快照之后
-         * ⇒ 复核必然不一致 ⇒ 放弃复位。 */
-        bool orphan_candidate = false;
-        ipc::id_pool<> orphan_snap;
-        {
-          std::lock_guard<std::mutex> guard{lock_};
-          h = &(handles_[shm_name]);
-          newly_attached = !h->valid();
-          if (!make_handle(*h, shm_name, chunk_size, count))
-          {
-            return nullptr;
-          }
-          if (newly_attached)
-          {
-            auto *probe = static_cast<chunk_info_t *>(h->get());
-            if (probe != nullptr)
-            {
-              /* 锁序与热路径一致：handles_.lock_ → info->lock_（见 acquire_storage）。 */
-              probe->lock_.lock();
-              bool const pristine = probe->pool_.invalid();
-              if (!pristine)
-              {
-                std::memcpy(&orphan_snap, &probe->pool_, sizeof(orphan_snap));
-                orphan_candidate = true;
-              }
-              probe->lock_.unlock();
-            }
-          }
-        }
-        auto *info = static_cast<chunk_info_t *>(h->get());
-        if (info == nullptr)
-        {
-          ipc::error(
-              "[chunk_storages] chunk_shm.id_info_.get failed: chunk_size = "
-              "%zd\n",
-              chunk_size);
-          return nullptr;
-        }
-        /* W09/D-14: 首次 attach 一个"已被用过"的段 ⇒ 判它是否崩溃遗留(见
-         * reclaim_orphan_segment 的论证), 是则整体复位空闲链。⛔ 这一步必须在
-         * **返回给调用方之前**完成: 调用方随后就会 acquire, 不能让它拿到一个
-         * 尚未判定的池。 */
-        if (newly_attached)
-        {
-          (void)reclaim_orphan_segment(info, pref, chunk_size, "attach",
-                                       orphan_candidate, &orphan_snap, count);
-        }
-        return info;
-      }
-    };
-    using deleter_t = void (*)(chunk_handle_t *);
-    using chunk_handle_ptr_t = std::unique_ptr<chunk_handle_t, deleter_t>;
-    static ipc::map<std::size_t, chunk_handle_ptr_t> chunk_hs;
-    return chunk_hs;
-  }
-
-  /* 只收前缀(按值) —— 调用方有的持有活的 conn_info, 有的(大消息 buff_t 的析构
-   * 器)只持有一份拷贝, 见 recycle_storage 的注释。 */
-  chunk_info_t *chunk_storage_info(ipc::string const &pref,
-                                   std::size_t chunk_size,
-                                   std::size_t count = ipc::large_msg_cache)
-  {
-    if (count != ipc::large_msg_cache && count != ipc::topic_msg_cache) return nullptr;
-    auto &storages = chunk_storages();
-    std::decay_t<decltype(storages)>::iterator it;
-    {
-      static ipc::rw_lock lock;
-      IPC_UNUSED_ std::shared_lock<ipc::rw_lock> guard{lock};
-      if ((it = storages.find(chunk_size)) == storages.end())
-      {
-        using chunk_handle_ptr_t =
-            std::decay_t<decltype(storages)>::value_type::second_type;
-        using chunk_handle_t = chunk_handle_ptr_t::element_type;
-        guard.unlock();
-        IPC_UNUSED_ std::lock_guard<ipc::rw_lock> guard{lock};
-        it = storages
-                 .emplace(chunk_size,
-                          chunk_handle_ptr_t{
-                              ipc::mem::alloc<chunk_handle_t>(),
-                              [](chunk_handle_t *p)
-                              { ipc::mem::destruct(p); }})
-                 .first;
-      }
-    }
-    return it->second->get_info(pref, chunk_size, count);
+  chunk_info_t* chunk_storage_info(std::shared_ptr<ipc::topic_pool_context> const& pool,
+                                    std::size_t chunk_size,
+                                    std::size_t count = ipc::topic_msg_cache) {
+    if (!pool || count != ipc::topic_msg_cache) return nullptr;
+    return static_cast<chunk_info_t*>(pool->map_pool(chunk_size,
+        sizeof(chunk_info_t) + chunk_info_t::chunks_mem_size(chunk_size)));
   }
 
   /* 借样(loan)的容量档位。
@@ -651,70 +369,13 @@ namespace
    * 接近一半容量 —— 但 chunk 是 tmpfs 上的稀疏映射, 只有真正写到的页才占物理内存,
    * 而我们只写 total_size 那一段。
    */
-  IPC_CONSTEXPR_ std::size_t loan_size_class(std::size_t size) noexcept
-  {
-    if (size <= 64 * 1024)
-    {
-      return ((size + ipc::large_msg_align - 1) / ipc::large_msg_align) *
-             ipc::large_msg_align;
-    }
-    std::size_t c = 128 * 1024;
-    while (c < size)
-    {
-      std::size_t nxt = c << 1;
-      if (nxt < c)
-        return size; // 溢出: 退回精确值, 后续 acquire 会失败
-      c = nxt;
-    }
-    return c;
+  std::size_t loan_size_class(std::size_t size) noexcept {
+    return ipc::pool_size_class(size);
   }
 
-  /* ── chunk 池耗尽的观测点 ───────────────────────────────────────────────────
-   *
-   * 本函数是**全仓唯一的取块点**, 三条调用路径(send / no_member_send / loan)都
-   * 汇合到这里, 所以"池空"只需要在这一处收口。
-   *
-   * 为什么必须做: 每档共享池 40 块、DzFlat 话题池 10 块，而环有 256 槽
-   * ⇒ 池是硬瓶颈。池一旦取空, 三条路径**全都静默降级** —— send / no_member_send
-   * 退化成 64 字节分片(那两处原有的 log 是被注释掉的), loan 直接返回空。于是
-   * "池是不是被钉干了"这个问题在现场无法回答。详见
-   * docs/shm_chunk_pool_occupancy_plan.md §1。
-   *
-   * 报法照 report_cache_alloc_failure 的先例: **首报一次全文, 之后按计数节流** ——
-   * 真耗尽时每一条大消息都会命中, 逐条打印会把日志淹掉, 而这里要的是"看得见"
-   * 而不是"看全"。节流后日志里的 count 就是累计量级(误差 < 节流间隔)。
-   *
-   * ⛔ 计数必须**按 (kind, chunk_size) 各自一份**, 不能全局共用一个:
-   *   - 池是按 calc_chunk_size 的 1KB 台阶**分档**的独立资源。全局单计数时, 只要
-   *     A 档先饿过一次, B 档再饿就是"第 2 次"而被节流吞掉 —— 恰好把"哪一档在饿"
-   *     这个最需要看见的信息抹掉。实测构造: 在一个进程里先饿干 7168 档, 再饿 3072
-   *     档, 旧写法第二条完全不报。
-   *   - kind 同理: 池被 send 饿和被 loan 饿, 处置不同。
-   *
-   * 这里上锁是安全的: 本函数**只在池取空时**被调用(id_pool::acquire() 返回 -1),
-   * 是病态路径而非热路径。
-   *
-   * kind 按指针保存: 三个调用点传的都是字符串字面量, 生存期覆盖整个进程。
-   *
-   * ── 报错里必须带 prefix ─────────────────────────────────────────────────────
-   *
-   * 池段名 = make_prefix(prefix, {"CHUNK_INFO__", chunk_size})(get_info,
-   * ipc.cpp:332-333), 所以 **prefix 就是这一档池的归属判别键**。而默认 prefix
-   * 是空串(connect(ph, {nullptr}, …) ⇒ 名字里没有话题/进程区分), 于是默认部署下
-   * 普通 send/loan 的空前缀池在同一尺寸档全机共享；loan_topic 另按话题隔离。
-   *
-   * 后果: "某话题大消息异常"的元凶可能在**另一个进程**里。这种情形下最要紧的一句
-   * 不是"谁在饿" —— 报错本来就是受害者自己打的, 打上自己的 pid 对定位元凶没有
-   * 帮助 —— 而是"这一档池根本没有归属区分"。所以空前缀要**显式打出来并点明**,
-   * 不能让日志里留一个空字段: 空字段读起来像"没信息", 而它本身就是那条信息。
-   * 非空前缀则直接就是归属证据。
-   *
-   * 同理, count 也必须标明是**本进程**的: 池是全机共享的, 一个光秃秃的 count
-   * 会被读成"全机饿了多少次"。读数能被读错, 与读数错了是同一类问题。
-   *
-   * 见 docs/shm_chunk_pool_occupancy_plan.md §1 结论 3。 */
+  // 池满是背压：每话题每尺寸档固定十块，计数按进程聚合并节流。
   void note_pool_exhausted(char const *kind, std::size_t chunk_size,
-                           std::size_t size, ipc::string const &prefix, std::size_t capacity = ipc::large_msg_cache) {
+                           std::size_t size, ipc::string const &prefix, std::size_t capacity = ipc::topic_msg_cache) {
     struct key_t {
       std::size_t chunk_size;
       char const *kind;
@@ -768,13 +429,10 @@ namespace
 
     if ((n == 1) || ((n % 1024) == 0)) {
       ipc::error("chunk pool exhausted: kind = %s, chunk_size = %zu, size = %zu, "
-                 "pool capacity = %zu, count = %llu (本进程), prefix = '%s'%s\n",
+                 "pool capacity = %zu, count = %llu (本进程), prefix = '%s'\n",
                  kind, chunk_size, size,
                  capacity,
-                 static_cast<unsigned long long>(n), prefix.c_str(),
-                 prefix.empty()
-                     ? "  <= 空前缀: 本档池无话题/进程区分, 全机共享, 归因须查其他进程"
-                     : "");
+                 static_cast<unsigned long long>(n), prefix.c_str());
     }
   }
 
@@ -800,7 +458,7 @@ namespace
     if (!bitmap_semantics) return false;
     if (inf->owners_ == nullptr || inf->route_tag_ == 0) return false;
 
-    /* 先对本路由的全部位做一次薄判(每块都探会让 /proc 读放大到 40×). */
+    /* 先对本路由的全部位做一次薄判(每块都探会让 /proc 读放大到池容量倍). */
     ipc::circ::cc_t const all =
         static_cast<ipc::circ::cc_t>(~static_cast<ipc::circ::cc_t>(0u));
     ipc::circ::cc_t const dead = inf->owners_->proven_dead_bits(all);
@@ -827,45 +485,6 @@ namespace
     }
     if (reclaimed != 0) note_reclaimed(kind, chunk_size, reclaimed, pref);
     return reclaimed != 0;
-  }
-
-  /* W09/D-14: 陈旧段恢复计数(与 note_pool_exhausted/note_reclaimed 同款口径). */
-  void note_orphan_reset(char const *kind, std::size_t chunk_size,
-                         ipc::string const &prefix) {
-    struct key_t {
-      std::size_t chunk_size;
-      char const *kind;
-    };
-    struct stat_t {
-      key_t key;
-      std::uint64_t count;
-    };
-    static std::mutex lock;
-    static std::vector<stat_t> stats;
-
-    std::uint64_t n;
-    {
-      std::lock_guard<std::mutex> guard{lock};
-      auto it = std::find_if(stats.begin(), stats.end(),
-                             [&](stat_t const &s)
-                             {
-                               return (s.key.chunk_size == chunk_size) &&
-                                      (std::strcmp(s.key.kind, kind) == 0);
-                             });
-      if (it == stats.end()) {
-        stats.push_back(stat_t{key_t{chunk_size, kind}, 0});
-        it = stats.end() - 1;
-      }
-      n = ++(it->count);
-    }
-    if ((n == 1) || ((n % 1024) == 0)) {
-      ipc::log("chunk pool orphan segment reset: kind = %s, chunk_size = %zu, "
-               "capacity = %zu, count = %llu (本进程), prefix = '%s'%s\n",
-               kind, chunk_size,
-               static_cast<std::size_t>(ipc::id_pool<>::max_count),
-               static_cast<unsigned long long>(n), prefix.c_str(),
-               "  <= 段已无活映射者(崩溃遗留), 空闲链已整体复位");
-    }
   }
 
   /* UF-003: 清扫归还计数(与 note_pool_exhausted 同款: 本进程计数 + 首报/节流). */
@@ -909,10 +528,8 @@ namespace
                       ipc::storage_id_t id) {
     if (inf == nullptr || !ipc::detail::valid_storage(id)) return;
     std::size_t const chunk_size = calc_chunk_size(size);
-    const auto count = ipc::detail::storage_capacity(id);
-    auto const& pref = storage_prefix(inf, id);
-    id = ipc::detail::storage_index(id);
-    auto info = chunk_storage_info(pref, chunk_size, count);
+    constexpr auto count = ipc::topic_msg_cache;
+    auto info = chunk_storage_info(inf->topic_pool_, chunk_size, count);
     if (info == nullptr) return;
     auto *chunk = info->at(chunk_size, id, count);
     if (chunk == nullptr) return;
@@ -926,10 +543,8 @@ namespace
                           ipc::storage_id_t id) {
     if (inf == nullptr || !ipc::detail::valid_storage(id)) return;
     std::size_t const chunk_size = calc_chunk_size(size);
-    const auto count = ipc::detail::storage_capacity(id);
-    auto const& pref = storage_prefix(inf, id);
-    id = ipc::detail::storage_index(id);
-    auto info = chunk_storage_info(pref, chunk_size, count);
+    constexpr auto count = ipc::topic_msg_cache;
+    auto info = chunk_storage_info(inf->topic_pool_, chunk_size, count);
     if (info == nullptr) return;
     auto *chunk = info->at(chunk_size, id, count);
     if (chunk == nullptr) return;
@@ -948,8 +563,7 @@ namespace
                                                        ipc::circ::cc_t conns,
                                                        char const *kind,
                                                        bool bitmap_semantics,
-                                                       ipc::loan_status *why = nullptr,
-                                                       bool topic_pool = false)  {
+                                                       ipc::loan_status *why = nullptr)  {
     const auto fail = [why](ipc::loan_status w) -> std::pair<ipc::storage_id_t, void *> {
       if (why != nullptr)
         *why = w;
@@ -958,15 +572,15 @@ namespace
     if (inf == nullptr)
       return fail(ipc::loan_status::invalid_handle);
     std::size_t chunk_size = calc_chunk_size(size);
-    const std::size_t count = topic_pool ? ipc::topic_msg_cache : ipc::large_msg_cache;
-    auto const& pref = topic_pool ? inf->topic_prefix_ : inf->prefix_;
-    auto info = chunk_storage_info(pref, chunk_size, count);
+    constexpr auto count = ipc::topic_msg_cache;
+    auto const& pref = inf->topic_prefix_;
+    auto info = chunk_storage_info(inf->topic_pool_, chunk_size, count);
     if (info == nullptr)
       /* 段建不出来（mmap 失败 / 名字被占 / 尺寸算术越界）—— **不是**背压。 */
       return fail(ipc::loan_status::storage_unavailable);
 
     info->lock_.lock();
-    info->pool_.prepare(count);
+    info->pool_.prepare();
     // got an unique id
     auto id = info->pool_.acquire();
     info->lock_.unlock();
@@ -980,7 +594,7 @@ namespace
        * 任何不确定一律放弃(保守, 退化为原有背压路径)。 */
       if (reclaim_dead_chunks(inf, info, chunk_size, bitmap_semantics, kind, pref, count)) {
         info->lock_.lock();
-        info->pool_.prepare(count);
+        info->pool_.prepare();
         id = info->pool_.acquire();
         info->lock_.unlock();
       }
@@ -1004,7 +618,7 @@ namespace
     chunk->published().store(0, std::memory_order_relaxed);
     chunk->route_tag().store(inf->route_tag_, std::memory_order_relaxed);
     chunk->conns().store(conns, std::memory_order_release);
-    return {topic_pool ? ipc::detail::topic_storage_tag + id : id, chunk->data()};
+    return {id, chunk->data()};
   }
 
   void *find_storage(ipc::storage_id_t id, conn_info_head *inf,
@@ -1019,10 +633,8 @@ namespace
     if (inf == nullptr)
       return nullptr;
     std::size_t chunk_size = calc_chunk_size(size);
-    const auto count = ipc::detail::storage_capacity(id);
-    auto const& pref = storage_prefix(inf, id);
-    id = ipc::detail::storage_index(id);
-    auto info = chunk_storage_info(pref, chunk_size, count);
+    constexpr auto count = ipc::topic_msg_cache;
+    auto info = chunk_storage_info(inf->topic_pool_, chunk_size, count);
     if (info == nullptr)
       return nullptr;
     auto* chunk = info->at(chunk_size, id, count);
@@ -1041,10 +653,8 @@ namespace
     if (inf == nullptr)
       return;
     std::size_t chunk_size = calc_chunk_size(size);
-    const auto count = ipc::detail::storage_capacity(id);
-    auto const& pref = storage_prefix(inf, id);
-    id = ipc::detail::storage_index(id);
-    auto info = chunk_storage_info(pref, chunk_size, count);
+    constexpr auto count = ipc::topic_msg_cache;
+    auto info = chunk_storage_info(inf->topic_pool_, chunk_size, count);
     if (info == nullptr)
       return;
     info->lock_.lock();
@@ -1169,7 +779,7 @@ namespace
    * 调用, 而调用点上接收方的 conn_info 可能早已 mem::free —— 那就是
    * use-after-free(实测见 docs/shm_defect_fixes.md 第 7 条)。前缀是这条路径唯一
    * 需要的信息, 而且必须是值的拷贝(接收时拷好, 见 recv 里的 recycle_t)。 */
-  void recycle_storage(ipc::string const &pref, ipc::storage_id_t id,
+  void recycle_storage(std::shared_ptr<ipc::topic_pool_context> const& pool, ipc::storage_id_t id,
                        std::size_t size, ipc::circ::cc_t curr_conns,
                        ipc::circ::cc_t conn_id)
   {
@@ -1180,9 +790,8 @@ namespace
       return;
     }
     std::size_t chunk_size = calc_chunk_size(size);
-    const auto count = ipc::detail::storage_capacity(id);
-    id = ipc::detail::storage_index(id);
-    auto info = chunk_storage_info(pref, chunk_size, count);
+    constexpr auto count = ipc::topic_msg_cache;
+    auto info = chunk_storage_info(pool, chunk_size, count);
     if (info == nullptr)
       return;
 
@@ -1268,10 +877,8 @@ namespace
     if (inf == nullptr)
       return;
     std::size_t chunk_size = calc_chunk_size(size);
-    const auto count = ipc::detail::storage_capacity(id);
-    auto const& pref = storage_prefix(inf, id);
-    id = ipc::detail::storage_index(id);
-    auto info = chunk_storage_info(pref, chunk_size, count);
+    constexpr auto count = ipc::topic_msg_cache;
+    auto info = chunk_storage_info(inf->topic_pool_, chunk_size, count);
     if (info == nullptr)
       return;
 
@@ -1393,7 +1000,7 @@ namespace
         return ipc::make_prefix(
             ipc::make_string(prefix),
             {"QU_CONN__", ipc::make_string(name), "__", ipc::to_string(DataSize),
-             "__", ipc::to_string(AlignSize), "__V3"});
+             "__", ipc::to_string(AlignSize), "__V4"});
       }
 
       void init()
@@ -1405,7 +1012,14 @@ namespace
           que_.open(ename.c_str());
         }
         /* UF-003: 绑定本路由的 owner 表与路由标签(清扫方只处置本路由的块)。 */
-        route_tag_ = ipc::circ::route_tag_of(ename.c_str());
+        // 同名队列重建后可能复用连接位；inode 将旧 Sample 与新 owner 表隔离。
+        struct stat generation{};
+        const std::string path = "/dev/shm/" + std::string(ename.c_str());
+        if (::stat(path.c_str(), &generation) == 0) {
+          const auto tag_name = std::string(ename.c_str()) + "#" + std::to_string(generation.st_ino);
+          route_tag_ = ipc::circ::route_tag_of(tag_name.c_str());
+        } else route_tag_ = 0; // 无法确定代次时禁用自动死持有者清扫
+
         owners_ = que_.valid() ? &que_.elems()->owners() : nullptr;
       }
 
@@ -1661,9 +1275,10 @@ namespace
         if (buf != nullptr)
         {
           std::memcpy(buf, data, size);
+          auto wire_id = ipc::detail::storage_to_wire(dat.first);
           if (try_push(static_cast<std::int32_t>(size) -
                            static_cast<std::int32_t>(ipc::data_length),
-                       &(dat.first), 0))
+                       &wire_id, 0))
           {
             /* UF-003: 已发布 ⇒ 清扫方自此才可接手处置该块。 */
             mark_published(inf, size, dat.first);
@@ -1810,9 +1425,10 @@ namespace
         if (buf != nullptr)
         {
           std::memcpy(buf, data, size);
+          auto wire_id = ipc::detail::storage_to_wire(dat.first);
           if (try_push(static_cast<std::int32_t>(size) -
                            static_cast<std::int32_t>(ipc::data_length),
-                       &(dat.first), 0))
+                       &wire_id, 0))
           {
             mark_published(inf, size, dat.first);
             return 1;
@@ -2030,17 +1646,19 @@ namespace
             struct recycle_t
             {
               ipc::storage_id_t storage_id;
-              ipc::string pref;
+              std::shared_ptr<ipc::topic_pool_context> pool;
               ipc::circ::cc_t curr_conns;
               ipc::circ::cc_t conn_id;
             } *r_info = ipc::mem::alloc<recycle_t>(recycle_t{
-                buf_id, storage_prefix(inf, buf_id),
+                buf_id, inf->topic_pool_,
                 que->elems()->connections(std::memory_order_relaxed),
                 que->connected_id()});
             if (r_info == nullptr)
             {
               ipc::log("fail: ipc::mem::alloc<recycle_t>.\n");
-              return ipc::buff_t{buf, msg_size}; // no recycle
+              recycle_storage<flag_t>(inf->topic_pool_, buf_id, msg_size,
+                  que->elems()->connections(std::memory_order_relaxed), que->connected_id());
+              return {};
             }
             else
             {
@@ -2052,7 +1670,7 @@ namespace
                     IPC_UNUSED_ auto finally =
                         ipc::guard([r_info]
                                    { ipc::mem::free(r_info); });
-                    recycle_storage<flag_t>(r_info->pref, r_info->storage_id, size,
+                    recycle_storage<flag_t>(r_info->pool, r_info->storage_id, size,
                                             r_info->curr_conns, r_info->conn_id);
                   },
                   r_info};
@@ -2126,7 +1744,7 @@ namespace
      * 那个薄转发保留）。所有失败出口都在这里逐条归因 —— 出口数 6，与 §"五出口"
      * 清点一一对应（交付 §2 的表）。 */
     static ipc::loan_t loan_impl(ipc::handle_t h, std::size_t size,
-                                 ipc::loan_status *why, bool verbose, bool topic_pool = false)
+                                 ipc::loan_status *why, bool verbose)
     {
       const auto fail = [why](ipc::loan_status w) -> ipc::loan_t {
         if (why != nullptr)
@@ -2162,27 +1780,7 @@ namespace
       {
         size = ipc::large_msg_limit + 1;
       }
-      /* ---- t46 安全修复：容量算术溢出必须**拒绝**，⛔ 不得返回假容量 ----
-       *
-       * 缺陷（本包实测, 见交付 §4）：`chunk_info_t::chunks_mem_size(chunk_size)` 是
-       * `max_count(=40) * chunk_size`，`make_handle` 再用
-       * `sizeof(chunk_info_t) + 那个乘积` 去 mmap。当乘积溢出 `size_t` 时它**回绕成一个
-       * 小值并成功映射一个过小的段**，而 `loan()` 依旧把 `size = 请求档位` 报给调用方：
-       *
-       *     loan(2^62)  → valid=true, size=4611686018427387904,
-       *                   真实段 = __IPC_SHM__CHUNK_INFO__4611686018427388928__C40, 41012 B
-       *     loan(2^64-1)→ calc_chunk_size 里的 8+size 先回绕 ⇒ 档位假装是 1024,
-       *                   实测 valid=true, size=18446744073709551615, 真实段 41012 B
-       *
-       * ⇒ 调用方按 `lo.size` 写就是**必然越界**。`loan_t` 无法表达"容量不够"，所以只能在
-       * 这里拒绝：把一个静默越界变回一次可判定的 `size_too_large`。
-       *
-       * 判据（唯一authoritative上界）：`chunks_mem_size(cap)` 必须仍可表示，即
-       *     cap ≤ (SIZE_MAX - sizeof(chunk_info_t)) / max_count
-       * 这条**同时**覆盖 `calc_chunk_size` 的 `8+size` 回绕（那种情况 cap 会算出接近
-       * `SIZE_MAX` 的值）。40 块 × 4.6e17 B ≈ 18 EB 远超任何真实负载，故对正常请求
-       * 零行为变更（64 KiB 档实测 valid=1/size=65536, 见交付 §4 的回归读数）。
-       */
+      // 同时检查池容量乘法与队列 remain 的有符号编码上限。
       const std::size_t kMaxChunkSize =
           ((std::numeric_limits<std::size_t>::max)() - sizeof(chunk_info_t)) /
           static_cast<std::size_t>(ipc::id_pool<>::max_count);
@@ -2198,10 +1796,10 @@ namespace
       conn_info_t *inf = info_of(h);
       ipc::loan_status w = ipc::loan_status::ok;
       auto dat = acquire_storage(inf, cap, conns, "loan",
-                                 ipc::relat_trait<flag_t>::is_broadcast, &w, topic_pool);
+                                 ipc::relat_trait<flag_t>::is_broadcast, &w);
       if (dat.second == nullptr)
       {
-        /* chunk 池耗尽(共享池每档 40 块、话题池每档 10 块)。这是背压信号。
+        /* chunk 池耗尽(每话题每档 10 块)。这是背压信号。
          * 计数与首报在 acquire_storage 的 note_pool_exhausted 里, 见该处注释。 */
         return fail(w);
       }
@@ -2209,6 +1807,23 @@ namespace
       lo.id = dat.first;
       lo.data = dat.second;
       lo.size = cap;
+      try {
+        lo.lifetime = std::make_shared<ipc::detail::loan_lifetime>();
+        lo.lifetime->pool = inf->topic_pool_;
+        auto pool = inf->topic_pool_;
+        const auto id = lo.id;
+        lo.lifetime->give_back = [pool, id, cap] {
+          auto* info = chunk_storage_info(pool, calc_chunk_size(cap));
+          if (!info) return;
+          auto* chunk = info->at(calc_chunk_size(cap), id);
+          chunk->published().store(0, std::memory_order_relaxed);
+          chunk->conns().store(0, std::memory_order_release);
+          info->lock_.lock(); info->pool_.release(id); info->lock_.unlock();
+        };
+      } catch (...) {
+        release_storage(lo.id, inf, cap);
+        return fail(ipc::loan_status::storage_unavailable);
+      }
       if (why != nullptr)
         *why = ipc::loan_status::ok;
       return lo;
@@ -2225,13 +1840,7 @@ namespace
       return loan_impl(h, size, st, verbose);
     }
 
-    static ipc::loan_t loan_topic(ipc::handle_t h, std::size_t size,
-                                  ipc::loan_status *st, bool verbose)
-    {
-      return loan_impl(h, size, st, verbose, true);
-    }
-
-    static bool publish_loan(ipc::handle_t h, ipc::loan_t const &lo,
+    static bool publish_loan_impl(ipc::handle_t h, ipc::loan_t const &lo,
                              std::uint64_t tm, bool verbose)
     {
       if (!lo.valid() || !ipc::detail::valid_storage(lo.id))
@@ -2242,7 +1851,6 @@ namespace
       {
         if (verbose)
           ipc::error("fail: publish_loan, invalid queue\n");
-        discard_loan(h, lo);
         return false;
       }
       auto acc = inf->acc();
@@ -2250,7 +1858,6 @@ namespace
       {
         if (verbose)
           ipc::error("fail: publish_loan, info_of(h)->acc() == nullptr\n");
-        discard_loan(h, lo);
         return false;
       }
       auto msg_id = acc->fetch_add(1, std::memory_order_relaxed);
@@ -2294,7 +1901,6 @@ namespace
         /* 没能进队列 = 没有任何接收方会回收它, 必须自己还回去。 */
         if (verbose)
           ipc::error("fail: publish_loan, push failed; chunk returned\n");
-        discard_loan(h, lo);
         return false;
       }
       /* UF-003: 借样已进队列 ⇒ 置"已发布", 清扫方自此刻才可接手处置。 */
@@ -2303,16 +1909,28 @@ namespace
       return true;
     }
 
-    static void discard_loan(ipc::handle_t h, ipc::loan_t const &lo)
-    {
-      if (!lo.valid())
-        return;
-      conn_info_t *inf = info_of(h);
-      if (inf == nullptr)
-        return;
-      /* 尚未投递 ⇒ 没有任何接收方持有它 ⇒ 无条件归还是安全的(与被覆写消息的
-       * discard_storage 不同, 那里必须先按 conns 位图判断)。 */
-      release_storage(lo.id, inf, lo.size);
+    static bool publish_loan(ipc::handle_t h, ipc::loan_t const& lo,
+                             std::uint64_t tm, bool verbose) {
+      if (!lo.valid() || !lo.lifetime) return false;
+      auto* inf = info_of(h);
+      std::lock_guard<std::mutex> guard(lo.lifetime->mutex);
+      if (lo.lifetime->finished || !inf || inf->topic_pool_ != lo.lifetime->pool) return false;
+      const bool okay = publish_loan_impl(h, lo, tm, verbose);
+      lo.lifetime->finished = true;
+      auto give_back = std::move(lo.lifetime->give_back);
+      if (!okay && give_back) give_back();
+      lo.lifetime->pool.reset();
+      return okay;
+    }
+
+    static void discard_loan(ipc::handle_t, ipc::loan_t const& lo) {
+      if (!lo.lifetime) return;
+      std::lock_guard<std::mutex> guard(lo.lifetime->mutex);
+      if (lo.lifetime->finished) return;
+      lo.lifetime->finished = true;
+      auto give_back = std::move(lo.lifetime->give_back);
+      if (give_back) give_back();
+      lo.lifetime->pool.reset();
     }
 
   }; // detail_impl<Policy>
@@ -2381,13 +1999,8 @@ namespace ipc
   template <typename Flag>
   void chan_impl<Flag>::clear(ipc::handle_t h) noexcept
   {
-    disconnect(h);
-    using conn_info_t = typename detail_impl<policy_t<Flag>>::conn_info_t;
-    auto conn_info_p = static_cast<conn_info_t *>(h);
-    if (conn_info_p == nullptr)
-      return;
-    conn_info_p->clear();
-    destroy(h);
+    // destroy 先断开本句柄；活跃对端继续复用，最后租约负责清理。
+    if (h != nullptr) destroy(h);
   }
 
   template <typename Flag>
@@ -2399,8 +2012,8 @@ namespace ipc
   template <typename Flag>
   void chan_impl<Flag>::clear_storage(prefix pref, char const *name) noexcept
   {
-    using conn_info_t = typename detail_impl<policy_t<Flag>>::conn_info_t;
-    conn_info_t::clear_storage(pref.str, name);
+    // 删除池与队列必须在同一个目录锁内完成，禁止清理与新建交错。
+    ipc::clear_topic_pools(ipc::make_string(pref.str), ipc::make_string(name));
   }
 
   template <typename Flag>
@@ -2481,13 +2094,6 @@ namespace ipc
                                     ipc::loan_status *st, bool verbose)
   {
     return detail_impl<policy_t<Flag>>::loan(h, size, st, verbose);
-  }
-
-  template <typename Flag>
-  ipc::loan_t chan_impl<Flag>::loan_topic(ipc::handle_t h, std::size_t size,
-                                         ipc::loan_status *st, bool verbose)
-  {
-    return detail_impl<policy_t<Flag>>::loan_topic(h, size, st, verbose);
   }
 
   template <typename Flag>

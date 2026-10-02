@@ -17,6 +17,13 @@ class UDPNode::UDPNode_ : public ipc::pimpl<UDPNode_>
 {
 public:
     ipc::detail::socket::UDPNode node_;
+    std::array<std::uint8_t,32> scope_{};
+    bool scoped_=false;
+    ipc::buffer accept(ipc::buffer data) {
+        if(!scoped_)return data;
+        if(data.size()<=scope_.size() || std::memcmp(data.data(),scope_.data(),scope_.size())!=0)return {};
+        return ipc::buffer(static_cast<std::uint8_t*>(data.data())+scope_.size(),data.size()-scope_.size(),nullptr);
+    }
 };
 
 /* 后续定义 */
@@ -53,6 +60,7 @@ void UDPNode::create(const char* name, const char* ip, uint16_t port) IPC_EXCEPT
         ipc::error("fail udp create: node is in invalid state (pimpl alloc failed)\n");
         return;
     }
+    n->scoped_=false;
     n->node_.create(name, ip, port);
 }
 
@@ -63,7 +71,12 @@ void UDPNode::create(const char* name, const char* ip, uint16_t port, NodeRole r
         ipc::error("fail udp create: node is in invalid state (pimpl alloc failed)\n");
         return;
     }
+    n->scoped_=false;
     n->node_.create(name, ip, port, role);
+}
+
+void UDPNode::set_scope(const std::array<std::uint8_t,32>& token) {
+    auto n=impl(p_);if(n){n->scope_=token;n->scoped_=true;}
 }
 
 NodeRole UDPNode::role() const noexcept
@@ -84,19 +97,27 @@ bool UDPNode::connect() IPC_EXCEPTION_
 bool UDPNode::send(ipc::buffer& data) IPC_EXCEPTION_
 {
     auto n = impl(p_);
-    return (n == nullptr) ? false : n->node_.send(data);
+    if(!n)return false;
+    if(!n->scoped_)return n->node_.send(data);
+    if(data.empty() || data.size()>ipc::wire_packet_size)return false;
+    // 载荷栈内封装，不为载荷申请堆内存；buffer 句柄仍用库分配器。总长不超过 1472 字节。
+    std::array<std::uint8_t,1472> frame;
+    std::memcpy(frame.data(),n->scope_.data(),n->scope_.size());
+    std::memcpy(frame.data()+n->scope_.size(),data.data(),data.size());
+    ipc::buffer wire(frame.data(),n->scope_.size()+data.size(),nullptr);
+    return n->node_.send(wire);
 }
 
 ipc::buffer UDPNode::receive_nowait() IPC_EXCEPTION_
 {
     auto n = impl(p_);
-    return (n == nullptr) ? ipc::buffer{} : n->node_.receive_nowait();
+    return (n == nullptr) ? ipc::buffer{} : n->accept(n->node_.receive_nowait());
 }
 
 ipc::buffer UDPNode::receive(uint64_t tm) IPC_EXCEPTION_
 {
     auto n = impl(p_);
-    return (n == nullptr) ? ipc::buffer{} : n->node_.receive(tm);
+    return (n == nullptr) ? ipc::buffer{} : n->accept(n->node_.receive(tm));
 }
 
 bool UDPNode::close() IPC_EXCEPTION_

@@ -37,9 +37,9 @@
 
 namespace {
 
-/* ipc::id_pool<>::max_count = ipc::large_msg_cache, 每个尺寸类全进程共享。
+/* ipc::id_pool<>::max_count = ipc::topic_msg_cache, 每个尺寸类全进程共享。
  * ⛔ 由常量导出: 写死魔数在容量变更时会让洪泛校准与 static_assert 全部失真。 */
-constexpr int kChunkPoolSize = static_cast<int>(ipc::large_msg_cache);
+constexpr int kChunkPoolSize = static_cast<int>(ipc::topic_msg_cache);
 
 /* 环的槽位数: circ::elem_array::elem_max = numeric_limits<uint8>::max() + 1。 */
 constexpr int kRingSlots = 256;
@@ -155,7 +155,7 @@ TEST(ChunkHold, HeldChunkSurvivesOverwriteWithLaggingPeer)
 TEST(ChunkHold, OverwrittenChunksAreReclaimed)
 {
     constexpr std::size_t kPayload = 8192;   // 独立尺寸类 calc_chunk_size(8192) = 9216
-    constexpr int kProbe = 20;
+    constexpr int kProbe = kChunkPoolSize - 1;
     static_assert(kProbe < kChunkPoolSize, "探针条数须小于 chunk 池容量");
 
     const std::string name = "dzflat_step0_reclaim";

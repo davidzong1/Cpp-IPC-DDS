@@ -20,7 +20,7 @@
 namespace dzIPC {
 namespace socket {
 namespace {
-constexpr std::size_t UDP_MAX_SIZE = 1'472;
+constexpr std::size_t UDP_MAX_SIZE = ipc::wire_packet_size;
 constexpr std::size_t TAIL_SIZE = 12;
 constexpr std::size_t MAX_RECV_TOTAL_SIZE = 64 * 1'024 * 1'024;
 constexpr int SEND_RETRY_MAX = 10;

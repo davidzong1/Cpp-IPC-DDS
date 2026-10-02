@@ -70,7 +70,8 @@ IPC_CONSTEXPR_ std::size_t align_chunk_size(std::size_t size) noexcept {
     return (((size - 1) / ipc::large_msg_align) + 1) * ipc::large_msg_align;
 }
 
-IPC_CONSTEXPR_ std::size_t calc_chunk_size(std::size_t size) noexcept {
+std::size_t calc_chunk_size(std::size_t size) noexcept {
+    size = ipc::pool_size_class(size);
     return ipc::make_align(
         alignof(std::max_align_t),
         align_chunk_size(ipc::make_align(alignof(std::max_align_t),
@@ -86,7 +87,8 @@ struct chunk_t {
     }
 };
 
-struct chunk_info_t {
+struct alignas(8) chunk_info_t {
+    ipc::pool_identity_header identity_;
     ipc::id_pool<> pool_;
     ipc::spin_lock lock_;
 
@@ -196,7 +198,7 @@ public:
     std::uint64_t                 dropped_ = 0;
 
     // Lazy-loaded per-chunk-size storage handles for large messages.
-    ipc::map<ipc::string, ipc::shm::handle> chunk_handles_;
+    std::shared_ptr<ipc::topic_pool_context> topic_pool_;
 
     // Fragment state must live across try_recv_one() calls. recv() may be
     // woken after any fragment, while the rest of the message is still being
@@ -211,6 +213,8 @@ public:
         prefix_ = std::move(pref);
         name_   = std::move(nm);
         topo_   = t;
+        topic_pool_ = ipc::acquire_topic_pool(prefix_, name_);
+        if (!topic_pool_) return false;
 
         // The shm name uses the queue_generator's template parameters
         // (data_length, kAlignSize), NOT sizeof(msg_t)/alignof(msg_t).
@@ -224,7 +228,7 @@ public:
             prefix_, {"QU_CONN__", name_, "__",
                       ipc::to_string(static_cast<std::size_t>(ipc::data_length)),
                       "__",
-                      ipc::to_string(kAlignSize), "__V3"});
+                      ipc::to_string(kAlignSize), "__V4"});
 
         switch (t) {
         case sniffer::topology::server: {
@@ -264,14 +268,9 @@ public:
 
     void close() noexcept {
         frags_.clear();
-        // Release chunk handles without shm_unlink — the sniffer must never
-        // delete the publisher's SHM segments.
-        for (auto& kv : chunk_handles_) {
-            kv.second.release_no_unlink();
-        }
-        chunk_handles_.clear();
         rd_waiter_.close();
         reader_.reset();
+        topic_pool_.reset();
         prefix_.clear();
         name_.clear();
         primed_ = false;
@@ -283,21 +282,12 @@ public:
     buff_t fetch_storage(ipc::storage_id_t wire_id, std::size_t msg_size) {
         const auto encoded_id = ipc::detail::storage_from_wire(wire_id);
         if (!ipc::detail::valid_storage(encoded_id)) return {};
-        const auto count = ipc::detail::storage_capacity(encoded_id);
-        const auto id = ipc::detail::storage_index(encoded_id);
-        const auto pref = ipc::detail::is_topic_storage(encoded_id)
-            ? ipc::topic_pool_prefix(prefix_, name_) : prefix_;
+        constexpr auto count = ipc::topic_msg_cache;
+        const auto id = encoded_id;
         const std::size_t chunk_size = calc_chunk_size(msg_size);
-        const auto shm_name = ipc::make_prefix(pref, {"CHUNK_INFO__", ipc::to_string(chunk_size),
-                                                      "__C", ipc::to_string(count)});
-        auto it = chunk_handles_.find(shm_name);
-        if (it == chunk_handles_.end()) {
-            ipc::shm::handle h;
-            if (!h.acquire(shm_name.c_str(), sizeof(chunk_info_t) +
-                           chunk_info_t::chunks_mem_size(chunk_size, count))) return {};
-            it = chunk_handles_.emplace(shm_name, std::move(h)).first;
-        }
-        auto* info = static_cast<chunk_info_t*>(it->second.get());
+        if (!topic_pool_) return {};
+        auto* info = static_cast<chunk_info_t*>(topic_pool_->map_pool(chunk_size,
+            sizeof(chunk_info_t) + chunk_info_t::chunks_mem_size(chunk_size, count)));
         if (info == nullptr) return {};
         chunk_t* chunk = info->at(chunk_size, id, count);
         if (chunk == nullptr) return {};
