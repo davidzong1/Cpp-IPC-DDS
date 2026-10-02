@@ -367,7 +367,7 @@ TEST(DzFlatTransport, PublishWithoutSubscriberStillSucceeds)
 
 /* ③ chunk 池耗尽时必须回退整包路径而不是丢消息。
  *
- * 构造: 用一个独立的 route 句柄把同一尺寸档位的 32 块全部借走并**不归还**, 此时
+ * 构造: 从被测发布者借空同话题同尺寸档的 10 块并保持持有，此时
  * DZFlat 借样必然失败; 消息仍须通过 TLV 送达。 */
 TEST(DzFlatTransport, ChunkPoolExhaustionFallsBackToTlv)
 {
@@ -393,20 +393,19 @@ TEST(DzFlatTransport, ChunkPoolExhaustionFallsBackToTlv)
     sizer.set_msg_id(17);
     const std::uint32_t need = sizer.dzflat_size();
 
-    /* shm_open 的名字不能含路径分隔符(topic 里带 "/"), 另起一个扁平名。 */
-    const std::string hog_name = "dzflat_tx_hog_pool";
-    ipc::route hog_tx{hog_name.c_str(), ipc::sender};
-    ipc::route hog_rx{hog_name.c_str(), ipc::receiver};
-    ASSERT_TRUE(hog_tx.wait_for_recv(1, 2000));
-    std::vector<ipc::loan_t> hogged;
-    for (int i = 0; i < 64; ++i)
-    {
-        auto lo = hog_tx.loan(need);
-        if (!lo.valid()) break;
-        hogged.push_back(lo);
+    using Flat = dzIPC::Msg::StdImageFlat;
+    ASSERT_GE(need,Flat::loan_size(0));
+    const auto budget=need-Flat::loan_size(0);
+    std::vector<dzIPC::LoanedMessage<Flat>> hogged;
+    for (unsigned i=0;i<ipc::topic_msg_cache;++i) {
+        auto lo=pub.loan<Flat>(budget);
+        if (!lo.valid()) break; // warm-up 返回对象可能仍持有一块；借空其余块。
+        hogged.push_back(std::move(lo));
     }
-    ASSERT_FALSE(hogged.empty()) << "未能借到任何 chunk, 无法构造耗尽场景";
-    EXPECT_FALSE(hog_tx.loan(need).valid()) << "池子应已耗尽";
+    ASSERT_FALSE(hogged.empty());
+    EXPECT_LE(hogged.size(),static_cast<std::size_t>(ipc::topic_msg_cache));
+    EXPECT_FALSE(pub.loan<Flat>(budget).valid()) << "同话题池已借空";
+    const auto fallback_before=dzIPC::DzFlatFallbackCount();
 
     /* 池空 ⇒ DZFlat 借样失败 ⇒ 必须回退 TLV 并照常送达。 */
     const auto src2 = make_image(96, 72, 0x9A);
@@ -415,7 +414,8 @@ TEST(DzFlatTransport, ChunkPoolExhaustionFallsBackToTlv)
         << "chunk 池耗尽时消息丢失 —— 借样路径没有回退整包序列化";
     EXPECT_TRUE(same_image(src2, got2));
 
-    for (const auto& lo : hogged) hog_tx.discard_loan(lo);
+    EXPECT_GT(dzIPC::DzFlatFallbackCount(),fallback_before);
+    hogged.clear();
 }
 
 /* ② msg_id 不匹配的 DZFlat 段必须被拒(与 TLV 的 check_id 同语义), 不能错投给

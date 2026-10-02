@@ -85,7 +85,7 @@ public:
      * loan<Flat>(varlen_budget) 借一块共享 chunk 并返回一个就地构造器: 大负载直接写
      * 进共享内存, 发布端零拷贝(docs/dzflat_shm.md §4.2)。
      *
-     * **必须检查返回值**: 无接收方 / chunk 池耗尽(32 块/尺寸档位)/ 开关未开时返回无效
+     * **必须检查返回值**: 无接收方 / 话题 chunk 池耗尽(10 块/尺寸档位)/ 开关未开时返回无效
      * 对象, 调用方须回退到普通 publish()。这是背压而非错误。
      *
      * varlen_budget = 变长区(string / 数组 / 嵌套元素块)最多需要的字节数上界。超出后
@@ -100,7 +100,7 @@ public:
         {
             return {};
         }
-        auto lo = publisher_->loan(Flat::loan_size(varlen_budget));
+        auto lo = publisher_->loan_topic(Flat::loan_size(varlen_budget));
         if (!lo.valid())
         {
             return {};

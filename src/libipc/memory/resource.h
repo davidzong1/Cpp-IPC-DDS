@@ -117,4 +117,10 @@ inline ipc::string make_prefix(ipc::string prefix, std::initializer_list<ipc::st
     return prefix;
 }
 
+// 原 prefix 用长度分隔，避免不同 prefix/话题组合拼成同一池键。
+// 名称由发送、接收和只读嗅探器共同使用，不含进程 ID。
+inline ipc::string topic_pool_prefix(ipc::string const& pref, ipc::string const& topic) {
+    return make_prefix({}, {"DZFLAT_TOPIC_V1__", to_string(pref.size()), "_", pref, "__", topic});
+}
+
 } // namespace ipc

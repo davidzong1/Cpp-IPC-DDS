@@ -1137,7 +1137,7 @@ bool shm_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_
  * 返回 false 表示"本次不走 DZFlat", 调用方须回退既有整包路径。回退不是异常, 是常态:
  *   - 开关未开 / 消息类型不支持(手写类型、GenericMessage);
  *   - 该通道当前没有接收方(chunk 无人回收, loan 会拒绝);
- *   - chunk 池耗尽(每尺寸档位 32 块) —— 这是背压, 回退整包路径仍能送达。
+ *   - 话题 chunk 池耗尽(每尺寸档位 10 块) —— 这是背压, 回退整包路径仍能送达。
  *
  * 生命周期: loan 成功后每条出口都必须以 publish_loan 或 discard_loan 结束。
  * publish_loan 失败时 chunk 已由其内部归还, 这里不得重复 discard。
@@ -1157,7 +1157,7 @@ bool shm_pub_ipc::try_publish_dzflat(const std::shared_ptr<IpcMsgBase>& msg, std
     {
         return false;
     }
-    auto lo = publisher_->loan(need);
+    auto lo = publisher_->loan_topic(need);
     if (!lo.valid())
     {
         return false;   // 池耗尽 / 无接收方 —— 回退整包
@@ -1207,7 +1207,7 @@ bool shm_pub_ipc::publish_prebuilt_segment(const void* seg, std::size_t len)
     {
         return false;
     }
-    auto lo = publisher_->loan(h.total_size);
+    auto lo = publisher_->loan_topic(h.total_size);
     if (!lo.valid())
     {
         return false;   // 池耗尽 —— 背压, 回退整包
@@ -1308,8 +1308,8 @@ void warn_view_queue_pinned(std::size_t requested, std::size_t applied)
         seen.push_back(requested);
     }
     std::cerr << "\033[33m[dzIPC][view_queue] queue_size = " << requested << " 超过钉上限, 被钉到 " << applied
-              << ": chunk 池每尺寸档只有 " << static_cast<std::size_t>(ipc::large_msg_cache)
-              << " 块且全机共享(建 route 不带 prefix), 队列配得比池大就会把池吃干。"
+              << ": DzFlat 每话题每尺寸档池有 " << static_cast<std::size_t>(ipc::topic_msg_cache)
+              << " 块；队列内外持样及未发布借样都占池，满池会产生背压。"
                  "两个钉面同用此上限: view 队列钉到 " << applied
               << "; adopt 借样(schema-less 话题的 DZFlat 经 msg_queue_)配额同为 " << applied
               << ", 配额满即自动物化拷贝 —— 零拷贝只在配额内生效, 超额每消息多一次拷贝。"
@@ -1338,17 +1338,9 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
     msg_id_ = sub_state_->topic_msg->topic()->msg_id();
     sub_state_->msg_id = msg_id_;
     sub_state_->msg_queue = std::make_shared<CircularQueue<IpcMsgBase>>(queue_size);
-    /* 步骤③: view 队列钉 chunk(借样 Sample 持有 buff_t, 见本文件订阅循环 :773 处
-     * 注释), adopt 借样(GenericMessage 收 schema-less DZFlat)经 msg_queue_ 也钉
-     * chunk —— 两者的配额同源: ViewQueueCap() = large_msg_cache/4 = 10(对齐 ROS 2
-     * 默认 QoS depth), 保持 "4 个订阅者满钉" 的池余量(10×4 = 40 = 池容量)。池每
-     * 尺寸档 large_msg_cache 块且全机共享(建 route 不带 prefix) ⇒ 不设上限的队列
-     * 配置就能把池吃干, 之后发布侧 loan 拿不到块而回退整包 TLV。设计与实测见
-     * docs/shm_chunk_pool_occupancy_plan.md §3 步骤③。
-     *
-     * ⚠️ msg 队列的 TLV 物化消息不钉 chunk —— 钉的只是 adopt 借样, 由 adopt_cap_
-     *    配额封顶(见订阅循环 adopt 分支与 UF-012); 缩 msg_queue_ 本体只是白减缓冲。
-     * ⚠️ socket/UDP 侧不钉: 那边的 Sample/借样持有的是去帧独立堆块, 不占池。 */
+    /* DzFlat 话题池每尺寸档 10 块，默认 view/adopt 持样上限同为 10。
+     * 上限只约束订阅队列或 adopt 配额，不保证发端和应用持样后仍有空闲块。
+     * 多订阅者共享同一消息，最后一个持有者释放才回池。 */
     const std::size_t view_cap =
         dzIPC::IsViewQueuePinEnabled() ? dzIPC::ViewQueueCap() : queue_size;
     if (view_cap < queue_size)

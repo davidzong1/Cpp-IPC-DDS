@@ -47,7 +47,35 @@ enum : std::size_t {
      * 段名编码了本值(ipc.cpp get_info), 容量不同的段天然隔离不混挂;
      * UF-007/UF-011 判据的 4×kCap 魔数由本值导出, 不得写死。 */
     large_msg_cache = 40,
+    // DzFlat 专用借样：每个话题、每个尺寸档独享的载荷块数。
+    topic_msg_cache = 10,
 };
+
+namespace detail {
+// loan_t 的 ID 为不透明句柄；高位只存在于本地 API，线上用负 ID 区分新池。
+// 旧接收器拒绝负 ID，不会把新池句柄作为旧池的大偏移解引用。
+constexpr storage_id_t topic_storage_tag = 0x40000000;
+constexpr bool is_topic_storage(storage_id_t id) noexcept {
+    return id >= topic_storage_tag && id < topic_storage_tag + static_cast<storage_id_t>(topic_msg_cache);
+}
+constexpr storage_id_t storage_index(storage_id_t id) noexcept {
+    return is_topic_storage(id) ? id - topic_storage_tag : id;
+}
+constexpr std::size_t storage_capacity(storage_id_t id) noexcept {
+    return is_topic_storage(id) ? topic_msg_cache : large_msg_cache;
+}
+constexpr bool valid_storage(storage_id_t id) noexcept {
+    return is_topic_storage(id) || (id >= 0 && id < static_cast<storage_id_t>(large_msg_cache));
+}
+constexpr storage_id_t storage_to_wire(storage_id_t id) noexcept {
+    return is_topic_storage(id) ? -2 - storage_index(id) : (valid_storage(id) ? id : -1);
+}
+constexpr storage_id_t storage_from_wire(storage_id_t id) noexcept {
+    return id <= -2 && id >= -1 - static_cast<storage_id_t>(topic_msg_cache)
+        ? topic_storage_tag + (-2 - id)
+        : (id >= 0 && id < static_cast<storage_id_t>(large_msg_cache) ? id : -1);
+}
+} // namespace detail
 
 enum class relat { // multiplicity of the relationship
     single,

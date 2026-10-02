@@ -20,7 +20,7 @@
  *    span、Writer 转入 !ok, publish_loaned 会失败并归还 chunk —— 不会写出坏段。
  *
  * ② **生命周期 RAII**。借到的 chunk 要么被 publish_loaned 交给队列(由最后一个接收方
- *    的 buff_t 析构归还), 要么在本对象析构时 discard。每个尺寸档位只有 32 块, 漏一块
+ *    的 buff_t 析构归还), 要么在本对象析构时 discard。每个话题每个尺寸档位只有 10 块, 漏一块
  *    就少一块, 所以这里不给"忘记归还"留口子。move-only, 禁止拷贝。
  *
  * ③ **借样会失败, 且失败是常态**。无接收方 / chunk 池耗尽都会得到无效 LoanedMessage,

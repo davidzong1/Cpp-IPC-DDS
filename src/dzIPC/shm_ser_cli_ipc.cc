@@ -458,7 +458,7 @@ bool try_send_dzflat(const std::shared_ptr<ipc::server>& ch, const std::shared_p
     {
         return false;
     }
-    auto lo = ch->loan(need);
+    auto lo = ch->loan_topic(need);
     if (!lo.valid())
     {
         return false;   // 池耗尽 —— 背压, 不是错误
