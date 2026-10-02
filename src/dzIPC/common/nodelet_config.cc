@@ -109,17 +109,8 @@ IPC_EXPORT bool IsViewQueuePinEnabled()
 
 IPC_EXPORT std::size_t ViewQueueCap()
 {
-    /* 池容量 / 4。池容量取 ipc::large_msg_cache(= 40) —— 它同时是
-     * ipc::id_pool<>::max_count 的取值来源(id_pool.h 取二者较小), 也就是池空报告
-     * 里打印的那个 "pool capacity"; 这里不直接引 id_pool.h 是因为那是 libipc 的
-     * 内部头, 而 dzIPC 侧只依赖 def.h。
-     * 40/4 = 10: 钉上限对齐 ROS 2 默认 QoS depth = 10, 同时保留 "4 个订阅者
-     * 满钉"的池余量(10×4 = 40 = 池容量)。max(1, ...) 是防御: 若将来把
-     * large_msg_cache 调到 <4, 整数除法会给出容量 0 的队列 —— 那会让 view 路径
-     * 彻底失效, 远比"钉得不够紧"更糟。 */
-    constexpr std::size_t kDivisor = 4;
-    return (std::max)(std::size_t{1},
-                      static_cast<std::size_t>(ipc::large_msg_cache) / kDivisor);
+    // 默认用户队列与每话题每尺寸档容量均为 10；应用取出的持样另占池。
+    return static_cast<std::size_t>(ipc::topic_msg_cache);
 }
 
 /* 传输层内部使用: 每条发布记一次。计数只用于观测, 用 relaxed 即可。 */

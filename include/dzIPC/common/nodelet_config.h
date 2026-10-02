@@ -13,7 +13,7 @@ namespace dzIPC {
 // 开启后, **SHM 发布路径**在满足下列条件时改用 DZFlat wire:
 //   - 消息类型由 generator 生成(dzflat_supported() 为真; 手写类型自动留在 TLV);
 //   - 该通道当前有接收方(无接收方时 chunk 借不到, 见 ipc::chan_wrapper::loan);
-//   - chunk 池未耗尽(每尺寸档位 32 块; 借不到就回退整包序列化)。
+//   - 话题 chunk 池未耗尽(每尺寸档位 10 块; 借不到就回退整包序列化)。
 // 任一条件不满足都会静默回退到既有 TLV 路径, 行为不变。
 //
 // 订阅侧**始终**同时认两种 wire(按段首 magic 判别, 见 dzflat::looks_like_dzflat),
@@ -90,31 +90,12 @@ IPC_EXPORT std::uint64_t DzFlatPrebuiltSegmentCount() noexcept;
 // ---------------------------------------------------------------------------
 // view 队列容量钉(进程级, 默认 ON)。设计见 docs/shm_chunk_pool_occupancy_plan.md §3 步骤③。
 //
-// 要解决的问题: SHM 订阅侧的 view 队列持有的是**借样** Sample —— 每个 Sample 里的
-// buff_t 让一块 chunk 的引用保持非零, 应用读完字段前该 chunk 不回池。而 chunk 池
-// 每尺寸档只有 ipc::large_msg_cache(=32) 块, 且 dzIPC 层建 route 不带 prefix ⇒
-// **同尺寸档全机一池**。调用方若把 queue_size 配得比池大(常见值 1024), 队列就能把
-// 整池吃干: 此后发布侧 loan 拿不到块 ⇒ 回退整包 TLV(DzFlatFallbackCount 上升),
-// 零拷贝收益归零。步骤② 实测坐实: 池占用 L == min(queue_size, 32), 队列是唯一
-// 主导者(通道 A 外部直读与通道 B 插桩直读逐点精确相等)。
-//
-// 钉法: view_queue_ 容量 = min(queue_size, ViewQueueCap()); 默认
-// ViewQueueCap() = ipc::large_msg_cache / 4 = 8, 留 24 块头寸给环内在飞、
-// 同进程其他话题、同机其他进程。
-//
-// 射程(为什么只钉 SHM 的 view 队列):
-//   - view_queue_ 只在"DZFlat + typed"的借样路径被 push; TLV 与 schema-less 走
-//     **物化**的 msg 队列 ⇒ 钉它不影响非 DZFlat 话题, 也不影响 msg 队列深度,
-//     所以 msg 队列刻意**不**钉(缩它只是白减应用缓冲)。
-//   - socket/UDP 侧也有 view 队列, 但它的 Sample 持有的是接收层去帧出来的**独立
-//     堆块**(见 socket_pub_sub_ipc.cc 的借样注释), 不占 chunk 池 ⇒ 不需要钉。
-//
-// ⚠️ 这是对调用方**显式传入**的 queue_size 的覆盖(该参数在 SubscriberIPCPtrMake
-// 里是必填、无默认值), 所以覆盖必须可观测: 生效时 shm_sub_ipc 构造会打一条一次性
-// stderr 诊断(按被请求的 queue_size 去重), 不静默。
-//
-// ⚠️ 单订阅者钉住 ≠ 全机不耗尽: 4 个同尺寸档订阅者各钉 8 块仍会用满 32。跨进程
-// 隔离要靠 prefix(见 docs/unfixed_defects.md UF-003), 不在本开关射程内。
+// SHM 的 view 队列和 GenericMessage adopt 持有共享块。DzFlat 使用每话题、每尺寸档
+// 10 块专用池，ViewQueueCap() 默认为 10，view 队列取 min(queue_size, 上限)。
+// 该值不会为发端未发布借样或应用取出后继续持有的 Sample 预留空闲块。
+// 多订阅者可以共享一块，但只有最后一个持有者释放后才能回池；池空时保留背压。
+// TLV 物化消息不受此持样上限影响；Socket 使用独立堆块，不占 SHM 专用池。
+// 队列大小被覆盖时保留一次性诊断。关闭钉上限也不会扩大十块池。
 //
 // 生效时机: 与 EnableDzFlat 一样是进程级, 但容量在**订阅者构造时**读取 ——
 // 因此只影响之后新建的订阅者, 已建的不变。

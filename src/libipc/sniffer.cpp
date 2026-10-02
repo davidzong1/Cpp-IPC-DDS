@@ -90,16 +90,16 @@ struct chunk_info_t {
     ipc::id_pool<> pool_;
     ipc::spin_lock lock_;
 
-    static std::size_t chunks_mem_size(std::size_t chunk_size) noexcept {
-        return ipc::id_pool<>::max_count * chunk_size;
+    static std::size_t chunks_mem_size(std::size_t chunk_size, std::size_t count) noexcept {
+        return count * chunk_size;
     }
 
     ipc::byte_t* chunks_mem() noexcept {
         return reinterpret_cast<ipc::byte_t*>(this + 1);
     }
 
-    chunk_t* at(std::size_t chunk_size, ipc::storage_id_t id) noexcept {
-        if (id < 0) return nullptr;
+    chunk_t* at(std::size_t chunk_size, ipc::storage_id_t id, std::size_t count) noexcept {
+        if (id < 0 || static_cast<std::size_t>(id) >= count) return nullptr;
         return reinterpret_cast<chunk_t*>(chunks_mem() + (chunk_size * id));
     }
 };
@@ -196,7 +196,7 @@ public:
     std::uint64_t                 dropped_ = 0;
 
     // Lazy-loaded per-chunk-size storage handles for large messages.
-    ipc::map<std::size_t, ipc::shm::handle> chunk_handles_;
+    ipc::map<ipc::string, ipc::shm::handle> chunk_handles_;
 
     // Fragment state must live across try_recv_one() calls. recv() may be
     // woken after any fragment, while the rest of the message is still being
@@ -280,32 +280,28 @@ public:
 
     /// Resolve a large-message storage chunk and copy its payload out.
     /// Returns empty buff_t on failure.
-    buff_t fetch_storage(ipc::storage_id_t id, std::size_t msg_size) {
-        std::size_t chunk_size = calc_chunk_size(msg_size);
-        auto it = chunk_handles_.find(chunk_size);
+    buff_t fetch_storage(ipc::storage_id_t wire_id, std::size_t msg_size) {
+        const auto encoded_id = ipc::detail::storage_from_wire(wire_id);
+        if (!ipc::detail::valid_storage(encoded_id)) return {};
+        const auto count = ipc::detail::storage_capacity(encoded_id);
+        const auto id = ipc::detail::storage_index(encoded_id);
+        const auto pref = ipc::detail::is_topic_storage(encoded_id)
+            ? ipc::topic_pool_prefix(prefix_, name_) : prefix_;
+        const std::size_t chunk_size = calc_chunk_size(msg_size);
+        const auto shm_name = ipc::make_prefix(pref, {"CHUNK_INFO__", ipc::to_string(chunk_size),
+                                                      "__C", ipc::to_string(count)});
+        auto it = chunk_handles_.find(shm_name);
         if (it == chunk_handles_.end()) {
             ipc::shm::handle h;
-            /* ⛔ 与 ipc.cpp get_info 的段名构造逐字同步(含容量分量 __C<cap>):
-             * sniffer 挂的就是发布/订阅用的同一档池段, 名字不一致 = 另建一段,
-             * sniffer 看到的池与真实池完全脱节。容量变更时两处一起改。 */
-            ipc::string shm_name = ipc::make_prefix(
-                prefix_,
-                {"CHUNK_INFO__", ipc::to_string(chunk_size), "__C",
-                 ipc::to_string(static_cast<std::size_t>(ipc::large_msg_cache))});
-            if (!h.acquire(shm_name.c_str(),
-                           sizeof(chunk_info_t) +
-                               chunk_info_t::chunks_mem_size(chunk_size))) {
-                return {};
-            }
-            it = chunk_handles_.emplace(chunk_size, std::move(h)).first;
+            if (!h.acquire(shm_name.c_str(), sizeof(chunk_info_t) +
+                           chunk_info_t::chunks_mem_size(chunk_size, count))) return {};
+            it = chunk_handles_.emplace(shm_name, std::move(h)).first;
         }
         auto* info = static_cast<chunk_info_t*>(it->second.get());
         if (info == nullptr) return {};
-        chunk_t* chunk = info->at(chunk_size, id);
+        chunk_t* chunk = info->at(chunk_size, id, count);
         if (chunk == nullptr) return {};
-
-        // Copy out into an owned buffer. We do not (and must not) recycle
-        // the storage slot — that is the producer's bookkeeping.
+        // 只复制观察，不取得持有者位，也不归还业务方的块。
         auto* mem = static_cast<ipc::byte_t*>(ipc::mem::alloc(msg_size));
         if (mem == nullptr) return {};
         std::memcpy(mem, chunk->data(), msg_size);

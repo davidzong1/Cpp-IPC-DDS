@@ -136,6 +136,9 @@ void warm_up(dzIPC::shm::shm_pub_ipc& pub, dzIPC::shm::shm_sub_ipc& sub,
         }
         else if (settled)
         {
+            // 出队不等于释放；sink 仍持有最后一条 warm-up 的共享借样。
+            sink = std::make_shared<dzIPC::TopicData>(
+                std::make_shared<dzIPC::GenericMessage>(), msg_id);
             return;
         }
         else
@@ -192,7 +195,7 @@ TEST(AdoptLoanQuota, WarnsWhenQueueExceedsPinCap)
 {
     /* 补充项③: 钉上限对齐 ROS 2 默认 depth —— 视图/adopt 共用 ViewQueueCap()。 */
     EXPECT_EQ(dzIPC::ViewQueueCap(), 10u)
-        << "钉上限应为 large_msg_cache(40)/4 = 10(对齐 ROS 2 默认 QoS depth)";
+        << "钉上限应为 topic_msg_cache = 10(对齐默认队列长度)";
     EXPECT_EQ(static_cast<std::size_t>(ipc::large_msg_cache), 40u);
 
     DzFlatSwitch on{true};
@@ -240,11 +243,11 @@ TEST(AdoptLoanQuota, QuotaCapsBorrowAndSpillsMaterialize)
     std::shared_ptr<dzIPC::TopicData>& sink = sub.td;
     warm_up(pub, *sub.sub, warm, kMsgId, sink);
 
-    /* 交替发布两种宽度(同档不同长)各 6 条, 共 12; 期间**完全不消费**。 */
+    /* 两个尺寸档各 6 条，共 12；每档不超过十块，独立触发总 adopt 配额 10。 */
     constexpr int kN = 12;
     for (int i = 0; i < kN; ++i)
     {
-        const auto src = make_image(i % 2 == 0 ? 60 : 61, 45, 0x10);
+        const auto src = make_image(i % 2 == 0 ? 60 : 80, 45, 0x10);
         auto m = std::make_shared<dzIPC::Msg::StdImage>(src);
         m->set_msg_id(kMsgId);
         pub.publish(m);
@@ -287,7 +290,7 @@ TEST(AdoptLoanQuota, QuotaCapsBorrowAndSpillsMaterialize)
     EXPECT_EQ(dzIPC::DzFlatRxCounters().dzflat_adopt_spilled, kN - cap)
         << "spilled 计数必须恰为 N - 配额";
 
-    /* 段长交替(60/61 两种宽度 ⇒ 两种段长), 证明没有串档。 */
+    /* 段长交替(60/80 两个尺寸档)，验证物化及借样均未串档。 */
     ASSERT_NE(got[0].seg_len, got[1].seg_len) << "两种宽度的段长不应相同";
     for (std::size_t i = 2; i < got.size(); ++i)
     {
@@ -396,7 +399,13 @@ TEST(AdoptLoanQuota, EvictionKeepsQuotaAccurate)
     {
         auto m = std::make_shared<dzIPC::Msg::StdImage>(make_image(60, 45, 0x30));
         m->set_msg_id(kMsgId);
-        pub.publish(m);
+        const auto before=dzIPC::DzFlatRxCounters().dzflat_accepted;
+        ASSERT_TRUE(pub.publish(m));
+        // 本用例验证接收队列驱逐；逐条等到接收，避免发端突发先耗尽十块池。
+        const auto until=std::chrono::steady_clock::now()+2s;
+        while(dzIPC::DzFlatRxCounters().dzflat_accepted==before &&
+              std::chrono::steady_clock::now()<until) std::this_thread::sleep_for(1ms);
+        ASSERT_GT(dzIPC::DzFlatRxCounters().dzflat_accepted,before);
     }
     std::this_thread::sleep_for(800ms);   // 等订阅线程吞完环里 12 条并完成驱逐
 

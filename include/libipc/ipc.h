@@ -161,6 +161,10 @@ namespace ipc
     static ipc::loan_t loan(ipc::handle_t h, std::size_t size,
                             ipc::loan_status *st, bool verbose);
 
+    /// 话题专用池借样：每个 (prefix, name, 尺寸档) 10 块；需新版本接收器。
+    static ipc::loan_t loan_topic(ipc::handle_t h, std::size_t size,
+                                 ipc::loan_status *st, bool verbose);
+
     /// \brief 把已借出的 chunk 作为一条消息投递(单条, 不拆包)。
     /// 失败时 chunk 已被本函数归还, 调用方不得再 discard_loan。
     static bool publish_loan(ipc::handle_t h, ipc::loan_t const &lo,
@@ -380,6 +384,14 @@ namespace ipc
     loan_t loan(std::size_t size, loan_status &st)
     {
       return detail_t::loan(h_, size, &st, verbose_);
+    }
+
+    /// DzFlat 使用的话题专用池；归还/发布仍用 discard_loan / publish_loan。
+    loan_t loan_topic(std::size_t size) {
+      return detail_t::loan_topic(h_, size, nullptr, verbose_);
+    }
+    loan_t loan_topic(std::size_t size, loan_status &st) {
+      return detail_t::loan_topic(h_, size, &st, verbose_);
     }
 
     bool publish_loan(loan_t const &lo, std::uint64_t tm = default_timeout)
