@@ -774,10 +774,10 @@ class TestSnifferBinding:
         """
         assert hasattr(dzplot.LiveSniffSource, "_channel_name_for_topic")
         ch = dzplot.LiveSniffSource._channel_name_for_topic("/test/foo")
-        assert ch == "dz_ipc_d0__test_foo_topic", f"unexpected name: {ch}"
+        assert ch == "dz_ipc_d0_s2_b70217718f7616a7900a27e8c02f6029_topic", f"unexpected name: {ch}"
         # domain 参与命名: 换 domain 必须换段名, 否则跨 domain 串台
         assert (dzplot.LiveSniffSource._channel_name_for_topic("/test/foo", 7)
-                == "dz_ipc_d7__test_foo_topic")
+                == "dz_ipc_d7_s2_ade835750cc9be22f59e4fd1cbfb0920_topic")
         assert (dzplot.LiveSniffSource._channel_name_for_topic("/test/foo", 0)
                 != dzplot.LiveSniffSource._channel_name_for_topic("/test/foo", 7))
 
@@ -2065,7 +2065,7 @@ class TestControlPlaneReattach:
         一直**恒绿**。现在钉死完整名字。
         """
         name = dzplot.LiveSniffSource._control_plane_name_for_topic("/test/foo")
-        assert name == "dz_ipc_d0__test_foo_topic_control2", f"unexpected name: {name}"
+        assert name == "dz_ipc_d0_s2_b70217718f7616a7900a27e8c02f6029_topic_control2", f"unexpected name: {name}"
 
     def test_control_plane_name_is_not_the_stale_form(self):
         """反面对照: 两个过期形态都不许再出现。
@@ -2084,8 +2084,8 @@ class TestControlPlaneReattach:
         """domain 必须参与控制面命名 —— 否则跨 domain 会挂到别人的控制面上。"""
         n0 = dzplot.LiveSniffSource._control_plane_name_for_topic("/t", 0)
         n5 = dzplot.LiveSniffSource._control_plane_name_for_topic("/t", 5)
-        assert n0 == "dz_ipc_d0__t_topic_control2", f"unexpected name: {n0}"
-        assert n5 == "dz_ipc_d5__t_topic_control2", f"unexpected name: {n5}"
+        assert n0 == "dz_ipc_d0_s2_537d58dfd31fe3a703e5c291ab513175_topic_control2", f"unexpected name: {n0}"
+        assert n5 == "dz_ipc_d5_s2_d13a1dc1003d92fa97cd4c07618cbf40_topic_control2", f"unexpected name: {n5}"
 
     def test_control_plane_derives_from_data_segment_name(self):
         """控制面名由**数据段名**派生(而不是另拼一份) —— 数据段名含 domain, 控制面
@@ -2283,7 +2283,7 @@ class TestControlPlaneReadOnly:
         """存在则返回 True —— 否则上面那条 False 可能只是"恒 False"。"""
         with tempfile.TemporaryDirectory() as d:
             shm = Path(d)
-            name = "dz_ipc_d0__t_topic_control2"
+            name = "dz_ipc_d0_s2_537d58dfd31fe3a703e5c291ab513175_topic_control2"
             (shm / name).write_bytes(b"\0" * 64)
             assert dzplot.LiveSniffSource._control_plane_segment_exists(
                 name, shm_dir=shm)
@@ -2307,7 +2307,7 @@ class TestControlPlaneReadOnly:
         """段存在则照常挂上 —— 否则"不建段"可能只是"永远不工作"。"""
         with tempfile.TemporaryDirectory() as d:
             shm = Path(d)
-            name = "dz_ipc_d0__t_topic_control2"
+            name = "dz_ipc_d0_s2_537d58dfd31fe3a703e5c291ab513175_topic_control2"
             (shm / name).write_bytes(b"\0" * 64)
             ipc = _FakeIPC()
             plane, gen, status = dzplot.LiveSniffSource._open_control_plane_readonly(
@@ -2327,7 +2327,7 @@ class TestControlPlaneReadOnly:
 
         with tempfile.TemporaryDirectory() as d:
             shm = Path(d)
-            name = "dz_ipc_d0__t_topic_control2"
+            name = "dz_ipc_d0_s2_537d58dfd31fe3a703e5c291ab513175_topic_control2"
             (shm / name).write_bytes(b"\0" * 64)
             plane, gen, status = dzplot.LiveSniffSource._open_control_plane_readonly(
                 _RefusingIPC(), name, shm_dir=shm)
@@ -2412,22 +2412,22 @@ class TestCrossFileNamingConsistency:
         sub = self._dzviz_subscriber()
         pats = sub._shm_globs_for_topic("/x", 0)
         real = [
-            "__IPC_SHM__AC_CONN__dz_ipc_d0__x_topic",
-            "__IPC_SHM__CC_CONN__dz_ipc_d0__x_topic_WAITER_COND_",
-            "__IPC_SHM__CC_CONN__dz_ipc_d0__x_topic_WAITER_LOCK_",
-            "__IPC_SHM__CC_CONN__dz_ipc_d0__x_topic_WAITER_STATE_",
-            "__IPC_SHM__QU_CONN__dz_ipc_d0__x_topic__64__16",
-            "__IPC_SHM__RD_CONN__dz_ipc_d0__x_topic_WAITER_COND_",
-            "__IPC_SHM__WT_CONN__dz_ipc_d0__x_topic_WAITER_STATE_",
-            "dz_ipc_d0__x_topic_control2",
+            "__IPC_SHM__AC_CONN__dz_ipc_d0_s2_537d4cdfd31fcf4303e5c691ab513841_topic",
+            "__IPC_SHM__CC_CONN__dz_ipc_d0_s2_537d4cdfd31fcf4303e5c691ab513841_topic_WAITER_COND_",
+            "__IPC_SHM__CC_CONN__dz_ipc_d0_s2_537d4cdfd31fcf4303e5c691ab513841_topic_WAITER_LOCK_",
+            "__IPC_SHM__CC_CONN__dz_ipc_d0_s2_537d4cdfd31fcf4303e5c691ab513841_topic_WAITER_STATE_",
+            "__IPC_SHM__QU_CONN__dz_ipc_d0_s2_537d4cdfd31fcf4303e5c691ab513841_topic__64__16",
+            "__IPC_SHM__RD_CONN__dz_ipc_d0_s2_537d4cdfd31fcf4303e5c691ab513841_topic_WAITER_COND_",
+            "__IPC_SHM__WT_CONN__dz_ipc_d0_s2_537d4cdfd31fcf4303e5c691ab513841_topic_WAITER_STATE_",
+            "dz_ipc_d0_s2_537d4cdfd31fcf4303e5c691ab513841_topic_control2",
         ]
         not_ours = [
-            "__IPC_SHM__QU_CONN__dz_ipc_d0__x_topic_extra_topic__64__16",
-            "__IPC_SHM__AC_CONN__dz_ipc_d0__x_topic_extra_topic",
-            "__IPC_SHM__CC_CONN__dz_ipc_d0__x_topic_extra_topic_WAITER_COND_",
-            "dz_ipc_d0__x_topic_extra_topic_control2",
-            "__IPC_SHM__QU_CONN__dz_ipc_d1__x_topic__64__16",
-            "__IPC_SHM__QU_CONN__dz_ipc_d0__x_topic_control2__64__16",
+            "__IPC_SHM__QU_CONN__dz_ipc_d0_s2_537d4cdfd31fcf4303e5c691ab513841_topic_extra_topic__64__16",
+            "__IPC_SHM__AC_CONN__dz_ipc_d0_s2_537d4cdfd31fcf4303e5c691ab513841_topic_extra_topic",
+            "__IPC_SHM__CC_CONN__dz_ipc_d0_s2_537d4cdfd31fcf4303e5c691ab513841_topic_extra_topic_WAITER_COND_",
+            "dz_ipc_d0_s2_537d4cdfd31fcf4303e5c691ab513841_topic_extra_topic_control2",
+            "__IPC_SHM__QU_CONN__dz_ipc_d1_s2_af8a4cc26897b632cadb030b3de64590_topic__64__16",
+            "__IPC_SHM__QU_CONN__dz_ipc_d0_s2_537d4cdfd31fcf4303e5c691ab513841_topic_control2__64__16",
         ]
         for name in real:
             assert any(fnmatch.fnmatch("/dev/shm/" + name, p) for p in pats), (

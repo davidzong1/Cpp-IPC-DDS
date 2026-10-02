@@ -9,6 +9,8 @@
 #include <string>
 #include <string_view>
 #include <cstdio>
+#include <memory>
+#include "libipc/export.h"
 
 #include "libipc/def.h"
 
@@ -90,7 +92,7 @@ template <> struct hash<wstring> {
 
 template <typename T>
 ipc::string to_string(T val) {
-    char buf[std::numeric_limits<T>::digits10 + 1] {};
+    char buf[std::numeric_limits<T>::digits10 + 3] {};
     if (std::snprintf(buf, sizeof(buf), pf(val), val) > 0) {
         return buf;
     }
@@ -117,10 +119,36 @@ inline ipc::string make_prefix(ipc::string prefix, std::initializer_list<ipc::st
     return prefix;
 }
 
-// 原 prefix 用长度分隔，避免不同 prefix/话题组合拼成同一池键。
-// 名称由发送、接收和只读嗅探器共同使用，不含进程 ID。
-inline ipc::string topic_pool_prefix(ipc::string const& pref, ipc::string const& topic) {
-    return make_prefix({}, {"DZFLAT_TOPIC_V1__", to_string(pref.size()), "_", pref, "__", topic});
+// loan 和普通 send 使用完全相同的尺寸档，接收与 sniffer 也按本规则定位。
+inline std::size_t pool_size_class(std::size_t size) noexcept {
+    if (size <= 64 * 1024) return ((size + large_msg_align - 1) / large_msg_align) * large_msg_align;
+    std::size_t value = 128 * 1024;
+    while (value < size) {
+        const auto next = value << 1;
+        if (next < value) return size;
+        value = next;
+    }
+    return value;
 }
+
+// 每个上下文持有一个跨进程租约；池缓存随最后一个本地持有者释放。
+struct pool_identity_header {
+    std::uint64_t magic;
+    std::uint64_t topic_id;
+};
+class topic_pool_context {
+    struct impl;
+    std::unique_ptr<impl> p_;
+public:
+    topic_pool_context(ipc::string const& pref, ipc::string const& name);
+    ~topic_pool_context();
+    bool valid() const noexcept;
+    bool same_process() const noexcept;
+    std::uint64_t identity() const noexcept;
+    void* map_pool(std::size_t stride, std::size_t bytes);
+};
+IPC_EXPORT ipc::string topic_pool_prefix(ipc::string const& pref, ipc::string const& name);
+IPC_EXPORT std::shared_ptr<topic_pool_context> acquire_topic_pool(ipc::string const& pref, ipc::string const& name);
+IPC_EXPORT bool clear_topic_pools(ipc::string const& pref, ipc::string const& name) noexcept;
 
 } // namespace ipc

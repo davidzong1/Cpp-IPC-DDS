@@ -144,8 +144,8 @@ TEST(HandshakeWatch, ExtraListenerNeitherStealsFramesNorInjectsThem)
 {
     const std::string topic = "hs_watch_multi_1";
     const int domain = 1;
-    const std::string group = common::udp_discovery_addr_calculate(topic);
-    const uint16_t data_port = common::udp_discovery_port_calculate(topic, domain);
+    const std::string group = common::socket_scope_address(topic,domain,common::ScopeKind::Service);
+    const uint16_t data_port = common::socket_scope_port(topic,domain,common::ScopeKind::Service);
     const uint16_t hs_port = static_cast<uint16_t>(data_port + common::kUdpPortOffsetHandshake);
 
     constexpr int kFrames = 20;
@@ -154,7 +154,9 @@ TEST(HandshakeWatch, ExtraListenerNeitherStealsFramesNorInjectsThem)
     int control_b_got = 0;
     {
         ipc::socket::UDPNode a(topic.c_str(), group.c_str(), hs_port, ipc::socket::NodeRole::SendRecv);
+        a.set_scope(common::channel_scope_token(topic,domain,common::ScopeKind::Service));
         ipc::socket::UDPNode b(topic.c_str(), group.c_str(), hs_port, ipc::socket::NodeRole::SendRecv);
+        b.set_scope(common::channel_scope_token(topic,domain,common::ScopeKind::Service));
         ASSERT_TRUE(a.connect());
         ASSERT_TRUE(b.connect());
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
@@ -174,7 +176,9 @@ TEST(HandshakeWatch, ExtraListenerNeitherStealsFramesNorInjectsThem)
     int with_watcher_b_got = 0;
     {
         ipc::socket::UDPNode a(topic.c_str(), group.c_str(), hs_port, ipc::socket::NodeRole::SendRecv);
+        a.set_scope(common::channel_scope_token(topic,domain,common::ScopeKind::Service));
         ipc::socket::UDPNode b(topic.c_str(), group.c_str(), hs_port, ipc::socket::NodeRole::SendRecv);
+        b.set_scope(common::channel_scope_token(topic,domain,common::ScopeKind::Service));
         handshake_probe watcher;
         ASSERT_TRUE(watcher.open(topic, domain));
         ASSERT_TRUE(a.connect());

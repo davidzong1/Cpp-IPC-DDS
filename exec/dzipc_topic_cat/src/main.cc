@@ -58,7 +58,7 @@ void clear_sniffer(std::unique_ptr<dzIPC::sniffer>& sniffer, std::unique_ptr<dzI
 
 /* 建新 sniffer 到临时变量, 再在锁内交换 —— 持锁期间不做 SHM/UDP 建链这种可能阻塞
  * (乃至 std::exit)的活; 旧 sniffer 在锁外析构, 其接收线程的 join 不占锁。 */
-void build_sniffer(const std::string& topic_name, int domain_id, bool ser_or_topic, bool link, uint32_t msg_id,
+void build_sniffer(const std::string& topic_name, std::uint64_t domain_id, bool ser_or_topic, bool link, uint32_t msg_id,
                    const dzipc_topic_cat::Selection& sel, std::unique_ptr<dzIPC::sniffer>& sniffer,
                    std::unique_ptr<dzIPC::TopicData>& MsgManager_topic,
                    std::unique_ptr<dzIPC::ServiceData>& MsgManager_service)

@@ -102,6 +102,7 @@ private:
     std::function<void(std::shared_ptr<ServiceData>&)> callback_;
     std::mutex callback_mtx_;
     std::string topic_name_;
+    std::shared_ptr<void> request_pool_lifetime_, response_pool_lifetime_;
     std::shared_ptr<ServiceData> message_;
     std::mutex message_mtx_;
     std::thread* response_thread_{nullptr};
@@ -165,6 +166,7 @@ private:
     std::shared_ptr<ServiceData> message_;
     std::mutex message_mtx_;
     std::string topic_name_;
+    std::shared_ptr<void> request_pool_lifetime_, response_pool_lifetime_;
     std::shared_ptr<ipc::server> ipc_r_ptr_;
     std::shared_ptr<ipc::server> ipc_w_ptr_;
     std::mutex channel_mtx_;

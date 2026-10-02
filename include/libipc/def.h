@@ -7,6 +7,9 @@
 #include <utility>
 
 namespace ipc {
+// 1472 字节 UDP 预算中预留 32 字节作用域头；分片及 TLV 页共用此常量。
+inline constexpr std::size_t wire_packet_size = 1440;
+
 
 // types
 
@@ -41,39 +44,19 @@ enum : std::size_t {
     sniffer_payload_limit = data_length * sniffer_ring_slots,
     large_msg_limit = data_length,
     large_msg_align = 1024,
-    /* 每尺寸档 chunk 池容量。40 = 10(钉上限, 对齐 ROS 2 默认 QoS depth=10)
-     * × 4(满钉订阅者余量) —— dzIPC::ViewQueueCap() 即取本值 / 4。
-     * 调整时同步检查: id_pool::max_count = min(本值, uint8 上限 255);
-     * 段名编码了本值(ipc.cpp get_info), 容量不同的段天然隔离不混挂;
-     * UF-007/UF-011 判据的 4×kCap 魔数由本值导出, 不得写死。 */
-    large_msg_cache = 40,
-    // DzFlat 专用借样：每个话题、每个尺寸档独享的载荷块数。
+    // 所有 SHM 载荷强制使用每话题、每尺寸档 10 块池。
     topic_msg_cache = 10,
 };
 
 namespace detail {
-// loan_t 的 ID 为不透明句柄；高位只存在于本地 API，线上用负 ID 区分新池。
-// 旧接收器拒绝负 ID，不会把新池句柄作为旧池的大偏移解引用。
-constexpr storage_id_t topic_storage_tag = 0x40000000;
-constexpr bool is_topic_storage(storage_id_t id) noexcept {
-    return id >= topic_storage_tag && id < topic_storage_tag + static_cast<storage_id_t>(topic_msg_cache);
-}
-constexpr storage_id_t storage_index(storage_id_t id) noexcept {
-    return is_topic_storage(id) ? id - topic_storage_tag : id;
-}
-constexpr std::size_t storage_capacity(storage_id_t id) noexcept {
-    return is_topic_storage(id) ? topic_msg_cache : large_msg_cache;
-}
 constexpr bool valid_storage(storage_id_t id) noexcept {
-    return is_topic_storage(id) || (id >= 0 && id < static_cast<storage_id_t>(large_msg_cache));
+    return id >= 0 && id < static_cast<storage_id_t>(topic_msg_cache);
 }
 constexpr storage_id_t storage_to_wire(storage_id_t id) noexcept {
-    return is_topic_storage(id) ? -2 - storage_index(id) : (valid_storage(id) ? id : -1);
+    return valid_storage(id) ? -2 - id : -1;
 }
 constexpr storage_id_t storage_from_wire(storage_id_t id) noexcept {
-    return id <= -2 && id >= -1 - static_cast<storage_id_t>(topic_msg_cache)
-        ? topic_storage_tag + (-2 - id)
-        : (id >= 0 && id < static_cast<storage_id_t>(large_msg_cache) ? id : -1);
+    return id <= -2 && id >= -1 - static_cast<storage_id_t>(topic_msg_cache) ? -2 - id : -1;
 }
 } // namespace detail
 

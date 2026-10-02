@@ -114,7 +114,7 @@ IPC_EXPORT bool chunk_rev_topic(std::shared_ptr<ipc::socket::UDPNode>& node, std
  * 区分"收到 TLV"与"什么都没收到"(返回 false 表示超时/丢片, 此时 out_payload 不动)。
  *
  * 契约与边界(必须写清, 否则会被误用):
- *   - DZFlat 段在 UDP 上**必须**是分帧流里的连续段: 每 1460 字节数据后跟 12 字节页尾,
+ *   - DZFlat 段在 UDP 上**必须**是分帧流里的连续段: 每 1428 字节数据后跟 12 字节页尾,
  *     去帧由本函数负责; 段本身仍是"位置无关、无指针"的 DZFlat 段, 语义与 SHM 上那份
  *     完全一致(可整体 memcpy, 见 dzflat.h 的三条性质);
  *   - 这一次去帧拷贝是**省不掉**的: UDP 的分帧会把页尾插进段中间, 且接收缓冲是本进程

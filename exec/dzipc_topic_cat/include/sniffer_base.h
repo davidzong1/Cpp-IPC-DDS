@@ -15,9 +15,9 @@ public:
     sniffer_base(sniffer_base const&) = delete;
     sniffer_base& operator=(sniffer_base const&) = delete;
 
-    sniffer_base(const std::string& topic_name, int domain_id, bool ser_or_topic, uint32_t msg_id) {}
+    sniffer_base(const std::string& topic_name, std::uint64_t domain_id, bool ser_or_topic, uint32_t msg_id) {}
 
-    virtual void create_sniffer(const std::string& topic_name, int domain_id, bool ser_or_topic, uint32_t msg_id) = 0;
+    virtual void create_sniffer(const std::string& topic_name, std::uint64_t domain_id, bool ser_or_topic, uint32_t msg_id) = 0;
     virtual sniffer_info try_recv() noexcept = 0;
 
 protected:

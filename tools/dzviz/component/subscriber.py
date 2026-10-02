@@ -87,12 +87,19 @@ class DzipcSubscriber(threading.Thread):
 
         唯一出处 include/dzIPC/common/name_operator.h(实现在 name_operator.cc:25):
 
-            "dz_ipc_d" + std::to_string(domain_id) + "_" + sanitize_topic_name(topic) + "_topic"
+            "dz_ipc_d<domain>_s2_<scope128>_topic"
 
         domain 参与命名, 漏掉它 SHM 上就没有 domain 隔离(docs/shm_defect_fixes.md 第 1 条)。
         """
-        return ("dz_ipc_d" + str(domain) + "_"
-                + DzipcSubscriber._sanitize_for_shm(topic) + "_topic")
+        raw = topic.encode("utf-8")
+        key = f"DZSC2:1:{domain}:{len(raw)}:".encode("ascii") + raw
+        def fnv(data):
+            value = 14695981039346656037
+            for byte in data:
+                value = ((value ^ byte) * 1099511628211) & ((1 << 64) - 1)
+            return value
+        suffix = f"{fnv(key):016x}{fnv(b'identity:' + key):016x}"
+        return f"dz_ipc_d{domain}_s2_{suffix}_topic"
 
     @staticmethod
     def _shm_globs_for_topic(topic: str, domain: int = 0) -> List[str]:

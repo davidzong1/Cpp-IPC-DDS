@@ -62,7 +62,7 @@ constexpr std::size_t kMaxEntries = 4096;
  * 因此: 布局一变就换段名后缀 + 升 kLayoutVersion, 旧段与新段物理隔离。
  * 回滚/清理见 .cc 顶部「跨版本与旧段处置」。 */
 constexpr std::uint32_t kLayoutMagic = 0x5A'49'50'44u;   // 'DZIP'
-constexpr std::uint32_t kLayoutVersion = 2;
+constexpr std::uint32_t kLayoutVersion = 3;
 /* PoolEntry 的字节数(与 .cc 的 offsetof/sizeof static_assert 同源)。 */
 constexpr std::size_t kPoolEntryBytes = 296;
 
@@ -88,7 +88,7 @@ struct RegisterInfo
     std::string topic_name;
     std::string type_name;
     std::string ipc_mode;
-    int32_t domain_id;
+    uint64_t domain_id;
     std::string extra;
 };
 
@@ -102,7 +102,7 @@ struct EntrySnapshot
     int64_t heartbeat_ns{0};
     std::string topic_name;
     std::string type_name;
-    int32_t domain_id{0};
+    uint64_t domain_id{0};
     std::string extra;
     bool in_use{true};
     bool alive{true};

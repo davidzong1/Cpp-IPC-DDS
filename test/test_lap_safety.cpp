@@ -33,7 +33,7 @@ namespace {
 
 using namespace std::chrono_literals;
 
-constexpr int kChunkPoolSize = static_cast<int>(ipc::large_msg_cache);
+constexpr int kChunkPoolSize = static_cast<int>(ipc::topic_msg_cache);
 constexpr int kRingSlots = 256;
 
 std::string uniq(const char* tag)
@@ -110,7 +110,7 @@ TEST(LapSafety, FloodedSubscriberMustNotCrash)
 TEST(LapSafety, LappedDrainMustNotShrinkChunkPool)
 {
     constexpr std::size_t kPayload = 8192;   /* 独立尺寸档位, 不与其他用例抢池子 */
-    constexpr int kProbe = 20;
+    constexpr int kProbe = kChunkPoolSize - 1;
     static_assert(kProbe < kChunkPoolSize, "探针条数须小于池容量");
 
     const std::string name = "lap_pool_probe";

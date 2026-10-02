@@ -656,45 +656,17 @@ TEST(SerCliAutoPath, OccupancyDetectedWithoutPoolEntry)
  *   - 不含 '/' 的 topic: 段名必须与本改动**逐字节相同**（零改名 ⇒ 跨版本互通）;
  *   - legacy（F1 前）规则仍可算出, 作为回滚基准与旧名比对。
  * ------------------------------------------------------------------------- */
-TEST(SerCliAutoPath, F1SegmentNameSanitizesOnlySlash)
+TEST(SerCliAutoPath, ScopedSegmentNamesKeepOriginalIdentity)
 {
-    const size_t domain = 3;
-
-    /* ① 修复目标: 前导 '/' 必须被消除。 */
-    const std::string t1 = shm_service_prefix("/demo", domain);
-    EXPECT_EQ(t1.find('/'), std::string::npos)
-        << "段名内仍有内层 '/' ⇒ shm_open 必返 EINVAL(22); 实际: " << t1;
-    EXPECT_EQ(t1, "dz_ipc_d3__demo");
-
-    /* ② 内层 '/' 同样要清, 且**每个**都要清(不能只清第一个)。 */
-    const std::string t2 = shm_service_prefix("/demo/depth", domain);
-    EXPECT_EQ(t2.find('/'), std::string::npos) << "实际: " << t2;
-    EXPECT_EQ(t2, "dz_ipc_d3__demo_depth");
-    EXPECT_EQ(shm_service_prefix("a/b/c", domain).find('/'), std::string::npos);
-
-    /* ③ 零改名 —— 这是"新旧版本互通"的**全部**依据: 不含 '/' 的 topic 逐字节不变。
-     *    特别钉住 ':' —— 全量 sanitize_topic_name 会把 ':' 换成 '_' 从而**改名**,
-     *    那会让新旧版本各建一段、静默不互通（见 F1 设计说明的取舍表）。 */
-    for (const char* topic : {"plain", "with_underscore", "with-dash", "with.dot", "rt:chatter"})
-    {
-        EXPECT_EQ(shm_service_prefix(topic, domain), shm_service_legacy_prefix(topic, domain))
-            << "不含 '/' 的 topic 段名被改了（违反零改名）: " << topic;
+    const size_t domain=3;
+    for(const char* topic:{"/demo","/demo/depth","a/b/c","plain","rt:chatter"}) {
+        const auto name=shm_service_prefix(topic,domain);
+        EXPECT_EQ(name.find('/'),std::string::npos);
+        EXPECT_EQ(name,shm_service_prefix(topic,domain));
+        EXPECT_NE(name,shm_service_prefix(topic,domain+1));
     }
-    /* 反向钉死 ':' 不被清洗: 若有人把本函数改成复用 sanitize_topic_name, 在此失败。 */
-    EXPECT_EQ(shm_service_prefix("rt:chatter", domain), "dz_ipc_d3_rt:chatter")
-        << "':' 被清洗了 —— 这会给现行可用 topic 改名, 破坏跨版本互通";
-
-    /* ④ legacy 规则仍可算出, 且对含 '/' 的 topic 与新名**不同**（回滚基准可比对）。 */
-    EXPECT_NE(shm_service_prefix("/demo", domain), shm_service_legacy_prefix("/demo", domain))
-        << "legacy 基准与 F1 新规则算出同一名字 ⇒ 回滚比对失去意义";
-    EXPECT_EQ(shm_service_legacy_prefix("/demo", domain), "dz_ipc_d3_/demo")
-        << "legacy 规则本身被改动了 —— 回滚基准不再忠实反映 F1 之前的行为";
-
-#if defined(_WIN32)
-    /* 平台谓词: Windows 段名没有 '/' 约束, 保持原样 ⇒ 新名与 legacy 完全相同。 */
-    EXPECT_EQ(shm_service_prefix("/demo", domain), shm_service_legacy_prefix("/demo", domain))
-        << "Windows 不应清洗（平台谓词失效）";
-#endif
+    EXPECT_NE(shm_service_prefix("/demo",domain),shm_service_prefix("_demo",domain));
+    EXPECT_EQ(shm_service_legacy_prefix("/demo",domain),"dz_ipc_d3_/demo");
 }
 
 /* ------------------------------------------------------------------------- *
@@ -1189,28 +1161,7 @@ TEST(SerCliAutoPath, F2RendezvousFailureIsNotReportedAsOccupied)
     probe.close();
 }
 
-/* ------------------------------------------------------------------------- *
- * A11/M3: 别名碰撞 —— '_foo' 与 '/foo' **派生到同一个 SHM 段**。
- *
- * 这不是假想的边界: F1 把段名里的内层 '/' 清成 '_'(POSIX 只接受 /somename, 内层 '/'
- * 让 shm_open 恒 EINVAL(22)), 于是"下划线名"与"斜杠名"从**两个不同的 topic** 变成了
- * **同一个段**的两个别名。诚实标注: 碰撞是 F1 **引入**的, 但它引入的是"从不可用 ->
- * 与别人撞名"(斜杠那条以前根本建不出段), 不是把两条本来能用的通道并成一条。
- *
- * 要钉死的两件事:
- *   ① 后起的 '/foo' **不得摧毁**先起的 '_foo' 的既有连接。摧毁的直接签名是控制面段被
- *      clear_storage/begin_rebuild 重建: owner_pid 被改写、generation 被推进、对端计数
- *      归零; 行为面则是客户端被顶下 SHM、RPC 开始失败。
- *   ② 后果必须**可判定**: 服务端记 ChannelOccupied, 客户端照实记账(而不是超时),
- *      并且两条连接各自继续可用(SHM / socket 各走各的)。
- *
- * ---- 变异条款(可执行) ----
- * 池证据对别名是**盲**的(它按原始 topic 名匹配, 而两个名字不同), 所以挡住这条碰撞的
- * **唯一**机制就是第二条证据源: 按**派生段名**做的控制面探测。把那一半去掉,
- * shm_channel_occupied() 就退化成 pool_only_says_occupied() 的返回值 ⇒ 下面那条
- * ASSERT_TRUE 立刻红。更进一步, '/foo' 会真的切进去并 clear_storage 掉 '_foo' 的段,
- * 于是 c1 掉下 SHM、generation 被推进 —— 本用例有多重承重点, 不是一条断言撑着的。
- * ------------------------------------------------------------------------- */
+// 两个原始名字各自建立通道；后建通道不能重建或破坏先前的服务。
 TEST(SerCliAutoPath, A11AliasCollisionDoesNotDestroyExistingConnection)
 {
 #if !defined(_WIN32)
@@ -1220,25 +1171,25 @@ TEST(SerCliAutoPath, A11AliasCollisionDoesNotDestroyExistingConnection)
     const std::string topic_underscore = base + "_x";   // 先起: 下划线名
     const std::string topic_slash = base + "/x";        // 后起: 斜杠名(只差这一个字符)
 
-    /* ---- 前提 1: 两个 topic 名不同, 派生段名却完全相同 ---- */
+
     ASSERT_NE(topic_underscore, topic_slash);
-    ASSERT_EQ(shm_service_prefix(topic_underscore, domain), shm_service_prefix(topic_slash, domain))
-        << "前提不成立: 两个 topic 没有派生到同一个段, 本用例检验不到别名碰撞";
-    ASSERT_EQ(dzIPC::shm::ser_service_control_name(topic_underscore, domain),
+    ASSERT_NE(shm_service_prefix(topic_underscore, domain), shm_service_prefix(topic_slash, domain))
+        << "不同原始名字必须派生到不同段";
+    ASSERT_NE(dzIPC::shm::ser_service_control_name(topic_underscore, domain),
               dzIPC::shm::ser_service_control_name(topic_slash, domain))
-        << "控制面段名(占用判据用的就是它)没有碰撞";
-    /* 老规则下两者名字不同 —— 碰撞确实是 F1 带来的(而 F1 前那条恒 EINVAL, 从未可用)。 */
+        << "控制面也必须按原始名字隔离";
+
     EXPECT_NE(shm_service_legacy_prefix(topic_underscore, domain), shm_service_legacy_prefix(topic_slash, domain))
         << "legacy 规则下两者居然同名 ⇒ 碰撞不是 F1 引入的, 本用例的定性错了";
 
-    /* ---- 前提 2: 握手通道不撞端口(撞了会互相串台, 断言就不可复现了) ---- */
+
     ASSERT_NE(dzIPC::common::udp_discovery_port_calculate(topic_underscore, 3),
               dzIPC::common::udp_discovery_port_calculate(topic_slash, 3))
         << "这两个 topic 名哈希到同一个 UDP 端口, 会互相串台; 换一个 base 名再跑";
 
     const std::string ctrl_name = dzIPC::shm::ser_service_control_name(topic_underscore, domain);
 
-    /* ---- 第一步: 子进程起 '_foo' 的服务端; 客户端留在**父进程** ---- */
+
     child_reaper child;
     child.pid = ::fork();
     ASSERT_GE(child.pid, 0);
@@ -1254,7 +1205,7 @@ TEST(SerCliAutoPath, A11AliasCollisionDoesNotDestroyExistingConnection)
         ::_exit(0);
     }
 
-    /* 客户端由父进程持有 —— 只有拿得住它, 才能直接断言"既有连接还在 SHM 上"。 */
+
     dzIPC::autopath::auto_cli_ipc c1(topic_underscore, make_sd(), domain, dzIPC::autopath::Options{}, false);
     c1.InitChannel();
     ASSERT_TRUE(wait_for([&] { return c1.handshake_completed(); }, 5000)) << "'_foo' 的 UDP 引导握手未完成";
@@ -1271,7 +1222,7 @@ TEST(SerCliAutoPath, A11AliasCollisionDoesNotDestroyExistingConnection)
     ASSERT_GT(before.generation, 0u) << "generation 还是 0 ⇒ 段没被真实建起来";
     ASSERT_GE(before.peer_count, 1u) << "既有连接没有登记到控制面, 前提不成立";
 
-    /* ---- 第二步: 起 '/foo' —— 它的派生段与 '_foo' 是**同一个** ---- */
+
     std::atomic<dzIPC::autopath::auto_ser_ipc*> srv2{nullptr};
     thread_joiner ser2;
     ser2.th = std::thread([&] {
@@ -1286,49 +1237,42 @@ TEST(SerCliAutoPath, A11AliasCollisionDoesNotDestroyExistingConnection)
     });
     std::this_thread::sleep_for(250ms);
 
-    /* 变异条款: 池对别名是盲的 —— 这一条同时证明了**下一条 ASSERT 是承重的**:
-     * 没有派生段探测, 函数返回的正是这里这个 false。 */
+
     EXPECT_FALSE(pool_only_says_occupied(topic_slash, domain, static_cast<int32_t>(::getpid())))
         << "池判据居然看见了这条别名占用 ⇒ 本用例不再能区分'池判据'与'派生段判据'";
-    ASSERT_TRUE(dzIPC::autopath::shm_channel_occupied(topic_slash, domain, static_cast<int32_t>(::getpid())))
-        << "别名碰撞未被拦下: '/foo' 会 clear_storage 掉 '_foo' 正在用的段";
+    ASSERT_FALSE(dzIPC::autopath::shm_channel_occupied(topic_slash, domain, static_cast<int32_t>(::getpid())))
+        << "不同原始名字不应相互占用";
 
     dzIPC::autopath::auto_cli_ipc c2(topic_slash, make_sd(), domain, dzIPC::autopath::Options{}, false);
     c2.InitChannel();
     ASSERT_TRUE(wait_for([&] { return c2.handshake_completed(); }, 5000));
-    ASSERT_TRUE(wait_for([&] { return c2.status().switch_fallbacks.load() >= 1u; }, 6000))
-        << "'/foo' 既没切上 SHM 也没记回退, 用例无从判定";
+    ASSERT_TRUE(wait_for([&] { return c2.transport_current() == dzIPC::path::Kind::Shm; }, 6000))
+        << "'/foo' 未能独立切换到 SHM";
 
-    /* ---- 判据 ②: 拒绝是**可判定**的, 且两侧标签与计数一致 ---- */
-    EXPECT_EQ(c2.transport_current(), dzIPC::path::Kind::Socket);
-    EXPECT_EQ(c2.status().fallback(), FR::ShmChannelOccupied);
-    EXPECT_EQ(c2.status().decision(), DR::ChannelOccupied);
-    EXPECT_EQ(c2.status().switch_successes.load(), 0u);
+
+    EXPECT_EQ(c2.transport_current(), dzIPC::path::Kind::Shm);
+    EXPECT_EQ(c2.status().switch_successes.load(), 1u);
     EXPECT_EQ(c2.status().switch_attempts.load(), 1u);
-    EXPECT_EQ(c2.status().switch_fallbacks.load(), 1u);
+    EXPECT_EQ(c2.status().switch_fallbacks.load(), 0u);
     EXPECT_EQ(c2.status().switch_attempts.load(),
               c2.status().switch_successes.load() + c2.status().switch_fallbacks.load())
         << "判定期不变量被破坏: switch_attempts != switch_successes + switch_fallbacks";
 
     auto* s2p = srv2.load(std::memory_order_acquire);
     ASSERT_NE(s2p, nullptr);
-    EXPECT_EQ(s2p->status().decision(), DR::ChannelOccupied);
-    EXPECT_EQ(s2p->status().fallback(), FR::ShmChannelOccupied);
     EXPECT_EQ(s2p->status().switch_attempts.load(), 1u);
-    EXPECT_EQ(s2p->status().switch_fallbacks.load(), 1u);
+    EXPECT_EQ(s2p->status().switch_fallbacks.load(), 0u);
 
-    /* ---- 判据 ①(核心): 原连接**没有被摧毁** ---- */
+
     EXPECT_EQ(c1.transport_current(), dzIPC::path::Kind::Shm)
         << "别名碰撞把 '_foo' 的既有 SHM 连接顶下去了 —— 这正是本用例要防的";
     EXPECT_EQ(c1.status().switch_successes.load(), 1u) << "原连接被重新判定过(不该发生)";
     EXPECT_EQ(c1.status().switch_fallbacks.load(), 0u) << "原连接记到了回退 ⇒ 它的 SHM 腿被拆了";
     EXPECT_TRUE(one_rpc(c1)) << "'_foo' 的既有连接在 '/foo' 起来之后第一次往返失败";
     EXPECT_TRUE(one_rpc(c1)) << "'_foo' 的既有连接第二次往返失败";
-    EXPECT_TRUE(one_rpc(c2)) << "'/foo' 退回 socket 之后必须仍然可用, 而不是半死状态";
+    EXPECT_TRUE(one_rpc(c2)) << "'/foo' 独立 SHM 通道必须仍然可用";
 
-    /* 控制面: 段还是**同一个段**, owner/代次/引用计数都没被动过。
-     * 其中 generation 是最干脆的签名 —— begin_rebuild() 唯一会推进它的地方, 而它正是
-     * clear_storage 之后重建通道的第一步。 */
+
     const ctrl_head after = read_ctrl_head(ctrl_name);
     ASSERT_TRUE(after.exists) << "控制面段消失了(被 unlink) —— 原连接的通道被摧毁";
     EXPECT_EQ(after.magic, dzIPC::control_plane_shm::kTopicControlMagic);

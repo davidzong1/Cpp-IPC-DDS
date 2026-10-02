@@ -28,16 +28,12 @@ std::string sanitize_topic_name(const std::string& topic_name);
  * 第 1 条。
  * ------------------------------------------------------------------------- */
 
-/// pub/sub 数据段: "dz_ipc_d<domain>_<sanitized>_topic"
+/// pub/sub 数据段: "dz_ipc_d<domain>_s2_<scope128>_topic"
 std::string shm_topic_segment_name(const std::string& topic_name, size_t domain_id);
 
-/* 服务通道段名前缀: "dz_ipc_d<domain>_<topic>"; 请求/响应各自追加 "_ser_r"/"_ser_w"
- *
- * F1: 段名里的**内层** '/' 会让 POSIX shm_open 直接 EINVAL(22) —— 带前导斜杠的 topic
- * (如 "/demo") 因而**从来建不出段**, 且失败被上层 catch 吞掉、静默降级 socket。
- * 本函数现在做**最小清洗**: 仅把 '/' 换成 '_', 且仅在 POSIX 上(Windows 原样)。
- * 只清 '/' 而非全量 sanitize, 是为了对不含 '/' 的 topic **逐字节保持不变** ⇒ 零改名、
- * 跨版本互通不受影响 —— 详见 name_operator.cc 的 minimal_segment_sanitize() 注释。 */
+/* 服务作用域：domain、Service 类型及原始 topic 的身份散列。
+ * 固定长度命名避免清洗别名与长名字超限；请求/响应追加 _ser_r / _ser_w。
+ * 与旧清洗段名不兼容，通信双方及嗅探工具必须一起升级。 */
 std::string shm_service_prefix(const std::string& topic_name, size_t domain_id);
 
 /* F1 之前的段名前缀规则(不清洗), 仅供**回滚基准与旧名探测**使用。

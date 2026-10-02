@@ -68,7 +68,7 @@ public:
 
     /* 预构造段发布(见 pub_ipc_base.h)。
      *
-     * 段直接作为 UDP 载荷送出 —— 分帧仍是既有的 1460+12 页尾, wire 格式**没变**; 变的
+     * 段直接作为 UDP 载荷送出 —— 分帧仍是既有的 1428+12 页尾, 外层增加 32 字节作用域头，与旧版 wire 不兼容; 变的
      * 只是"载荷是平坦段还是 TLV"。接收侧的 T1 分流(data_rev.cc 的 out_payload 闸)认的
      * 正是这个, 于是 UDP 的借样腿由此有了第一个生产者(见 test_socket_borrow.cpp)。 */
     bool publish_prebuilt_segment(const void* seg, std::size_t len) override;

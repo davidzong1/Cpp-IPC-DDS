@@ -1,3 +1,6 @@
+#include <filesystem>
+#include "libipc/memory/resource.h"
+#include "dzIPC/common/name_operator.h"
 /* DZFlat 传输层回归 (docs/dzflat_shm.md Step 2)
  *
  * Step 1 只验证了布局本身(离线, 不碰传输)。这里验证收益进入真实 SHM 路径之后
@@ -549,4 +552,36 @@ TEST(DzFlatTransport, CrossProcessRoundTripProvesPositionIndependence)
         EXPECT_EQ(got.encoding, expected.encoding);
         EXPECT_EQ(got.header.frame_id, expected.header.frame_id);
     }
+}
+
+// 高层话题对象、重复初始化与尚未发布借样的真实生命周期。
+TEST(DzFlatTransport, ReinitAndLoanOutlivingTopicKeepPoolAlive) {
+    DzFlatSwitch on{true};
+    const auto topic=unique_topic("pool_lifecycle");
+    const auto name=shm_topic_segment_name(topic,0);
+    const auto key=ipc::topic_pool_prefix({},ipc::make_string(name.c_str()));
+    auto pool_count=[&] {
+        std::size_t count=0;
+        for(const auto& e:std::filesystem::directory_iterator("/dev/shm"))
+            if(e.path().filename().string().rfind(std::string(key.c_str())+"CHUNK_INFO__",0)==0)++count;
+        return count;
+    };
+    using Flat=dzIPC::Msg::StdImageFlat;
+    dzIPC::LoanedMessage<Flat> held;
+    {
+        auto pub_td=std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::Msg::StdImage>(),17);
+        auto sub_td=std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::Msg::StdImage>(),17);
+        dzIPC::shm::shm_pub_ipc pub{pub_td,topic,0};
+        dzIPC::shm::shm_sub_ipc sub{sub_td,topic,0,10};
+        for(int round=0;round<3;++round) {
+            pub.InitChannel();sub.InitChannel();
+            auto src=make_image(16,16,static_cast<std::uint8_t>(round));
+            dzIPC::Msg::StdImage got;
+            ASSERT_TRUE(pump_until(pub,sub,sub_td,src,got,17,same_image));
+        }
+        held=pub.loan<Flat>(128);ASSERT_TRUE(held.valid());
+        ASSERT_GT(pool_count(),0u);
+    }
+    EXPECT_TRUE(held.valid());EXPECT_GT(pool_count(),0u);
+    held={};EXPECT_EQ(pool_count(),0u);
 }

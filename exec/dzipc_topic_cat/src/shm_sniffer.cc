@@ -27,7 +27,7 @@ struct shm_sniffer_options
     bool quiet_meta = false;
 };
 
-shm_sniffer::shm_sniffer(const std::string& topic_name, int domain_id, bool ser_or_topic, uint32_t msg_id)
+shm_sniffer::shm_sniffer(const std::string& topic_name, std::uint64_t domain_id, bool ser_or_topic, uint32_t msg_id)
     : sniffer_base(topic_name, domain_id, ser_or_topic, msg_id)
 {
     create_sniffer(topic_name, domain_id, ser_or_topic, msg_id);
@@ -42,7 +42,7 @@ shm_sniffer::~shm_sniffer()
     }
 }
 
-void shm_sniffer::create_sniffer(const std::string& topic_name, int domain_id, bool ser_or_topic, uint32_t msg_id)
+void shm_sniffer::create_sniffer(const std::string& topic_name, std::uint64_t domain_id, bool ser_or_topic, uint32_t msg_id)
 {
     stop_.store(false, std::memory_order_release);
     topic_name_ = topic_name;
@@ -97,7 +97,7 @@ void shm_sniffer::create_sniffer(const std::string& topic_name, int domain_id, b
         });
 }
 
-bool shm_sniffer::open_channels(const std::string& topic_name, int, bool ser_or_topic)
+bool shm_sniffer::open_channels(const std::string& topic_name, std::uint64_t, bool ser_or_topic)
 {
     // The shm publishers/servers do NOT open a route/server with the raw topic
     // name — they mangle it the same way the regular sub/cli does. The sniffer

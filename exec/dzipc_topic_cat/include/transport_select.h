@@ -105,7 +105,7 @@ struct Selection
     int32_t slot{-1};
     dzIPC::info_pool::EntryKind kind{dzIPC::info_pool::EntryKind::Unknown};
     int32_t pid{0};
-    int32_t domain_id{0};
+    uint64_t domain_id{0};
     int64_t register_ts_ns{0};
     bool shm{false};
 

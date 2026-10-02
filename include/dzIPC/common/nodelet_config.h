@@ -23,7 +23,7 @@ namespace dzIPC {
 // msg_id, 几乎必然失配而丢弃 —— 不会错解, 但会静默丢消息)。因此必须在确认链路
 // 两端都是新版本之后, 由部署方显式打开。
 //
-// socket/UDP 路径不受影响: 其分片格式(1460+12 页尾)由 data_rev.cc 消费, 见
+// socket/UDP 路径不受影响: 其分片格式(1428+12 页尾)由 data_rev.cc 消费, 见
 // docs/dzflat_shm.md §1.4。
 // ---------------------------------------------------------------------------
 IPC_EXPORT void EnableDzFlat(bool enabled);

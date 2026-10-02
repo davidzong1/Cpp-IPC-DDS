@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <array>
 #include <cstring>
 #include "libipc/buffer.h"
 #include "libipc/debug.h"
@@ -45,6 +46,8 @@ public:
     UDPNode(const char* name, const char* ip, uint16_t port, NodeRole role);
     void create(const char* name, const char* ip, uint16_t port, NodeRole role) IPC_EXCEPTION_;
 
+    // 仅在连接/收发前设置。作用域固定头由传输层生成；底层裸 UDP 默认不封装。
+    void set_scope(const std::array<std::uint8_t,32>& token);
     NodeRole role() const noexcept;
 
     bool connect() IPC_EXCEPTION_;
