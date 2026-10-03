@@ -520,7 +520,7 @@ Step 1 先离线做(不碰传输), 是为了在承诺传输改造之前先把 §
 | `nodelet_config` | `EnableDzFlat` / `IsDzFlatEnabled` + 发布计数器 |
 | `shm_pub_sub_ipc` | 发布侧 `try_publish_dzflat`; 订阅侧按段首 magic 双 wire 分派 |
 
-**开关默认 OFF**, 理由写在 `nodelet_config.h`: DZFlat 段对未升级的订阅方不可解析(它会按 TLV 读段尾的 msg_id, 几乎必然失配而丢弃 —— 不会错解, 但会静默丢消息)。订阅侧则**无条件**同时认两种 wire, 于是"先升级订阅方、再升级发布方"是安全的灰度顺序。
+**开关默认 ON**：SHM 普通发布优先走 A（对象复制到每话题共享池），`loan` / `publish_loaned` 走 B（共享段内原地构造）。不支持平坦布局或普通发布借池失败时保留 TLV 回退；显式借样失败返回无效借样，由调用方处理。RPC 的 SHM 路径（含自动选路切入 SHM）同样默认启用。订阅侧同时识别两种 wire；通信双方须整体升级。需要关闭时，在初始化阶段调用 `EnableDzFlat(false)`。
 
 **为什么容量按档位取整**: `calc_chunk_size` 只按 1024 取整且共享段名含 chunk_size, 变长负载每 1KB 就开一个新段。借样把 chunk 持有期拉长后同时活着的段更多, 所以 `loan_size_class` 对 ≤64KB 用 1KB 台阶(与既有 send 同粒度, 不引入新段)、更大用 2 的幂(段数对数增长)。代价是大消息最坏浪费近一半容量 —— 但 chunk 是 tmpfs 稀疏映射, 只有真正写到的页才占物理内存, 而只写 `total_size` 那一段。**可见后果**: 接收方拿到的 `buff_t` 大小是容量而非负载长度, 真实长度由段头的 `total_size` 承载。
 
@@ -711,3 +711,28 @@ Python 侧的通用消费者是 `GenericMessage` —— 一个**自描述 TLV** 
 
 平坦段的发布端一旦上线, 未升级的订阅方会**静默丢消息**(§6.1)。所以顺序是硬的: **先升级所有订阅方, 再开发布端**, 且按话题分批 (`publish_dzflat` 只在逐话题处调用, 不像 `EnableDzFlat` 那样是进程级), 同时盯 `DzFlatFallbackCount` 与对端的 `dzflat_id_skipped`。
 
+
+### 2026-10-03 默认启用与 RPC 兼容
+
+`IPC_SHM` 默认启用 DzFlat。旧 RPC 回调可继续通过 `request()` / `response()` 访问普通对象：首次访问会按需物化并释放该槽借样。需要零拷贝时直接使用 `request_view<T>()` / `response_view<T>()`；不要在物化或重置该槽后继续使用先前取得的视图。显式 `EnableDzFlat(false)` 仍可恢复 TLV 路径。
+
+本轮验证：在私有 user/mount/IPC namespace 的独立 tmpfs 中执行，6 组 69 个用例全部通过：
+
+| 测试 | 用例数 |
+|---|---:|
+| test_dzflat_transport | 10 |
+| test_dzflat_builder | 9 |
+| test_dzflat_sercli | 4 |
+| test_dzflat_fallback_semantics | 6 |
+| test_sercli_auto_path | 15 |
+| test_topic_chunk_pool | 25 |
+
+A 的图像收发、B 的原地构造收发和非平坦类型回退用例均不再显式开启 DzFlat，以验证默认行为。初轮自动选路测试中 4 个用例暴露了旧 RPC owning 接口返回未填充模板的问题；补上按需物化后，原有 15 个自动选路用例全部通过，未修改其判据。未进行新的吞吐或延迟对比测试。
+
+复现命令（使用尚不存在的仓库外目录）：
+
+```bash
+python3 -B test/transport_comparison/domain_scope_runs.py --work /var/tmp/cppipc-default-dzflat-check --tests test_dzflat_transport test_dzflat_builder test_dzflat_sercli test_dzflat_fallback_semantics test_sercli_auto_path test_topic_chunk_pool
+```
+
+本轮构建、日志和 JSON 临时结果已在摘录后清理。公共头文件含 RPC 兼容改动，应用须随库重新编译。

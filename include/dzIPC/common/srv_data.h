@@ -1,6 +1,7 @@
 #ifndef SRV_DATA_H
 #define SRV_DATA_H
 #include <memory>
+#include <stdexcept>
 #include "dzIPC/common/data_base.h"
 #include "dzIPC/common/sample_message.h"
 #include "ipc_msg/ipc_msg_base/ipc_msg_base.hpp"
@@ -30,17 +31,25 @@ public:
         msg_method = 1;
     }
 
-    std::shared_ptr<IpcMsgBase>& request() { return request_; };
+    std::shared_ptr<IpcMsgBase>& request()
+    {
+        materialize(request_, req_sample_);
+        return request_;
+    }
 
-    std::shared_ptr<IpcMsgBase>& response() { return response_; }
+    std::shared_ptr<IpcMsgBase>& response()
+    {
+        materialize(response_, resp_sample_);
+        return response_;
+    }
 
     /* ---- 接收侧零拷贝视图(docs/dzflat_shm.md; 与 pub/sub 的 Sample 同机制) ----
      *
      * DZFlat 的 request/response 到达时不再物化进上面的 owning 槽, 而是把借来的 chunk
      * 存在 *_sample_ 里, 用 request_view<T>()/response_view<T>() 只读零拷贝访问。owning
-     * request()/response() 在视图模式下保持模板克隆(未填充) —— 所以:
-     *   request_is_view()==true  ⟹ 读 request_view<T>(); request() 此刻不可读物化数据;
-     *   request_is_view()==false ⟹ 走 TLV / 快速路径物化, request() 是收到的 owning 对象。
+     * request()/response() 首次访问时按需物化并释放该槽的借样，兼容既有 owning 接口。
+     * 若需零拷贝，应直接读 request_view<T>()/response_view<T>()，不调用 owning 接口。
+     * 已取得的 view 不得在该槽物化或重置后继续使用。
      * clone()/拷贝构造**丢弃**借样 —— 借的 chunk 不能深拷贝, 复制出的必须是全新 owning 壳。 */
     std::shared_ptr<Sample>& request_sample() noexcept { return req_sample_; }
     std::shared_ptr<Sample>& response_sample() noexcept { return resp_sample_; }
@@ -82,6 +91,16 @@ public:
     bool check_msg_id(const ipc::buffer& data) { return request_->check_id(data); }
 
 private:
+    static void materialize(std::shared_ptr<IpcMsgBase>& owning, std::shared_ptr<Sample>& sample)
+    {
+        if (!sample) return;
+        auto decoded = owning ? std::shared_ptr<IpcMsgBase>(owning->clone()) : nullptr;
+        if (!decoded || !decoded->dzflat_read(sample->data(), sample->size()))
+            throw std::runtime_error("DZFlat service sample materialization failed");
+        owning = std::move(decoded);
+        sample.reset();
+    }
+
     ServiceData(const ServiceData& other)
     {
         request_.reset(other.request_->clone());

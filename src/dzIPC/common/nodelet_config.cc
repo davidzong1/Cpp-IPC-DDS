@@ -11,7 +11,7 @@ namespace dzIPC {
 
 namespace {
 std::atomic<bool> g_nodelet_enabled{false};
-std::atomic<bool> g_dzflat_enabled{false};
+std::atomic<bool> g_dzflat_enabled{true};
 std::atomic<std::uint64_t> g_dzflat_published{0};
 std::atomic<std::uint64_t> g_dzflat_fallback{0};
 /* W08: 预构造段入口(publish_prebuilt_segment)的成功条数。W03 的三路径 ID 只定义了

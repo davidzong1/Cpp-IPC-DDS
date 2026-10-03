@@ -135,7 +135,8 @@ TEST(DzFlatBuilder, AllocReturnsSpanInsideTheLoanedChunk)
 /* ① 端到端: 就地写进共享内存的字节, 订阅方必须原样读到。 */
 TEST(DzFlatBuilder, InPlaceConstructionRoundTrips)
 {
-    DzFlatSwitch on{true};
+    ASSERT_TRUE(dzIPC::IsDzFlatEnabled());
+    dzIPC::ResetDzFlatCounters();
     const std::string topic = unique_topic("rt");
     constexpr std::uint32_t kMsgId = 42;
     constexpr std::uint32_t kW = 64, kH = 48, kStep = kW * 3;
