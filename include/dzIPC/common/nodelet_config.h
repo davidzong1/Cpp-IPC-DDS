@@ -8,7 +8,7 @@
 namespace dzIPC {
 
 // ---------------------------------------------------------------------------
-// DZFlat 平坦布局开关(进程级, 默认 OFF)。设计见 docs/dzflat_shm.md。
+// DZFlat 平坦布局开关(进程级, 默认 ON)。设计见 docs/dzflat_shm.md。
 //
 // 开启后, **SHM 发布路径**在满足下列条件时改用 DZFlat wire:
 //   - 消息类型由 generator 生成(dzflat_supported() 为真; 手写类型自动留在 TLV);
@@ -19,9 +19,10 @@ namespace dzIPC {
 // 订阅侧**始终**同时认两种 wire(按段首 magic 判别, 见 dzflat::looks_like_dzflat),
 // 与本开关无关 —— 这样先升级订阅方、再升级发布方即可安全灰度。
 //
-// 为什么默认 OFF: DZFlat 段对**未升级**的订阅方是不可解析的(它会按 TLV 读段尾的
-// msg_id, 几乎必然失配而丢弃 —— 不会错解, 但会静默丢消息)。因此必须在确认链路
-// 两端都是新版本之后, 由部署方显式打开。
+// 默认优先共享池: 普通 publish 走 A(对象复制到共享段), loan/publish_loaned
+// 走 B(共享段内原地构造)。借样失败返回无效借样, 不会自动物化为 TLV。
+// EnableDzFlat(false) 可显式关闭; 通信双方须支持 DZFlat 后再使用默认设置。
+// RPC 的 SHM 路径(包括自动选路切入 SHM)同样受本开关控制。
 //
 // socket/UDP 路径不受影响: 其分片格式(1428+12 页尾)由 data_rev.cc 消费, 见
 // docs/dzflat_shm.md §1.4。

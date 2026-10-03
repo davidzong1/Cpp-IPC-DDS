@@ -14,7 +14,7 @@
  *   ③ **回退是常态**。开关未开 / 类型不支持 / 无接收方 / chunk 池耗尽都必须静默
  *      回退整包序列化并照常送达, 而不是丢消息或报错。
  *
- * 开关默认 OFF, 每个用例自己开关并在结束时恢复(RAII), 避免污染同进程内的其他用例。
+ * 开关默认 ON, 每个用例自己开关并在结束时恢复(RAII), 避免污染同进程内的其他用例。
  */
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -185,7 +185,8 @@ bool pump_until(Pub& pub, Sub& sub, std::shared_ptr<dzIPC::TopicData>& sink, con
 /* ① 借样发布 → 接收 → 值一致(大 blob)。 */
 TEST(DzFlatTransport, ImageRoundTripOverLoanedChunk)
 {
-    DzFlatSwitch on{true};
+    ASSERT_TRUE(dzIPC::IsDzFlatEnabled());
+    dzIPC::ResetDzFlatCounters();
     const std::string topic = unique_topic("img");
 
     auto pub_td = std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::Msg::StdImage>(), 11);
@@ -240,7 +241,7 @@ TEST(DzFlatTransport, PointCloudRoundTripOverLoanedChunk)
     expect_dzflat_was_used("point cloud 往返");
 }
 
-/* ③ 开关关闭(默认态): 走既有 TLV 路径, 行为不得改变。 */
+/* ③ 显式关闭开关: 走既有 TLV 路径, 行为不得改变。 */
 TEST(DzFlatTransport, SwitchOffKeepsTlvPathIntact)
 {
     DzFlatSwitch off{false};
@@ -308,7 +309,8 @@ TEST(DzFlatTransport, OneSubscriberAcceptsBothWiresAlternately)
  * (Python / topic_echo 用的就是它), 不由 generator 发射 DZFlat 覆写。 */
 TEST(DzFlatTransport, UnsupportedTypeFallsBackToTlv)
 {
-    DzFlatSwitch on{true};
+    ASSERT_TRUE(dzIPC::IsDzFlatEnabled());
+    dzIPC::ResetDzFlatCounters();
     const std::string topic = unique_topic("generic");
 
     auto probe = std::make_shared<dzIPC::GenericMessage>();

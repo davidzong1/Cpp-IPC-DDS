@@ -184,7 +184,7 @@ TEST(DzFlatSerCli, ServerReceivesRequestAsViewWhenDzflat)
     }
 }
 
-/* 开关关闭(默认态): 既有 TLV 路径行为不得改变。 */
+/* 显式关闭开关: 既有 TLV 路径行为不得改变。 */
 TEST(DzFlatSerCli, TlvRoundTripUnchanged)
 {
     run_case(false, "dzflat_sc_tlv", 2000);
