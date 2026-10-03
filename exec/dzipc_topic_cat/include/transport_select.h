@@ -108,13 +108,14 @@ struct Selection
     uint64_t domain_id{0};
     int64_t register_ts_ns{0};
     bool shm{false};
+    bool hybrid{false};
 
     /* sniffer 的入参只有 (topic, domain, ser_or_topic, shm); 两条腿的
      * server/client 区分不影响挂哪条通道, 所以"要不要重建 sniffer"只看这两项 ——
      * 同一传输内换了个进程(slot 变)不需要重建, 免得白白清掉显示缓存。 */
     bool same_channel(const Selection& other) const noexcept
     {
-        return found && other.found && shm == other.shm && domain_id == other.domain_id;
+        return found && other.found && shm == other.shm && hybrid == other.hybrid && domain_id == other.domain_id;
     }
 };
 
@@ -122,7 +123,7 @@ inline Selection select_sniffer_entry(const std::vector<dzIPC::info_pool::EntryS
                                       const std::string& topic_name, bool ser_or_topic, TransportPreference pref)
 {
     Selection best;
-    auto take = [&best](const dzIPC::info_pool::EntrySnapshot& e, bool shm)
+    auto take = [&best, pref, ser_or_topic](const dzIPC::info_pool::EntrySnapshot& e, bool shm)
     {
         best.found = true;
         best.slot = e.slot;
@@ -131,28 +132,38 @@ inline Selection select_sniffer_entry(const std::vector<dzIPC::info_pool::EntryS
         best.domain_id = e.domain_id;
         best.register_ts_ns = e.register_ts_ns;
         best.shm = shm;
+        best.hybrid = !ser_or_topic && e.extra == "hybrid" && pref == TransportPreference::Auto;
     };
 
     for (const auto& e : entries)
     {
-        if (e.topic_name != topic_name)
-            continue;
-        if (!e.alive || !e.in_use)
+        if (e.topic_name != topic_name || !e.alive || !e.in_use)
             continue;
         if (!is_sniffable_kind(e.kind, ser_or_topic))
             continue;
+        const bool mixed = !ser_or_topic && e.extra == "hybrid";
         const bool shm = is_shm_kind(e.kind);
-        if (!transport_allowed(pref, shm))
+        if (!transport_allowed(pref, shm) && !(pref == TransportPreference::Auto && mixed))
             continue;
         if (!best.found)
         {
             take(e, shm);
             continue;
         }
-        if (shm != best.shm)
+        // Auto 选择优先级：逻辑 hybrid > SHM > socket。
+        if (pref == TransportPreference::Auto)
         {
-            /* 只有 auto 会同时看到两种传输。SHM 胜出 —— 这正是本函数存在的理由:
-             * 切到 SHM 后 socket 腿仍然登记在池里, 但它已经不发数据了。 */
+            const int rank = mixed ? 2 : (shm ? 1 : 0);
+            const int best_rank = best.hybrid ? 2 : (best.shm ? 1 : 0);
+            if (rank != best_rank)
+            {
+                if (rank > best_rank)
+                    take(e, shm);
+                continue;
+            }
+        }
+        if (shm != best.shm && pref != TransportPreference::Auto)
+        {
             if (shm)
                 take(e, shm);
             continue;

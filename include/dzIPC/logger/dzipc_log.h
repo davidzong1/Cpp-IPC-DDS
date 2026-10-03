@@ -59,6 +59,7 @@ enum class TransportKind : uint8_t
 {
     kShm = 0,
     kSocket = 1,
+    kHybrid = 2,
 };
 
 /// All data needed to record one event.  The logger takes ownership of

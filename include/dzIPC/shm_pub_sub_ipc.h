@@ -68,6 +68,8 @@ public:
                          int thread_priority = 0);
     ~shm_pub_ipc();
     void reset_message(const std::shared_ptr<TopicData>& msg);
+    bool channel_ready() const { return publisher_ && publisher_->valid(); }
+    void set_internal(bool value) { internal_ = value; }
     void InitChannel(std::string extra_info = "");
     bool publish(std::shared_ptr<IpcMsgBase> msg);
     bool publish_best_effort(std::shared_ptr<IpcMsgBase> msg) override;
@@ -206,6 +208,7 @@ private:
     bool try_publish_dzflat(const std::shared_ptr<IpcMsgBase>& msg, std::uint64_t tm);
 
 private:
+    bool internal_{false};
     size_t domain_id_{0};
     std::atomic<bool> subscribed_{false};
     bool verbose_{false};
@@ -241,6 +244,8 @@ public:
                          const size_t queue_size, bool verbose = false, bool enable_thread_qos = false,
                          int cpu_id = -1, int thread_priority = 0);
     ~shm_sub_ipc();
+    void set_receive_notifier(std::function<void()> notify);
+    void set_internal(bool value) { internal_ = value; }
     void InitChannel(std::string extra_info = "");
     void reset_message(const std::shared_ptr<TopicData>& msg);
     /* ---- 视图路径(零拷贝, 只服务 DZFlat 段) ---- */
@@ -309,6 +314,7 @@ private:
      * 之前没有 route 可等，早了只是空转；那一刻起线程才有意义。 */
     void start_compat_recv_thread();
 
+    bool internal_{false};
     size_t domain_id_{0};
     std::atomic<bool> running{true};
     std::atomic<bool> handshake_completed{false};

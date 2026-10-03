@@ -22,7 +22,7 @@ namespace dzIPC {
  *                   生产路径不该用它。
  */
 constexpr IPCType IPC_SHM = IPCType::Shm;              // 共享内存通信模式(强制)
-constexpr IPCType IPC_SOCKET = IPCType::Socket;        // ser-cli 自动选路 / pub-sub 纯 UDP
+constexpr IPCType IPC_SOCKET = IPCType::Socket;        // ser-cli 自动选路 / pub-sub 本机 SHM + 跨机 UDP
 constexpr IPCType IPC_SOCKET_ONLY = IPCType::SocketOnly;  // 强制纯 socket(对照实验用)
 
 #define ENABLENODELET EnableNodelet(true); // 启用进程内快速路径

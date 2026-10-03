@@ -1,4 +1,5 @@
 #include "dzIPC/topic_ipc.h"
+#include "dzIPC/hybrid_pub_sub_ipc.h"
 #include <memory>
 #include <typeinfo>
 #include <utility>
@@ -17,7 +18,7 @@ void log_publish_event(const std::string& topic, size_t domain_id, IPCType ipc_t
     if (!logger::IsDzipcLogRunning()) return;
     try {
         auto transport = (ipc_type == IPCType::Shm) ? logger::TransportKind::kShm
-                                                     : logger::TransportKind::kSocket;
+                                                     : (ipc_type == IPCType::Socket ? logger::TransportKind::kHybrid : logger::TransportKind::kSocket);
         std::shared_ptr<IpcMsgBase> snapshot(msg->clone());
         if (!snapshot) return;
         ipc::buffer buf = snapshot->serialize();
@@ -44,7 +45,7 @@ void log_subscribe_event(const std::string& topic, size_t domain_id, IPCType ipc
         ev.domain_id = static_cast<uint32_t>(domain_id);
         ev.msg_id = msg->msg_id();
         ev.transport = (ipc_type == IPCType::Shm) ? logger::TransportKind::kShm
-                                                   : logger::TransportKind::kSocket;
+                                                   : (ipc_type == IPCType::Socket ? logger::TransportKind::kHybrid : logger::TransportKind::kSocket);
         ev.role = logger::RoleKind::kSubscriber;
         ev.event_kind = logger::EventKind::kPublish;
         if (buf.size() > 0) {
@@ -110,10 +111,13 @@ pimpl::publisher_ipc_impl::publisher_ipc_impl(const std::shared_ptr<TopicData>& 
         impl(p_)->ipc = std::make_unique<shm::shm_pub_ipc>(msg, topic_name, domain_id, verbose,
                                                            enable_thread_qos, cpu_id, thread_priority);
     }
-    else if (ipc_type == IPCType::Socket || ipc_type == IPCType::SocketOnly)
+    else if (ipc_type == IPCType::Socket)
     {
-        /* SocketOnly 与 Socket 在 pub/sub 上等价 —— pub/sub 本来就没有自动选路,
-         * 两者都落到同一个纯 socket 实现。 */
+        impl(p_)->ipc = std::make_unique<hybrid::Publisher>(msg, topic_name, domain_id, verbose,
+                                                         enable_thread_qos, cpu_id, thread_priority);
+    }
+    else if (ipc_type == IPCType::SocketOnly)
+    {
         impl(p_)->ipc = std::make_unique<socket::socket_pub_ipc>(msg, topic_name, domain_id, verbose,
                                                                  enable_thread_qos, cpu_id, thread_priority);
     }
@@ -210,7 +214,12 @@ pimpl::subscriber_ipc_impl::subscriber_ipc_impl(const std::shared_ptr<TopicData>
         impl(p_)->ipc = std::make_unique<shm::shm_sub_ipc>(msg, topic_name, domain_id, queue_size, verbose,
                                                            enable_thread_qos, cpu_id, thread_priority);
     }
-    else if (ipc_type == IPCType::Socket || ipc_type == IPCType::SocketOnly)
+    else if (ipc_type == IPCType::Socket)
+    {
+        impl(p_)->ipc = std::make_unique<hybrid::Subscriber>(msg, topic_name, domain_id, queue_size, verbose,
+                                                          enable_thread_qos, cpu_id, thread_priority);
+    }
+    else if (ipc_type == IPCType::SocketOnly)
     {
         impl(p_)->ipc = std::make_unique<socket::socket_sub_ipc>(msg, topic_name, domain_id, queue_size, verbose,
                                                                  enable_thread_qos, cpu_id, thread_priority);

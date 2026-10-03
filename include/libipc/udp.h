@@ -48,6 +48,12 @@ public:
 
     // 仅在连接/收发前设置。作用域固定头由传输层生成；底层裸 UDP 默认不封装。
     void set_scope(const std::array<std::uint8_t,32>& token);
+    // 混合传输的可选来源头：共享内存身份 16B + 发布实例 8B + 序号低位 4B。
+    // 仅发送前设置，由调用方串行化同一发布者；全零头恢复普通 UDP。
+    void set_hybrid_source(const std::array<std::uint8_t,32>& source);
+    // 在连接前配置；本机已经走 SHM 的帧在重组和 ACK 前丢弃。
+    void suppress_hybrid_local(const std::array<std::uint8_t,16>& identity);
+    std::uint64_t hybrid_suppressed() const noexcept;
     NodeRole role() const noexcept;
 
     bool connect() IPC_EXCEPTION_;

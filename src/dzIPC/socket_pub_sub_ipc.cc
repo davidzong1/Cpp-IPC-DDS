@@ -652,11 +652,11 @@ void socket_pub_ipc::InitChannel(std::string extra_info)
                                           ? dzIPC::info_pool::demangle(typeid(*topic_msg_->topic()).name())
                                           : std::string{};
         topic_type_name = extract_last_segment(topic_type_name);
-        pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketPub, topic_name_, topic_type_name, "socket",
-                          static_cast<uint64_t>(domain_id_), extra_info});
+        if (!internal_) pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketPub, topic_name_, topic_type_name, "socket",
+                          static_cast<uint64_t>(domain_id_), hybrid_mode_ ? "hybrid" : extra_info});
         /* 本进程的 SocketPub 条目注册完成后再启动发现线程, 避免它先于
          * rebind 拿到不完整的池快照。重复 InitChannel 不再重复起线程。 */
-        if (discovery_thread_ == nullptr)
+        if (!hybrid_mode_ && discovery_thread_ == nullptr)
         {
             discovery_thread_ = new std::thread(&socket_pub_ipc::discovery_loop, this);
         }
@@ -1126,6 +1126,7 @@ socket_sub_ipc::~socket_sub_ipc()
      *   4/5) 关 subscriber_ 与 ack_tx_ —— fd/句柄只在 wait 项删除且 in-flight 清零**之后**才关
      *   6) 释放 state（teardown_receive_path 已 reset） */
     teardown_receive_path();
+    if (discovery_) discovery_->active.store(false);
     if (subscriber_)
         subscriber_->close();
     if (ack_tx_)
@@ -1162,6 +1163,10 @@ void socket_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
             reg.register_subscriber(new_key, msg_queue_);
         }
         msg_id_ = new_msg_id;
+        if (discovery_) {
+            discovery_->active.store(false);
+            discovery_ = hybrid::discover(topic_name_, domain_id_, msg_id_, true, local_shm_);
+        }
     }
     /* worker 模式：worker 与兼容线程都从 state 快照取模板与分流期望值（worker 不持裸本对象）。
      * 锁序（P0 §3.2）：topic_msg_mtx_ →（取快照后释放 receive_state_mtx_）→ state->mtx；
@@ -1196,6 +1201,7 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
         subscriber_ = std::make_shared<ipc::socket::UDPNode>(this->topic_name_.c_str(), this->ipaddr_.c_str(),
                                                              this->port_hash_, ipc::socket::NodeRole::RecvOnly);
         subscriber_->set_scope(dzIPC::common::channel_scope_token(topic_name_, domain_id_, dzIPC::common::ScopeKind::PubSub));
+        if(hybrid_mode_) subscriber_->suppress_hybrid_local(local_identity_);
         /* ACK 发送通道 (端点分离): 发到发布端 ack_rx_ 监听的端口。
          * SendOnly 不入组, 所以自己发的 ACK 不会回绕进 subscriber_。 */
         ack_tx_ = std::make_shared<ipc::socket::UDPNode>(
@@ -1235,8 +1241,8 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
                                           ? dzIPC::info_pool::demangle(typeid(*topic_template->topic()).name())
                                           : std::string{};
         topic_type_name = extract_last_segment(topic_type_name);
-        pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketSub, topic_name_, topic_type_name, "socket",
-                          static_cast<uint64_t>(domain_id_), extra_info});
+        if (!internal_) pool_reg_.rebind({dzIPC::info_pool::EntryKind::SocketSub, topic_name_, topic_type_name, "socket",
+                          static_cast<uint64_t>(domain_id_), hybrid_mode_ ? "hybrid" : extra_info});
         /* ---- 接收路径：worker 优先；任何非 ok / 后端不可用 / 开关 / nodelet / fork 闸
          *      ⇒ start_receive_path() 已打显式原因，回退兼容 subscribe_thread_。---- */
         auto state = std::make_shared<socket_sub_receive_state>();
@@ -1282,6 +1288,11 @@ void socket_sub_ipc::InitChannel(std::string extra_info)
             dzIPC::ThreadDispatch::apply_thread_options(subscribe_thread_, thread_options_, verbose_,
                                                         topic_name_ + "_SocketSubReceiveThread");
         }
+
+        // Hybrid publishers need to discover both IPC_SOCKET subscribers and
+        // pure IPC_SOCKET_ONLY subscribers so they can decide whether to send UDP.
+        if (discovery_) discovery_->active.store(false);
+        discovery_ = hybrid::discover(topic_name_, domain_id_, msg_id_, true, local_shm_);
 
         // Register for intra-process fast-path delivery (once only).
         // C7 裁决：worker 模式下**不**注册进程内快路径队列（nodelet 启用时本就走兼容收包线程）。

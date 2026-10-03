@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -62,7 +63,7 @@ constexpr std::size_t kMaxEntries = 4096;
  * 因此: 布局一变就换段名后缀 + 升 kLayoutVersion, 旧段与新段物理隔离。
  * 回滚/清理见 .cc 顶部「跨版本与旧段处置」。 */
 constexpr std::uint32_t kLayoutMagic = 0x5A'49'50'44u;   // 'DZIP'
-constexpr std::uint32_t kLayoutVersion = 3;
+constexpr std::uint32_t kLayoutVersion = 4;
 /* PoolEntry 的字节数(与 .cc 的 offsetof/sizeof static_assert 同源)。 */
 constexpr std::size_t kPoolEntryBytes = 296;
 
@@ -112,6 +113,9 @@ class IPC_EXPORT IpcInfoPool
 {
 public:
     static IpcInfoPool& instance();
+
+    // 当前共享内存实例身份；全零表示不可用。用于判定混合传输的本机可达性。
+    std::array<std::uint8_t, 16> local_identity() const noexcept;
 
     /* 注册一条记录，返回 slot（>=0 成功，-1 失败） */
     int32_t register_entry(const RegisterInfo& info);

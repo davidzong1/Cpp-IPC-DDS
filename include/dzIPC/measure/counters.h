@@ -158,6 +158,9 @@ enum class CounterId : std::size_t
     deferred_depth_after_max,       ///< 扫描后深度最大值（全局 gauge，⛔非全池总量）
     deferred_depth_after_total,     ///< Σ 每轮扫描后深度（可直接按 worker 相加求平均）
 
+    hybrid_publish_calls,
+    hybrid_shm_sends,
+    hybrid_udp_sends,
     count
 };
 
@@ -259,6 +262,9 @@ inline const std::array<CounterMeta, kCounterCount>& counter_table()
          "扫描后 deferred 深度最大值(全局 gauge=任一 worker 的值); 不得当全池总量", true},
         {CounterId::deferred_depth_after_total, "deferred_depth_after_total", "count", "scan",
          "Σ 每轮扫描后深度(唯一可安全按 worker 相加的深度量); /scan_rounds = 平均扫描后深度", true},
+        {CounterId::hybrid_publish_calls, "hybrid_publish_calls", "count", "hybrid", "混合普通发布逻辑调用次数，两腿不重复计数", false},
+        {CounterId::hybrid_shm_sends, "hybrid_shm_sends", "count", "hybrid", "混合普通发布 SHM 提交成功次数", false},
+        {CounterId::hybrid_udp_sends, "hybrid_udp_sends", "count", "hybrid", "混合普通发布 UDP 发送成功次数，非 ACK", false},
     }};
     return kTable;
 }

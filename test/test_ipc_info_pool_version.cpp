@@ -173,7 +173,7 @@ std::string kv(const std::string& text, const std::string& key)
 void cleanup_segments()
 {
     ipc::shm::remove(kOldShmName);
-    ipc::shm::remove("dz_ipc_info_pool_v3");
+    ipc::shm::remove("dz_ipc_info_pool_v4");
 }
 
 }   // namespace
@@ -184,7 +184,7 @@ TEST(IpcInfoPoolVersion, StaleOldLayoutOnCurrentNameIsRejectedNotMisread)
 {
     const ChildRun r = run_child_capture_stderr([](int out) {
         cleanup_segments();
-        if (!install_stale_segment("dz_ipc_info_pool_v3", kOldLayoutRegionBytes, kLayoutMagic, 1u, 512u))
+        if (!install_stale_segment("dz_ipc_info_pool_v4", kOldLayoutRegionBytes, kLayoutMagic, 1u, 512u))
         {
             emit(out, "installed=0");
             return;
@@ -224,7 +224,7 @@ TEST(IpcInfoPoolVersion, OldGenerationSegmentIsNotTouchedByNewLayout)
             {EntryKind::SocketSub, "w07_iso", "", "", 0, ""});
 
         const FileProbe after = probe_shm_file(kOldShmName);
-        const FileProbe v2 = probe_shm_file("dz_ipc_info_pool_v3");
+        const FileProbe v2 = probe_shm_file("dz_ipc_info_pool_v4");
 
         emit(out, "installed=1 slot=" + std::to_string(slot) + " before_size=" +
                       std::to_string(before.size) + " after_size=" + std::to_string(after.size) +

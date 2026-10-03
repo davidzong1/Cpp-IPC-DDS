@@ -1,6 +1,7 @@
 #pragma once
 // #include <semaphore.h>
 #include <atomic>
+#include <algorithm>
 #include <condition_variable>
 #include <cstdint>
 #include <cstddef>
@@ -12,6 +13,7 @@
 #include <type_traits>
 #include <vector>
 #include "dzIPC/common/circularqueue.h"
+#include "dzIPC/common/hybrid_discovery.h"
 #include "dzIPC/common/local_pub_sub_registry.h"
 #include "dzIPC/common/nodelet_config.h"
 #include "dzIPC/common/sample_message.h"
@@ -47,6 +49,10 @@ public:
                             bool verbose = false, bool enable_thread_qos = false, int cpu_id = -1,
                             int thread_priority = 20);
     ~socket_pub_ipc();
+    void set_hybrid_mode(bool enabled) { hybrid_mode_ = enabled; }
+    void set_internal(bool enabled) { internal_ = enabled; }
+    void set_hybrid_source(const std::array<std::uint8_t,32>& source) { if(publisher_) publisher_->set_hybrid_source(source); }
+    bool channel_ready() const { return publisher_ != nullptr; }
     void reset_message(const std::shared_ptr<TopicData>& msg);
     void InitChannel(std::string extra_info = "");
     bool publish(std::shared_ptr<IpcMsgBase> msg);
@@ -98,6 +104,8 @@ private:
     void discovery_loop();
     static constexpr int kDiscoveryPollMs = 50;
 
+    bool hybrid_mode_{false};
+    bool internal_{false};
     size_t domain_id_{0};
     int cli_cnt{0};
     std::atomic<bool> subscribed_{false};
@@ -157,6 +165,12 @@ public:
                             int cpu_id = -1, int thread_priority = 20);
     ~socket_sub_ipc();
     void InitChannel(std::string extra_info = "");
+    void set_internal(bool enabled) { internal_ = enabled; }
+    void configure_hybrid(const hybrid::Identity& identity, std::function<void()> notify) {
+        hybrid_mode_ = true; local_identity_ = identity; local_shm_ = std::any_of(identity.begin(), identity.end(), [](auto b){ return b != 0; });
+        msg_queue_->set_notify_cb(notify); view_queue_->set_notify_cb(std::move(notify));
+    }
+    std::uint64_t hybrid_suppressed() const { return subscriber_ ? subscriber_->hybrid_suppressed() : 0; }
     void reset_message(const std::shared_ptr<TopicData>& msg);
     /* ---- 视图路径(借样) ----
      *
@@ -243,6 +257,11 @@ private:
      *     schema-less dzflat_adopt / typed view 三支分流（含 NoteDzFlatRx 三档计数）。
      * worker 路径与兼容 subscribe_thread_ 路径共用它们与同一个 receive_state_。 */
 
+    hybrid::Identity local_identity_{};
+    std::shared_ptr<hybrid::DiscoveryState> discovery_;
+    bool hybrid_mode_{false};
+    bool internal_{false};
+    bool local_shm_{false};
     size_t domain_id_{0};
     std::atomic<bool> subscribed_{false};
     std::atomic<bool> running{true};

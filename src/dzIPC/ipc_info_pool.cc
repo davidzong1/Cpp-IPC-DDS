@@ -1,4 +1,5 @@
 #include "dzIPC/ipc_info_pool.h"
+#include <random>
 
 #include <algorithm>
 #include <atomic>
@@ -35,9 +36,9 @@ namespace {
 /* 域作用域 V3：domain 由 int32 扩为 uint64，条目仍为 296 字节，extra 偏移已改变。
  * 因而必须换段名/版本，不读取或重置旧版注册池。容量仍为 4096。
  * 表满时回收死条目并重试，行为保持不变。 */
-constexpr char kShmName[] = "dz_ipc_info_pool_v3";
+constexpr char kShmName[] = "dz_ipc_info_pool_v4";
 #if defined(_WIN32)
-constexpr char kMutexName[] = "Global\\dz_ipc_info_pool_v3_mtx";
+constexpr char kMutexName[] = "Global\\dz_ipc_info_pool_v4_mtx";
 #endif
 
 constexpr uint32_t kInitUninit = 0;
@@ -67,6 +68,7 @@ struct PoolHeader
     uint32_t magic;
     uint32_t version;
     uint32_t max_entries;
+    std::array<std::uint8_t, 16> identity;
     /* 占位：保留与 Linux 版 pthread_mutex_t 同等量级的空间，
        避免不同平台二进制布局差异过大；不被 Windows 实际使用 */
     char mtx_placeholder[64];
@@ -78,6 +80,7 @@ struct PoolHeader
     uint32_t magic;
     uint32_t version;
     uint32_t max_entries;
+    std::array<std::uint8_t, 16> identity;
     pthread_mutex_t mtx;
 };
 #endif
@@ -513,6 +516,8 @@ struct IpcInfoPool::Impl
         uint32_t expect = kInitUninit;
         if (header->init_state.compare_exchange_strong(expect, kInitInProgress, std::memory_order_acq_rel))
         {
+            std::random_device random;
+            for (auto& byte : header->identity) byte = static_cast<std::uint8_t>(random());
             header->magic = kLayoutMagic;
             header->version = kLayoutVersion;
             header->max_entries = static_cast<uint32_t>(kMaxEntries);
@@ -762,6 +767,14 @@ std::vector<EntrySnapshot> IpcInfoPool::snapshot(bool gc_dead_flag)
         out.push_back(std::move(s));
     }
     return out;
+}
+
+std::array<std::uint8_t, 16> IpcInfoPool::local_identity() const noexcept
+{
+    if (!impl_ || !impl_->header || impl_->header->init_state.load(std::memory_order_acquire) != kInitReady)
+        return {};
+    if (layout_mismatch(impl_->header, kRegionSize)) return {};
+    return impl_->header->identity;
 }
 
 std::size_t IpcInfoPool::gc_dead()

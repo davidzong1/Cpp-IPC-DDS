@@ -1,4 +1,6 @@
 #include "libipc/udp.h"
+#include <algorithm>
+#include <atomic>
 #include "libipc/debug.h"
 #include "libipc/memory/resource.h"
 #include "libipc/platform/detail.h"
@@ -19,10 +21,23 @@ public:
     ipc::detail::socket::UDPNode node_;
     std::array<std::uint8_t,32> scope_{};
     bool scoped_=false;
+    std::array<std::uint8_t,32> hybrid_source_{};
+    std::array<std::uint8_t,16> local_{};
+    bool hybrid_tx_=false, suppress_=false;
+    std::atomic<std::uint64_t> suppressed_{0};
     ipc::buffer accept(ipc::buffer data) {
         if(!scoped_)return data;
-        if(data.size()<=scope_.size() || std::memcmp(data.data(),scope_.data(),scope_.size())!=0)return {};
-        return ipc::buffer(static_cast<std::uint8_t*>(data.data())+scope_.size(),data.size()-scope_.size(),nullptr);
+        if(data.size()<=32)return {};
+        const auto* bytes=static_cast<const std::uint8_t*>(data.data());
+        if(std::memcmp(bytes,scope_.data(),32)!=0)return {};
+        const bool hybrid=data.size()>36 && std::memcmp(bytes+32,"DZH1",4)==0;
+        const std::size_t header=hybrid?64:32;
+        if(data.size()<=header)return {};
+        // 来源头在完整 scope 后；本机副本在分片重组/ACK 前丢弃。
+        if(hybrid && suppress_ && std::memcmp(bytes+36,local_.data(),16)==0) {
+            suppressed_.fetch_add(1,std::memory_order_relaxed);return {};
+        }
+        return ipc::buffer(static_cast<std::uint8_t*>(data.data())+header,data.size()-header,nullptr);
     }
 };
 
@@ -61,6 +76,7 @@ void UDPNode::create(const char* name, const char* ip, uint16_t port) IPC_EXCEPT
         return;
     }
     n->scoped_=false;
+    n->hybrid_tx_=false; n->suppress_=false;
     n->node_.create(name, ip, port);
 }
 
@@ -72,6 +88,7 @@ void UDPNode::create(const char* name, const char* ip, uint16_t port, NodeRole r
         return;
     }
     n->scoped_=false;
+    n->hybrid_tx_=false; n->suppress_=false;
     n->node_.create(name, ip, port, role);
 }
 
@@ -94,6 +111,16 @@ bool UDPNode::connect() IPC_EXCEPTION_
     return (n == nullptr) ? false : n->node_.connect();
 }
 
+void UDPNode::set_hybrid_source(const std::array<std::uint8_t,32>& source) {
+    if(auto n=impl(p_)){n->hybrid_source_=source;n->hybrid_tx_=std::any_of(source.begin(),source.end(),[](auto b){return b!=0;});}
+}
+void UDPNode::suppress_hybrid_local(const std::array<std::uint8_t,16>& identity) {
+    if(auto n=impl(p_)){n->local_=identity;n->suppress_=std::any_of(identity.begin(),identity.end(),[](auto b){return b!=0;});}
+}
+std::uint64_t UDPNode::hybrid_suppressed() const noexcept {
+    auto n=impl(p_);return n?n->suppressed_.load(std::memory_order_relaxed):0;
+}
+
 bool UDPNode::send(ipc::buffer& data) IPC_EXCEPTION_
 {
     auto n = impl(p_);
@@ -102,9 +129,15 @@ bool UDPNode::send(ipc::buffer& data) IPC_EXCEPTION_
     if(data.empty() || data.size()>ipc::wire_packet_size)return false;
     // 载荷栈内封装，不为载荷申请堆内存；buffer 句柄仍用库分配器。总长不超过 1472 字节。
     std::array<std::uint8_t,1472> frame;
-    std::memcpy(frame.data(),n->scope_.data(),n->scope_.size());
-    std::memcpy(frame.data()+n->scope_.size(),data.data(),data.size());
-    ipc::buffer wire(frame.data(),n->scope_.size()+data.size(),nullptr);
+    const std::size_t header=n->hybrid_tx_?64:32;
+    std::memcpy(frame.data(),n->scope_.data(),32);
+    if(n->hybrid_tx_) {
+        std::memcpy(frame.data()+32,"DZH1",4);
+        std::memcpy(frame.data()+36,n->hybrid_source_.data(),16);
+        std::memcpy(frame.data()+52,n->hybrid_source_.data()+16,12);
+    }
+    std::memcpy(frame.data()+header,data.data(),data.size());
+    ipc::buffer wire(frame.data(),header+data.size(),nullptr);
     return n->node_.send(wire);
 }
 

@@ -275,3 +275,28 @@ TEST(TopicCatTransportSelect, RealPoolPrefersLaterRegisteredShmLeg)
     pool.unregister_entry(socket_slot);
     pool.unregister_entry(shm_slot);
 }
+
+TEST(TopicCatTransportSelect, AutoPrefersSingleLogicalHybridEndpoint)
+{
+    const std::string topic = "ut_select_hybrid";
+    auto socket = mk(0, EntryKind::SocketPub, topic, 100);
+    auto shm = mk(1, EntryKind::ShmSub, topic, 300);
+    auto hybrid = mk(2, EntryKind::SocketPub, topic, 200);
+    hybrid.extra = "hybrid";
+    const auto sel = dzipc_topic_cat::select_sniffer_entry({socket, shm, hybrid}, topic, false, Pref::Auto);
+    ASSERT_TRUE(sel.found);
+    EXPECT_TRUE(sel.hybrid);
+    EXPECT_FALSE(sel.shm);
+    EXPECT_EQ(sel.slot, 2);
+}
+
+TEST(TopicCatTransportSelect, ExplicitSocketDoesNotSelectHybridLogicalEndpoint)
+{
+    const std::string topic = "ut_select_hybrid_explicit";
+    auto hybrid = mk(2, EntryKind::SocketPub, topic, 200);
+    hybrid.extra = "hybrid";
+    const auto sel = dzipc_topic_cat::select_sniffer_entry({hybrid}, topic, false, Pref::Socket);
+    ASSERT_TRUE(sel.found);
+    EXPECT_FALSE(sel.hybrid);
+    EXPECT_FALSE(sel.shm);
+}

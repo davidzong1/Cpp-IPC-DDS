@@ -8,7 +8,7 @@
 
 namespace ipc {
 // 1472 字节 UDP 预算中预留 32 字节作用域头；分片及 TLV 页共用此常量。
-inline constexpr std::size_t wire_packet_size = 1440;
+inline constexpr std::size_t wire_packet_size = 1408;
 
 
 // types

@@ -66,7 +66,7 @@ void build_sniffer(const std::string& topic_name, std::uint64_t domain_id, bool 
     std::unique_ptr<dzIPC::sniffer> new_sniffer;
     std::unique_ptr<dzIPC::TopicData> new_topic;
     std::unique_ptr<dzIPC::ServiceData> new_service;
-    new_sniffer.reset(new dzIPC::sniffer(topic_name, domain_id, ser_or_topic, link, msg_id, watch_handshake));
+    new_sniffer.reset(new dzIPC::sniffer(topic_name, domain_id, ser_or_topic, link, msg_id, watch_handshake, sel.hybrid));
     if (ser_or_topic)
         new_service.reset(
             new dzIPC::ServiceData(std::make_shared<IpcMsgBase>(), std::make_shared<IpcMsgBase>(), msg_id));

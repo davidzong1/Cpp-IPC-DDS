@@ -51,6 +51,7 @@ public:
    * ⛔ 必须在首次 push 之前设置一次; 之后只读, 无需同步。 */
   using EvictCb = std::function<void(MsgPtr &)>;
   void set_evict_cb(EvictCb cb) { evict_cb_ = std::move(cb); }
+  void set_notify_cb(std::function<void()> cb) { notify_cb_ = std::move(cb); }
 
   bool pop(MsgPtr &out, uint64_t tm = std::numeric_limits<uint64_t>::max())
   {
@@ -92,6 +93,7 @@ public:
   }
 
 private:
+  std::function<void()> notify_cb_;
   struct Cell
   {
     std::atomic<size_t> sequence{0};
@@ -141,6 +143,7 @@ private:
       }
     }
     cv_.notify_one();
+    if (notify_cb_) notify_cb_();
   }
 
   bool try_enqueue(MsgPtr &msg)

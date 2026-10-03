@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include "shm_sniffer.h"
+#include "hybrid_sniffer.h"
 #include "socket_sniffer.h"
 
 namespace dzIPC {
@@ -14,15 +15,17 @@ public:
     sniffer& operator=(sniffer const&) = delete;
 
     sniffer(const std::string& topic_name, std::uint64_t domain_id, bool ser_or_topic, bool shm_or_socket, uint32_t msg_id,
-            bool watch_handshake = false)
+            bool watch_handshake = false, bool hybrid = false)
     {
         create_sniffer(topic_name, domain_id, ser_or_topic, shm_or_socket, msg_id, watch_handshake);
     }
 
     void create_sniffer(const std::string& topic_name, std::uint64_t domain_id, bool ser_or_topic, bool shm_or_socket,
-                        uint32_t msg_id, bool watch_handshake = false)
+                        uint32_t msg_id, bool watch_handshake = false, bool hybrid = false)
     {
-        if (shm_or_socket)
+        if (hybrid && !ser_or_topic)
+            sniffer_impl = std::make_unique<hybrid_sniffer>(topic_name, domain_id, msg_id);
+        else if (shm_or_socket)
             sniffer_impl = std::make_unique<shm_sniffer>(topic_name, domain_id, ser_or_topic, msg_id);
         else
             sniffer_impl = std::make_unique<socket_sniffer>(topic_name, domain_id, ser_or_topic, msg_id, watch_handshake);

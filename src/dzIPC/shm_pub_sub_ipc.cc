@@ -928,7 +928,7 @@ void shm_pub_ipc::InitChannel(std::string extra_info)
                                           ? dzIPC::info_pool::demangle(typeid(*topic_msg_->topic()).name())
                                           : std::string{};
         topic_type_name = extract_last_segment(topic_type_name);
-        pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmPub, raw_topic_name_, topic_type_name, "shm",
+        if (!internal_) pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmPub, raw_topic_name_, topic_type_name, "shm",
                           static_cast<uint64_t>(domain_id_), extra_info});
     }
     catch (const std::exception& e)
@@ -2210,6 +2210,11 @@ void shm_sub_ipc::reset_message(const std::shared_ptr<TopicData>& msg)
 /******************************************************************************************************/
 /******************************************************************************************************/
 /******************************************************************************************************/
+void shm_sub_ipc::set_receive_notifier(std::function<void()> notify) {
+    sub_state_->msg_queue->set_notify_cb(notify);
+    sub_state_->view_queue->set_notify_cb(std::move(notify));
+}
+
 void shm_sub_ipc::InitChannel(std::string extra_info)
 {
     auto pool = ipc::acquire_topic_pool({}, ipc::make_string(topic_name_.c_str()));
@@ -2225,7 +2230,7 @@ void shm_sub_ipc::InitChannel(std::string extra_info)
             ? dzIPC::info_pool::demangle(typeid(*topic_template->topic()).name())
             : std::string{};
     topic_type_name = extract_last_segment(topic_type_name);
-    pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmSub, raw_topic_name_, topic_type_name, "shm",
+    if (!internal_) pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmSub, raw_topic_name_, topic_type_name, "shm",
                       static_cast<uint64_t>(domain_id_), extra_info});
     /* ===== W05：控制面驱动（取代 per-route `sub_handshake_thread_`）=====
      *

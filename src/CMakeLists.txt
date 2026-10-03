@@ -1,6 +1,6 @@
 project(ipc)
 
-set (PACKAGE_VERSION 1.5.0)
+set (PACKAGE_VERSION 1.6.0)
 
 if(ROSBUILD)
 find_package(ament_cmake REQUIRED)
@@ -76,7 +76,7 @@ set_target_properties(${PROJECT_NAME}
 set_target_properties(${PROJECT_NAME}
     PROPERTIES
     VERSION ${PACKAGE_VERSION}
-    SOVERSION 5
+    SOVERSION 6
     INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
 
 target_include_directories(${PROJECT_NAME}
