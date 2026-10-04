@@ -12,12 +12,16 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <limits>
 #include <mutex>
+#include <sstream>
 #include <typeinfo>
 #include <vector>
 #include "dzIPC/common/local_pub_sub_registry.h"
 #include "dzIPC/common/name_operator.h"
+#include "dzIPC/common/shm_mpmc_config.h"
 #include "dzIPC/common/nodelet_config.h"
 #include "dzIPC/common/wire_accept.h"
 #include "dzIPC/detail/shm_sub_seam.h"   /* 内部测试缝: 默认空指针 ⇒ 零行为变化 */
@@ -44,7 +48,8 @@ constexpr std::size_t kMaxShmReceiversPerTopic = 32;
  * 代价是与旧版本进程不互通 —— 这是有意的, 旧进程段名不带 domain, 能互通就说明没生效。 */
 std::string shm_name_for_topic(const std::string& topic_name, size_t domain_id)
 {
-    return shm_topic_segment_name(topic_name, domain_id);
+    return dzIPC::shm_mpmc_enabled() ? shm_topic_mpmc_segment_name(topic_name, domain_id)
+                                      : shm_topic_segment_name(topic_name, domain_id);
 }
 
 /* pub/sub 控制面段名 —— 本文件只是**转调**, 规则("数据段名 + _control2")的唯一出处在
@@ -56,7 +61,8 @@ std::string shm_name_for_topic(const std::string& topic_name, size_t domain_id)
  * "把某个别的东西当数据段名传进来" 的写法 —— 段名拼错不报错, 只静默多出一个空段。 */
 std::string topic_control_name_for(const std::string& topic_name, size_t domain_id)
 {
-    return shm_topic_control_name(topic_name, domain_id);
+    return dzIPC::shm_mpmc_enabled() ? shm_topic_mpmc_control_name(topic_name, domain_id)
+                                     : shm_topic_control_name(topic_name, domain_id);
 }
 
 void wait_for_peer_drain(dzIPC::control_plane_shm::TopicControlPlane& control_plane)
@@ -77,6 +83,78 @@ void wait_for_peer_drain(dzIPC::control_plane_shm::TopicControlPlane& control_pl
  * 两条驱动路径的时间语义不可能分叉。 */
 constexpr int64_t kPeerDeadTimeoutNs = 2'000'000'000LL;   ///< 与原 pub_handshake 逐位相同
 const dzIPC::shm_control::ControlTiming kControlTiming{};   /* {10ms, 50ms, 2s} */
+
+std::int32_t shm_process_id() noexcept
+{
+#if defined(_WIN32)
+    return static_cast<std::int32_t>(::GetCurrentProcessId());
+#else
+    return static_cast<std::int32_t>(::getpid());
+#endif
+}
+
+/* Linux exposes a process start time in /proc/<pid>/stat.  Keeping that token
+ * separate from the PID prevents a recycled PID from refreshing an old slot.
+ * The fallback is process-local and still changes on every process start. */
+std::uint64_t shm_process_start_token() noexcept
+{
+    static std::atomic<std::int32_t> cached_pid{0};
+    static std::atomic<std::uint64_t> cached_token{0};
+    const auto pid = shm_process_id();
+    if (cached_pid.load(std::memory_order_acquire) == pid)
+    {
+        const auto cached = cached_token.load(std::memory_order_acquire);
+        if (cached != 0)
+        {
+            return cached;
+        }
+    }
+
+    const auto token = [&] {
+#if defined(__linux__)
+        std::ifstream input("/proc/self/stat");
+        std::string line;
+        if (std::getline(input, line))
+        {
+            const auto close = line.rfind(')');
+            if (close != std::string::npos && close + 2 < line.size())
+            {
+                std::istringstream fields(line.substr(close + 2));
+                std::string state;
+                fields >> state; /* field 3 */
+                std::uint64_t value = 0;
+                for (int field = 4; field <= 22; ++field)
+                {
+                    if (!(fields >> value))
+                    {
+                        value = 0;
+                        break;
+                    }
+                }
+                if (value != 0)
+                {
+                    return value;
+                }
+            }
+        }
+#endif
+        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        const auto ticks = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+        return ticks ^ (static_cast<std::uint64_t>(pid) << 32);
+    }();
+    const auto result = token == 0 ? 1 : token;
+    cached_token.store(result, std::memory_order_release);
+    cached_pid.store(pid, std::memory_order_release);
+    return result;
+}
+
+std::uint64_t next_shm_publisher_id() noexcept
+{
+    static std::atomic<std::uint64_t> sequence{1};
+    const auto seq = sequence.fetch_add(1, std::memory_order_relaxed);
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(shm_process_id())) << 32) ^ seq;
+}
 
 /* 进程内只读一次的特性开关。用法与 socket 侧的 DZIPC_SOCKET_COMPAT_THREAD 同构
  * （src/dzIPC/socket_pub_sub_ipc.cc:93-107），但**极性相反**，因为两边"兼容"的含义
@@ -483,7 +561,7 @@ struct SubRecvOutcome
     std::size_t bytes{0};
 };
 
-SubRecvOutcome sub_recv_attempt(dzIPC::shm::RouteSession& session,
+SubRecvOutcome sub_recv_attempt(dzIPC::shm::ShmRouteSession& session,
                                 const std::shared_ptr<SubState>& state,
                                 std::uint64_t wait_ms)
 {
@@ -509,12 +587,13 @@ SubRecvOutcome sub_recv_attempt(dzIPC::shm::RouteSession& session,
         return out;
     }
     /* 测试缝(§4.2)：此刻 inflight 仍为 1 ⇒ 钩子**不得阻塞**。 */
-    detail::FireSeam({detail::SeamPoint::kAfterRecv, lease->generation, lease->route.get(), raw_data.data(),
+    detail::FireSeam({detail::SeamPoint::kAfterRecv, lease->generation, lease->route->legacy_route(), raw_data.data(),
                       raw_data.size()});
     session.release_receive();
     /* 测试缝(§4.1 的 I5 暂停点)：已 release ⇒ 重建方可推进到第 5 步 release 旧 route。
      * ⚠️ 必须留在**分流之前**（I5 就是靠这个窗口守住的）。 */
-    detail::FireSeam({detail::SeamPoint::kAfterRecvRelease, lease->generation, lease->route.get(),
+    detail::FireSeam({detail::SeamPoint::kAfterRecvRelease, lease->generation,
+                      lease->route->legacy_route(),
                       raw_data.data(), raw_data.size()});
     if (raw_data.empty())
     {
@@ -564,7 +643,7 @@ class SubRecvRoute final : public dzIPC::threepools::RecvRouteSource
 public:
     SubRecvRoute(std::shared_ptr<SubRecvState> state,
                  std::shared_ptr<SubState> sub_state,
-                 std::shared_ptr<RouteSession> session)
+                 std::shared_ptr<ShmRouteSession> session)
         : state_(std::move(state))
         , sub_state_(std::move(sub_state))
         , session_(std::move(session))
@@ -580,7 +659,7 @@ public:
      * ⚠️ 本函数只读当前 route 的拷贝，不参与任何 lease —— worker 在**注册期**调用它。 */
     ipc::recv_wait_token read_wait_token() const noexcept override
     {
-        std::shared_ptr<ipc::route> cur = session_->current_route();
+        std::shared_ptr<ShmChannel> cur = session_->current_route();
         return (cur && cur->valid()) ? cur->read_wait_token() : ipc::recv_wait_token{};
     }
 
@@ -652,7 +731,7 @@ private:
      * lease 协议，不参与它的生命周期管理。安全性由注销协议给出 —— `remove_route`
      * 返回后 worker 才可能不再引用本适配器，而宿主在 remove_route 之后才析构
      * route_session_（析构八步的次序，见本文件 ~shm_sub_ipc）。 */
-    std::shared_ptr<RouteSession> session_;
+    std::shared_ptr<ShmRouteSession> session_;
 };
 
 /******************************************************************************************************/
@@ -689,6 +768,7 @@ struct shm_pub_ipc::PubHeartbeatState : dzIPC::shm_control::PubControlState
         if (h == nullptr) return;
 
         h->control_plane_.heartbeat();
+        h->mpmc_publisher_tick();
 
         /* 死连接回收。
          *
@@ -793,7 +873,217 @@ shm_pub_ipc::shm_pub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
     , thread_options_(dzIPC::ThreadDispatch::make_realtime_options(enable_thread_qos, cpu_id, thread_priority))
 {
     topic_msg_.reset(msg->clone());
+    publisher_id_ = next_shm_publisher_id();
+    publisher_start_token_ = shm_process_start_token();
     dzIPC::ThreadDispatch::apply_current_thread_options(thread_options_, verbose_, topic_name_ + "_PubOwnerThread");
+}
+
+std::string shm_pub_ipc::mpmc_info_extra() const
+{
+    std::ostringstream out;
+    out << "transport=shm_mpmc;layout=V2;gen=" << publisher_registry_.generation()
+        << ";pub=" << publisher_registry_.publisher_count()
+        << ";coord=" << publisher_registry_.coordinator_slot();
+    if (!info_extra_.empty())
+        out << ";" << info_extra_;
+    return out.str();
+}
+
+void shm_pub_ipc::mpmc_publisher_tick() noexcept
+{
+    if (!dzIPC::shm_mpmc_enabled() || !publisher_registered_ || publisher_slot_ < 0)
+    {
+        return;
+    }
+    if (!publisher_registry_.heartbeat(publisher_slot_, publisher_id_, publisher_start_token_))
+    {
+        publisher_registered_ = false;
+        publisher_slot_ = -1;
+        return;
+    }
+    (void)publisher_registry_.reap_stale(kPeerDeadTimeoutNs);
+    if (!mpmc_coordinator_)
+    {
+        mpmc_coordinator_ = publisher_registry_.acquire_coordinator(
+            publisher_slot_, publisher_id_, publisher_start_token_,
+            kPeerDeadTimeoutNs);
+    }
+    (void)pool_reg_.update_extra(mpmc_info_extra());
+}
+
+bool shm_pub_ipc::init_mpmc_channel()
+{
+    if (!publisher_registry_.open(shm_topic_publisher_registry_name(raw_topic_name_, domain_id_)))
+    {
+        return false;
+    }
+
+    const auto pid = shm_process_id();
+    publisher_registry_.reap_stale(kPeerDeadTimeoutNs);
+    const auto initial_state = control_plane_.state();
+    const auto control_generation = control_plane_.generation();
+    auto registry_generation = publisher_registry_.generation();
+    const bool had_publishers = publisher_registry_.publisher_count() != 0;
+
+    std::uint32_t candidate_generation = control_generation != 0
+                                             ? control_generation
+                                             : (registry_generation != 0 ? registry_generation : 1U);
+    if (registry_generation == 0)
+    {
+        if (!publisher_registry_.compare_exchange_generation(0, candidate_generation))
+        {
+            registry_generation = publisher_registry_.generation();
+            candidate_generation = registry_generation;
+        }
+        else
+        {
+            registry_generation = candidate_generation;
+        }
+    }
+    if (candidate_generation == 0)
+    {
+        return false;
+    }
+    if (initial_state == TopicState::Ready && control_generation != registry_generation)
+    {
+        /* A Ready control segment with a different publisher generation is an
+         * incompatible/in-flight migration.  Do not attach to a mixed layout. */
+        return false;
+    }
+
+    publisher_slot_ = publisher_registry_.join(candidate_generation, publisher_id_, pid,
+                                                publisher_start_token_);
+    if (publisher_slot_ < 0)
+    {
+        return false;
+    }
+    publisher_registered_ = true;
+    publisher_generation_ = candidate_generation;
+
+    mpmc_coordinator_ = publisher_registry_.acquire_coordinator(
+        publisher_slot_, publisher_id_, publisher_start_token_, kPeerDeadTimeoutNs);
+
+    if (initial_state == TopicState::Ready && control_plane_.generation() == candidate_generation)
+    {
+        publisher_ = std::make_shared<ShmChannel>(topic_name_.c_str(), ipc::sender, verbose_, true);
+        return publisher_ && publisher_->valid();
+    }
+
+    if (!mpmc_coordinator_)
+    {
+        /* Another publisher is creating this generation.  Joining publishers
+         * never rebuild or clear the segment; they wait for Ready and attach
+         * to the generation selected by the coordinator. */
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (control_plane_.state() == TopicState::Ready &&
+                control_plane_.generation() == publisher_registry_.generation())
+            {
+                publisher_generation_ = control_plane_.generation();
+                publisher_ = std::make_shared<ShmChannel>(topic_name_.c_str(), ipc::sender, verbose_, true);
+                return publisher_ && publisher_->valid();
+            }
+            (void)publisher_registry_.reap_stale(kPeerDeadTimeoutNs);
+            if (publisher_registry_.acquire_coordinator(
+                    publisher_slot_, publisher_id_, publisher_start_token_, kPeerDeadTimeoutNs))
+            {
+                mpmc_coordinator_ = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (!mpmc_coordinator_)
+        {
+            return false;
+        }
+    }
+
+    /* Only the coordinator may establish a new generation.  Clear stale data
+     * before the first creator opens the new MPMC handle; an active publisher
+     * observed above means the segment is still owned and must be preserved. */
+    if (!had_publishers && publisher_registry_.publisher_count() == 1 &&
+        control_plane_.peer_count() == 0)
+    {
+        ShmChannel::clear_storage(topic_name_.c_str(), true);
+    }
+    const auto old_generation = control_plane_.generation();
+    const auto new_generation = control_plane_.begin_rebuild();
+    if (new_generation == 0)
+    {
+        return false;
+    }
+    if (publisher_registry_.generation() != new_generation)
+    {
+        const auto current_registry_generation = publisher_registry_.generation();
+        const bool advanced = current_registry_generation == new_generation ||
+                               publisher_registry_.advance_generation(current_registry_generation,
+                                                                      new_generation);
+        if (!advanced)
+        {
+            return false;
+        }
+    }
+    (void)old_generation;
+    publisher_generation_ = new_generation;
+    publisher_ = std::make_shared<ShmChannel>(topic_name_.c_str(), ipc::sender, verbose_, true);
+    if (!publisher_ || !publisher_->valid())
+    {
+        return false;
+    }
+    control_plane_.set_ready();
+    return true;
+}
+
+void shm_pub_ipc::leave_mpmc_registry() noexcept
+{
+    if (!publisher_registered_ || publisher_slot_ < 0)
+    {
+        return;
+    }
+    bool became_empty = false;
+    const bool left = publisher_registry_.leave(publisher_slot_, publisher_id_,
+                                                publisher_start_token_, &became_empty);
+    publisher_registered_ = false;
+    publisher_slot_ = -1;
+    mpmc_coordinator_ = false;
+    if (!left)
+    {
+        if (publisher_ && publisher_->valid())
+        {
+            publisher_->release();
+        }
+        return;
+    }
+    if (!became_empty)
+    {
+        /* Another live publisher still owns the MPMC segment. */
+        if (publisher_ && publisher_->valid())
+        {
+            publisher_->release();
+        }
+        return;
+    }
+
+    control_plane_.set_stopping();
+    wait_for_peer_drain(control_plane_);
+    if (publisher_ && publisher_->valid())
+    {
+        if (control_plane_.peer_count() == 0)
+        {
+            publisher_->clear();
+        }
+        else
+        {
+            /* Keep the segment mapped for existing subscribers; no future
+             * publisher can safely unlink it while they still hold a peer. */
+            publisher_->release();
+        }
+    }
+    /* Keep the registry gate closed through the control/data cleanup above.
+     * A join that races the final leave must observe the completed stop/clear
+     * decision before it can attach the next generation. */
+    (void)publisher_registry_.finish_close();
 }
 
 /******************************************************************************************************/
@@ -840,18 +1130,23 @@ shm_pub_ipc::~shm_pub_ipc()
      * 对 topic_name_/control_plane_/publisher_ 的操作不可能与回调并发。 */
     stop_control_plane();
     running.store(false, std::memory_order_release);
-    /* ⛔ 发布端退出 = 控制面离开 Ready —— 这个**收尾动作**原在 pub_handshake() 循环
-     * 退出后执行（`subscribed_=false` + `set_stopping()`），迁到调度器后没有"线程退出"
-     * 这一刻，必须由析构体补上。⛔ 不能省：订阅端靠"控制面离开 Ready"才走
-     * stop_and_wake/detach（test_wakeup_artifact 的 NoPhantomMessageOnGenerationRebuild
-     * 与 test_shm_sub_dtor_gate 的前提都建立在"拆 pub ⇒ 状态离开 Ready"上）。
-     * 位置与旧实现同序：清零 → set_stopping → 等 peer 排空 → clear。 */
     subscribed_.store(false, std::memory_order_release);
-    control_plane_.set_stopping();
-    if (publisher_ && publisher_->valid())
+    if (dzIPC::shm_mpmc_enabled())
     {
-        wait_for_peer_drain(control_plane_);
-        publisher_->clear();
+        /* A non-last MPMC publisher must leave the Ready topic intact.  The
+         * registry decides whether this instance is the final owner before
+         * any stop/clear action is taken. */
+        leave_mpmc_registry();
+    }
+    else
+    {
+        /* Legacy single-publisher shutdown keeps its historical ordering. */
+        control_plane_.set_stopping();
+        if (publisher_ && publisher_->valid())
+        {
+            wait_for_peer_drain(control_plane_);
+            publisher_->clear();
+        }
     }
     exit_flag.store(true, std::memory_order_release);
 }
@@ -871,17 +1166,36 @@ void shm_pub_ipc::InitChannel(std::string extra_info)
 {
     try
     {
+        info_extra_ = std::move(extra_info);
         if (!control_plane_.open(topic_control_name_for(raw_topic_name_, domain_id_)))
         {
             throw std::runtime_error("failed to open topic control plane");
         }
-        control_plane_.begin_rebuild();
-        ipc::route::clear_storage(topic_name_.c_str());
-        auto pool = ipc::acquire_topic_pool({}, ipc::make_string(topic_name_.c_str()));
-        if (!pool || pool->identity() != topic_pool_id_) throw std::runtime_error("topic pool identity unavailable");
-        topic_pool_lifetime_ = std::move(pool);
-        publisher_ = std::make_shared<ipc::route>(topic_name_.c_str(), ipc::sender, verbose_);
-        control_plane_.set_ready();
+        if (dzIPC::shm_mpmc_enabled())
+        {
+            if (!init_mpmc_channel())
+            {
+                throw std::runtime_error("failed to join or create MPMC publisher channel");
+            }
+        }
+        else
+        {
+            control_plane_.begin_rebuild();
+            ShmChannel::clear_storage(topic_name_.c_str(), false);
+            auto pool = ipc::acquire_topic_pool({}, ipc::make_string(topic_name_.c_str()));
+            if (!pool || pool->identity() != topic_pool_id_)
+                throw std::runtime_error("topic pool identity unavailable");
+            topic_pool_lifetime_ = std::move(pool);
+            publisher_ = std::make_shared<ShmChannel>(topic_name_.c_str(), ipc::sender, verbose_, false);
+            control_plane_.set_ready();
+        }
+        if (dzIPC::shm_mpmc_enabled() && !topic_pool_lifetime_)
+        {
+            auto pool = ipc::acquire_topic_pool({}, ipc::make_string(topic_name_.c_str()));
+            if (!pool || pool->identity() != topic_pool_id_)
+                throw std::runtime_error("topic pool identity unavailable");
+            topic_pool_lifetime_ = std::move(pool);
+        }
         /* W05：控制面驱动。默认进程级调度器（线程数 O(1)）；显式回退每话题兼容线程。
          * ⛔ 先建 state、再注册（RegistrationToken 的"先注册后构造"形式），
          *    避免 (sched, sched.register_...) 那种"注册成功但令牌构造抛异常 ⇒ 条目泄漏"。
@@ -928,8 +1242,13 @@ void shm_pub_ipc::InitChannel(std::string extra_info)
                                           ? dzIPC::info_pool::demangle(typeid(*topic_msg_->topic()).name())
                                           : std::string{};
         topic_type_name = extract_last_segment(topic_type_name);
-        if (!internal_) pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmPub, raw_topic_name_, topic_type_name, "shm",
-                          static_cast<uint64_t>(domain_id_), extra_info});
+        if (!internal_)
+        {
+            pool_reg_.rebind({dzIPC::info_pool::EntryKind::ShmPub, raw_topic_name_, topic_type_name,
+                              dzIPC::shm_mpmc_enabled() ? "shm_mpmc" : "shm",
+                              static_cast<uint64_t>(domain_id_),
+                              dzIPC::shm_mpmc_enabled() ? mpmc_info_extra() : info_extra_});
+        }
     }
     catch (const std::exception& e)
     {
@@ -967,7 +1286,14 @@ void shm_pub_ipc::compat_control_loop()
         std::this_thread::sleep_for(kControlTiming.pub_heartbeat);
     }
     subscribed_.store(false, std::memory_order_release);
-    control_plane_.set_stopping();
+    /* In MPMC mode the registry decides whether this publisher is the last
+     * owner.  A compatibility control thread belongs to one publisher and
+     * must not move the shared topic to Stopping when another publisher is
+     * still active. */
+    if (!dzIPC::shm_mpmc_enabled())
+    {
+        control_plane_.set_stopping();
+    }
 }
 
 /******************************************************************************************************/
@@ -1472,7 +1798,8 @@ struct shm_sub_ipc::SubHandshakeState : dzIPC::shm_control::SubControlState
                         generation,
                         [h]()
                         {
-                            return std::make_shared<ipc::route>(h->topic_name_.c_str(), ipc::receiver, h->verbose_);
+                            return std::make_shared<ShmChannel>(h->topic_name_.c_str(), ipc::receiver, h->verbose_,
+                                                                dzIPC::shm_mpmc_enabled());
                         });
                 }
                 attached_generation_ = generation;
@@ -1486,7 +1813,7 @@ struct shm_sub_ipc::SubHandshakeState : dzIPC::shm_control::SubControlState
                     h->before_generation_rebuild();
                     h->route_session_.stop_and_wake();
                     h->route_session_.wait_quiescent();
-                    std::shared_ptr<ipc::route> cur = h->route_session_.current_route();
+                    std::shared_ptr<ShmChannel> cur = h->route_session_.current_route();
                     if (cur && cur->valid())
                     {
                         cur->release();
@@ -1502,7 +1829,7 @@ struct shm_sub_ipc::SubHandshakeState : dzIPC::shm_control::SubControlState
                     /* begin_rebuild 返回之后读 route: 此刻没有并发的 release
                      * (阶段 2 说明 §4 表格第 3 行)。current_route() 的拷贝让 route
                      * 在读取 connected_id() 期间保活。 */
-                    std::shared_ptr<ipc::route> cur = h->route_session_.current_route();
+                    std::shared_ptr<ShmChannel> cur = h->route_session_.current_route();
                     cc_id = (cur && cur->valid()) ? cur->connected_id() : 0u;
                     peer_slot_ = h->control_plane_.acquire_peer_slot(attached_generation_, cc_id);
                 }
@@ -1591,7 +1918,7 @@ struct shm_sub_ipc::SubHandshakeState : dzIPC::shm_control::SubControlState
                     h->before_generation_rebuild();
                     h->route_session_.stop_and_wake();
                     h->route_session_.wait_quiescent();
-                    std::shared_ptr<ipc::route> cur = h->route_session_.current_route();
+                    std::shared_ptr<ShmChannel> cur = h->route_session_.current_route();
                     if (cur && cur->valid())
                     {
                         cur->release();
@@ -1764,7 +2091,7 @@ bool shm_sub_ipc::start_recv_path()
          * 留空（阶段 2 说明 §4 表格第 2 行），这一轮不接；下一次 Ready 重建会再来。
          * ⛔ 这里**不**算回退（原因码 kNoRoute = 路径未定，不是故障），因此不记
          * fallback_* 计数（与 W09「路径选择不是回退」同一纪律）。 */
-        std::shared_ptr<ipc::route> cur = route_session_.current_route();
+        std::shared_ptr<ShmChannel> cur = route_session_.current_route();
         if (!cur || !cur->valid())
         {
             return false;
@@ -1785,7 +2112,7 @@ bool shm_sub_ipc::start_recv_path()
         {
             /* route_session_ 的**别名**（no-op deleter）：适配器只借它的 lease 协议，
              * 不参与它的生命周期（安全性见 `teardown_recv_path` 与析构八步）。 */
-            std::shared_ptr<RouteSession> alias(&route_session_, [](RouteSession*) {});
+            std::shared_ptr<ShmRouteSession> alias(&route_session_, [](ShmRouteSession*) {});
             recv_route_ = std::make_shared<SubRecvRoute>(recv_state_, sub_state_, std::move(alias));
         }
         recv_generation_.store(route_session_.generation(), std::memory_order_release);
@@ -1998,7 +2325,7 @@ void shm_sub_ipc::start_compat_recv_thread()
         }
         if (!recv_route_)
         {
-            std::shared_ptr<RouteSession> alias(&route_session_, [](RouteSession*) {});
+            std::shared_ptr<ShmRouteSession> alias(&route_session_, [](ShmRouteSession*) {});
             recv_route_ = std::make_shared<SubRecvRoute>(recv_state_, sub_state_, std::move(alias));
         }
         subscribe_thread_ = new std::thread(&shm_sub_ipc::compat_recv_loop, this);
@@ -2161,7 +2488,7 @@ shm_sub_ipc::~shm_sub_ipc()
     route_session_.wait_quiescent();
     detail::FireSeam({detail::SeamPoint::kDtorAfterQuiescent, 0, nullptr, nullptr, 0});
     {
-        std::shared_ptr<ipc::route> cur = route_session_.current_route();
+        std::shared_ptr<ShmChannel> cur = route_session_.current_route();
         if (cur && cur->valid())
         {
             cur->release();

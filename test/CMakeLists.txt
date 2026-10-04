@@ -138,6 +138,31 @@ add_test(NAME test_udp_port_boundary COMMAND test_udp_port_boundary)
 # 命名规范同前: 与 target 名一致, 不另起别名。
 add_test(NAME test_shm_control_scheduler COMMAND test_shm_control_scheduler)
 
+# MPMC shared-memory queue contract: concurrent writers must preserve every
+# writer/sequence pair for each broadcast receiver.  Keep this focused test in
+# CTest so the topology cannot regress while the higher-level publisher
+# registry is still being implemented.
+add_test(NAME test_shm_mpmc_channel COMMAND test_shm_mpmc_channel)
+set_tests_properties(test_shm_mpmc_channel PROPERTIES TIMEOUT 30)
+
+# Type-adapter contract: RouteSession and LoanedMessage can carry the explicit
+# MPMC channel without changing the legacy route aliases.
+add_test(NAME test_shm_mpmc_types COMMAND test_shm_mpmc_types)
+set_tests_properties(test_shm_mpmc_types PROPERTIES TIMEOUT 30)
+
+# MPMC mode parsing is deliberately pure so deployment scripts can validate
+# the opt-in contract without creating a shared-memory object.
+add_test(NAME test_shm_mpmc_config COMMAND test_shm_mpmc_config)
+set_tests_properties(test_shm_mpmc_config PROPERTIES TIMEOUT 10)
+
+# Publisher registry lease contract: shared generation, identity-guarded
+# heartbeat/leave, coordinator lease transfer, and stale slot reclamation.
+add_test(NAME test_shm_mpmc_control_plane COMMAND test_shm_mpmc_control_plane)
+set_tests_properties(test_shm_mpmc_control_plane PROPERTIES TIMEOUT 30)
+
+add_test(NAME test_shm_multi_publisher COMMAND test_shm_multi_publisher)
+set_tests_properties(test_shm_multi_publisher PROPERTIES TIMEOUT 60 ENVIRONMENT "DZIPC_SHM_MPMC=1")
+
 # 用例内含 4 线程 churn 与 250ms 慢回调, 实测全套约 3s; 给 120s 只为在死锁
 # (本用例要抓的失败模式之一: 注销等待在途回调时自锁) 时让 ctest 报超时而非永久
 # 阻塞构建机, 不是性能判据。

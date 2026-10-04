@@ -208,7 +208,7 @@ public:
     template <typename T, typename F, typename... P>
     bool push_sniffer(F&& prep, P&&... params) {
         if (elems_ == nullptr) return false;
-        if constexpr (!relat_trait<policy_t>::is_broadcast || relat_trait<policy_t>::is_multi_producer) {
+        if constexpr (!relat_trait<policy_t>::is_broadcast) {
             return this->push<T>(std::forward<F>(prep), std::forward<P>(params)...);
         }
         else {

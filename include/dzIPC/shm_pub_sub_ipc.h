@@ -11,8 +11,10 @@
 #include "dzIPC/common/control_plane.h"
 #include "dzIPC/common/circularqueue.h"
 #include "dzIPC/common/loaned_message.h"
+#include "dzIPC/common/shm_channel.h"
 #include "dzIPC/common/nodelet_config.h"
 #include "dzIPC/common/local_pub_sub_registry.h"
+#include "dzIPC/common/publisher_registry.h"
 #include "dzIPC/common/thread_dispatch.h"
 #include "dzIPC/common/sample_message.h"
 #include "dzIPC/common/topic_data.h"
@@ -37,6 +39,7 @@ class RecvRouteSource;
 namespace shm {
 class shm_pub_ipc;
 class shm_sub_ipc;
+using ShmRouteSession = BasicRouteSession<ShmChannel>;
 
 /* W06（接收池接入）：订阅 route 的模块侧**独立状态**与适配器（定义在 .cc）。
  *
@@ -197,6 +200,10 @@ private:
 
     /// 同步停止控制面驱动：reset 令牌（等该项在途 tick 结算）+ join 兼容线程。幂等。
     void stop_control_plane() noexcept;
+    void mpmc_publisher_tick() noexcept;
+    bool init_mpmc_channel();
+    void leave_mpmc_registry() noexcept;
+    std::string mpmc_info_extra() const;
     /* B 级借样封口时写进段头的 msg_id。取自本发布者的话题模板 —— 与 A 级走
      * msg->dz_ipc_msg_id 等价, 但 B 级没有 owning 消息对象可问。 */
     std::uint32_t dzflat_msg_id() const
@@ -217,10 +224,18 @@ private:
     std::uint64_t topic_pool_id_;
     std::shared_ptr<void> topic_pool_lifetime_;
     std::string raw_topic_name_;
-    std::shared_ptr<ipc::route> publisher_;
+    std::shared_ptr<ShmChannel> publisher_;
     dzIPC::info_pool::ScopedRegistration pool_reg_;
     std::shared_ptr<TopicData> topic_msg_;
+    std::string info_extra_;
     dzIPC::control_plane_shm::TopicControlPlane control_plane_;
+    dzIPC::control_plane_shm::PublisherRegistry publisher_registry_;
+    int publisher_slot_{-1};
+    std::uint64_t publisher_id_{0};
+    std::uint64_t publisher_start_token_{0};
+    bool publisher_registered_{false};
+    bool mpmc_coordinator_{false};
+    std::uint32_t publisher_generation_{0};
     dzIPC::ThreadDispatch::ThreadOptions thread_options_;
     // Fast-path state, serialized by fast_path_mtx_.
     // Key is rebuilt from msg->msg_id() on each publish; any change resets
@@ -329,7 +344,7 @@ private:
      * begin_rebuild/stop_and_wake 换 route —— release 与 recv 不再可能并发,
      * 收包路径也不必再持有互斥量。
      * 见 docs/消息接收架构改造/阶段2_RouteSession实现说明.md §1-§6。 */
-    RouteSession route_session_;
+    ShmRouteSession route_session_;
     std::shared_ptr<SubState> sub_state_;
     std::thread* subscribe_thread_{nullptr};
 

@@ -156,6 +156,14 @@ public:
         return head_.write_index();
     }
 
+    /// Whether the slot at an absolute counter has completed its data copy.
+    /// MPMC writers reserve the counter before copying and publish it through
+    /// the per-slot commit flag; other policies advance their write cursor
+    /// only after the copy and therefore always return true.
+    bool slot_published(cursor_t index) const noexcept {
+        return head_.slot_published(index, block_);
+    }
+
     /// Direct read-only access to the slot array. Used by ipc::sniffer.
     /// Writers/readers should keep going through push/pop instead.
     elem_t const* block() const noexcept { return block_; }

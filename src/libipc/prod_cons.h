@@ -48,6 +48,12 @@ struct prod_cons_impl<wr<relat::single, relat::single, trans::unicast>> {
     circ::u2_t write_index() const noexcept {
         return wt_.load(std::memory_order_acquire);
     }
+
+    template <typename E>
+    bool slot_published(circ::u2_t, E*) const noexcept {
+        /* wt_ is advanced only after the producer has copied the slot. */
+        return true;
+    }
     circ::u2_t read_index() const noexcept {
         return rd_.load(std::memory_order_acquire);
     }
@@ -130,6 +136,12 @@ struct prod_cons_impl<wr<relat::multi , relat::multi, trans::unicast>>
     };
 
     alignas(cache_line_size) std::atomic<circ::u2_t> ct_; // commit index
+
+    template <typename E>
+    bool slot_published(circ::u2_t index, E* elems) const noexcept {
+        return elems[circ::index_of(index)].f_ct_.load(std::memory_order_acquire) ==
+               ~static_cast<flag_t>(index);
+    }
 
     template <typename W, typename F, typename E>
     bool push(W* /*wrapper*/, F&& f, E* elems) {
@@ -239,6 +251,12 @@ struct prod_cons_impl<wr<relat::single, relat::multi, trans::broadcast>> {
     /// Writer's published position; identical to cursor() for broadcast policies.
     circ::u2_t write_index() const noexcept {
         return wt_.load(std::memory_order_acquire);
+    }
+
+    template <typename E>
+    bool slot_published(circ::u2_t, E*) const noexcept {
+        /* wt_ is advanced only after the producer has copied the slot. */
+        return true;
     }
 
     template <typename W, typename F, typename E>
@@ -480,16 +498,44 @@ struct prod_cons_impl<wr<relat::multi, relat::multi, trans::broadcast>> {
         std::atomic<flag_t> f_ct_ { 0 }; // commit flag
     };
 
-    alignas(cache_line_size) std::atomic<circ::u2_t> ct_;   // commit index
+    /* ct_ reserves slots. wt_ advances only across contiguous, fully
+     * committed slots, so readers and passive sniffers never observe a
+     * writer's reservation before its payload copy is complete. */
+    alignas(cache_line_size) std::atomic<circ::u2_t> ct_ { 0 };
+    alignas(cache_line_size) std::atomic<circ::u2_t> wt_ { 0 };
     alignas(cache_line_size) std::atomic<rc_t> epoch_ { 0 };
 
     circ::u2_t cursor() const noexcept {
-        return ct_.load(std::memory_order_acquire);
+        return wt_.load(std::memory_order_acquire);
     }
 
     /// Writer's published position; identical to cursor() for broadcast policies.
     circ::u2_t write_index() const noexcept {
-        return ct_.load(std::memory_order_acquire);
+        return wt_.load(std::memory_order_acquire);
+    }
+
+    template <typename E>
+    bool slot_published(circ::u2_t index, E* elems) const noexcept {
+        return elems[circ::index_of(index)].f_ct_.load(std::memory_order_acquire) ==
+               ~static_cast<flag_t>(index);
+    }
+
+    template <typename E>
+    void publish_ready(E* elems) noexcept {
+        for (;;) {
+            const auto published = wt_.load(std::memory_order_acquire);
+            auto* slot = elems + circ::index_of(published);
+            if (slot->f_ct_.load(std::memory_order_acquire) !=
+                ~static_cast<flag_t>(published)) {
+                return;
+            }
+            auto expected = published;
+            if (wt_.compare_exchange_weak(expected, published + 1,
+                                           std::memory_order_release,
+                                           std::memory_order_acquire)) {
+                continue;
+            }
+        }
     }
 
     constexpr static rc_t inc_rc(rc_t rc) noexcept {
@@ -529,11 +575,12 @@ struct prod_cons_impl<wr<relat::multi, relat::multi, trans::broadcast>> {
             }
             ipc::yield(k);
         }
-        // only one thread/process would touch here at one time
+        // ct_ reservation is complete before invoking the copy callback.
         ct_.store(cur_ct + 1, std::memory_order_release);
         std::forward<F>(f)(&(el->data_));
         // set flag & try update wt
         el->f_ct_.store(~static_cast<flag_t>(cur_ct), std::memory_order_release);
+        publish_ready(elems);
         return true;
     }
 
@@ -577,13 +624,43 @@ struct prod_cons_impl<wr<relat::multi, relat::multi, trans::broadcast>> {
             }
             ipc::yield(k);
         }
-        // only one thread/process would touch here at one time
+        // ct_ reservation is complete before invoking the copy callback.
         ct_.store(cur_ct + 1, std::memory_order_release);
         // rem_cc 语义与 <single,multi,broadcast>::force_push 一致, 见该处注释。
         std::forward<F>(f)(&(el->data_), rem_cc);
         // set flag & try update wt
         el->f_ct_.store(~static_cast<flag_t>(cur_ct), std::memory_order_release);
+        publish_ready(elems);
         return true;
+    }
+
+    /* Passive sniffers do not claim a receiver bit.  A normal MPMC push
+     * therefore rejects the write as having no readers, but the publisher
+     * still needs a bounded ring slot so the sniffer can observe it.  Reserve
+     * the next slot with the same CAS used by push(), clear stale reader bits,
+     * and publish the fragment without touching receiver ownership. */
+    template <typename W, typename F, typename E>
+    bool push_sniffer(W* /*wrapper*/, F&& f, E* elems) {
+        const rc_t epoch = epoch_.fetch_add(ep_incr, std::memory_order_acq_rel) + ep_incr;
+        for (unsigned k = 0;;) {
+            const auto cur_ct = ct_.load(std::memory_order_relaxed);
+            auto* el = elems + circ::index_of(cur_ct);
+            auto cur_rc = el->rc_.load(std::memory_order_acquire);
+            const auto desired = inc_mask(epoch);
+            if (el->rc_.compare_exchange_weak(cur_rc, desired,
+                                              std::memory_order_relaxed,
+                                              std::memory_order_acquire)) {
+                /* Advance before invoking the caller's copy callback.  This
+                 * preserves the existing MPMC writer reservation ordering. */
+                ct_.store(cur_ct + 1, std::memory_order_release);
+                std::forward<F>(f)(&(el->data_));
+                el->f_ct_.store(~static_cast<flag_t>(cur_ct),
+                                std::memory_order_release);
+                publish_ready(elems);
+                return true;
+            }
+            ipc::yield(k);
+        }
     }
 
     template <typename W, typename F, typename R, typename E, std::size_t N>

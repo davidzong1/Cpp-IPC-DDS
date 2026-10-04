@@ -32,6 +32,7 @@
 #include <string>
 
 #include "dzIPC/common/name_operator.h"
+#include "dzIPC/common/shm_mpmc_config.h"
 #include "dzIPC/shm_ser_cli_ipc.h"
 #include "libipc/shm.h"
 
@@ -44,7 +45,8 @@ inline std::string control_plane_name(const std::string& topic_name, std::size_t
     {
         return dzIPC::shm::ser_service_control_name(topic_name, domain_id);
     }
-    return shm_topic_control_name(topic_name, domain_id);
+    return dzIPC::shm_mpmc_enabled() ? shm_topic_mpmc_control_name(topic_name, domain_id)
+                                     : shm_topic_control_name(topic_name, domain_id);
 }
 
 /* 控制面段是否已存在 —— **只读探测, 绝不建段**。

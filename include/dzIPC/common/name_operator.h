@@ -31,6 +31,10 @@ std::string sanitize_topic_name(const std::string& topic_name);
 /// pub/sub 数据段: "dz_ipc_d<domain>_s2_<scope128>_topic"
 std::string shm_topic_segment_name(const std::string& topic_name, size_t domain_id);
 
+/// Versioned MPMC pub/sub data segment. It is intentionally disjoint from the
+/// legacy route segment so old readers cannot attach to a different layout.
+std::string shm_topic_mpmc_segment_name(const std::string& topic_name, size_t domain_id);
+
 /* 服务作用域：domain、Service 类型及原始 topic 的身份散列。
  * 固定长度命名避免清洗别名与长名字超限；请求/响应追加 _ser_r / _ser_w。
  * 与旧清洗段名不兼容，通信双方及嗅探工具必须一起升级。 */
@@ -55,3 +59,12 @@ std::string shm_service_legacy_prefix(const std::string& topic_name, size_t doma
  * 以及工具侧的文档注释。规则一改就得同时改这几处, 漏掉哪处都是静默失效 ——
  * 与数据段名当初收进本文件是同一个理由。 */
 std::string shm_topic_control_name(const std::string& topic_name, size_t domain_id);
+
+/// Versioned MPMC control segment, paired with shm_topic_mpmc_segment_name().
+std::string shm_topic_mpmc_control_name(const std::string& topic_name, size_t domain_id);
+
+/// Publisher registry segment for the versioned MPMC migration path.
+/// Kept separate from the subscriber control segment so old route processes
+/// cannot interpret the publisher table as a TopicControl layout.
+std::string shm_topic_publisher_registry_name(const std::string& topic_name,
+                                              size_t domain_id);

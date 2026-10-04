@@ -423,4 +423,14 @@ namespace ipc
    */
   using channel = chan<relat::multi, relat::multi, trans::broadcast>;
 
+  /**
+   * @brief Explicit name for the multi-producer broadcast channel.
+   *
+   * Keep ``route`` as the single-producer compatibility channel.  New SHM
+   * integrations should use this explicit name so that the topology is not
+   * accidentally changed by modifying an existing alias.  SHM segment
+   * versioning and publisher coordination remain owned by the SHM layer.
+   */
+  using mpmc_channel = chan<relat::multi, relat::multi, trans::broadcast>;
+
 } // namespace ipc

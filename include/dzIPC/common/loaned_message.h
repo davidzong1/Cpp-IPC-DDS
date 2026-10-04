@@ -32,12 +32,13 @@
 #include <utility>
 
 #include "ipc_msg/ipc_msg_base/dzflat.h"
+#include "dzIPC/common/shm_channel.h"
 #include "libipc/ipc.h"
 
 namespace dzIPC {
 
 /// \tparam Flat 由 generator 发射的 XxxFlat(提供 root_t / builder_t / kSchemaHash)
-template<typename Flat>
+template<typename Flat, typename Channel = shm::ShmChannel>
 class LoanedMessage
 {
 public:
@@ -47,7 +48,7 @@ public:
     LoanedMessage() = default;
 
     /* 由 shm_pub_ipc::loan 调用。ch 需在本对象存活期间有效 —— 发布者持有它。 */
-    LoanedMessage(std::shared_ptr<ipc::route> ch, ipc::loan_t lo, std::uint32_t msg_id)
+    LoanedMessage(std::shared_ptr<Channel> ch, ipc::loan_t lo, std::uint32_t msg_id)
         : ch_(std::move(ch)), lo_(lo), msg_id_(msg_id)
     {
         if (!ch_ || !lo_.valid())
@@ -142,12 +143,15 @@ private:
         rhs.armed_ = false;
     }
 
-    std::shared_ptr<ipc::route> ch_;
+    std::shared_ptr<Channel> ch_;
     ipc::loan_t lo_{};
     std::uint32_t msg_id_ = 0;
     dzflat::Writer w_{nullptr, 0, 0};
     Builder b_{};
     bool armed_ = false;
 };
+
+template<typename Flat>
+using MpmcLoanedMessage = LoanedMessage<Flat, ipc::mpmc_channel>;
 
 }   // namespace dzIPC

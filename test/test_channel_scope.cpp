@@ -78,6 +78,18 @@ TEST(ChannelScope, SharedPythonCppNamingVectors) {
     EXPECT_EQ(shm_topic_segment_name("/中文/话题",1099511627776ULL),"dz_ipc_d1099511627776_s2_90c48a09216d80adce3570e96297310b_topic");
 }
 
+TEST(ChannelScope, MpmcNamesAreVersionedAndIsolated) {
+    const auto legacy = shm_topic_segment_name("/test/foo", 7);
+    const auto mpmc = shm_topic_mpmc_segment_name("/test/foo", 7);
+    EXPECT_NE(legacy, mpmc);
+    EXPECT_EQ(mpmc.substr(mpmc.size() - std::string("__MPMC_V2").size()), "__MPMC_V2");
+    EXPECT_NE(shm_topic_control_name("/test/foo", 7),
+              shm_topic_mpmc_control_name("/test/foo", 7));
+    const auto registry = shm_topic_publisher_registry_name("/test/foo", 7);
+    EXPECT_EQ(registry.substr(registry.size() - std::string("__MPMC_PUBLISHERS_V3").size()),
+              "__MPMC_PUBLISHERS_V3");
+}
+
 #include "dzIPC/shm_pub_sub_ipc.h"
 #include "dzIPC/socket_pub_sub_ipc.h"
 #include "dzIPC/shm_ser_cli_ipc.h"

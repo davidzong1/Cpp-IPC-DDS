@@ -131,6 +131,7 @@ struct reader_iface {
     virtual bool          valid() const noexcept = 0;
     virtual std::size_t   receiver_connections() const noexcept = 0;
     virtual std::uint32_t write_index() const noexcept = 0;
+    virtual bool         slot_published(std::uint32_t index) const noexcept = 0;
     /// Copy slot data at the given absolute counter into `out`.
     virtual void          copy_slot(std::uint32_t index, sniff_msg_t& out) = 0;
 };
@@ -172,6 +173,10 @@ struct typed_reader final : reader_iface {
 
     std::uint32_t write_index() const noexcept override {
         return elems_ ? static_cast<std::uint32_t>(elems_->write_index()) : 0u;
+    }
+
+    bool slot_published(std::uint32_t index) const noexcept override {
+        return elems_ != nullptr && elems_->slot_published(index);
     }
 
     void copy_slot(std::uint32_t index, sniff_msg_t& out) override {
@@ -245,9 +250,13 @@ public:
             reader_ = std::move(r);
             break;
         }
-        case sniffer::topology::channel:
-            ipc::error("sniffer: 'channel' topology is not supported yet\n");
-            return false;
+        case sniffer::topology::channel: {
+            using flag_t = ipc::wr<relat::multi, relat::multi, trans::broadcast>;
+            auto r = std::unique_ptr<typed_reader<flag_t>>(new typed_reader<flag_t>);
+            if (!r->open(shm_name.c_str())) return false;
+            reader_ = std::move(r);
+            break;
+        }
         default:
             ipc::error("sniffer: unknown topology %u\n",
                        static_cast<unsigned>(t));
@@ -327,6 +336,12 @@ public:
         while (cur_ != reader_->write_index()) {
             sniff_msg_t   msg{};
             std::uint32_t this_idx = cur_;
+            /* MPMC ct_ is a reservation cursor.  A later writer can advance
+             * it while an earlier writer is still copying its slot.  Keep the
+             * cursor parked until the per-slot commit flag is visible. */
+            if (!reader_->slot_published(this_idx)) {
+                return {};
+            }
             reader_->copy_slot(this_idx, msg);
             std::uint32_t after_wt = reader_->write_index();
             ++cur_;
@@ -334,6 +349,12 @@ public:
             // If the writer lapped this slot while we were copying, the
             // bytes may be torn. Treat as drop and advance.
             if ((after_wt - this_idx) > ring) {
+                dropped_++;
+                frags_.clear();
+                continue;
+            }
+            if (!reader_->slot_published(this_idx)) {
+                /* A force/overwrite completed while the slot was copied. */
                 dropped_++;
                 frags_.clear();
                 continue;

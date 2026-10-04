@@ -55,6 +55,7 @@
  *   析构路径不会再 begin_rebuild，所以说明 §5 的「先 stop_and_wake、join、
  *   再 wait_quiescent」语义不受影响（不会复活任何 lease）。
  */
+#include <cassert>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -62,6 +63,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <utility>
 
 #include "libipc/export.h"
 #include "libipc/ipc.h"
@@ -133,6 +135,148 @@ private:
     bool stopping_{false};
     bool rebuilding_{false};
 };
+
+/*
+ * 通道类型化的同一生命周期协议。
+ *
+ * RouteSession 保留为旧 ipc::route 的导出类，避免改变现有 SHM 对象的 ABI。
+ * 新的 MPMC 数据面使用这个模板实例；Channel 只需要提供与 ipc::route 相同的
+ * disconnect()/release() 接口。
+ */
+template<typename Channel>
+class BasicRouteSession
+{
+public:
+    struct ReceiveLease
+    {
+        std::shared_ptr<Channel> route;
+        uint32_t generation{0};
+    };
+
+    BasicRouteSession() = default;
+    ~BasicRouteSession() = default;
+
+    BasicRouteSession(const BasicRouteSession&) = delete;
+    BasicRouteSession& operator=(const BasicRouteSession&) = delete;
+
+    std::optional<ReceiveLease> acquire_receive()
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (stopping_ || rebuilding_ || !route_)
+        {
+            return std::nullopt;
+        }
+        ++receive_inflight_;
+        return ReceiveLease{route_, generation_};
+    }
+
+    void release_receive() noexcept
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (receive_inflight_ == 0)
+        {
+            assert(false && "BasicRouteSession::release_receive without a matching acquire_receive");
+            return;
+        }
+        --receive_inflight_;
+        cv_.notify_all();
+    }
+
+    void begin_rebuild(uint32_t new_generation,
+                       const std::function<std::shared_ptr<Channel>()>& create)
+    {
+        std::shared_ptr<Channel> old;
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            rebuilding_ = true;
+            old = route_;
+        }
+
+        if (old)
+        {
+            old->disconnect();
+        }
+
+        {
+            std::unique_lock<std::mutex> lock(mtx_);
+            cv_.wait(lock, [this] { return receive_inflight_ == 0; });
+            if (old)
+            {
+                old->release();
+            }
+            route_.reset();
+        }
+
+        std::shared_ptr<Channel> fresh;
+        if (create)
+        {
+            try
+            {
+                fresh = create();
+            }
+            catch (...)
+            {
+                fresh.reset();
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            if (fresh)
+            {
+                route_ = std::move(fresh);
+                generation_ = new_generation;
+                stopping_ = false;
+            }
+            rebuilding_ = false;
+            cv_.notify_all();
+        }
+    }
+
+    void stop_and_wake() noexcept
+    {
+        std::shared_ptr<Channel> current;
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            stopping_ = true;
+            current = route_;
+            cv_.notify_all();
+        }
+        if (current)
+        {
+            current->disconnect();
+        }
+    }
+
+    void wait_quiescent()
+    {
+        std::unique_lock<std::mutex> lock(mtx_);
+        cv_.wait(lock, [this] { return receive_inflight_ == 0; });
+    }
+
+    std::shared_ptr<Channel> current_route() const
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return route_;
+    }
+
+    uint32_t generation() const
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return generation_;
+    }
+
+private:
+    mutable std::mutex mtx_;
+    std::condition_variable cv_;
+    std::shared_ptr<Channel> route_;
+    uint32_t generation_{0};
+    std::size_t receive_inflight_{0};
+    bool stopping_{false};
+    bool rebuilding_{false};
+};
+
+using MpmcRouteSession = BasicRouteSession<ipc::mpmc_channel>;
 
 }   // namespace shm
 }   // namespace dzIPC

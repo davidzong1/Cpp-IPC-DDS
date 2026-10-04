@@ -681,6 +681,24 @@ void IpcInfoPool::heartbeat(int32_t slot)
     e.heartbeat_ns.store(now_ns(), std::memory_order_relaxed);
 }
 
+bool IpcInfoPool::update_extra(int32_t slot, const std::string& extra)
+{
+    if (slot < 0 || static_cast<std::size_t>(slot) >= kMaxEntries)
+        return false;
+    if (!impl_ || !impl_->ok())
+        return false;
+
+    ScopedShmLock lock(impl_->header);
+    if (!lock.locked)
+        return false;
+    PoolEntry& e = impl_->entries[slot];
+    if (e.in_use.load(std::memory_order_acquire) == 0)
+        return false;
+    copy_truncate(e.extra, kMaxExtra, extra);
+    e.heartbeat_ns.store(now_ns(), std::memory_order_relaxed);
+    return true;
+}
+
 std::vector<EntrySnapshot> IpcInfoPool::snapshot(bool gc_dead_flag)
 {
     std::vector<EntrySnapshot> out;
@@ -862,6 +880,11 @@ void ScopedRegistration::heartbeat()
 {
     if (slot_ >= 0)
         IpcInfoPool::instance().heartbeat(slot_);
+}
+
+bool ScopedRegistration::update_extra(const std::string& extra)
+{
+    return slot_ >= 0 && IpcInfoPool::instance().update_extra(slot_, extra);
 }
 
 }   // namespace info_pool

@@ -18,8 +18,7 @@
  *     dropped (see ipc::sniffer::dropped()).
  *
  * Topology: the on-disk layout differs by topology, so the caller must
- * pass the same flag the publisher used (server / route). channel topology
- * is not yet supported and will be rejected at open() time.
+ * pass the same flag the publisher used (server / route / channel).
  */
 
 #include <cstddef>
@@ -40,11 +39,12 @@ using buff_t = buffer;
 class IPC_EXPORT sniffer {
 public:
     /// Channel topology. Must match what the publisher used to create the
-    /// channel (e.g. ipc::server -> server, ipc::route -> route).
+    /// channel (e.g. ipc::server -> server, ipc::route -> route,
+    /// ipc::mpmc_channel -> channel).
     enum class topology : unsigned {
         server  = 0, // single producer, single consumer, unicast
         route   = 1, // single producer, multi  consumer, broadcast
-        channel = 2, // multi  producer, multi  consumer, broadcast (NOT supported yet)
+        channel = 2, // multi  producer, multi  consumer, broadcast
     };
 
     /// Per-message metadata returned alongside the payload.

@@ -29,6 +29,11 @@ std::string shm_topic_segment_name(const std::string& topic_name, size_t domain_
            + "_topic";
 }
 
+std::string shm_topic_mpmc_segment_name(const std::string& topic_name, size_t domain_id)
+{
+    return shm_topic_segment_name(topic_name, domain_id) + "__MPMC_V2";
+}
+
 std::string shm_service_prefix(const std::string& topic_name, size_t domain_id)
 {
     // 原始名字参与身份，避免斜杠/下划线别名共享同一服务通道。
@@ -48,4 +53,16 @@ std::string shm_topic_control_name(const std::string& topic_name, size_t domain_
 {
     // 控制面由相同作用域的数据段名派生，二者的 domain 与原始话题身份一致。
     return shm_topic_segment_name(topic_name, domain_id) + "_control2";
+}
+
+std::string shm_topic_mpmc_control_name(const std::string& topic_name, size_t domain_id)
+{
+    return shm_topic_mpmc_segment_name(topic_name, domain_id) + "_control3";
+}
+
+std::string shm_topic_publisher_registry_name(const std::string& topic_name,
+                                              size_t domain_id)
+{
+    return shm_topic_mpmc_control_name(topic_name, domain_id) +
+           "__MPMC_PUBLISHERS_V3";
 }

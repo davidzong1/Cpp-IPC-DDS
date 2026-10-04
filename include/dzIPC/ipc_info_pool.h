@@ -126,6 +126,9 @@ public:
     /* 刷新心跳时间戳（steady_clock ns） */
     void heartbeat(int32_t slot);
 
+    /* 原位更新条目的 extra 字段，不改变 slot、注册时间或共享布局。 */
+    bool update_extra(int32_t slot, const std::string& extra);
+
     /* 整表快照；gc_dead=true 时同步回收 pid 已不存在的条目 */
     std::vector<EntrySnapshot> snapshot(bool gc_dead = true);
 
@@ -172,6 +175,9 @@ public:
 
     /* 刷新心跳 */
     void heartbeat();
+
+    /* 更新当前条目的 extra 字段；未注册时静默失败。 */
+    bool update_extra(const std::string& extra);
 
 private:
     int32_t slot_{-1};

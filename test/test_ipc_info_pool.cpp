@@ -348,6 +348,18 @@ TEST(IpcInfoPool, HeartbeatUpdatesTimestamp)
     EXPECT_GT(ts_after, ts_before);
 }
 
+TEST(IpcInfoPool, ScopedRegistrationUpdatesExtraInPlace)
+{
+    ScopedRegistration reg({EntryKind::ShmPub, "ut_extra_update", "", "shm_mpmc", 0, "old"});
+    ASSERT_TRUE(reg.valid());
+    ASSERT_TRUE(reg.update_extra("transport=shm_mpmc;layout=V2;gen=3;pub=2;coord=42"));
+    const auto entries = IpcInfoPool::instance().snapshot(false);
+    const auto it = std::find_if(entries.begin(), entries.end(),
+                                 [&](const auto& e) { return e.slot == reg.slot(); });
+    ASSERT_NE(it, entries.end());
+    EXPECT_EQ(it->extra, "transport=shm_mpmc;layout=V2;gen=3;pub=2;coord=42");
+}
+
 TEST(IpcInfoPool, ToStringCoversAllKinds)
 {
     EXPECT_STREQ(to_string(EntryKind::ShmPub), "shm_pub");

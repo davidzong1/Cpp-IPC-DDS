@@ -11,6 +11,7 @@
 #include <iostream>
 #include <string>
 #include "control_plane_naming.h"
+#include "dzIPC/common/shm_mpmc_config.h"
 #include "dzIPC/common/name_operator.h"
 
 namespace dzIPC {
@@ -113,8 +114,16 @@ bool shm_sniffer::open_channels(const std::string& topic_name, std::uint64_t, bo
     }
     else
     {
-        opt.topo = ipc::sniffer::topology::route;
-        opt.name = shm_topic_segment_name(topic_name, domain_id_);
+        if (dzIPC::shm_mpmc_enabled())
+        {
+            opt.topo = ipc::sniffer::topology::channel;
+            opt.name = shm_topic_mpmc_segment_name(topic_name, domain_id_);
+        }
+        else
+        {
+            opt.topo = ipc::sniffer::topology::route;
+            opt.name = shm_topic_segment_name(topic_name, domain_id_);
+        }
     }
     req_ = std::make_unique<ipc::sniffer>();
     bool ok = opt.pref.empty() ? req_->open(opt.name.c_str(), opt.topo)
