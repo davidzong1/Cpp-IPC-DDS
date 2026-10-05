@@ -34,6 +34,7 @@ class CopyCpuSummaryTest(unittest.TestCase):
         tail = result['slowest_copy_ten_percent']
         self.assertEqual(tail['count'], 1)
         self.assertAlmostEqual(tail['cpu_over_wall_sum'], 102 / 110)
+        self.assertAlmostEqual(tail['cpu_minus_probe_bracket_over_wall_sum'], 92 / 110)
         self.assertEqual(len(result['by_endpoint_cpus']), 2)
 
 

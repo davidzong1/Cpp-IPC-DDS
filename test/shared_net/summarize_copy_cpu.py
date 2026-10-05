@@ -36,6 +36,7 @@ def statistics(records):
                 mean_us=sum(r[key] for r in records) / len(records) / 1000)
             for key in ('wall_ns', 'cpu_ns', 'gap_ns', 'probe_bracket_ns', 'publish_ns')},
             'cpu_over_wall_sum': sum(r['cpu_ns'] for r in records) / sum(r['wall_ns'] for r in records),
+            'cpu_minus_probe_bracket_over_wall_sum': sum(r['cpu_ns'] - r['probe_bracket_ns'] for r in records) / sum(r['wall_ns'] for r in records),
             'different_endpoint_cpu': sum(r['begin_cpu'] != r['end_cpu'] for r in records)}
 
 
