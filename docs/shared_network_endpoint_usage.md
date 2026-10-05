@@ -79,7 +79,7 @@ export DZIPC_GATEWAY_CONTROL=/tmp/dzipc-gateway-$UID/control.sock
 | ack_wait | 源网关首发到可靠终结；应用侧为等待 SEND_RESULT 的时段，可能以超时/拒绝终结，须结合可靠结果计数 |
 | api_return | 通过基本调用校验后的发布处理到返回，含编码、信用和可靠等待 |
 
-每话题 `queue_wait` 与 `gateway_queue_wait` 同口径；tx_bytes 是实际 DATA wire 字节（含重传），rx_bytes 是首次接纳的分片 payload 字节，commits 是确定提交次数。源端本机直达不经过网关，因此该路由网关计数可以为0。shard的wakeups统计poll返回次数（含超时与立即就绪轮转），不是内核调度唤醒事件；上下文切换另查采样线程的/proc状态。`shm_committed_bytes` 仅累计确定提交的 payload，其他 copy_bytes 按实际发生的编码/复制位置累计。所有计时仅使用各自进程的 steady_clock，跨物理主机的时钟不可相减。
+每话题 `queue_wait` 与 `gateway_queue_wait` 同口径；tx_bytes 是实际 DATA wire 字节（含重传），rx_bytes 是首次接纳的分片 payload 字节，commits 是确定提交次数。源端本机直达不经过网关，因此该路由网关计数可以为0。shard的wakeups统计poll返回次数（含超时与立即就绪轮转），不是内核调度唤醒事件；上下文切换另查采样线程的/proc状态。`shm_committed_bytes` 仅累计确定提交的 payload，encode_copy_bytes表示编码出口产出字节，未穷举用户编码器内部复制或写零；local/outbox/reassembly_copy_bytes按已接线的payload复制位置累计。remote_target_copies计接管时冻结的逻辑远端副本数，实际发送量查tx_bytes。所有计时仅使用各自进程的 steady_clock，跨物理主机的时钟不可相减。
 
 当前没有 DZTX enqueue 时间字段；完整应用出站排队、网络单程时间和跨主机时钟误差仍不可从这些直方图推算。协议头未挪用保留字段。
 
@@ -109,4 +109,4 @@ export DZIPC_GATEWAY_CONTROL=/tmp/dzipc-gateway-$UID/control.sock
 
 正确性和性能验收参见 [执行计划](shared_network_endpoint_execution_plan.md) 与其证据表；单机命名空间验证不能替代两台物理主机的最终验收。
 
-当前验收结论见 [T14 实测](shared_network_endpoint_evidence/20261005-t14/results.md) 和 [T15 交付审计](shared_network_endpoint_evidence/20261005-t15/results.md)。本机九组三轮分位数中位数达到初始门槛，5/27 个逐轮配对未达到；物理跨机、完整阶段指标与若干负载矩阵仍缺项，维持实验性显式启用。legacy 的 blocking 固定采用 TLV，应使用对象读取接口；shared_v1 的 ACK 则在目标 SHM 确定提交后发送，不将两种返回语义等同。
+当前验收结论见[等待/指标修复实测](shared_network_endpoint_evidence/20261005-optimization/results.md)和[CRC固定负载实测](shared_network_endpoint_evidence/20261005-crc/results.md)。同shard冷消息可靠完成p99中位数从4.988ms降至1.057ms；已测纯本机版本仍有13/27逐轮配对未达到门槛，CRC版本没有重复该本机矩阵。物理跨机、完整阶段指标与若干负载矩阵仍缺项，维持实验性显式启用。旧[T14](shared_network_endpoint_evidence/20261005-t14/results.md)和[T15](shared_network_endpoint_evidence/20261005-t15/results.md)记录保留。legacy 的 blocking 固定采用 TLV，应使用对象读取接口；shared_v1 的 ACK 则在目标 SHM 确定提交后发送，不将两种返回语义等同。
