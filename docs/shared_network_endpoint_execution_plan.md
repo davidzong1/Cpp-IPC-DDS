@@ -2182,7 +2182,7 @@ nodelet 配置必须一致；已存在的纯进程内 nodelet 路径另作参考
 | T01 | 已完成 | f066a82 + 工作区 | build-shared-net / build-shared-net-off | 配置各 10/0/0；旧路径 22/0/0 | [构建与配置记录](shared_network_endpoint_evidence/20261005-foundation/baseline.md) | 非 Linux 仅纯函数分支验证；实际平台构建待验收 |
 | T02 | 已完成 | f066a82 + 工作区 | build-shared-net | GTest 16/0/0；Python 向量 1/0/0 | [协议记录](shared_network_endpoint_evidence/20261005-foundation/implementation.md) | 具体类型解码仍由订阅者承担；未验证异端序 DZFlat 平台 |
 | T03 | 已完成 | f066a82 + 工作区 | build-shared-net | GTest 12/0/0 | [端点与 IO 记录](shared_network_endpoint_evidence/20261005-foundation/implementation.md) | 路由生命周期与重组接入仍属后续卡；尚无跨机性能结论 |
-| T04 | 未开始 | | | | | |
+| T04 | 已完成 | dae9ca0 + 本卡提交 | build-shared-net / build-shared-net-sanitize | 新增 GTest 14/0/0；共享 CTest 10/0/0；sanitizer 2/0/0 | [会话与独占启动](shared_network_endpoint_evidence/20261005-t04/results.md) | 数据面尚未接入，status 明确报告未就绪 |
 | T05 | 未开始 | | | | | |
 | T06 | 未开始 | | | | | |
 | T07 | 未开始 | | | | | |
