@@ -79,7 +79,7 @@ export DZIPC_GATEWAY_CONTROL=/tmp/dzipc-gateway-$UID/control.sock
 | ack_wait | 源网关首发到可靠终结；应用侧为等待 SEND_RESULT 的时段，可能以超时/拒绝终结，须结合可靠结果计数 |
 | api_return | 通过基本调用校验后的发布处理到返回，含编码、信用和可靠等待 |
 
-每话题 `queue_wait` 与 `gateway_queue_wait` 同口径；tx_bytes 是实际 DATA wire 字节（含重传），rx_bytes 是首次接纳的分片 payload 字节，commits 是确定提交次数。源端本机直达不经过网关，因此该路由网关计数可以为0。`shm_committed_bytes` 仅累计确定提交的 payload，其他 copy_bytes 按实际发生的编码/复制位置累计。所有计时仅使用各自进程的 steady_clock，跨物理主机的时钟不可相减。
+每话题 `queue_wait` 与 `gateway_queue_wait` 同口径；tx_bytes 是实际 DATA wire 字节（含重传），rx_bytes 是首次接纳的分片 payload 字节，commits 是确定提交次数。源端本机直达不经过网关，因此该路由网关计数可以为0。shard的wakeups统计poll返回次数（含超时与立即就绪轮转），不是内核调度唤醒事件；上下文切换另查采样线程的/proc状态。`shm_committed_bytes` 仅累计确定提交的 payload，其他 copy_bytes 按实际发生的编码/复制位置累计。所有计时仅使用各自进程的 steady_clock，跨物理主机的时钟不可相减。
 
 当前没有 DZTX enqueue 时间字段；完整应用出站排队、网络单程时间和跨主机时钟误差仍不可从这些直方图推算。协议头未挪用保留字段。
 

@@ -16,6 +16,7 @@ import time
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--baseline', required=True)
+    parser.add_argument('--affinity', help='可选的固定进程CPU映射，原样传给所有配对窗口')
     parser.add_argument('--current', required=True)
     parser.add_argument('--gateway', required=True)
     parser.add_argument('--output', required=True)
@@ -33,7 +34,7 @@ def main():
         'benchmark_sha256': hashlib.sha256(Path('test/shared_net/benchmark.cc').read_bytes()).hexdigest(),
         'compiler': subprocess.check_output(['c++', '--version'], text=True).splitlines()[0],
         'flags': '-O2 -g -DNDEBUG -std=c++17', 'platform': platform.platform(),
-        'cpus': sorted(os.sched_getaffinity(0)), 'binary_sha256': frozen,
+        'affinity_plan': json.loads(args.affinity) if args.affinity else None, 'cpus': sorted(os.sched_getaffinity(0)), 'binary_sha256': frozen,
         'cpu_governors': {str(p): p.read_text().strip() for p in Path('/sys/devices/system/cpu').glob('cpu*/cpufreq/scaling_governor')}, 'clock': '同主机 CLOCK_MONOTONIC', 'commands': []}
     results = []
     for repeat in (1, 2, 3):
@@ -45,6 +46,7 @@ def main():
                     command = [sys.executable, 'test/shared_net/benchmark.py', '--binary', args.baseline if mode == 'baseline' else args.current,
                         '--gateway', args.gateway, '--mode', mode, '--output', str(folder), '--subscribers', str(subscribers),
                         '--bytes', str(size), '--seconds', '30', '--rate', '100']
+                    if args.affinity: command.extend(['--affinity', args.affinity])
                     manifest['commands'].append(command)
                     (output/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+'\n')
                     with (output/(case+'.log')).open('w') as log:

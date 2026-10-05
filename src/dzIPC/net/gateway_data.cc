@@ -301,7 +301,7 @@ struct GatewayData::Impl {
                             WireHeader h; ByteView body;
                             if (decode_packet(command.control->view(), h, body)) {
                                 const auto found = active.find({h.publisher_id, h.sequence});
-                                if (found != active.end() && found->second->reliable) control(*found->second, *command.control);
+                                if (found != active.end() && found->second->reliable) { control(*found->second, *command.control); new_send = true; }
                             }
                         }
                     }

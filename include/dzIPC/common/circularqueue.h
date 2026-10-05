@@ -164,7 +164,8 @@ private:
     }
     if (cancellable_) {
       // 与消费者的“空队列→等待”及取消共用同一把锁，不能在该窗口丢失通知。
-      std::lock_guard<std::mutex> lock(wait_mtx_);
+      { std::lock_guard<std::mutex> lock(wait_mtx_); }
+      // 释放等待锁后再唤醒，避免消费者醒来又阻塞于生产者仍持有的锁。
       cv_.notify_one();
     } else cv_.notify_one();
     if (notify_cb_) notify_cb_();

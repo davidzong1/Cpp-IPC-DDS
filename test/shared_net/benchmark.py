@@ -46,11 +46,17 @@ def host(args):
     with tempfile.TemporaryDirectory(prefix='dzipc-bench-') as control_dir:
         control = control_dir + '/control.sock'
         env['DZIPC_GATEWAY_CONTROL'] = control
+        affinity = json.loads(args.affinity) if args.affinity else None
+        if affinity:
+            allowed = os.sched_getaffinity(0)
+            assert set(affinity['subscribers'] + [affinity['publisher'], affinity['gateway']]) <= allowed
+        def launched(command, cpu):
+            return ['taskset', '-c', str(cpu), *command] if affinity else command
         try:
             if args.mode == 'shared_v1':
                 bases, discovery = reserve_ports()
-                gateway = subprocess.Popen([args.gateway, 'serve', '--control', control, '--interface', 'lo', '--listen-ip', '127.0.0.1',
-                    '--data-base-port', str(bases[0]), '--control-port', str(bases[0]+4), '--discovery-port', str(discovery)],
+                gateway = subprocess.Popen(launched([args.gateway, 'serve', '--control', control, '--interface', 'lo', '--listen-ip', '127.0.0.1',
+                    '--data-base-port', str(bases[0]), '--control-port', str(bases[0]+4), '--discovery-port', str(discovery)], affinity['gateway'] if affinity else 0),
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
                 end = time.monotonic() + 5
                 while not os.path.exists(control):
@@ -58,10 +64,10 @@ def host(args):
                     time.sleep(.01)
             transport = 'socket' if args.mode == 'shared_v1' else 'shm'
             for index in range(args.subscribers):
-                sub = Process([args.binary, 'sub', transport, 'benchmark', str(args.bytes), str(directory/f'sub{index}.csv'), str(args.rate)], env)
+                sub = Process(launched([args.binary, 'sub', transport, 'benchmark', str(args.bytes), str(directory/f'sub{index}.csv'), str(args.rate)], affinity['subscribers'][index % len(affinity['subscribers'])] if affinity else 0), env)
                 processes.append(sub)
                 sub.receive()
-            pub = Process([args.binary, 'pub', transport, 'benchmark', str(args.bytes), str(directory/'pub.csv'), str(args.rate)], env)
+            pub = Process(launched([args.binary, 'pub', transport, 'benchmark', str(args.bytes), str(directory/'pub.csv'), str(args.rate)], affinity['publisher'] if affinity else 0), env)
             processes.append(pub)
             pub.receive()
             pids = [p.p.pid for p in processes] + ([gateway.pid] if gateway else [])
@@ -98,7 +104,7 @@ def host(args):
                 stats = quantiles([int(row['elapsed_ns']) for row in rows])
                 stats.update(lost=len(accepted - set(sequences)), duplicates=len(sequences)-len(set(sequences)), invalid=sub_result['invalid'])
                 receiver_stats.append(stats)
-            evidence = {'host_loadavg_after': list(os.getloadavg()), 'mode': args.mode, 'bytes': args.bytes, 'subscribers': args.subscribers,
+            evidence = {'affinity_plan': affinity, 'host_loadavg_after': list(os.getloadavg()), 'mode': args.mode, 'bytes': args.bytes, 'subscribers': args.subscribers,
                 'seconds': args.seconds, 'rate': args.rate, 'cpu_window_seconds': wall, 'publish': result,
                 'wire_bytes': int(pub_rows[0]['bytes']) if pub_rows else 0,
                 'publish_latency': quantiles([int(row['elapsed_ns']) for row in pub_rows]),
@@ -127,6 +133,7 @@ def host(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--host', action='store_true')
+    parser.add_argument('--affinity', help='可选JSON：publisher/gateway CPU及subscribers CPU列表；两模式必须一致')
     parser.add_argument('--binary', required=True)
     parser.add_argument('--gateway', required=True)
     parser.add_argument('--mode', choices=('baseline', 'shared_v1'), required=True)
