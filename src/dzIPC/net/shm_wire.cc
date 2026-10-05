@@ -5,6 +5,7 @@
 #include "dzIPC/shm_pub_sub_ipc.h"
 #include "ipc_msg/ipc_msg_base/generic_message.hpp"
 #include "local_control_linux.h"
+#include "libipc/detail/publish_trace.h"
 #include <mutex>
 #include <shared_mutex>
 
@@ -57,14 +58,23 @@ struct ShmWireWriter::Impl
             return SubmitState::NotRequired;
         if (deadline && local::monotonic_ns() >= deadline)
             return SubmitState::NotSubmitted;
+        using ipc::detail::trace_publish;
+        using ipc::detail::PublishPoint;
+        trace_publish(PublishPoint::BeforeLoan);
         auto loan = publisher->publisher_->loan(bytes.size);
+        trace_publish(PublishPoint::AfterLoan);
         if (!loan.valid())
             return SubmitState::NotSubmitted;
+        trace_publish(PublishPoint::BeforeCopy);
         std::memcpy(loan.data, bytes.data, bytes.size);
+        trace_publish(PublishPoint::AfterCopy);
         if (metrics) metrics->add(NetMetric::local_copy_bytes, bytes.size);
         if (deadline && local::monotonic_ns() >= deadline)
             return SubmitState::NotSubmitted;
-        return publish(loan, bytes.size);
+        trace_publish(PublishPoint::BeforeCommit);
+        const auto result = publish(loan, bytes.size);
+        trace_publish(PublishPoint::AfterCommit);
+        return result;
     }
 };
 ShmWireWriter::ShmWireWriter(RouteDescriptor descriptor, bool internal, std::uint64_t gateway_epoch, NetMetrics* metrics) : impl_(new Impl)

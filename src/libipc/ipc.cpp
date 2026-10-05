@@ -22,6 +22,7 @@
  * static ⇒ 与 libipc.so 内既有写入点**同一份**（实测见 evidence 的 odr_unification_probe）。 */
 #include "dzIPC/measure/counters.h"
 #include "libipc/ipc.h"
+#include "libipc/detail/publish_trace.h"
 #include "libipc/def.h"
 #include "libipc/shm.h"
 #include "libipc/pool_alloc.h"
@@ -40,6 +41,9 @@
 #include "libipc/circ/elem_array.h"
 
 namespace ipc::detail {
+namespace { std::atomic<PublishHook> publish_hook{nullptr}; }
+void set_publish_hook(PublishHook hook) noexcept { publish_hook.store(hook, std::memory_order_relaxed); }
+PublishHook get_publish_hook() noexcept { return publish_hook.load(std::memory_order_relaxed); }
 struct loan_lifetime {
     std::mutex mutex;
     std::shared_ptr<ipc::topic_pool_context> pool;
@@ -1912,7 +1916,9 @@ namespace
       }
       /* 标记已在队列发布前的槽位回调内完成。接收者可能已归还甚至复用了
        * chunk；发布可见后绝不能再按旧 storage id 修改该块元数据。 */
+      ipc::detail::trace_publish(ipc::detail::PublishPoint::BeforeNotify);
       if (wake_readers) notify_readers(inf);
+      ipc::detail::trace_publish(ipc::detail::PublishPoint::AfterNotify);
       return true;
     }
 

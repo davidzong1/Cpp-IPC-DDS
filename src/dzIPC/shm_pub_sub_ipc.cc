@@ -1,4 +1,5 @@
 #include "libipc/memory/resource.h"
+#include "libipc/detail/publish_trace.h"
 #include "dzIPC/common/hash.h"
 #include <dzIPC/shm_pub_sub_ipc.h>
 #include <fcntl.h>
@@ -1616,13 +1617,21 @@ bool shm_pub_ipc::publish_prebuilt_segment(const void* seg, std::size_t len)
     {
         return false;
     }
+    using ipc::detail::trace_publish;
+    using ipc::detail::PublishPoint;
+    trace_publish(PublishPoint::BeforeLoan);
     auto lo = publisher_->loan(h.total_size);
+    trace_publish(PublishPoint::AfterLoan);
     if (!lo.valid())
     {
         return false;   // 池耗尽 —— 背压, 回退整包
     }
+    trace_publish(PublishPoint::BeforeCopy);
     std::memcpy(lo.data, seg, h.total_size);
+    trace_publish(PublishPoint::AfterCopy);
+    trace_publish(PublishPoint::BeforeCommit);
     const bool ok = publisher_->publish_loan(lo, 0);
+    trace_publish(PublishPoint::AfterCommit);
     if (ok)
     {
         dzIPC::detail::NoteDzFlatPublish(true);

@@ -1,4 +1,5 @@
 #include "dzIPC/threepools/recv_worker.h"
+#include "dzIPC/detail/shm_sub_seam.h"
 
 #include <cassert>
 #include <algorithm>
@@ -961,7 +962,11 @@ RecvWorker::AssistLease::~AssistLease() {
 }
 void RecvWorker::AssistLease::reset() noexcept {
     auto entry = std::move(entry_);
-    if (entry) worker_->release_assist(entry);
+    if (entry) {
+        detail::FireSeam({detail::SeamPoint::kBeforeAssistRelease});
+        worker_->release_assist(entry);
+        detail::FireSeam({detail::SeamPoint::kAfterAssistRelease});
+    }
 }
 RecvWorker::AssistLease RecvWorker::assist_route(const RecvRouteSource* route) {
     if (!impl_ || !route) return {};
