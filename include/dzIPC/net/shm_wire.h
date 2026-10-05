@@ -7,7 +7,7 @@ namespace dzIPC::net
 class ShmWireWriter
 {
   public:
-    explicit ShmWireWriter(RouteDescriptor, bool internal = false, std::uint64_t gateway_epoch = 0);
+    explicit ShmWireWriter(RouteDescriptor, bool internal = false, std::uint64_t gateway_epoch = 0, NetMetrics* metrics = nullptr);
     ~ShmWireWriter();
     ShmWireWriter(const ShmWireWriter &) = delete;
     ShmWireWriter &operator=(const ShmWireWriter &) = delete;

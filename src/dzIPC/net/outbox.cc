@@ -61,16 +61,17 @@ struct OutboxSender::Impl
     mutable std::mutex mutex;
     std::condition_variable changed;
     CreditCounters out_used, out_reserved, released, net_used, net_reserved, granted;
+    NetMetrics* metrics = nullptr;
     bool ready = false, closed = false;
 };
-OutboxSender::OutboxSender(const WelcomeBody &w, std::uint64_t session, std::uint64_t epoch)
+OutboxSender::OutboxSender(const WelcomeBody &w, std::uint64_t session, std::uint64_t epoch, NetMetrics* metrics)
     : impl_(new Impl)
 {
     Bytes checked;
     if (!session || !epoch || w.tx_name != outbox_name(w.locality, epoch, session) ||
         !encode_welcome(w, checked))
         throw std::invalid_argument("出站会话参数无效");
-    impl_->welcome = w;
+    impl_->welcome = w; impl_->metrics = metrics;
     impl_->session = session;
     impl_->epoch = epoch;
     impl_->granted = {w.granted_bytes, w.granted_records};
@@ -148,6 +149,7 @@ OutboxUsage OutboxSender::usage() const
 }
 OutboxSubmit OutboxSender::submit(const OutboxHeader &h, ByteView blob)
 {
+    if (impl_->metrics && blob.size > impl_->welcome.max_message_bytes) impl_->metrics->reject(NetQuota::message_bytes);
     if (!blob.data || !blob.size || blob.size > impl_->welcome.max_message_bytes ||
         h.session_id != impl_->session || h.gateway_epoch != impl_->epoch ||
         (h.delivery == Delivery::Reliable && local::monotonic_ns() >= h.deadline_monotonic_ns))
@@ -158,10 +160,19 @@ OutboxSubmit OutboxSender::submit(const OutboxHeader &h, ByteView blob)
         if (!impl_->ready || impl_->closed)
             return {};
         const auto occupancy = add(sub(impl_->out_used, impl_->released), impl_->out_reserved);
-        if (!fits(out, sub({impl_->welcome.outbox_limit_bytes, impl_->welcome.outbox_record_limit},
-                           occupancy)) ||
-            !fits(net, sub(impl_->granted, add(impl_->net_used, impl_->net_reserved))))
+        const bool bytes_full = out.bytes > impl_->welcome.outbox_limit_bytes - occupancy.bytes;
+        const bool records_full = out.records > impl_->welcome.outbox_record_limit - occupancy.records;
+        if (impl_->metrics) {
+            if (bytes_full) impl_->metrics->reject(NetQuota::outbox_bytes);
+            if (records_full) impl_->metrics->reject(NetQuota::outbox_records);
+        }
+        if (bytes_full || records_full || !fits(net, sub(impl_->granted, add(impl_->net_used, impl_->net_reserved))))
             return {SubmitState::NotSubmitted, OutboxCode::CreditUnavailable};
+        if (impl_->metrics) {
+            impl_->metrics->peak(NetQuota::outbox_bytes, occupancy.bytes + out.bytes);
+            impl_->metrics->peak(NetQuota::outbox_records, occupancy.records + out.records);
+            impl_->metrics->peak(NetQuota::message_bytes, blob.size);
+        }
         impl_->out_reserved = add(impl_->out_reserved, out);
         impl_->net_reserved = add(impl_->net_reserved, net);
     }
@@ -175,6 +186,7 @@ OutboxSubmit OutboxSender::submit(const OutboxHeader &h, ByteView blob)
             throw std::runtime_error("实际 loan 档位与信用不符");
         const bool encoded =
             loan.valid() && bool(encode_outbox_into(h, blob, loan.data, loan.size));
+        if (encoded && impl_->metrics) impl_->metrics->add(NetMetric::outbox_copy_bytes, blob.size);
         std::lock_guard<std::mutex> lock(impl_->mutex);
         impl_->out_reserved = sub(impl_->out_reserved, out);
         impl_->net_reserved = sub(impl_->net_reserved, net);
@@ -228,10 +240,16 @@ struct SendBudget::Impl
 {
     mutable std::mutex mutex;
     CreditCounters limit, session_limit, occupied, inflight;
+    std::shared_ptr<NetMetrics> metrics;
+    void peaks(CreditCounters held) {
+        metrics->peak(NetQuota::send_bytes, occupied.bytes); metrics->peak(NetQuota::send_records, occupied.records);
+        metrics->peak(NetQuota::session_send_bytes, held.bytes); metrics->peak(NetQuota::session_send_records, held.records);
+    }
 };
-SendBudget::SendBudget(CreditCounters global, CreditCounters session)
+SendBudget::SendBudget(CreditCounters global, CreditCounters session, std::shared_ptr<NetMetrics> metrics)
     : impl_(std::make_shared<Impl>())
 {
+    impl_->metrics = metrics ? std::move(metrics) : std::make_shared<NetMetrics>();
     impl_->limit = global;
     impl_->session_limit = session;
 }
@@ -243,7 +261,7 @@ std::shared_ptr<SendAccount> SendBudget::open(CreditCounters initial)
     account->granted_ = {
         std::min({initial.bytes, available.bytes, impl_->session_limit.bytes}),
         std::min({initial.records, available.records, impl_->session_limit.records})};
-    impl_->occupied = add(impl_->occupied, account->granted_);
+    impl_->occupied = add(impl_->occupied, account->granted_); impl_->peaks(account->granted_);
     return account;
 }
 CreditCounters SendBudget::occupied() const
@@ -263,12 +281,17 @@ bool SendAccount::grant(CreditCounters additional)
 {
     std::lock_guard<std::mutex> lock(pool_->mutex);
     const auto held = add(sub(granted_, used_), inflight_);
-    if (closed_ || !fits(additional, sub(pool_->session_limit, held)) ||
-        !fits(additional, sub(pool_->limit, pool_->occupied)))
-        return false;
+    if (closed_) return false;
+    bool rejected = false;
+    const auto check = [&](bool full, NetQuota quota) { if (full) { rejected = true; pool_->metrics->reject(quota); } };
+    check(additional.bytes > pool_->session_limit.bytes - held.bytes, NetQuota::session_send_bytes);
+    check(additional.records > pool_->session_limit.records - held.records, NetQuota::session_send_records);
+    check(additional.bytes > pool_->limit.bytes - pool_->occupied.bytes, NetQuota::send_bytes);
+    check(additional.records > pool_->limit.records - pool_->occupied.records, NetQuota::send_records);
+    if (rejected) { pool_->metrics->add(NetMetric::credit_grant_rejected); return false; }
     const auto next = add(granted_, additional);
     pool_->occupied = add(pool_->occupied, additional);
-    granted_ = next;
+    granted_ = next; pool_->peaks(add(held, additional));
     return true;
 }
 bool SendAccount::take(CreditCounters cost)
@@ -328,7 +351,7 @@ OutboxRecord &OutboxRecord::operator=(OutboxRecord &&other) noexcept
     if (this != &other)
     {
         release();
-        header = other.header;
+        header = other.header; pulled_ns = other.pulled_ns;
         blob = std::move(other.blob);
         network_cost = other.network_cost;
         account_ = std::move(other.account_);
@@ -422,11 +445,12 @@ bool OutboxReceiver::pull(OutboxRecord &record)
         impl_->account->finish(cost);
         throw;
     }
+    impl_->account->pool_->metrics->add(NetMetric::outbox_copy_bytes, payload.size);
     const auto actual = sample.size();
     sample = {}; // 必须在进度发布前释放 loan
     impl_->progress = add(impl_->progress, {actual, 1});
     record.release();
-    record.header = h;
+    record.header = h; record.pulled_ns = metric_now_ns();
     record.blob = std::move(blob);
     record.network_cost = cost;
     record.account_ = impl_->account;

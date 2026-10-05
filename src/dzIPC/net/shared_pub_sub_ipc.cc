@@ -120,6 +120,7 @@ struct Subscriber::Impl {
         net::Bytes body(next->id.begin(), next->id.end()); net::codec::append(body, generation, 4);
         reply = next->client->request(net::LocalKind::SubReady, body);
         if (reply.header.kind != net::LocalKind::SubReadyAck) throw std::runtime_error("共享订阅 Ready 失败");
+        if (initialized) next->client->metrics().add(net::NetMetric::route_recreated);
         next->active.store(true); { std::lock_guard<std::mutex> lock(state); current = std::move(next); } initialized = true;
     }
     template<class Try> bool read(std::uint64_t timeout, Try attempt) {

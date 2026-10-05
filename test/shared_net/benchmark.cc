@@ -1,5 +1,10 @@
-// 同一源码分别链接 f066a82 与当前库；只使用两版本已有的公共 API。
+// 同一源码分别链接 f066a82 与当前库；采样循环使用两版本共有API。
+// 当前版本的阶段诊断仅在采样结束后导出，不改变基线热路径。
 #include "dzIPC/dzipc.h"
+#if __has_include("dzIPC/net/metrics.h")
+#include "dzIPC/net/client_runtime.h"
+#define DZIPC_BENCH_STAGE_METRICS 1
+#endif
 #include "dzIPC/common/sample_message.h"
 #include "ipc_msg/ipc_msg_base/generic_message.hpp"
 #include "ipc_msg/std_msgs/std_image.hpp"
@@ -82,7 +87,11 @@ int main(int argc, char** argv) try {
     }
     std::this_thread::sleep_until(start + std::chrono::seconds(seconds + warmup));
     csv.close();
-    std::cout << "{\"accepted\":" << accepted << ",\"rejected\":" << rejected << ",\"window_seconds\":" << seconds << "}" << std::endl;
+    std::cout << "{\"accepted\":" << accepted << ",\"rejected\":" << rejected << ",\"window_seconds\":" << seconds;
+#ifdef DZIPC_BENCH_STAGE_METRICS
+    if (transport == dzIPC::IPC_SOCKET) std::cout << ",\"diagnostics\":" << dzIPC::net::ClientRuntime::acquire(std::getenv("DZIPC_GATEWAY_CONTROL"))->diagnostics_json();
+#endif
+    std::cout << "}" << std::endl;
     std::string command; std::getline(std::cin, command); std::getline(std::cin, command);
     return 0;
 } catch (const std::exception& e) { std::cerr << "基准失败：" << e.what() << '\n'; return 1; }

@@ -41,6 +41,11 @@ def main():
             assert all(b['receive_bytes'] > 0 and b['send_bytes'] > 0 for b in status['socket_buffers'])
             query = json.loads(run(['status', '--control', control, '--topic', 'absent', '--domain', '18446744073709551615', '--msg-id', '71'], 0).stdout)
             assert query['domain'] == '18446744073709551615' and not query['ready']
+            for category in ('counters', 'quota', 'latency', 'shards'):
+                metrics = json.loads(run(['status', '--control', control, '--metrics', category], 0).stdout)
+                assert metrics
+            run(['status', '--control', control, '--metrics', 'bad'], 2)
+            run(['status', '--control', control, '--metrics', 'quota', '--topic', 'x'], 2)
             run(['serve', *options], 3)
             os.mkdir(directory + '/second')
             collision = options.copy()

@@ -20,7 +20,11 @@ def sample(pid):
     return {'cpu_seconds': (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK'),
             'rss_kib': int(status.get('VmRSS', '0 kB').split()[0]),
             'threads': int(status['Threads']), 'fd': len(list((root / 'fd').iterdir())),
-            'udp': udp_count(pid)}
+             'udp': udp_count(pid),
+            'thread_status': [dict(tid=int(task.name), **{key: value.strip() for key, value in
+                (line.split(':', 1) for line in (task/'status').read_text().splitlines())
+                if key in ('voluntary_ctxt_switches', 'nonvoluntary_ctxt_switches', 'Cpus_allowed_list')})
+                for task in sorted((root/'task').iterdir())]}
 
 
 def quantiles(values):
@@ -71,6 +75,9 @@ def host(args):
             wall = time.monotonic() - measured_start
             shm = os.statvfs('/dev/shm')
             peak_shm = (shm.f_blocks - shm.f_bfree) * shm.f_frsize
+            gateway_metrics = {category: json.loads(subprocess.check_output(
+                [args.gateway, 'status', '--control', control, '--metrics', category], env=env, text=True))
+                for category in ('counters', 'quota', 'latency', 'shards')} if gateway else None
             sub_results = [p.request('stop') for p in processes[:-1]]
             for p in processes:
                 if p.p.poll() is None:
@@ -91,13 +98,14 @@ def host(args):
                 stats = quantiles([int(row['elapsed_ns']) for row in rows])
                 stats.update(lost=len(accepted - set(sequences)), duplicates=len(sequences)-len(set(sequences)), invalid=sub_result['invalid'])
                 receiver_stats.append(stats)
-            evidence = {'mode': args.mode, 'bytes': args.bytes, 'subscribers': args.subscribers,
+            evidence = {'host_loadavg_after': list(os.getloadavg()), 'mode': args.mode, 'bytes': args.bytes, 'subscribers': args.subscribers,
                 'seconds': args.seconds, 'rate': args.rate, 'cpu_window_seconds': wall, 'publish': result,
                 'wire_bytes': int(pub_rows[0]['bytes']) if pub_rows else 0,
                 'publish_latency': quantiles([int(row['elapsed_ns']) for row in pub_rows]),
                 'receivers': receiver_stats, 'before': before, 'after': after,
                 'cpu_seconds': [b['cpu_seconds']-a['cpu_seconds'] for a,b in zip(before,after)],
-                'shm_peak_sample_bytes': peak_shm, 'idle_gateway': idle, 'idle_status': status,
+                'gateway_metrics': gateway_metrics, 'shm_peak_sample_bytes': peak_shm, 'idle_gateway': idle, 'idle_status': status,
+                'stage_window': '应用直方图含2秒预热，网关指标为进程累计；精确端到端CSV仅正式窗口',
                 'environment': {'DZIPC_SHM_MPMC': '1', 'DZIPC_SHM_RECV_WORKERS': '1', 'nodelet': False, 'wire': 'prebuilt StdImage DZFlat'}}
             (directory/'result.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2)+'\n')
             assert result['accepted'] > 0 and all(x['count'] > 0 for x in receiver_stats), evidence

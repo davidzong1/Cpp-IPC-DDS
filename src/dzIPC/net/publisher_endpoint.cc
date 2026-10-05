@@ -64,13 +64,14 @@ PublisherEndpoint::PublisherEndpoint(std::shared_ptr<ClientRuntime> runtime, Rou
     if (!impl_->runtime || !impl_->runtime->healthy()) throw std::runtime_error("网关会话不可用");
     const auto reply = impl_->runtime->request(LocalKind::RegisterPub, registration_body(impl_->id, impl_->descriptor));
     if (reply.header.kind != LocalKind::PubRegistered) throw std::runtime_error("发布者登记失败");
-    try { impl_->writer = std::make_unique<ShmWireWriter>(impl_->descriptor, false, impl_->runtime->gateway_epoch()); impl_->runtime->attach_outbox(); }
+    try { impl_->writer = std::make_unique<ShmWireWriter>(impl_->descriptor, false, impl_->runtime->gateway_epoch(), &impl_->runtime->metrics()); impl_->runtime->attach_outbox(); }
     catch (...) { try { Bytes b(impl_->id.begin(), impl_->id.end()); b.push_back(1); impl_->runtime->request(LocalKind::Unregister, b); } catch (...) {} throw; }
 }
 PublisherEndpoint::~PublisherEndpoint() { if (impl_->owner != getpid()) { impl_.release(); return; } close(); }
 PublishOutcome PublisherEndpoint::publish(IpcMsgBase& message, Delivery delivery, std::uint64_t ms) {
     PublishOutcome failure; std::uint64_t deadline = 0;
     if (impl_->owner != getpid() || !Impl::timeout(delivery, ms, deadline, failure)) return failure;
+    MetricTimer api(&impl_->runtime->metrics(), NetStage::ApiReturn);
     std::shared_lock<std::shared_mutex> lock(impl_->gate); if (impl_->closed) return failure;
     const bool local_required = impl_->writer->has_subscribers();
     if (!impl_->runtime->healthy() || !impl_->network_required(delivery)) {
@@ -81,12 +82,14 @@ PublishOutcome PublisherEndpoint::publish(IpcMsgBase& message, Delivery delivery
         failure.success = delivery == Delivery::Reliable ? reliable_result(failure.local, failure.remote) : best_effort_result(failure.local, failure.network); return failure;
     }
     WireBlob blob;
-    try { if (!WireEncoder::encode(message, IsDzFlatEnabled(), blob)) return failure; } catch (...) { return failure; }
+    try { MetricTimer timer(&impl_->runtime->metrics(), NetStage::Encode); if (!WireEncoder::encode(message, IsDzFlatEnabled(), blob)) return failure; } catch (...) { return failure; }
+    impl_->runtime->metrics().add(NetMetric::encode_copy_bytes, blob.size());
     return impl_->deliver(blob, delivery, deadline, local_required);
 }
 PublishOutcome PublisherEndpoint::prebuilt(ByteView bytes, Delivery delivery, std::uint64_t ms) {
     PublishOutcome failure; std::uint64_t deadline = 0;
     if (impl_->owner != getpid() || !Impl::timeout(delivery, ms, deadline, failure)) return failure;
+    MetricTimer api(&impl_->runtime->metrics(), NetStage::ApiReturn);
     std::shared_lock<std::shared_mutex> lock(impl_->gate); if (impl_->closed) return failure;
     const bool local_required = impl_->writer->has_subscribers(); WireBlob blob;
     if (!impl_->runtime->healthy() || !impl_->network_required(delivery)) {
@@ -96,12 +99,14 @@ PublishOutcome PublisherEndpoint::prebuilt(ByteView bytes, Delivery delivery, st
         if (local_required && failure.local == SubmitState::NotRequired) failure.local = SubmitState::NotSubmitted;
         failure.success = delivery == Delivery::Reliable ? reliable_result(failure.local, failure.remote) : best_effort_result(failure.local, failure.network); return failure;
     }
-    try { if (!WireEncoder::encode_prebuilt(bytes, impl_->descriptor.key.msg_id, impl_->descriptor.schema_hash, blob)) return failure; } catch (...) { return failure; }
+    try { MetricTimer timer(&impl_->runtime->metrics(), NetStage::Encode); if (!WireEncoder::encode_prebuilt(bytes, impl_->descriptor.key.msg_id, impl_->descriptor.schema_hash, blob)) return failure; } catch (...) { return failure; }
+    impl_->runtime->metrics().add(NetMetric::encode_copy_bytes, blob.size());
     return impl_->deliver(blob, delivery, deadline, local_required);
 }
 PublishOutcome PublisherEndpoint::publish_blob(const WireBlob& blob, Delivery delivery, std::uint64_t ms) {
     PublishOutcome failure; std::uint64_t deadline = 0;
     if (impl_->owner != getpid() || !Impl::timeout(delivery, ms, deadline, failure)) return failure;
+    MetricTimer api(&impl_->runtime->metrics(), NetStage::ApiReturn);
     std::shared_lock<std::shared_mutex> lock(impl_->gate); if (impl_->closed || blob.msg_id() != impl_->descriptor.key.msg_id ||
         (blob.encoding() == Encoding::DzFlat && impl_->descriptor.schema_hash && blob.schema_hash() != impl_->descriptor.schema_hash)) return failure;
     return impl_->deliver(blob, delivery, deadline, impl_->writer->has_subscribers());

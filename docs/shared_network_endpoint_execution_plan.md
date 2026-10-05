@@ -812,7 +812,7 @@ HELLO 的 session_id/gateway_epoch 为 0，之后所有包必须匹配会话。
 | 10 | SUB_READY_ACK | handle_id[16]、u64 receiver_route_epoch（非零） |
 | 11 | UNREGISTER | handle_id[16]、u8 role（1=PUB，2=SUB） |
 | 12 | UNREGISTERED | handle_id[16] |
-| 13 | QUERY_STATE | u8 kind（0=汇总，1=单话题，2=话题与 peer）；kind=1/2 后跟 scope[32]、u32 msg_id；kind=2 再跟 peer_id[16] |
+| 13 | QUERY_STATE | u8 kind（0=汇总，1=单话题，2=话题与 peer，3=指标）；kind=1/2 后跟 scope[32]、u32 msg_id；kind=2 再跟 peer_id[16]；kind=3 后跟 u8 category（0计数、1配额、2延迟、3shard），总长2B |
 | 14 | STATE | u32 json_bytes、UTF-8 JSON；含头总长不超过 8192B |
 | 15、16 | 保留 | 旧草案 SEND_BEGIN/BEGIN_READY，不允许发送或接纳 |
 | 17 | SEND_RESULT | publisher_id[16]、u64 sequence、u32 result_code、u32 flags、u32 target_count、u32 acked_count |
@@ -1413,7 +1413,7 @@ dzipc_gateway check-config --listen-ip 192.168.10.10 --interface eth0
 dzipc_gateway status --control /tmp/dzipc-gateway-1000/control.sock --json
 ~~~
 
-以上命令是待实现的接口示例，不代表当前已经可执行。
+以上 CLI 已实现；细分指标使用 `status --metrics counters|quota|latency|shards`，与 `--topic` 互斥。
 check-config 只校验配置；端口可用性由 serve 的实际 bind 决定，不能用先探测再关闭保证之后无冲突。
 
 status JSON 至少包含：

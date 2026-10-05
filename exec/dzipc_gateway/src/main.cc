@@ -2,6 +2,7 @@
 #include "dzIPC/net/gateway_runtime.h"
 #include "dzIPC/net/shared_config.h"
 #include <csignal>
+#include <algorithm>
 #include <charconv>
 #include <set>
 #include "dzIPC/common/channel_scope.h"
@@ -18,7 +19,7 @@ int main(int argc, char **argv)
     {
         std::cout << "用法：dzipc_gateway check-config|serve --listen-ip IPv4 --interface 网卡 "
                      "--control 绝对路径\n"
-                     "dzipc_gateway status --control 绝对路径 --json [--topic 话题 --domain 域 --msg-id ID --peer-id 实例ID]\n";
+                     "dzipc_gateway status --control 绝对路径 --json [--topic 话题 --domain 域 --msg-id ID --peer-id 实例ID] [--metrics counters|quota|latency|shards]\n";
         return argc < 2 ? 2 : 0;
     }
     const std::string command = argv[1];
@@ -32,7 +33,7 @@ int main(int argc, char **argv)
         config.control_path = path;
     if (command == "status")
     {
-        std::string topic, peer_text; std::uint64_t domain = 0, message_id = 0;
+        std::string topic, peer_text, metric_category; std::uint64_t domain = 0, message_id = 0;
         Identity peer{}; std::set<std::string> seen;
         for (int i = 2; i < argc; ++i) {
             const std::string arg = argv[i];
@@ -41,6 +42,7 @@ int main(int argc, char **argv)
             if (i + 1 >= argc) { std::cerr << "InvalidOption: 缺少参数值\n"; return 2; }
             const std::string value = argv[++i];
             if (arg == "--control") config.control_path = value;
+            else if (arg == "--metrics") metric_category = value;
             else if (arg == "--topic") topic = value;
             else if (arg == "--peer-id") peer_text = value;
             else if (arg == "--domain" || arg == "--msg-id") {
@@ -63,6 +65,9 @@ int main(int argc, char **argv)
             }
             if (!nonzero(peer)) { std::cerr << "InvalidOption: peer-id 不可全零\n"; return 2; }
         }
+        const std::vector<std::string> categories{"counters", "quota", "latency", "shards"};
+        const auto category = std::find(categories.begin(), categories.end(), metric_category);
+        if (seen.count("--metrics") && (category == categories.end() || !topic.empty())) { std::cerr << "InvalidOption: 指标类别无效或与话题明细冲突\n"; return 2; }
         const auto status = validate_control_path(config.control_path);
         if (!status)
         {
@@ -72,7 +77,8 @@ int main(int argc, char **argv)
         try
         {
             auto runtime = ClientRuntime::acquire(config.control_path);
-            if (topic.empty()) std::cout << runtime->status() << '\n';
+            if (!metric_category.empty()) std::cout << runtime->gateway_metrics(category - categories.begin()) << '\n';
+            else if (topic.empty()) std::cout << runtime->status() << '\n';
             else {
                 RouteKey key; key.scope = dzIPC::common::channel_scope_token(topic, domain, dzIPC::common::ScopeKind::PubSub); key.msg_id = message_id;
                 std::cout << runtime->route_status(key, peer) << '\n';

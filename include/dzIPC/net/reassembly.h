@@ -2,6 +2,7 @@
 #include "dzIPC/net/datagram_endpoint.h"
 #include "dzIPC/net/client_runtime.h"
 #include "dzIPC/net/wire_blob.h"
+#include "dzIPC/net/metrics.h"
 #include <atomic>
 #include <functional>
 
@@ -15,6 +16,7 @@ struct PeerAdmission {
 };
 struct RouteAdmission {
     RouteDescriptor descriptor;
+    RouteMetrics metrics;
     std::atomic<bool> active{true};
     std::atomic<bool> publisher_active{true}, subscriber_active{true};
 };
@@ -35,9 +37,10 @@ struct ReassemblyUsage {
 };
 class ReassemblyBudget {
 public:
-    explicit ReassemblyBudget(Limits limits = {});
+    explicit ReassemblyBudget(Limits limits = {}, std::shared_ptr<NetMetrics> metrics = {});
     ~ReassemblyBudget();
     ReassemblyUsage usage() const;
+    std::shared_ptr<NetMetrics> metrics() const;
 private:
     friend class ReassemblyShard;
     struct Impl; std::shared_ptr<Impl> impl_;

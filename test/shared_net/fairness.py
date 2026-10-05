@@ -50,6 +50,12 @@ def host(args):
                 result={'running':True}
             elif command[0]=='collect':
                 result=[p.receive(timeout=40) for p in (probes[:1] if command[1] else probes)]
+            elif command[0]=='metrics':
+                result = {category: json.loads(subprocess.check_output([args.gateway,'status','--control',args.control,'--metrics',category],env=env,text=True))
+                          for category in ('counters','quota','latency','shards')}
+                result['applications'] = [p.request('diagnostics') for p in probes]
+                result['routes'] = [json.loads(subprocess.check_output([args.gateway,'status','--control',args.control,'--topic',topic,'--msg-id','71'],env=env,text=True))
+                                    for topic in (args.hot,args.cold)]
             elif command[0]=='status':
                 result=json.loads(subprocess.check_output([args.gateway,'status','--control',args.control,'--json'],env=env,text=True))
                 if args.sender:
@@ -92,7 +98,7 @@ def driver(args):
                 snapshots.append([request(index,['status']) for index in range(2)])
             sent=request(0,['collect',False]);received=request(1,['collect',False])
             result={'same_shard':args.same_shard,'topics':[hot,cold],'shards':[shard(hot),shard(cold)],
-                'calibration':calibrated,'hot_rate':hot_rate,'seconds':30,'sent':sent,'received':received,'status':snapshots}
+                'calibration':calibrated,'hot_rate':hot_rate,'seconds':30,'sent':sent,'received':received,'status':snapshots,'metrics':[request(index,['metrics']) for index in range(2)]}
             Path(args.output).write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
             assert not calibrated['failed']
             assert all(not x['failed'] and x['max_ns']<=1250000000 for x in sent),sent

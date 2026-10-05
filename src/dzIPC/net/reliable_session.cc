@@ -110,7 +110,7 @@ void ReliableSession::control(const ReceivedDatagram& packet, std::uint64_t now)
         if (!target.sent || packet.source.host != peer->ipv4 || packet.source.port != peer->hello.control_port || !impl_->matches(header, impl_->header(i))) { ++impl_->stats.ignored_controls; return; }
         if (target.acked) return;
         if (header.kind == PacketKind::Ack) {
-            target.acked = true;
+            target.acked = true; ++impl_->stats.acks;
             // ACK 使待发的该目标后缀失效，其他目标的批次身份保持不变。
             auto& pending = impl_->pending;
             pending.erase(std::remove_if(pending.begin(), pending.end(), [&](const auto& f) { return f.target == i; }), pending.end());

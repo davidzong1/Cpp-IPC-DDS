@@ -147,6 +147,7 @@ struct ClientRuntime::Impl
     std::shared_ptr<OutboxSender> outbox;
     std::uint64_t credit_request = 0, credit_retry_after = 0;
     std::array<std::atomic<std::uint64_t>, 4> local_results{}, network_results{};
+    NetMetrics metrics; bool closing = false;
     std::atomic<std::uint64_t> partial_submit{0}, credit_wait_count{0}, credit_wait_ns{0};
     std::condition_variable changed;
     std::map<std::uint64_t, std::shared_ptr<Waiter>> pending;
@@ -187,6 +188,7 @@ struct ClientRuntime::Impl
     {
         if (!healthy.exchange(false))
             return;
+        if (!closing) metrics.add(NetMetric::gateway_lost);
         failure = reason;
         if (outbox)
             outbox->stop();
@@ -439,7 +441,7 @@ void ClientRuntime::stop()
     std::lock_guard<std::mutex> stopping(impl_->stop_mutex);
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
-        impl_->fail_locked("运行时已关闭");
+        impl_->closing = true; impl_->fail_locked("运行时已关闭");
     }
     if (impl_->thread.joinable())
         impl_->thread.join();
@@ -552,7 +554,7 @@ SendTicket ClientRuntime::prepare_send(Identity publisher, std::uint64_t sequenc
 SendResultBody ClientRuntime::wait_send(const SendTicket &ticket, std::uint64_t deadline)
 {
     check_process();
-    return impl_->sends.wait(ticket, deadline);
+    MetricTimer timer(&impl_->metrics, NetStage::AckWait); return impl_->sends.wait(ticket, deadline);
 }
 SendResultBody ClientRuntime::cancel_send(const SendTicket& ticket, SendResultCode code)
 {
@@ -577,7 +579,8 @@ std::string ClientRuntime::diagnostics_json() const {
       << ",\"credit_wait_ns\":" << impl_->credit_wait_ns.load() << ",\"outbox_used_capacity\":" << usage.used.bytes
       << ",\"outbox_used_records\":" << usage.used.records << ",\"outbox_reserved_capacity\":" << usage.reserved.bytes
       << ",\"outbox_reserved_records\":" << usage.reserved.records << ",\"outbox_released_capacity\":" << usage.released.bytes
-      << ",\"outbox_released_records\":" << usage.released.records << '}';
+      << ",\"outbox_released_records\":" << usage.released.records
+      << ",\"counters\":" << impl_->metrics.json(0) << ",\"quotas\":" << impl_->metrics.json(1) << ",\"latency\":" << impl_->metrics.json(2) << '}';
     return s.str();
 }
 std::string ClientRuntime::route_status(const RouteKey& key, Identity peer) {
@@ -587,6 +590,13 @@ std::string ClientRuntime::route_status(const RouteKey& key, Identity peer) {
     const auto reply = request(LocalKind::QueryState, std::move(body));
     if (reply.header.kind != LocalKind::State) throw std::runtime_error("路由状态响应类型错误");
     return std::string(reply.body.begin() + 4, reply.body.end());
+}
+NetMetrics& ClientRuntime::metrics() const { check_process(); return impl_->metrics; }
+std::string ClientRuntime::gateway_metrics(unsigned category) {
+    if (category > 3) throw std::invalid_argument("未知指标分类");
+    const auto reply = request(LocalKind::QueryState, Bytes{3, static_cast<std::uint8_t>(category)});
+    if (reply.header.kind != LocalKind::State) throw std::runtime_error("指标响应类型错误");
+    return std::string(reply.body.begin()+4, reply.body.end());
 }
 std::string ClientRuntime::status()
 {
@@ -610,7 +620,7 @@ void ClientRuntime::attach_outbox()
         if (impl_->outbox)
             return;
     }
-    auto sender = std::make_shared<OutboxSender>(impl_->welcome, impl_->session, impl_->epoch);
+    auto sender = std::make_shared<OutboxSender>(impl_->welcome, impl_->session, impl_->epoch, &impl_->metrics);
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         sender->grant(impl_->granted);
@@ -641,7 +651,7 @@ OutboxSubmit ClientRuntime::submit_outbox(const OutboxHeader &header, ByteView b
     for (;;)
     {
         OutboxSubmit result;
-        try { result = sender->submit(header, blob); }
+        try { MetricTimer timer(&impl_->metrics, NetStage::OutboxSubmit); result = sender->submit(header, blob); }
         catch (...) { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->fail_locked("出站提交前失败"); throw; }
         if (result.state == SubmitState::Indeterminate)
         {
@@ -677,7 +687,8 @@ OutboxSubmit ClientRuntime::submit_outbox(const OutboxHeader &header, ByteView b
         if (header.delivery != Delivery::Reliable) return result;
         const auto wait_start = local::monotonic_ns(); ++impl_->credit_wait_count;
         const auto ready = sender->wait(header.deadline_monotonic_ns);
-        impl_->credit_wait_ns += local::monotonic_ns() - wait_start;
+        const auto elapsed = local::monotonic_ns() - wait_start;
+        impl_->credit_wait_ns += elapsed; impl_->metrics.observe(NetStage::CreditWait, elapsed);
         if (!ready) return result;
     }
 }

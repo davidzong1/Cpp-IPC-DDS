@@ -16,9 +16,10 @@ struct DirectorySnapshot {
 };
 class DirectoryBudget {
 public:
-    explicit DirectoryBudget(Limits limits = {});
+    explicit DirectoryBudget(Limits limits = {}, std::shared_ptr<NetMetrics> metrics = {});
     ~DirectoryBudget();
     DirectoryUsage usage() const;
+    std::shared_ptr<NetMetrics> metrics() const;
     // 失败保持 old 不变；成功使消失/改变的 admission 永久失效。
     std::shared_ptr<const DirectorySnapshot> replace(const std::vector<RouteDescriptor>&,
         std::uint64_t version, const std::shared_ptr<const DirectorySnapshot>& old = {});

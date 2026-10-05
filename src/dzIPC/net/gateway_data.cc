@@ -34,7 +34,7 @@ struct GatewayData::Impl {
         std::shared_ptr<LocalRegistration> source;
         std::vector<Target> targets;
         std::size_t cursor = 0;
-        std::uint64_t expires = 0;
+        std::uint64_t expires = 0, first_send_ns = 0;
         std::uint32_t crc = 0;
         bool sent = false;
         std::unique_ptr<ReliableSession> reliable;
@@ -52,6 +52,7 @@ struct GatewayData::Impl {
         std::mutex mutex; std::deque<Command> commands;
         std::thread thread;
         mutable std::mutex stats_mutex; ReassemblyStats snapshot;
+        std::atomic<std::uint64_t> rx_bytes{0}, tx_bytes{0}, wakeups{0}, budget_yields{0}, queued{0}, queued_peak{0};
         void capture() { std::lock_guard<std::mutex> lock(stats_mutex); if (receive) snapshot = receive->stats(); }
         std::shared_ptr<const GatewayDataView> view;
         std::unique_ptr<ReassemblyShard> receive;
@@ -66,14 +67,14 @@ struct GatewayData::Impl {
                 try { if (empty) ready_routes.push_back(key); }
                 catch (...) { queue.pop_back(); throw; }
             } catch (...) { if (queue.empty()) sends.erase(key); throw; }
-            ++send_count;
+            ++send_count; queued.store(send_count); auto peak = queued_peak.load(); if (send_count > peak) queued_peak.store(send_count);
         }
         std::unique_ptr<Tx> pop_send() {
             const auto key = ready_routes.front(); auto found = sends.find(key);
             // 先完成可能分配的轮转，再转移事务，异常时队列仍保持一致。
             if (found->second.size() > 1) ready_routes.push_back(key);
             ready_routes.pop_front();
-            auto tx = std::move(found->second.front()); found->second.pop_front(); --send_count;
+            auto tx = std::move(found->second.front()); found->second.pop_front(); --send_count; queued.store(send_count);
             if (found->second.empty()) sends.erase(found);
             return tx;
         }
@@ -99,7 +100,7 @@ struct GatewayData::Impl {
                 auto& queue = route->second;
                 for (auto item = queue.begin(); item != queue.end();) {
                     if ((*item)->source && !(*item)->source->active.load()) {
-                        auto tx = std::move(*item); item = queue.erase(item); --send_count;
+                        auto tx = std::move(*item); item = queue.erase(item); --send_count; queued.store(send_count);
                         finish(std::move(tx), SendResultCode::Cancelled);
                     } else ++item;
                 }
@@ -121,12 +122,14 @@ struct GatewayData::Impl {
         void incoming(const ReceivedDatagram& packet) {
             if (!view) return;
             WireHeader h; ByteView bytes;
-            ++parent.rx_packets; parent.rx_bytes += packet.size;
+            ++parent.rx_packets; parent.rx_bytes += packet.size; rx_bytes += packet.size;
             if (packet.status == IoStatus::Truncated) ++parent.truncated;
-            if (packet.status != IoStatus::Data || !decode_packet(packet.view(), h, bytes, parent.config.limits.message_bytes)) { ++parent.invalid_packets; return; }
+            if (packet.status != IoStatus::Data) { ++parent.invalid_packets; parent.metrics->add(NetMetric::bad_header); return; }
+            const auto decoded = decode_packet(packet.view(), h, bytes, parent.config.limits.message_bytes);
+            if (!decoded) { ++parent.invalid_packets; record_protocol_error(*parent.metrics, decoded.code); return; }
             const auto p = view->peers.find(h.source_id); const auto s = view->local->routes.find(h.route);
-            if (p == view->peers.end() || s == view->local->routes.end() || !p->second.snapshot) { ++parent.unverified_route; return; }
-            const auto pub = p->second.snapshot->routes.find(h.route); if (pub == p->second.snapshot->routes.end()) { ++parent.unverified_route; return; }
+            if (p == view->peers.end() || s == view->local->routes.end() || !p->second.snapshot) { ++parent.unverified_route; parent.metrics->add(NetMetric::source_route_unverified); return; }
+            const auto pub = p->second.snapshot->routes.find(h.route); if (pub == p->second.snapshot->routes.end()) { ++parent.unverified_route; parent.metrics->add(NetMetric::source_route_unverified); return; }
             ReceiveAdmission admission{p->second.admission, pub->second, s->second, p->second.snapshot, view->local};
             feedback(receive->ingest(packet, admission, local::monotonic_ns()));
         }
@@ -140,6 +143,17 @@ struct GatewayData::Impl {
             }
             if (tx->reliable) { const auto stats = tx->reliable->stats(); parent.retry_packets += stats.retry_packets; parent.nacks += stats.nacks; parent.ignored_controls += stats.ignored_controls; }
             result = event.result.result;
+            if (tx->reliable) {
+                switch (result) {
+                case SendResultCode::Completed: parent.metrics->add(NetMetric::reliable_completed); break;
+                case SendResultCode::TimedOut: parent.metrics->add(NetMetric::reliable_timed_out); break;
+                case SendResultCode::Cancelled: parent.metrics->add(NetMetric::reliable_cancelled); break;
+                case SendResultCode::NoSubscribers: parent.metrics->add(NetMetric::reliable_no_subscribers); break;
+                case SendResultCode::PeerGone: case SendResultCode::PeerRestarted: case SendResultCode::GatewayLost: parent.metrics->add(NetMetric::reliable_peer_lost); break;
+                default: parent.metrics->add(NetMetric::reliable_rejected); break;
+                }
+                if (tx->first_send_ns) parent.metrics->observe(NetStage::AckWait, metric_now_ns() - tx->first_send_ns);
+            }
             const auto key = std::make_pair(event.header.publisher_id, event.header.sequence);
             const auto found = active.find(key); if (found != active.end() && found->second == tx.get()) active.erase(found);
             tx.reset();
@@ -153,6 +167,11 @@ struct GatewayData::Impl {
             return h;
         }
         void prepare(std::unique_ptr<Tx> tx) {
+            if (tx->record.pulled_ns) {
+                const auto elapsed = metric_now_ns() - tx->record.pulled_ns;
+                parent.metrics->observe(NetStage::OutboxWait, elapsed);
+                if (view) { const auto route = view->local->routes.find(tx->record.header.route); if (route != view->local->routes.end()) route->second->metrics.queue_wait.observe(elapsed); }
+            }
             if (tx->source && !tx->source->active.load()) { finish(std::move(tx), SendResultCode::Cancelled); return; }
             const auto& h = tx->record.header;
             const auto key = std::make_pair(h.publisher_id, h.sequence);
@@ -166,8 +185,21 @@ struct GatewayData::Impl {
                 tx->expires = h.deadline_monotonic_ns;
                 tx->reliable = std::make_unique<ReliableSession>(base(*tx), std::move(targets), tx->expires,
                     parent.config.retry_initial_ms * 1000000, parent.config.retry_max_ms * 1000000, parent.config.nack_interval_ms * 1000000);
+                parent.metrics->add(NetMetric::reliable_started);
             }
             active.emplace(key, tx.get()); queue_send(std::move(tx));
+        }
+        void sent(Tx& tx, std::uint64_t bytes) {
+            tx_bytes += bytes;
+            if (!tx.first_send_ns) {
+                tx.first_send_ns = metric_now_ns();
+                if (tx.record.pulled_ns) parent.metrics->observe(NetStage::FirstSend, tx.first_send_ns - tx.record.pulled_ns);
+            }
+            if (view) { const auto route = view->local->routes.find(tx.record.header.route); if (route != view->local->routes.end()) route->second->metrics.tx_bytes.fetch_add(bytes, std::memory_order_relaxed); }
+        }
+        void control(Tx& tx, const ReceivedDatagram& packet) {
+            const auto before = tx.reliable->stats(); tx.reliable->control(packet, local::monotonic_ns()); const auto after = tx.reliable->stats();
+            parent.metrics->add(NetMetric::acks_rx, after.acks - before.acks); parent.metrics->add(NetMetric::nacks_rx, after.nacks - before.nacks);
         }
         void sending() {
             send_progress = false;
@@ -203,8 +235,12 @@ struct GatewayData::Impl {
                     const auto result = endpoint->send_batch(outgoing.data(), outgoing.size());
                     if (result.status == IoStatus::WouldBlock) ++parent.send_eagain;
                     if (result.status == IoStatus::Fatal) ++parent.send_error;
-                    for (unsigned n = 0; n < result.count; ++n) parent.tx_bytes += storage[n].size();
-                    for (unsigned n = 0; n < result.count; ++n) retried += batch[n].retry;
+                    std::uint64_t accepted_bytes = 0;
+                    for (unsigned n = 0; n < result.count; ++n) accepted_bytes += storage[n].size();
+                    parent.tx_bytes += accepted_bytes; if (result.count) sent(*tx, accepted_bytes);
+                    std::uint64_t retry_bytes = 0;
+                    for (unsigned n = 0; n < result.count; ++n) { retried += batch[n].retry; if (batch[n].retry) retry_bytes += storage[n].size(); }
+                    parent.metrics->add(NetMetric::retransmitted_bytes, retry_bytes);
                     tx->reliable->accepted(result.count, local::monotonic_ns()); tx->sent |= result.count != 0;
                     packets += result.count; parent.sent_packets += result.count;
                     send_progress |= result.count != 0;
@@ -236,7 +272,9 @@ struct GatewayData::Impl {
                 const auto result = endpoint->send_batch(outgoing.data(), outgoing.size());
                     if (result.status == IoStatus::WouldBlock) ++parent.send_eagain;
                     if (result.status == IoStatus::Fatal) ++parent.send_error;
-                    for (unsigned n = 0; n < result.count; ++n) parent.tx_bytes += storage[n].size();
+                    std::uint64_t accepted_bytes = 0;
+                    for (unsigned n = 0; n < result.count; ++n) accepted_bytes += storage[n].size();
+                    parent.tx_bytes += accepted_bytes; if (result.count) sent(*tx, accepted_bytes);
                 if (!result.count && result.status == IoStatus::WouldBlock) send_blocked_until = local::monotonic_ns() + 1000000;
                 target.fragment += result.count; packets += result.count; parent.sent_packets += result.count;
                 send_progress |= result.count != 0;
@@ -246,6 +284,7 @@ struct GatewayData::Impl {
                 if (target.fragment == h.fragment_count && ++tx->cursor == tx->targets.size()) finish(std::move(tx), SendResultCode::Completed);
                 else queue_send(std::move(tx));
             }
+            if (!ready_routes.empty() && (packets >= parent.config.io_round_packets || bytes >= parent.config.io_round_bytes || local::monotonic_ns() >= deadline)) { ++budget_yields; parent.metrics->add(NetMetric::shard_budget_yields); }
         }
         void run() noexcept {
             try {
@@ -262,7 +301,7 @@ struct GatewayData::Impl {
                             WireHeader h; ByteView body;
                             if (decode_packet(command.control->view(), h, body)) {
                                 const auto found = active.find({h.publisher_id, h.sequence});
-                                if (found != active.end() && found->second->reliable) found->second->reliable->control(*command.control, local::monotonic_ns());
+                                if (found != active.end() && found->second->reliable) control(*found->second, *command.control);
                             }
                         }
                     }
@@ -273,6 +312,7 @@ struct GatewayData::Impl {
                     { std::lock_guard<std::mutex> lock(mutex); pending_commands = !commands.empty(); }
                     const int timeout = (deferred || pending_commands) ? 0 : (!ready_routes.empty() ? 1 : receive->idle_wait_ms());
                     if (::poll(fds, 2, timeout) < 0 && errno != EINTR) throw std::runtime_error("数据 shard 轮询失败");
+                    ++wakeups; parent.metrics->add(NetMetric::shard_wakeups);
                     if (fds[0].revents) local::drain_event(wake.get());
                     if (fds[1].revents & POLLIN) {
                         std::array<ReceivedDatagram, 32> input; const auto until = local::monotonic_ns() + parent.config.io_round_us * 1000;
@@ -283,6 +323,7 @@ struct GatewayData::Impl {
                             for (unsigned n = 0; n < result.count; ++n) { incoming(input[n]); bytes += input[n].size; }
                             packets += result.count;
                         }
+                        if (packets >= parent.config.io_round_packets || bytes >= parent.config.io_round_bytes || local::monotonic_ns() >= until) { ++budget_yields; parent.metrics->add(NetMetric::shard_budget_yields); }
                     }
                     for (auto& result : receive->tick(local::monotonic_ns(), [&](const WireHeader& h, const WireBlob& blob) {
                         if (!view) return SubmitState::NotSubmitted;
@@ -299,11 +340,12 @@ struct GatewayData::Impl {
                 if (found->second.empty()) sends.erase(found);
                 finish(std::move(tx), SendResultCode::GatewayLost);
             }
-            ready_routes.clear(); send_count = 0;
+            ready_routes.clear(); send_count = 0; queued.store(0);
             { std::lock_guard<std::mutex> lock(mutex); for (auto& command : commands) { --parent.queued_commands; parent.queued_bytes -= command.charged_bytes; if (command.tx) finish(std::move(command.tx), SendResultCode::GatewayLost); } commands.clear(); }
             capture(); active.clear(); receive.reset(); view.reset();
         }
     };
+    std::shared_ptr<NetMetrics> metrics;
     GatewayConfig config; Identity identity; std::uint64_t epoch; int control_wake;
     std::shared_ptr<ReassemblyBudget> receive_budget;
     std::vector<std::unique_ptr<Shard>> shards;
@@ -330,11 +372,11 @@ struct GatewayData::Impl {
     bool enqueue(unsigned index, Command& command) {
         if (stopped.load()) return false;
         auto count = queued_commands.load();
-        do { if (count >= config.limits.command_records) return false; } while (!queued_commands.compare_exchange_weak(count, count + 1));
+        do { if (count >= config.limits.command_records) { metrics->reject(NetQuota::command_records); return false; } } while (!queued_commands.compare_exchange_weak(count, count + 1));
         const auto bytes = sizeof(Command) + (command.view ? command.view->peers.size() * 192 : command.tx ? sizeof(Tx) + command.tx->targets.size() * sizeof(Target) : sizeof(ReceivedDatagram));
         auto used = queued_bytes.load();
-        do { if (bytes > config.limits.command_bytes - used) { --queued_commands; return false; } } while (!queued_bytes.compare_exchange_weak(used, used + bytes));
-        command.charged_bytes = bytes;
+        do { if (bytes > config.limits.command_bytes - used) { metrics->reject(NetQuota::command_bytes); --queued_commands; return false; } } while (!queued_bytes.compare_exchange_weak(used, used + bytes));
+        command.charged_bytes = bytes; metrics->peak(NetQuota::command_bytes, used + bytes); metrics->peak(NetQuota::command_records, count + 1);
         auto& shard = shards[index];
         try {
             std::lock_guard<std::mutex> lock(shard->mutex);
@@ -345,9 +387,10 @@ struct GatewayData::Impl {
         local::notify(shard->wake.get()); return true;
     }
 };
-GatewayData::GatewayData(const GatewayConfig& c, Identity id, std::uint64_t epoch, int wake, std::vector<std::unique_ptr<DatagramEndpoint>> endpoints) : impl_(new Impl) {
+GatewayData::GatewayData(const GatewayConfig& c, Identity id, std::uint64_t epoch, int wake, std::vector<std::unique_ptr<DatagramEndpoint>> endpoints, std::shared_ptr<NetMetrics> metrics) : impl_(new Impl) {
     impl_->config = c; impl_->identity = id; impl_->epoch = epoch; impl_->control_wake = wake;
-    impl_->receive_budget = std::make_shared<ReassemblyBudget>(c.limits);
+    impl_->metrics = metrics ? std::move(metrics) : std::make_shared<NetMetrics>();
+    impl_->receive_budget = std::make_shared<ReassemblyBudget>(c.limits, impl_->metrics);
     if (endpoints.size() != c.data_shards) throw std::invalid_argument("数据端点数不匹配");
     for (unsigned i = 0; i < endpoints.size(); ++i) impl_->shards.push_back(std::make_unique<Impl::Shard>(*impl_, i, std::move(endpoints[i])));
     try { for (auto& shard : impl_->shards) shard->thread = std::thread([p = shard.get()] { p->run(); }); }
@@ -377,19 +420,20 @@ bool GatewayData::submit(OutboxRecord& record, std::vector<PeerView> peers, std:
     if (record.header.delivery == Delivery::Reliable) {
         std::lock_guard<std::mutex> lock(impl_->quota_mutex);
         auto& count = impl_->publisher_reliable[tx->charged_publisher];
-        if (count >= impl_->config.limits.publisher_reliable) return false;
-        ++count; tx->publisher_charged = true;
+        if (count >= impl_->config.limits.publisher_reliable) { impl_->metrics->reject(NetQuota::publisher_reliable); if (!count) impl_->publisher_reliable.erase(tx->charged_publisher); return false; }
+        ++count; impl_->metrics->peak(NetQuota::publisher_reliable, count); tx->publisher_charged = true;
     }
     const auto size = peers.size(); auto used = impl_->target_states.load();
-    do { if (size > impl_->config.limits.target_states - used) return false; }
+    do { if (size > impl_->config.limits.target_states - used) { impl_->metrics->reject(NetQuota::target_states); return false; } }
     while (!impl_->target_states.compare_exchange_weak(used, used + size));
+    impl_->metrics->peak(NetQuota::target_states, used + size);
     tx->target_charge = size; tx->targets.reserve(size);
     for (auto& peer : peers) { auto route = peer.snapshot->routes.at(record.header.route); tx->targets.push_back({std::move(peer), std::move(route), 0}); }
     tx->expires = local::monotonic_ns() + 500000000ull;
     tx->record = std::move(record); Impl::Command command; command.tx = std::move(tx);
     const auto index = route_hash(command.tx->record.header.route) % impl_->config.data_shards;
     try {
-        if (impl_->enqueue(index, command)) return true;
+        if (impl_->enqueue(index, command)) { impl_->metrics->add(NetMetric::remote_target_copies, size); if (!size) impl_->metrics->add(NetMetric::no_target_dropped); return true; }
     } catch (...) { record = std::move(command.tx->record); throw; }
     record = std::move(command.tx->record); return false;
 }
@@ -400,6 +444,16 @@ bool GatewayData::control(const ReceivedDatagram& packet) {
     return impl_->enqueue(route_hash(h.route) % impl_->config.data_shards, command);
 }
 bool GatewayData::pop(GatewayDataEvent& event) { std::lock_guard<std::mutex> lock(impl_->events_mutex); if (impl_->events.empty()) return false; impl_->event_bytes -= sizeof(GatewayDataEvent) + impl_->events.front().packet.capacity(); event = std::move(impl_->events.front()); impl_->events.pop_front(); return true; }
+std::string GatewayData::shard_metrics() const {
+    std::ostringstream out; out << "{\"shards\":["; bool first = true;
+    for (const auto& shard : impl_->shards) {
+        if (!first) out << ','; first = false;
+        out << "{\"index\":" << shard->index << ",\"rx_bytes\":" << shard->rx_bytes.load() << ",\"tx_bytes\":" << shard->tx_bytes.load()
+            << ",\"wakeups\":" << shard->wakeups.load() << ",\"budget_yields\":" << shard->budget_yields.load()
+            << ",\"queued\":" << shard->queued.load() << ",\"queued_peak\":" << shard->queued_peak.load() << '}';
+    }
+    out << "]}"; return out.str();
+}
 bool GatewayData::healthy() const { return !impl_->stopped.load(); }
 GatewayDataStats GatewayData::stats() const {
     GatewayDataStats result{impl_->sent_messages.load(), impl_->sent_packets.load(), impl_->committed_messages.load(), impl_->rejected_records.load(), impl_->dropped_feedback.load(), impl_->target_states.load(), impl_->receive_budget->usage()};

@@ -47,6 +47,7 @@ std::string json_string(const std::string &value)
 } // namespace
 struct GatewayRuntime::Impl
 {
+    std::shared_ptr<NetMetrics> metrics = std::make_shared<NetMetrics>();
     struct Cached
     {
         Bytes request, response;
@@ -190,6 +191,7 @@ struct GatewayRuntime::Impl
     }
     std::string query(ByteView body) const {
         if (!body.data[0]) return status();
+        if (body.data[0] == 3) return body.data[1] == 3 ? data->shard_metrics() : metrics->json(body.data[1]);
         RouteKey key; codec::copy(key.scope, body.data + 1); key.msg_id = codec::get(body.data + 33, 4);
         auto snapshot = local_directory->snapshot(); bool verified = true, reachable = true;
         Identity peer_id = identity; std::uint64_t peer_epoch = epoch;
@@ -209,7 +211,7 @@ struct GatewayRuntime::Impl
         if (route) {
             const auto& d = route->descriptor;
             s << ",\"topic\":" << json_string(d.topic) << ",\"schema_hash\":" << d.schema_hash << ",\"roles\":" << d.role_flags
-              << ",\"receiver_route_epoch\":\"" << d.receiver_route_epoch << "\"";
+              << ",\"receiver_route_epoch\":\"" << d.receiver_route_epoch << "\",\"metrics\":" << route->metrics.json();
         }
         s << '}'; return s.str();
     }
@@ -219,11 +221,13 @@ struct GatewayRuntime::Impl
             session.output_bytes + session.cache_bytes + packet.size() >
                 config.limits.session_control_bytes ||
             control_memory + packet.size() > config.limits.local_control_bytes)
-            throw std::runtime_error("控制输出达到配额");
+            { if (session.output_bytes + session.cache_bytes + packet.size() > config.limits.session_control_bytes) metrics->reject(NetQuota::session_control_bytes);
+              if (control_memory + packet.size() > config.limits.local_control_bytes) metrics->reject(NetQuota::local_control_bytes);
+              throw std::runtime_error("控制输出达到配额"); }
         const auto size = packet.size();
         session.output.push_back(std::move(packet));
         session.output_bytes += size;
-        control_memory += size;
+        control_memory += size; metrics->peak(NetQuota::local_control_bytes, control_memory); metrics->peak(NetQuota::session_control_bytes, session.output_bytes + session.cache_bytes);
     }
     Bytes response(Session &session, LocalKind kind, std::uint64_t request_id, const Bytes &body)
     {
@@ -278,10 +282,12 @@ struct GatewayRuntime::Impl
         }
         if (size + control_memory > config.limits.local_control_bytes ||
             size + session.output_bytes > config.limits.session_control_bytes)
-            throw std::runtime_error("请求历史达到配额");
+            { if (size + session.output_bytes > config.limits.session_control_bytes) metrics->reject(NetQuota::session_control_bytes);
+              if (size + control_memory > config.limits.local_control_bytes) metrics->reject(NetQuota::local_control_bytes);
+              throw std::runtime_error("请求历史达到配额"); }
         session.cache.emplace(id, Cached{request, reply});
         session.cache_bytes += size;
-        control_memory += size;
+        control_memory += size; metrics->peak(NetQuota::local_control_bytes, control_memory); metrics->peak(NetQuota::session_control_bytes, session.output_bytes + session.cache_bytes);
     }
     void process(Session &session, local::Packet packet)
     {
@@ -391,7 +397,7 @@ struct GatewayRuntime::Impl
                     try {
                         const auto binding = registration->binding;
                         if (!binding->bridge && std::none_of(initializing.begin(), initializing.end(), [&](const auto& task) { return task.binding == binding; })) {
-                            if (initializing.size() >= config.limits.init_tasks) throw std::runtime_error("bridge 初始化队列已满");
+                            if (initializing.size() >= config.limits.init_tasks) { metrics->reject(NetQuota::init_tasks); throw std::runtime_error("bridge 初始化队列已满"); }
                             const auto fence = last_data_fence;
                             auto task = std::make_shared<std::packaged_task<std::shared_ptr<ShmWireBridge>()>>([descriptor, fence] {
                                 if (fence.valid()) fence.get();
@@ -399,7 +405,7 @@ struct GatewayRuntime::Impl
                             });
                             auto future = task->get_future().share();
                             if (!outboxes->initialize([task] { (*task)(); })) throw std::runtime_error("初始化队列已满");
-                            initializing.push_back({binding, std::move(future)});
+                            initializing.push_back({binding, std::move(future)}); metrics->peak(NetQuota::init_tasks, initializing.size());
                         }
                         pending_subs.push_back({session.id, h.request_id, id, packet.bytes}); pending_sub_bytes += packet.bytes.size();
                         session.last_request = h.request_id; remember(session, h.request_id, packet.bytes, {}); return;
@@ -408,7 +414,7 @@ struct GatewayRuntime::Impl
                 synchronize_data();
                 pending_fences.push_back({session.id, h.request_id, packet.bytes, reply, last_data_fence});
                 session.last_request = h.request_id; remember(session, h.request_id, packet.bytes, {}); return;
-            } catch (const std::exception& e) { reply = error(session, h.request_id, 3, e.what()); }
+            } catch (const std::exception& e) { metrics->add(NetMetric::registration_rejected); reply = error(session, h.request_id, 3, e.what()); }
         }
         else if (h.kind == LocalKind::SubReady || h.kind == LocalKind::Unregister)
         {
@@ -426,7 +432,7 @@ struct GatewayRuntime::Impl
                 synchronize_data();
                 pending_fences.push_back({session.id, h.request_id, packet.bytes, reply, last_data_fence});
                 session.last_request = h.request_id; remember(session, h.request_id, packet.bytes, {}); return;
-            } catch (const std::exception& e) { reply = error(session, h.request_id, 3, e.what()); }
+            } catch (const std::exception& e) { metrics->add(NetMetric::registration_rejected); reply = error(session, h.request_id, 3, e.what()); }
         }
         else
             reply = error(session, h.request_id, 1, "NotImplemented");
@@ -496,7 +502,13 @@ struct GatewayRuntime::Impl
             GatewayDataEvent event; if (!data->pop(event)) break;
             if (event.kind == GatewayDataEvent::Kind::Feedback) {
                 WireHeader h; ByteView payload;
-                if (decode_packet(ByteView(event.packet), h, payload) && allow_control(h.target_id, local::monotonic_ns())) endpoints[config.data_shards]->send(ByteView(event.packet), event.destination);
+                if (decode_packet(ByteView(event.packet), h, payload) && allow_control(h.target_id, local::monotonic_ns())) {
+                    const auto sent = endpoints[config.data_shards]->send(ByteView(event.packet), event.destination);
+                    if (sent.status == IoStatus::Data) {
+                        if (h.kind == PacketKind::Ack) metrics->add(NetMetric::acks_tx);
+                        if (h.kind == PacketKind::Nack) metrics->add(NetMetric::nacks_tx);
+                    }
+                }
                 continue;
             }
             auto session = std::find_if(sessions.begin(), sessions.end(), [&](const auto& entry) { return entry.second.id == event.header.session_id; });
@@ -572,8 +584,8 @@ struct GatewayRuntime::Impl
             }
         }
         for (auto& request : peer_directory->tick(now)) {
-            if (catalog_requests.size() >= config.limits.peers || catalog_bytes + request.packet.size() > config.limits.network_control_bytes) break;
-            catalog_bytes += request.packet.size(); catalog_requests.push_back(std::move(request));
+            if (catalog_requests.size() >= config.limits.peers || catalog_bytes + request.packet.size() > config.limits.network_control_bytes) { metrics->reject(catalog_requests.size() >= config.limits.peers ? NetQuota::peers : NetQuota::network_control_bytes); break; }
+            catalog_bytes += request.packet.size(); metrics->peak(NetQuota::network_control_bytes, catalog_bytes); catalog_requests.push_back(std::move(request));
         }
         auto& control = endpoints[config.data_shards];
         for (unsigned n = 0, count = std::min<std::size_t>(32, catalog_requests.size()); n < count; ++n) {
@@ -753,6 +765,7 @@ struct GatewayRuntime::Impl
                             throw std::runtime_error("接纳控制连接失败");
                         }
                         auto peer = local::credentials(fd.get());
+                        if (sessions.size() >= config.limits.sessions) metrics->reject(NetQuota::sessions);
                         if (peer.uid != geteuid() || sessions.size() >= config.limits.sessions ||
                             next_session == UINT64_MAX)
                         {
@@ -765,7 +778,7 @@ struct GatewayRuntime::Impl
                         session.peer = peer;
                         session.id = next_session++;
                         session.connected_at = local::monotonic_ns();
-                        sessions.emplace(raw, std::move(session));
+                        sessions.emplace(raw, std::move(session)); metrics->peak(NetQuota::sessions, sessions.size());
                     }
                 for (std::size_t index = 2; index < session_end; ++index)
                 {
@@ -832,16 +845,16 @@ GatewayRuntime::GatewayRuntime(GatewayConfig config) : impl_(new Impl)
     impl_->send_budget = std::make_unique<SendBudget>(
         CreditCounters{impl_->config.limits.send_bytes, impl_->config.limits.send_records},
         CreditCounters{impl_->config.limits.session_send_bytes,
-                       impl_->config.limits.session_send_records});
+                       impl_->config.limits.session_send_records}, impl_->metrics);
     impl_->outboxes = std::make_unique<OutboxService>(
         impl_->wake.get(), impl_->config.limits.init_tasks, impl_->config.limits.command_records);
-    impl_->directory_budget = std::make_shared<DirectoryBudget>(impl_->config.limits);
+    impl_->directory_budget = std::make_shared<DirectoryBudget>(impl_->config.limits, impl_->metrics);
     impl_->peer_directory = std::make_unique<PeerDirectory>(impl_->identity, impl_->epoch, impl_->directory_budget);
     impl_->local_directory = std::make_unique<LocalDirectory>(impl_->directory_budget, impl_->config.limits);
     for (const auto& endpoint : impl_->endpoints) impl_->socket_buffers.emplace_back(endpoint->receive_buffer_bytes(), endpoint->send_buffer_bytes());
     std::vector<std::unique_ptr<DatagramEndpoint>> data_endpoints;
     for (unsigned i = 0; i < impl_->config.data_shards; ++i) data_endpoints.push_back(std::move(impl_->endpoints[i]));
-    impl_->data = std::make_unique<GatewayData>(impl_->config, impl_->identity, impl_->epoch, impl_->wake.get(), std::move(data_endpoints));
+    impl_->data = std::make_unique<GatewayData>(impl_->config, impl_->identity, impl_->epoch, impl_->wake.get(), std::move(data_endpoints), impl_->metrics);
     impl_->synchronize_data();
     impl_->thread = std::thread([p = impl_.get()] { p->run(); });
 }

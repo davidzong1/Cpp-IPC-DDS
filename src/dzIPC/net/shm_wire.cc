@@ -14,6 +14,7 @@ struct ShmWireWriter::Impl
 {
     const pid_t owner = getpid();
     RouteDescriptor descriptor;
+    NetMetrics* metrics = nullptr;
     mutable std::shared_mutex gate;
     std::unique_ptr<shm::shm_pub_ipc> publisher;
     info_pool::ScopedRegistration registration;
@@ -36,6 +37,7 @@ struct ShmWireWriter::Impl
     {
         try
         {
+            MetricTimer timer(metrics, NetStage::LocalCommit);
             return publisher->publisher_->publish_loan_size(loan, size) ? SubmitState::Committed
                                                                         : SubmitState::NotSubmitted;
         }
@@ -59,19 +61,20 @@ struct ShmWireWriter::Impl
         if (!loan.valid())
             return SubmitState::NotSubmitted;
         std::memcpy(loan.data, bytes.data, bytes.size);
+        if (metrics) metrics->add(NetMetric::local_copy_bytes, bytes.size);
         if (deadline && local::monotonic_ns() >= deadline)
             return SubmitState::NotSubmitted;
         return publish(loan, bytes.size);
     }
 };
-ShmWireWriter::ShmWireWriter(RouteDescriptor descriptor, bool internal, std::uint64_t gateway_epoch) : impl_(new Impl)
+ShmWireWriter::ShmWireWriter(RouteDescriptor descriptor, bool internal, std::uint64_t gateway_epoch, NetMetrics* metrics) : impl_(new Impl)
 {
     if (!shm_mpmc_enabled())
         throw ConfigError({ConfigCode::MpmcRequired, "原始 SHM 写入需要 DZIPC_SHM_MPMC=1"});
     Bytes checked;
     if (!encode_descriptor(descriptor, true, checked))
         throw std::invalid_argument("业务路由描述无效");
-    impl_->descriptor = std::move(descriptor);
+    impl_->metrics = metrics; impl_->descriptor = std::move(descriptor);
     auto model = std::make_shared<GenericMessage>();
     model->set_msg_id(impl_->descriptor.key.msg_id);
     auto topic = std::make_shared<TopicData>(model, impl_->descriptor.key.msg_id);
@@ -159,7 +162,10 @@ try
         auto loan = impl_->publisher->publisher_->loan(need);
         if (!loan.valid())
             return SubmitState::NotSubmitted;
-        if (!message.dzflat_write(loan.data, loan.size) ||
+        bool encoded;
+        { MetricTimer timer(impl_->metrics, NetStage::Encode); encoded = message.dzflat_write(loan.data, loan.size); }
+        if (encoded && impl_->metrics) impl_->metrics->add(NetMetric::encode_copy_bytes, need);
+        if (!encoded ||
             !validate_blob({loan.data, need}, Encoding::DzFlat, message.msg_id(),
                            message.dzflat_schema_hash()) ||
             (deadline && local::monotonic_ns() >= deadline))
@@ -167,8 +173,9 @@ try
         return impl_->publish(loan, need);
     }
     WireBlob blob;
-    if (!WireEncoder::encode(message, false, blob))
-        return SubmitState::NotSubmitted;
+    { MetricTimer timer(impl_->metrics, NetStage::Encode);
+      if (!WireEncoder::encode(message, false, blob)) return SubmitState::NotSubmitted; }
+    if (impl_->metrics) impl_->metrics->add(NetMetric::encode_copy_bytes, blob.size());
     return impl_->commit(blob.view(), blob.encoding(), blob.msg_id(), blob.schema_hash(), deadline);
 }
 catch (...)

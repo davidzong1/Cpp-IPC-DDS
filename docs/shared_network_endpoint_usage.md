@@ -63,7 +63,25 @@ export DZIPC_GATEWAY_CONTROL=/tmp/dzipc-gateway-$UID/control.sock
 
 汇总状态列出真实 socket 缓冲容量、活跃/历史配额、命令积压、入站提交与错误计数、重传和实际配置。`gateway_threads` 是网关专有线程数，SHM 公共线程另查 `/proc/<pid>/task`；socket 缓冲容量不是已占内存。`allocated_send_bytes` 包括未用授予与在途缓存，`send_inflight_bytes` 是其中实际在途部分。计数为 JSON uint64 数值，使用能保存整数精度的解析器；身份、epoch 和域使用十进制字符串。
 
-应用进程可用 `ClientRuntime::diagnostics_json()` 查看本机/网络提交结果、部分提交、信用等待和出站容量。这些值不能从网关入站提交计数推算。计数快照不是跨线程事务快照，采样期间可能相差一个在途更新。延迟分位数与阶段耗时由测试驱动单独采集；当前未提供所有第 14.2 节细分错误/每话题延迟指标，交付审计保留该缺项。
+应用进程可用 `ClientRuntime::diagnostics_json()` 查看本机/网络提交结果、部分提交、信用等待和出站容量。这些值不能从网关入站提交计数推算。计数快照不是跨线程事务快照，采样期间可能相差一个在途更新。细分指标使用 `status --metrics counters|quota|latency|shards` 分页查询，不能与 `--topic` 合并。单话题详情包含 `metrics`，其生命周期跟随已登记的路由；不会根据未核验报文创建统计表。
+
+延迟字段是固定 64 个 log2 纳秒桶的统计：`count/sum_ns/max_ns` 与 `p50_upper_ns/p95_upper_ns/p99_upper_ns`。分位数是桶上界；`count=0` 表示没有采样。精确端到端分位数另由 benchmark 原始 CSV 计算。`quota` 给出实际预留峰值与拒绝次数，当前占用仍查汇总；一个申请同时违反多个配额时各拒绝计数均递增。计数是进程累计值，不能直接比较运行时长不同的两个进程。
+
+| 阶段 | 采样范围 |
+|---|---|
+| encode | 应用执行编码/预构造段校验复制；纯本机 prebuilt 没有编码，count 为0 |
+| local_commit | 应用实际调用 MPMC publish 的耗时；loan/复制耗时包含在 api_return 中 |
+| credit_wait | 应用实际阻塞等待出站资源，每次等待一个样本 |
+| outbox_submit | 单次尝试写出站SHM，排除信用阻塞；含失败尝试 |
+| gateway_queue_wait | 网关取出并复制记录后，到所属 shard prepare；不是应用 enqueue→网关 pull |
+| network_first_send | 从上述网关取出时刻到首个 DATA 被内核接受 |
+| remote_commit | 接收网关一次业务SHM提交尝试，含失败重试 |
+| ack_wait | 源网关首发到可靠终结；应用侧为等待 SEND_RESULT 的时段，可能以超时/拒绝终结，须结合可靠结果计数 |
+| api_return | 通过基本调用校验后的发布处理到返回，含编码、信用和可靠等待 |
+
+每话题 `queue_wait` 与 `gateway_queue_wait` 同口径；tx_bytes 是实际 DATA wire 字节（含重传），rx_bytes 是首次接纳的分片 payload 字节，commits 是确定提交次数。源端本机直达不经过网关，因此该路由网关计数可以为0。`shm_committed_bytes` 仅累计确定提交的 payload，其他 copy_bytes 按实际发生的编码/复制位置累计。所有计时仅使用各自进程的 steady_clock，跨物理主机的时钟不可相减。
+
+当前没有 DZTX enqueue 时间字段；完整应用出站排队、网络单程时间和跨主机时钟误差仍不可从这些直方图推算。协议头未挪用保留字段。
 
 ## 错误与退出码
 

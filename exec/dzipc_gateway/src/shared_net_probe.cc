@@ -56,7 +56,8 @@ int main(int argc, char** argv) try {
         if (command == "state") {
             const auto hint = publisher ? runtime->route_state(publisher->publisher_id()) : RouteStateBody{};
             std::cout << "{\"remote\":" << hint.remote_ready_count << ",\"synchronized\":" << (hint.synchronized ? "true" : "false") << ",\"healthy\":" << (runtime->healthy() ? "true" : "false") << "}" << std::endl;
-        } else if (command == "status") std::cout << runtime->status() << std::endl;
+        } else if (command == "diagnostics") std::cout << runtime->diagnostics_json() << std::endl;
+        else if (command == "status") std::cout << runtime->status() << std::endl;
         else if (command == "send" && publisher) {
             std::size_t size; std::uint64_t tag, seed; unsigned reliable = 0; input >> size >> tag >> seed >> reliable;
             auto bytes = payload(size, tag, seed); const auto result = publisher->prebuilt(ByteView(bytes), reliable ? Delivery::Reliable : Delivery::BestEffort, reliable ? 5000 : 0);

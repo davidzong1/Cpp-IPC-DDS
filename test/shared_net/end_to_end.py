@@ -116,6 +116,10 @@ def host(args):
             elif command[0] == 'signal':
                 gateway.send_signal(command[1])
                 result = {'signaled': True}
+            elif command[0] == 'metrics':
+                result = {category: json.loads(subprocess.check_output([args.gateway, 'status', '--control', args.control, '--metrics', category], env=env, text=True))
+                          for category in ('counters', 'quota', 'latency', 'shards')}
+                result['application'] = probes[0].request('diagnostics')
             elif command[0] == 'resources':
                 result = {'gateway_udp': udp_count(gateway.pid),
                           'application_udp': [udp_count(p.p.pid) for p in probes if p.p.poll() is None]}
@@ -215,6 +219,11 @@ def driver(args):
                 assert status['source_injections'] == 0 and status['committed_messages'] == expected_remote[host_index], status
                 for app in range(args.local_subscribers):
                     assert not request(host_index, ['probe', app, 'recv 1 30'])['received'], '出现重复或回流'
+            evidence['metrics'] = [request(i, ['metrics']) for i in range(2)]
+            if args.reliable:
+                for metrics in evidence['metrics']:
+                    assert metrics['counters']['reliable_completed'] == 6 and metrics['counters']['acks_rx'] == 6, metrics
+                    assert metrics['counters']['acks_tx'] >= 6 and metrics['latency']['remote_commit']['count'] >= 6, metrics
             request(0, ['signal', signal.SIGSTOP])
             # 等待客户端判定网络离线，既有本机发布者和两个订阅进程仍应工作。
             time.sleep(3.3)

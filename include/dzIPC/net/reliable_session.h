@@ -6,7 +6,7 @@
 namespace dzIPC::net {
 struct SendFragment { std::size_t target = 0; std::uint32_t fragment = 0; bool retry = false; };
 struct ReliableTarget { PeerView peer; std::shared_ptr<RouteAdmission> route; };
-struct ReliableStats { std::uint64_t original_packets = 0, retry_packets = 0, ignored_controls = 0, nacks = 0; };
+struct ReliableStats { std::uint64_t original_packets = 0, retry_packets = 0, ignored_controls = 0, nacks = 0, acks = 0; };
 // 单 shard 纯发送状态机。批次在 accepted() 确认前不改变身份；ACK 不直接释放外部 WireBlob。
 class ReliableSession {
 public:

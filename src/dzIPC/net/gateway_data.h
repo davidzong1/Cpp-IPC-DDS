@@ -31,7 +31,7 @@ struct GatewayDataStats {
 class GatewayData {
 public:
     GatewayData(const GatewayConfig&, Identity, std::uint64_t epoch, int control_wake,
-                std::vector<std::unique_ptr<DatagramEndpoint>> endpoints);
+                std::vector<std::unique_ptr<DatagramEndpoint>> endpoints, std::shared_ptr<NetMetrics> metrics = {});
     ~GatewayData();
     std::shared_future<void> synchronize(std::shared_ptr<const GatewayDataView>);
     bool submit(OutboxRecord&, std::vector<PeerView> targets, std::shared_ptr<LocalRegistration> source = {});
@@ -39,6 +39,7 @@ public:
     bool pop(GatewayDataEvent&);
     bool healthy() const;
     GatewayDataStats stats() const;
+    std::string shard_metrics() const;
     void stop();
 private:
     struct Impl; std::unique_ptr<Impl> impl_;

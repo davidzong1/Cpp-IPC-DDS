@@ -27,33 +27,37 @@ struct DirectoryBudget::Impl : std::enable_shared_from_this<Impl> {
         std::shared_ptr<Impl> pool; Kind kind; std::uint64_t bytes;
         ~Charge() { if (bytes) { std::lock_guard<std::mutex> lock(pool->mutex); pool->counter(kind) -= bytes; } }
     };
+    std::shared_ptr<NetMetrics> metrics;
     Limits limits; mutable std::mutex mutex; DirectoryUsage used;
     std::uint64_t& counter(Kind kind) { return kind == Kind::Installed ? used.installed : kind == Kind::Old ? used.old : used.candidates; }
     std::uint64_t limit(Kind kind) const { return kind == Kind::Installed ? limits.directory_bytes : kind == Kind::Old ? limits.old_directory_bytes : limits.candidate_bytes; }
     std::shared_ptr<Charge> reserve(Kind kind, std::uint64_t bytes) {
         auto c = std::make_shared<Charge>(); c->pool = shared_from_this(); c->kind = kind; c->bytes = 0;
         std::lock_guard<std::mutex> lock(mutex);
-        if (bytes > limit(kind) - counter(kind)) return {};
-        counter(kind) += bytes; c->bytes = bytes; return c;
+        const auto quota = kind == Kind::Installed ? NetQuota::directory_bytes : kind == Kind::Old ? NetQuota::old_directory_bytes : NetQuota::candidate_bytes;
+        if (bytes > limit(kind) - counter(kind)) { metrics->reject(quota); return {}; }
+        counter(kind) += bytes; metrics->peak(quota, counter(kind)); c->bytes = bytes; return c;
     }
     bool retire(const std::shared_ptr<const DirectorySnapshot>& snapshot) {
         if (!snapshot) return true;
         auto charge = std::static_pointer_cast<Charge>(snapshot->charge);
         std::lock_guard<std::mutex> lock(mutex);
         if (charge->kind == Kind::Old) return true;
-        if (charge->bytes > limits.old_directory_bytes - used.old) return false;
-        used.installed -= charge->bytes; used.old += charge->bytes; charge->kind = Kind::Old; return true;
+        if (charge->bytes > limits.old_directory_bytes - used.old) { metrics->reject(NetQuota::old_directory_bytes); return false; }
+        used.installed -= charge->bytes; used.old += charge->bytes; metrics->peak(NetQuota::old_directory_bytes, used.old); charge->kind = Kind::Old; return true;
     }
 };
-DirectoryBudget::DirectoryBudget(Limits limits) : impl_(std::make_shared<Impl>()) { impl_->limits = limits; }
+DirectoryBudget::DirectoryBudget(Limits limits, std::shared_ptr<NetMetrics> metrics) : impl_(std::make_shared<Impl>()) { impl_->limits = limits; impl_->metrics = metrics ? std::move(metrics) : std::make_shared<NetMetrics>(); }
+std::shared_ptr<NetMetrics> DirectoryBudget::metrics() const { return impl_->metrics; }
 DirectoryBudget::~DirectoryBudget() = default;
 DirectoryUsage DirectoryBudget::usage() const { std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->used; }
 std::shared_ptr<const DirectorySnapshot> DirectoryBudget::replace(const std::vector<RouteDescriptor>& entries,
         std::uint64_t version, const std::shared_ptr<const DirectorySnapshot>& old) {
-    if (entries.size() > impl_->limits.topics || size_of(entries) > impl_->limits.peer_candidate_bytes ||
-        size_of(entries) > 8 * kMiB || (old && version <= old->version)) return {};
+    if (entries.size() > impl_->limits.topics) { impl_->metrics->reject(NetQuota::topics); return {}; }
+    if (size_of(entries) > impl_->limits.peer_candidate_bytes || size_of(entries) > 8 * kMiB) { impl_->metrics->reject(NetQuota::peer_candidate_bytes); return {}; }
+    if (old && version <= old->version) return {};
     // 保守计费包含编码、解析条目、名称及树节点。新旧同时存在时先预留新表。
-    const auto bytes = 2 * size_of(entries) + entries.size() * 512 + sizeof(DirectorySnapshot);
+    const auto bytes = 2 * size_of(entries) + entries.size() * (512 + sizeof(RouteMetrics)) + sizeof(DirectorySnapshot);
     auto charge = impl_->reserve(Impl::Kind::Installed, bytes); if (!charge) return {};
     auto next = std::make_shared<DirectorySnapshot>(); next->charge = charge; next->version = version;
     if (!encode_directory(entries, next->body)) return {};
@@ -82,7 +86,7 @@ std::shared_ptr<const DirectorySnapshot> DirectoryBudget::replace(const std::vec
             route->publisher_active.store(pub); route->subscriber_active.store(sub); route->active.store(pub || sub);
         }
     }
-    return next;
+    impl_->metrics->peak(NetQuota::topics, entries.size()); return next;
 }
 
 struct PeerDirectory::Impl {
@@ -114,28 +118,32 @@ struct PeerDirectory::Impl {
         auto found = entries.find(h.gateway_id);
         if (found == entries.end()) {
             auto& pool = *budget->impl_;
-            if (entries.size() >= pool.limits.peers || pool.used.histories >= pool.limits.peer_history || !pool.limits.gateway_history) return DirectoryCode::HistoryFull;
+            if (entries.size() >= pool.limits.peers) { pool.metrics->reject(NetQuota::peers); return DirectoryCode::HistoryFull; }
+            if (pool.used.histories >= pool.limits.peer_history) { pool.metrics->reject(NetQuota::peer_history); return DirectoryCode::HistoryFull; }
+            if (!pool.limits.gateway_history) { pool.metrics->reject(NetQuota::gateway_history); return DirectoryCode::HistoryFull; }
             Peer p; p.view.admission = std::make_shared<PeerAdmission>(); p.view.admission->active.store(false);
             p.view.admission->hello = h; p.view.admission->ipv4 = source.host; p.history.insert(h.gateway_epoch);
             found = entries.emplace(h.gateway_id, std::move(p)).first;
-            { std::lock_guard<std::mutex> lock(pool.mutex); ++pool.used.histories; }
+            { std::lock_guard<std::mutex> lock(pool.mutex); ++pool.used.histories; pool.metrics->peak(NetQuota::peer_history, pool.used.histories); }
         } else {
             auto& p = found->second; const auto& old = p.view.admission->hello;
             if (source.host != p.view.admission->ipv4) return DirectoryCode::IdentityConflict;
             if (h.gateway_epoch != old.gateway_epoch) {
                 if (p.history.count(h.gateway_epoch)) return DirectoryCode::RetiredEpoch;
                 auto& pool = *budget->impl_;
-                if (p.history.size() >= pool.limits.gateway_history || pool.used.histories >= pool.limits.peer_history) return DirectoryCode::HistoryFull;
+                if (p.history.size() >= pool.limits.gateway_history) { pool.metrics->reject(NetQuota::gateway_history); return DirectoryCode::HistoryFull; }
+                if (pool.used.histories >= pool.limits.peer_history) { pool.metrics->reject(NetQuota::peer_history); return DirectoryCode::HistoryFull; }
                 // 新权限对象只在全部必要历史可保留后替换，旧对象绝不重新激活。
                 auto admission = std::make_shared<PeerAdmission>(); admission->hello = h; admission->ipv4 = source.host; admission->active.store(false);
                 if (!pool.retire(p.view.snapshot)) return DirectoryCode::QuotaExceeded;
                 p.history.insert(h.gateway_epoch);
-                { std::lock_guard<std::mutex> lock(pool.mutex); ++pool.used.histories; }
+                { std::lock_guard<std::mutex> lock(pool.mutex); ++pool.used.histories; pool.metrics->peak(NetQuota::peer_history, pool.used.histories); }
                 invalidate(p); p.view.admission = std::move(admission); p.desired = 0; p.needs_snapshot = true; p.expired = false; p.next_request = 0;
             } else if (old.data_base_port != h.data_base_port || old.data_shards != h.data_shards || old.control_port != h.control_port || old.max_message_bytes != h.max_message_bytes)
                 return DirectoryCode::IdentityConflict;
         }
         auto& p = found->second; p.seen = now;
+        budget->metrics()->peak(NetQuota::peers, entries.size()); budget->metrics()->peak(NetQuota::gateway_history, p.history.size());
         // HELLO 可能乱序；旧版本只续租，不回退期望目录版本。
         if (h.snapshot_version > p.desired) { p.desired = h.snapshot_version; p.next_request = 0; p.retry = 100000000; p.needs_snapshot = true; ++revision; }
         if (p.expired) { p.expired = false; p.needs_snapshot = true; p.next_request = 0; p.retry = 100000000; }
@@ -152,10 +160,11 @@ struct PeerDirectory::Impl {
         if (h.snapshot_version < p.desired || (p.view.snapshot && h.snapshot_version < p.view.snapshot->version) ||
             (p.candidate && h.snapshot_version < p.candidate->header.snapshot_version)) return DirectoryCode::Stale;
         if (!p.needs_snapshot && p.view.snapshot && h.snapshot_version == p.view.snapshot->version) return DirectoryCode::Ignored;
-        if (p.candidate && now >= p.candidate->expires) p.candidate.reset();
+        if (p.candidate && now >= p.candidate->expires) { budget->metrics()->add(NetMetric::snapshot_timeout); p.candidate.reset(); }
         if (!p.candidate || h.snapshot_version > p.candidate->header.snapshot_version) {
             const auto bytes = std::uint64_t(h.page_count) * 1024;
-            if (bytes > budget->impl_->limits.peer_candidate_bytes) return DirectoryCode::QuotaExceeded;
+            if (bytes > budget->impl_->limits.peer_candidate_bytes) { budget->metrics()->reject(NetQuota::peer_candidate_bytes); return DirectoryCode::QuotaExceeded; }
+            budget->metrics()->peak(NetQuota::peer_candidate_bytes, bytes);
             auto charge = budget->impl_->reserve(DirectoryBudget::Impl::Kind::Candidate, bytes + (h.page_count + 7) / 8);
             if (!charge) return DirectoryCode::QuotaExceeded;
             auto c = std::make_unique<Candidate>(); c->charge = std::move(charge); c->header = h; c->expires = now + candidate_ns; c->absolute_deadline = now + 30000000000ull;
@@ -177,7 +186,7 @@ struct PeerDirectory::Impl {
         std::vector<RouteDescriptor> routes;
         // 解析临时索引另计候选费用；先核对 count，再分配字符串/条目。
         const auto count = c.bytes.size() >= 4 ? codec::get(c.bytes.data(), 4) : UINT64_MAX;
-        if (count > budget->impl_->limits.topics) { p.candidate.reset(); return DirectoryCode::QuotaExceeded; }
+        if (count > budget->impl_->limits.topics) { budget->metrics()->reject(NetQuota::topics); p.candidate.reset(); return DirectoryCode::QuotaExceeded; }
         auto parse_charge = budget->impl_->reserve(DirectoryBudget::Impl::Kind::Candidate, count * 512 + c.bytes.size());
         if (!parse_charge) { p.candidate.reset(); return DirectoryCode::QuotaExceeded; }
         if (!decode_directory(ByteView(c.bytes), routes, budget->impl_->limits.topics)) { p.candidate.reset(); return DirectoryCode::Invalid; }
@@ -202,8 +211,19 @@ PeerDirectory::~PeerDirectory() {
     for (auto& [id, p] : impl_->entries) { p.view.admission->active.store(false); count += p.history.size(); }
     auto& pool = *impl_->budget->impl_; std::lock_guard<std::mutex> lock(pool.mutex); pool.used.histories -= count;
 }
-DirectoryCode PeerDirectory::hello(const DiscoveryHello& h, Ipv4Address source, std::uint64_t now) { return impl_->hello(h, source, now); }
-DirectoryCode PeerDirectory::page(const ReceivedDatagram& p, std::uint64_t now) { return impl_->page(p, now); }
+DirectoryCode PeerDirectory::hello(const DiscoveryHello& h, Ipv4Address source, std::uint64_t now) {
+    const auto code = impl_->hello(h, source, now); auto& m = *impl_->budget->metrics();
+    if (code == DirectoryCode::RetiredEpoch) m.add(NetMetric::peer_epoch_retired);
+    if (code == DirectoryCode::HistoryFull) m.add(NetMetric::peer_history_full);
+    if (code == DirectoryCode::IdentityConflict) m.add(NetMetric::identity_conflict);
+    return code;
+}
+DirectoryCode PeerDirectory::page(const ReceivedDatagram& p, std::uint64_t now) {
+    const auto code = impl_->page(p, now); auto& m = *impl_->budget->metrics();
+    if (code == DirectoryCode::Ok) m.add(NetMetric::snapshot_complete);
+    else if (code != DirectoryCode::Incomplete && code != DirectoryCode::Ignored && code != DirectoryCode::Stale) m.add(NetMetric::snapshot_rejected);
+    return code;
+}
 std::vector<CatalogRequest> PeerDirectory::tick(std::uint64_t now, std::size_t allowance) {
     std::vector<CatalogRequest> out;
     for (std::size_t i = 0, count = std::min(allowance, impl_->entries.size()); i < count; ++i) {
@@ -211,10 +231,10 @@ std::vector<CatalogRequest> PeerDirectory::tick(std::uint64_t now, std::size_t a
         if (it == impl_->entries.end()) it = impl_->entries.begin(); impl_->cursor = it->first;
         auto& p = it->second;
         if (now - p.seen >= lease_ns) {
-            if (!p.expired) { p.expired = true; p.view.admission->active.store(false); p.candidate.reset(); p.needs_snapshot = true; ++impl_->revision; }
+            if (!p.expired) { impl_->budget->metrics()->add(NetMetric::peer_expired); p.expired = true; p.view.admission->active.store(false); p.candidate.reset(); p.needs_snapshot = true; ++impl_->revision; }
             continue;
         }
-        if (p.candidate && now >= p.candidate->expires) p.candidate.reset();
+        if (p.candidate && now >= p.candidate->expires) { impl_->budget->metrics()->add(NetMetric::snapshot_timeout); p.candidate.reset(); }
         if (!p.needs_snapshot || now < p.next_request) continue;
         CatalogHeader h; h.source_id = impl_->local; h.source_epoch = impl_->epoch; h.target_id = it->first;
         h.target_epoch = p.view.admission->hello.gateway_epoch; h.snapshot_version = p.desired;

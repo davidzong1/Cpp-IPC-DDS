@@ -28,7 +28,7 @@ struct OutboxUsage
 class OutboxSender
 {
   public:
-    OutboxSender(const WelcomeBody &, std::uint64_t session, std::uint64_t epoch);
+    OutboxSender(const WelcomeBody &, std::uint64_t session, std::uint64_t epoch, NetMetrics* metrics = nullptr);
     ~OutboxSender();
     int event_fd() const;
     void ready();
@@ -50,7 +50,7 @@ class SendAccount;
 class SendBudget
 {
   public:
-    SendBudget(CreditCounters global_limit, CreditCounters session_limit);
+    SendBudget(CreditCounters global_limit, CreditCounters session_limit, std::shared_ptr<NetMetrics> metrics = {});
     std::shared_ptr<SendAccount> open(CreditCounters initial);
     CreditCounters occupied() const;
     CreditCounters inflight() const;
@@ -74,6 +74,7 @@ class SendAccount
 
   private:
     friend class SendBudget;
+    friend class OutboxReceiver;
     explicit SendAccount(std::shared_ptr<SendBudget::Impl>);
     std::shared_ptr<SendBudget::Impl> pool_;
     CreditCounters granted_, used_, inflight_;
@@ -91,6 +92,7 @@ struct OutboxRecord
     OutboxHeader header;
     WireBlob blob;
     CreditCounters network_cost;
+    std::uint64_t pulled_ns = 0;
 
   private:
     friend class OutboxReceiver;

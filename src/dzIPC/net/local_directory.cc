@@ -53,14 +53,15 @@ std::shared_ptr<LocalRegistration> LocalDirectory::add(std::uint64_t session, Id
     const auto& limits = impl_->limits;
     auto& history = impl_->used_ids[session];
     if (impl_->handles.count(id) || history.count(id)) throw std::runtime_error("句柄已使用");
-    if (impl_->handles.size() >= limits.handles || history.size() >= limits.session_handles) throw std::runtime_error("登记配额不足");
+    if (impl_->handles.size() >= limits.handles) { impl_->budget->metrics()->reject(NetQuota::handles); throw std::runtime_error("登记配额不足"); }
+    if (history.size() >= limits.session_handles) { impl_->budget->metrics()->reject(NetQuota::session_handles); throw std::runtime_error("登记配额不足"); }
     auto topic = impl_->topics.find(descriptor.key.scope); const bool fresh = topic == impl_->topics.end();
-    if (fresh && impl_->topics.size() >= limits.topics) throw std::runtime_error("话题配额不足");
+    if (fresh && impl_->topics.size() >= limits.topics) { impl_->budget->metrics()->reject(NetQuota::topics); throw std::runtime_error("话题配额不足"); }
     if (!fresh && !compatible_routes(topic->second.binding->descriptor, descriptor)) throw std::runtime_error("话题名称或类型冲突");
     std::uint64_t advertised = 4;
     for (const auto& [scope, value] : impl_->topics) advertised += 52 + value.binding->descriptor.topic.size();
     if (fresh) advertised += 52 + descriptor.topic.size();
-    if (advertised > limits.peer_candidate_bytes || advertised > 8 * kMiB) throw std::runtime_error("目录公告超过容量");
+    if (advertised > limits.peer_candidate_bytes || advertised > 8 * kMiB) { impl_->budget->metrics()->reject(NetQuota::peer_candidate_bytes); throw std::runtime_error("目录公告超过容量"); }
     if (fresh) { Impl::Topic entry; entry.binding = std::make_shared<LocalBinding>(); entry.binding->descriptor = descriptor; topic = impl_->topics.emplace(descriptor.key.scope, std::move(entry)).first; }
     auto& t = topic->second; const auto old_schema = t.binding->descriptor.schema_hash;
     if (!old_schema && descriptor.schema_hash) t.binding->descriptor.schema_hash = descriptor.schema_hash;
@@ -76,7 +77,9 @@ std::shared_ptr<LocalRegistration> LocalDirectory::add(std::uint64_t session, Id
         history.erase(id); t.binding->descriptor.schema_hash = old_schema;
         if (fresh) impl_->topics.erase(topic); throw;
     }
-    return registration;
+    impl_->budget->metrics()->peak(NetQuota::handles, impl_->handles.size());
+    impl_->budget->metrics()->peak(NetQuota::session_handles, history.size());
+    impl_->budget->metrics()->peak(NetQuota::topics, impl_->topics.size()); return registration;
 }
 bool LocalDirectory::set_bridge(const std::shared_ptr<LocalBinding>& binding, std::shared_ptr<ShmWireBridge> bridge) {
     auto i = impl_->topics.find(binding->descriptor.key.scope);

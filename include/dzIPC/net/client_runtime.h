@@ -1,5 +1,6 @@
 #pragma once
 #include "dzIPC/net/local_protocol.h"
+#include "dzIPC/net/metrics.h"
 #include <chrono>
 #include <future>
 #include <memory>
@@ -65,6 +66,8 @@ class ClientRuntime : public std::enable_shared_from_this<ClientRuntime>
     SendResultBody wait_send(const SendTicket &, std::uint64_t deadline_ns);
     SendResultBody cancel_send(const SendTicket &, SendResultCode);
     std::string status();
+    std::string gateway_metrics(unsigned category = 0);
+    NetMetrics& metrics() const;
     void record_publish(SubmitState local, SubmitState network);
     std::string diagnostics_json() const;
     std::string route_status(const RouteKey&, Identity peer = {});

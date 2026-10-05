@@ -61,18 +61,19 @@ struct ReassemblyBudget::Impl : std::enable_shared_from_this<Impl> {
         bool enter_pending() {
             std::lock_guard<std::mutex> lock(pool->mutex);
             if (pending) return true;
-            if (bytes > pool->limits.commit_pending_bytes - pool->used.pending_bytes) { ++pool->used.quota_rejected; return false; }
-            pending = true; pool->used.pending_bytes += bytes; return true;
+            if (bytes > pool->limits.commit_pending_bytes - pool->used.pending_bytes) { ++pool->used.quota_rejected; pool->metrics->reject(NetQuota::commit_pending_bytes); return false; }
+            pending = true; pool->used.pending_bytes += bytes; pool->metrics->peak(NetQuota::commit_pending_bytes, pool->used.pending_bytes); return true;
         }
     };
+    std::shared_ptr<NetMetrics> metrics;
     Limits limits; mutable std::mutex mutex; ReassemblyUsage used;
     std::map<Identity, Peer> peers; std::map<RouteKey, std::uint64_t> routes;
     std::shared_ptr<Claim> stream_claim() {
         auto c = std::make_shared<Claim>(); c->pool = shared_from_this();
         std::lock_guard<std::mutex> lock(mutex);
-        if (used.streams >= limits.streams) { ++used.quota_rejected; return {}; }
+        if (used.streams >= limits.streams) { ++used.quota_rejected; metrics->reject(NetQuota::streams); return {}; }
         c->stream_bytes = 2 * ((limits.stream_window + 63) / 64) * 8; c->stream = true;
-        ++used.streams; used.stream_bytes += c->stream_bytes; return c;
+        ++used.streams; metrics->peak(NetQuota::streams, used.streams); used.stream_bytes += c->stream_bytes; return c;
     }
     std::shared_ptr<Claim> message_claim(const WireHeader& h) {
         auto c = std::make_shared<Claim>(); c->pool = shared_from_this(); c->header = h;
@@ -82,23 +83,34 @@ struct ReassemblyBudget::Impl : std::enable_shared_from_this<Impl> {
         const auto p = peers.find(h.source_id), end = peers.end(); const auto r = routes.find(h.route);
         const auto peer_bytes = p == end ? 0 : p->second.bytes, peer_receipts = p == end ? 0 : p->second.receipts;
         const auto route_bytes = r == routes.end() ? 0 : r->second;
-        if (used.assemblies >= limits.assemblies || c->bytes > limits.reassembly_bytes - used.bytes ||
-            c->bytes > limits.peer_reassembly_bytes - peer_bytes || c->bytes > limits.route_reassembly_bytes - route_bytes ||
-            (reliable && (used.receipts >= limits.receipts || peer_receipts >= limits.peer_receipts))) { ++used.quota_rejected; return {}; }
+        bool rejected = false;
+        const auto check = [&](bool full, NetQuota quota) { if (full) { rejected = true; metrics->reject(quota); } };
+        check(used.assemblies >= limits.assemblies, NetQuota::assemblies);
+        check(c->bytes > limits.reassembly_bytes - used.bytes, NetQuota::reassembly_bytes);
+        check(c->bytes > limits.peer_reassembly_bytes - peer_bytes, NetQuota::peer_reassembly_bytes);
+        check(c->bytes > limits.route_reassembly_bytes - route_bytes, NetQuota::route_reassembly_bytes);
+        check(reliable && used.receipts >= limits.receipts, NetQuota::receipts);
+        check(reliable && peer_receipts >= limits.peer_receipts, NetQuota::peer_receipts);
+        if (rejected) { ++used.quota_rejected; return {}; }
         try { peers.try_emplace(h.source_id); routes.try_emplace(h.route); }
         catch (...) { auto pi = peers.find(h.source_id); if (pi != peers.end() && !pi->second.bytes && !pi->second.receipts) peers.erase(pi); throw; }
         c->buffer = true; c->receipt = reliable;
         ++used.assemblies; used.bytes += c->bytes; used.peak_bytes = std::max(used.peak_bytes, used.bytes); used.bitmap_bytes += c->bitmap;
         peers.at(h.source_id).bytes += c->bytes; routes.at(h.route) += c->bytes;
         if (reliable) { ++used.receipts; ++peers.at(h.source_id).receipts; }
+        metrics->peak(NetQuota::message_bytes, h.message_size);
+        metrics->peak(NetQuota::assemblies, used.assemblies); metrics->peak(NetQuota::reassembly_bytes, used.bytes);
+        metrics->peak(NetQuota::peer_reassembly_bytes, peers.at(h.source_id).bytes); metrics->peak(NetQuota::route_reassembly_bytes, routes.at(h.route));
+        metrics->peak(NetQuota::receipts, used.receipts); metrics->peak(NetQuota::peer_receipts, peers.at(h.source_id).receipts);
         return c;
     }
 };
-ReassemblyBudget::ReassemblyBudget(Limits limits) : impl_(std::make_shared<Impl>()) {
+ReassemblyBudget::ReassemblyBudget(Limits limits, std::shared_ptr<NetMetrics> metrics) : impl_(std::make_shared<Impl>()) {
     if (!limits.stream_window || limits.stream_window > 4096 || !limits.message_bytes || limits.message_bytes > kMaxMessageBytes) throw std::invalid_argument("重组配额无效");
-    impl_->limits = limits;
+    impl_->limits = limits; impl_->metrics = metrics ? std::move(metrics) : std::make_shared<NetMetrics>();
 }
 ReassemblyBudget::~ReassemblyBudget() = default;
+std::shared_ptr<NetMetrics> ReassemblyBudget::metrics() const { return impl_->metrics; }
 ReassemblyUsage ReassemblyBudget::usage() const { std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->used; }
 
 struct ReassemblyShard::Impl {
@@ -150,6 +162,7 @@ struct ReassemblyShard::Impl {
     std::map<Key, Receipt> receipts;
     std::optional<Key> assembly_cursor, receipt_cursor;
     ReassemblyStats stats;
+    NetMetrics& metrics() { return *budget->impl_->metrics; }
     ReceiveFeedback failure(const WireHeader& h, RejectReason reason) { ++stats.rejected; return reject(h, reason); }
     bool authorized(const WireHeader& h, const ReceivedDatagram& packet, const ReceiveAdmission& a) const {
         if (!a.peer || !a.peer->active.load() || a.peer->hello.gateway_id != h.source_id || a.peer->hello.gateway_epoch != h.source_epoch || a.peer->ipv4 != packet.source.host || !a.peer->hello.data_shards || a.peer->hello.data_shards > 16) return false;
@@ -165,6 +178,11 @@ struct ReassemblyShard::Impl {
     void expire_receipt(std::map<Key, Receipt>::iterator i) { i->second.claim->release_receipt(); receipts.erase(i); }
     ReceiveFeedback terminate(std::map<Key, Assembly>::iterator it, Terminal state, RejectReason reason, std::uint64_t now) {
         const auto h = it->second.header; streams.at(it->first.stream).mark(h.sequence, state);
+        if (state == Terminal::Committed) {
+            auto& route = it->second.admission.subscriber->metrics;
+            route.commits.fetch_add(1, std::memory_order_relaxed);
+            metrics().add(NetMetric::shm_committed_bytes, h.message_size);
+        }
         if (auto receipt = receipts.find(it->first); receipt != receipts.end()) { receipt->second.state = state; receipt->second.reason = reason; receipt->second.last_reply = now; }
         // 先释放 buffer，再归还其容量；可靠回执另持同一 claim 的回执部分。
         auto claim = it->second.claim; assemblies.erase(it); claim->release_buffer();
@@ -173,16 +191,20 @@ struct ReassemblyShard::Impl {
     }
     ReceiveFeedback ingest(const ReceivedDatagram& packet, const ReceiveAdmission& admission, std::uint64_t now) {
         WireHeader h; ByteView payload;
-        if (packet.status != IoStatus::Data || packet.size > packet.bytes.size() || !decode_packet(packet.view(), h, payload, budget->impl_->limits.message_bytes) || h.kind != PacketKind::Data) { ++stats.malformed; return {}; }
-        if (h.target_id != local || h.target_epoch != epoch || !authorized(h, packet, admission)) return {};
+        if (packet.status != IoStatus::Data || packet.size > packet.bytes.size()) { ++stats.malformed; metrics().add(NetMetric::bad_header); return {}; }
+        const auto decoded = decode_packet(packet.view(), h, payload, budget->impl_->limits.message_bytes);
+        if (!decoded) { ++stats.malformed; record_protocol_error(metrics(), decoded.code); return {}; }
+        if (h.kind != PacketKind::Data) { ++stats.malformed; metrics().add(NetMetric::bad_header); return {}; }
+        if (h.target_id != local || h.target_epoch != epoch) { metrics().add(NetMetric::foreign_route); return {}; }
+        if (!authorized(h, packet, admission)) { metrics().add(NetMetric::source_route_unverified); return {}; }
         if (route_hash(h.route) % shards != shard) { ++stats.wrong_shard; return {}; }
-        if (!route_valid(h, admission)) return failure(h, RejectReason::UnknownRoute);
+        if (!route_valid(h, admission)) { metrics().add(NetMetric::source_route_unverified); return failure(h, RejectReason::UnknownRoute); }
         const auto key = key_of(h);
         auto receipt = receipts.find(key);
         if (receipt != receipts.end() && now >= receipt->second.expires) { expire_receipt(receipt); receipt = receipts.end(); }
         if (receipt != receipts.end() && receipt->second.state != Terminal::Unknown) {
             if (!same_message(receipt->second.header, h)) return failure(h, RejectReason::BadMetadata);
-            ++stats.duplicates;
+            ++stats.duplicates; metrics().add(NetMetric::duplicate_message_suppressed);
             if (now < after(receipt->second.last_reply, nack_interval)) return {ReceiveDisposition::Duplicate, h, {}};
             receipt->second.last_reply = now;
             return receipt->second.state == Terminal::Committed ? feedback(h, ReceiveDisposition::Duplicate, PacketKind::Ack) : reject(h, receipt->second.reason);
@@ -190,18 +212,19 @@ struct ReassemblyShard::Impl {
         auto existing = assemblies.find(key);
         if (existing != assemblies.end()) {
             auto& assembly = existing->second;
-            if (now >= assembly.deadline) return terminate(existing, Terminal::Rejected, RejectReason::ShmUnavailable, now);
+            if (now >= assembly.deadline) { metrics().add(NetMetric::assembly_timeout); return terminate(existing, Terminal::Rejected, RejectReason::ShmUnavailable, now); }
             if (!same_message(h, assembly.header)) {
+                metrics().add(NetMetric::conflicting_fragment);
                 if (assembly.stage == Stage::Pending) return failure(h, RejectReason::BadMetadata);
                 return terminate(existing, Terminal::Rejected, RejectReason::BadMetadata, now);
             }
             if (assembly.stage == Stage::Pending) {
-                if (std::memcmp(assembly.blob.view().data + std::size_t(h.fragment_index) * 1024, payload.data, payload.size)) return failure(h, RejectReason::BadMetadata);
-                ++stats.duplicates; return {ReceiveDisposition::Duplicate, h, {}};
+                if (std::memcmp(assembly.blob.view().data + std::size_t(h.fragment_index) * 1024, payload.data, payload.size)) { metrics().add(NetMetric::conflicting_fragment); return failure(h, RejectReason::BadMetadata); }
+                ++stats.duplicates; metrics().add(NetMetric::duplicate_fragment); return {ReceiveDisposition::Duplicate, h, {}};
             }
         } else {
             auto stream = streams.find(key.stream);
-            if (stream != streams.end() && stream->second.state(h.sequence) != Terminal::Unknown) { ++stats.duplicates; return h.delivery == Delivery::Reliable ? reject(h, RejectReason::ShmUnavailable) : ReceiveFeedback{ReceiveDisposition::Duplicate, h, {}}; }
+            if (stream != streams.end() && stream->second.state(h.sequence) != Terminal::Unknown) { ++stats.duplicates; metrics().add(NetMetric::duplicate_message_suppressed); return h.delivery == Delivery::Reliable ? reject(h, RejectReason::ShmUnavailable) : ReceiveFeedback{ReceiveDisposition::Duplicate, h, {}}; }
             bool inserted_stream = false, inserted_receipt = false;
             try {
                 std::shared_ptr<Pool::Claim> stream_claim;
@@ -222,9 +245,10 @@ struct ReassemblyShard::Impl {
         auto& a = existing->second; const auto bit = 1ull << (h.fragment_index % 64); const auto word = h.fragment_index / 64;
         const auto offset = std::size_t(h.fragment_index) * 1024;
         if (a.bits[word] & bit) {
-            if (std::memcmp(a.storage.get() + offset, payload.data, payload.size)) return terminate(existing, Terminal::Rejected, RejectReason::BadMetadata, now);
-            ++stats.duplicates; return {ReceiveDisposition::Duplicate, h, {}};
+            if (std::memcmp(a.storage.get() + offset, payload.data, payload.size)) { metrics().add(NetMetric::conflicting_fragment); return terminate(existing, Terminal::Rejected, RejectReason::BadMetadata, now); }
+            ++stats.duplicates; metrics().add(NetMetric::duplicate_fragment); return {ReceiveDisposition::Duplicate, h, {}};
         }
+        metrics().add(NetMetric::reassembly_copy_bytes, payload.size); a.admission.subscriber->metrics.rx_bytes.fetch_add(payload.size, std::memory_order_relaxed);
         std::memcpy(a.storage.get() + offset, payload.data, payload.size); a.bits[word] |= bit; ++a.count; a.progress = now;
         if (a.count != h.fragment_count) return {ReceiveDisposition::Accepted, h, {}};
         if (crc32c({a.storage.get(), h.message_size}) != h.message_crc) { ++stats.message_crc_fail; return terminate(existing, Terminal::Rejected, RejectReason::BadMetadata, now); }
@@ -238,11 +262,11 @@ struct ReassemblyShard::Impl {
         for (std::size_t n = 0; n < count && !assemblies.empty(); ++n) {
             auto i = assembly_cursor ? assemblies.upper_bound(*assembly_cursor) : assemblies.begin(); if (i == assemblies.end()) i = assemblies.begin(); assembly_cursor = i->first;
             auto& a = i->second;
-            if (now >= a.deadline || (a.header.delivery == Delivery::BestEffort && a.stage == Stage::Collecting && now >= after(a.progress, best_effort_idle_ns)) || !a.admission.peer->active.load() || !a.admission.subscriber->active.load() || !a.admission.publisher->active.load() || !a.admission.subscriber->subscriber_active.load() || !a.admission.publisher->publisher_active.load()) { ++stats.expired; output.push_back(terminate(i, Terminal::Rejected, RejectReason::ShmUnavailable, now)); continue; }
+            if (now >= a.deadline || (a.header.delivery == Delivery::BestEffort && a.stage == Stage::Collecting && now >= after(a.progress, best_effort_idle_ns)) || !a.admission.peer->active.load() || !a.admission.subscriber->active.load() || !a.admission.publisher->active.load() || !a.admission.subscriber->subscriber_active.load() || !a.admission.publisher->publisher_active.load()) { metrics().add(route_valid(a.header, a.admission) && a.admission.peer->active.load() ? NetMetric::assembly_timeout : NetMetric::assembly_revoked); ++stats.expired; output.push_back(terminate(i, Terminal::Rejected, RejectReason::ShmUnavailable, now)); continue; }
             if (a.stage == Stage::Pending) {
                 if (now < a.next_commit) continue;
                 ++stats.commit_attempts; SubmitState result;
-                try { result = commit(a.header, a.blob); } catch (...) { result = SubmitState::Indeterminate; }
+                try { MetricTimer timer(&metrics(), NetStage::RemoteCommit); result = commit(a.header, a.blob); } catch (...) { result = SubmitState::Indeterminate; }
                 if (result == SubmitState::Indeterminate) ++stats.commit_indeterminate;
                 else if (result != SubmitState::Committed) ++stats.commit_not_submitted;
                 if (result == SubmitState::Committed) output.push_back(terminate(i, Terminal::Committed, RejectReason::ShmUnavailable, now));
@@ -266,7 +290,7 @@ struct ReassemblyShard::Impl {
     }
     template<class Predicate> void retire(Predicate predicate) {
         for (auto i = assemblies.begin(); i != assemblies.end();) {
-            if (predicate(i->first.stream)) { auto claim = i->second.claim; i = assemblies.erase(i); claim->release_buffer(); } else ++i;
+            if (predicate(i->first.stream)) { metrics().add(NetMetric::assembly_revoked); auto claim = i->second.claim; i = assemblies.erase(i); claim->release_buffer(); } else ++i;
         }
         for (auto i = receipts.begin(); i != receipts.end();) { if (predicate(i->first.stream)) { auto old = i++; expire_receipt(old); } else ++i; }
         for (auto i = streams.begin(); i != streams.end();) if (predicate(i->first)) i = streams.erase(i); else ++i;
