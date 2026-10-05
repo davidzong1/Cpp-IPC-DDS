@@ -32,7 +32,7 @@ def decode(row, complete):
         stages['recv_return_to_api_return'] = read - received
     if sum(stages.values()) != elapsed:
         raise ValueError('分段和不等于同条消息端到端耗时')
-    return {'elapsed_ns': elapsed, 'stages': stages, 'recv_call_ns': call, 'recv_overlaps_publish': overlap}
+    return {'elapsed_ns': elapsed, 'stages': stages, 'recv_call_ns': call, 'recv_overlaps_publish': overlap, 'assisted': row.get('assisted', 0)}
 
 
 def summarize(rows, complete):
@@ -43,6 +43,7 @@ def summarize(rows, complete):
     sums = {key: sum(record['stages'][key] for record in slow) for key in records[0]['stages']}
     total = sum(record['elapsed_ns'] for record in slow)
     return {'count': len(records), 'complete_trace': complete,
+            'assisted_count': sum(record['assisted'] for record in records),
             'end_to_end': quantiles([record['elapsed_ns'] for record in records]),
             'stages': {key: quantiles([record['stages'][key] for record in records]) for key in sums},
             'recv_call': quantiles([record['recv_call_ns'] for record in records if record['recv_call_ns'] is not None]),

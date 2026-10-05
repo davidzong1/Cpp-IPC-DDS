@@ -74,6 +74,9 @@ enum class SeamPoint : int
     kBeforeRecv            = 2,
     kBeforeViewEnqueue     = 3,
     kAfterViewDequeue      = 4,
+    kCallerAssistedReceive = 5, // 调用线程完成一次非阻塞协作接收；不携带借用字节。
+    kBeforeWorkerReceive   = 6, // 协作模式worker取消费锁之前；无lease，可供测试暂停。
+    kBeforeCallerWait      = 7, // 调用线程即将阻塞；可能持有lease，钩子不得阻塞。
 
     /* ---- 析构 (shm_sub_ipc::~shm_sub_ipc, 说明 §5 的八步) ---- */
     kDtorAfterUnregister    = 16,   /* §5 第 1 步: LocalPubSubRegistry 已注销 */

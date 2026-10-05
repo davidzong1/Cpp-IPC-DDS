@@ -43,6 +43,7 @@ def host(args):
     env = dict(os.environ, DZIPC_SHM_MPMC='1', DZIPC_SHM_RECV_WORKERS='1',
                DZIPC_NET_BACKEND='shared_v1' if args.mode == 'shared_v1' else 'legacy')
     env['DZIPC_TEST_RECEIVE_TRACE'] = '1' if args.receive_trace else '0'
+    env['DZIPC_SHARED_RECV_ASSIST'] = args.receive_assist
     processes = []
     gateway = None
     with tempfile.TemporaryDirectory(prefix='dzipc-bench-') as control_dir:
@@ -128,10 +129,10 @@ def host(args):
                 'cpu_seconds': [b['cpu_seconds']-a['cpu_seconds'] for a,b in zip(before,after)],
                 'gateway_metrics': gateway_metrics, 'shm_peak_sample_bytes': peak_shm, 'idle_gateway': idle, 'idle_status': status,
                 'stage_window': '应用直方图含2秒预热，网关指标为进程累计；精确端到端CSV仅正式窗口',
-                'environment': {'DZIPC_SHM_MPMC': '1', 'DZIPC_SHM_RECV_WORKERS': '1', 'receive_trace': args.receive_trace, 'nodelet': False, 'wire': 'prebuilt StdImage DZFlat'}}
+                'environment': {'DZIPC_SHM_MPMC': '1', 'DZIPC_SHM_RECV_WORKERS': '1', 'DZIPC_SHARED_RECV_ASSIST': args.receive_assist, 'receive_trace': args.receive_trace, 'nodelet': False, 'wire': 'prebuilt StdImage DZFlat'}}
             (directory/'result.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2)+'\n')
-            assert result['accepted'] > 0 and all(x['count'] > 0 for x in receiver_stats), evidence
-            assert all(not x['duplicates'] and not x['invalid'] for x in receiver_stats), evidence
+            assert result['accepted'] == args.seconds * args.rate and result['rejected'] == 0, evidence
+            assert all(x['count'] == result['accepted'] and not x['lost'] and not x['duplicates'] and not x['invalid'] for x in receiver_stats), evidence
             if args.receive_trace:
                 assert all(not x['trace_overflow'] and not x['trace_missing_or_unordered'] for x in receiver_stats), evidence
             assert all(x['udp'] == 0 for x in after[:len(processes)]), evidence
@@ -152,6 +153,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--host', action='store_true')
     parser.add_argument('--receive-trace', action='store_true', help='开启接收缝分段诊断；不是无观测成本的正式验收')
+    parser.add_argument('--receive-assist', choices=('0', '1'), default='1', help='共享后端调用线程协作接收开关；0用于同库回退对照')
     parser.add_argument('--affinity', help='可选JSON：publisher/gateway CPU及subscribers CPU列表；两模式必须一致')
     parser.add_argument('--binary', required=True)
     parser.add_argument('--gateway', required=True)

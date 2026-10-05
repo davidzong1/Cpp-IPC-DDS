@@ -1,6 +1,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -46,12 +47,41 @@ bool require_backend(ipc::recv_wait_set& set, const ipc::recv_wait_token& token)
 }
 }  // namespace
 
+TEST(RecvWaitChange, SnapshotClosesNotificationBeforeSleepAndPreservesDeadline)
+{
+    if (!ipc::recv_wait_change_supported()) GTEST_SKIP();
+    std::atomic<std::uint32_t> signal{1};
+    EXPECT_EQ(ipc::recv_wait_change({}, 0, signal, 0, 1000000000), ipc::recv_wait_result::changed);
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_EQ(ipc::recv_wait_change({}, 0, signal, 1, 20000000), ipc::recv_wait_result::timeout);
+    EXPECT_GE(std::chrono::steady_clock::now() - start, 15ms);
+}
+
+TEST(RecvWaitChange, BothSharedDataAndLocalCancellationWakeBlockedCaller)
+{
+    if (!ipc::recv_wait_change_supported()) GTEST_SKIP();
+    RoutePair pair{"dual_wait"}; std::atomic<std::uint32_t> signal{0};
+    const auto token = pair.sub->read_wait_token(); ASSERT_TRUE(token.valid());
+    for (bool cancel : {false, true}) {
+        const auto seq = token.sequence()->load(); const auto local = signal.load();
+        auto blocked = std::async(std::launch::async, [&] {
+            return ipc::recv_wait_change(token, seq, signal, local, 1000000000);
+        });
+        EXPECT_EQ(blocked.wait_for(10ms), std::future_status::timeout);
+        if (cancel) { ++signal; ipc::recv_wait_set_wake(&signal); }
+        else ASSERT_TRUE(pair.pub->try_send("wake", sizeof("wake"), 100));
+        EXPECT_EQ(blocked.wait_for(500ms), std::future_status::ready);
+        EXPECT_EQ(blocked.get(), ipc::recv_wait_result::changed);
+        if (!cancel) EXPECT_FALSE(pair.sub->recv(0).empty());
+    }
+}
+
 TEST(RecvWaitSet, OneRouteMessageProducesOneReadyToken)
 {
     RoutePair pair{"one"};
     ipc::recv_wait_set set;
     if (!require_backend(set, pair.sub->read_wait_token())) { GTEST_SKIP(); return; }
-    ASSERT_TRUE(pair.pub->try_send("hello", 100));
+    ASSERT_TRUE(pair.pub->try_send("hello", sizeof("hello"), 100));
     ASSERT_TRUE(set.wait(1000ms));
     const auto ready = set.consume_ready();
     ASSERT_EQ(ready.size(), 1u);
@@ -66,8 +96,8 @@ TEST(RecvWaitSet, AllChangedRoutesAreLevelTriggered)
     ipc::recv_wait_set set;
     if (!require_backend(set, first.sub->read_wait_token())) { GTEST_SKIP(); return; }
     ASSERT_TRUE(set.add(second.sub->read_wait_token()));
-    ASSERT_TRUE(first.pub->try_send("a", 100));
-    ASSERT_TRUE(second.pub->try_send("b", 100));
+    ASSERT_TRUE(first.pub->try_send("a", sizeof("a"), 100));
+    ASSERT_TRUE(second.pub->try_send("b", sizeof("b"), 100));
     ASSERT_TRUE(set.wait(1000ms));
     const auto ready = set.consume_ready();
     ASSERT_EQ(ready.size(), 2u);
@@ -80,7 +110,7 @@ TEST(RecvWaitSet, SequenceAlreadyChangedDoesNotSleep)
     RoutePair pair{"prescan"};
     ipc::recv_wait_set set;
     if (!require_backend(set, pair.sub->read_wait_token())) { GTEST_SKIP(); return; }
-    ASSERT_TRUE(pair.pub->try_send("ready", 100));
+    ASSERT_TRUE(pair.pub->try_send("ready", sizeof("ready"), 100));
     const auto begin = std::chrono::steady_clock::now();
     ASSERT_TRUE(set.wait(1000ms));
     EXPECT_LT(std::chrono::steady_clock::now() - begin, 200ms);
@@ -147,7 +177,7 @@ TEST(RecvWaitSet, CapacityIsBounded)
         EXPECT_EQ(added, i < capacity);
     }
     ASSERT_TRUE(routes.back() != nullptr);
-    ASSERT_TRUE(routes.front()->pub->try_send("at-capacity", 100));
+    ASSERT_TRUE(routes.front()->pub->try_send("at-capacity", sizeof("at-capacity"), 100));
     ASSERT_TRUE(set.wait(1000ms));
     const auto ready = set.consume_ready();
     ASSERT_EQ(ready.size(), 1u);
@@ -188,7 +218,7 @@ TEST(RecvWaitSet, PublisherInAnotherProcessWakesWaiter)
     char ready = 0;
     ASSERT_EQ(::read(ready_pipe[0], &ready, 1), 1);
     ASSERT_EQ(ready, 'R');
-    ASSERT_TRUE(pair.pub->try_send("cross-process", 500));
+    ASSERT_TRUE(pair.pub->try_send("cross-process", sizeof("cross-process"), 500));
     int status = 0;
     ASSERT_EQ(::waitpid(child, &status, 0), child);
     EXPECT_TRUE(WIFEXITED(status));

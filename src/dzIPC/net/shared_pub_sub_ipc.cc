@@ -111,7 +111,9 @@ struct Subscriber::Impl {
         const auto generation = net::codec::get(reply.body.data() + 16, 4);
         next->reader = std::make_unique<shm::shm_sub_ipc>(model, topic, domain, queue_size, verbose, qos, cpu, priority);
         next->reader->set_internal(true);
-        next->reader->enable_cancellable_wait(); next->reader->InitChannel(extra);
+        next->reader->enable_cancellable_wait();
+        if (net::process_config().receive_assist) next->reader->enable_receive_assist();
+        next->reader->InitChannel(extra);
         const auto deadline = net::local::monotonic_ns() + 2000000000ull;
         while (next->reader->connected_generation() != generation) {
             if (!next->client->healthy() || net::local::monotonic_ns() >= deadline) throw std::runtime_error("共享订阅 SHM generation 未连接");

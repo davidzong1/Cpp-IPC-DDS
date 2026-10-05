@@ -1,6 +1,130 @@
 #include "shared_net/public_fixture.h"
+#include "dzIPC/detail/shm_sub_seam.h"
 #include "gtest/gtest.h"
 using namespace shared_net_test;
+namespace {
+struct AssistGate {
+    static AssistGate* current;
+    static thread_local int slot;
+    std::atomic<bool> armed{false}, blocked{false}, release{false};
+    std::atomic<unsigned> assisted{0}, enqueued{0};
+    std::array<std::atomic<bool>, 4> waiting{};
+    AssistGate() {
+        current = this;
+        dzIPC::detail::SetSeamHook([](const dzIPC::detail::SeamEvent& event) {
+            auto* gate = current;
+            if (event.point == dzIPC::detail::SeamPoint::kCallerAssistedReceive) ++gate->assisted;
+            if (event.point == dzIPC::detail::SeamPoint::kBeforeViewEnqueue) ++gate->enqueued;
+            if (event.point == dzIPC::detail::SeamPoint::kBeforeCallerWait && slot >= 0) gate->waiting[slot].store(true);
+            if (event.point == dzIPC::detail::SeamPoint::kBeforeWorkerReceive && gate->armed.load()) {
+                gate->blocked.store(true);
+                const auto end = std::chrono::steady_clock::now() + 2s;
+                while (!gate->release.load() && std::chrono::steady_clock::now() < end) std::this_thread::sleep_for(1ms);
+            }
+        });
+    }
+    ~AssistGate() { release.store(true); dzIPC::detail::SetSeamHook(nullptr); }
+};
+AssistGate* AssistGate::current = nullptr;
+thread_local int AssistGate::slot = -1;
+}
+
+TEST(SharedNetPublicApi, CallerReceivesWhileWorkerIsPausedBeforeConsumeLock) {
+    PublicFixture f; AssistGate gate;
+    dzIPC::shared_net::Subscriber sub(f.model(), f.topic.descriptor.topic, 0, 8); sub.InitChannel();
+    dzIPC::shared_net::Publisher pub(f.model(), f.topic.descriptor.topic, 0); pub.InitChannel();
+    gate.armed.store(true);
+    ASSERT_TRUE(pub.publish(f.message()));
+    ASSERT_TRUE(until([&] { return gate.blocked.load(); }));
+    dzIPC::Sample sample;
+    EXPECT_TRUE(sub.get(sample, 100));
+    EXPECT_GT(gate.assisted.load(), 0u);
+    gate.release.store(true);
+    ASSERT_TRUE(sample.valid());
+    EXPECT_EQ(sample.view<dzIPC::Msg::StdImageFlat>().data().size(), 64u);
+    EXPECT_FALSE(sub.try_get(sample));
+}
+
+TEST(SharedNetPublicApi, BackgroundBufferAndEvictionRemainActiveWithoutGetters) {
+    PublicFixture f; AssistGate gate;
+    dzIPC::shared_net::Subscriber sub(f.model(), f.topic.descriptor.topic, 0, 2); sub.InitChannel();
+    dzIPC::shared_net::Publisher pub(f.model(), f.topic.descriptor.topic, 0); pub.InitChannel();
+    for (unsigned i = 0; i < 6; ++i) {
+        auto message = f.message(); message->data[0] = i;
+        ASSERT_TRUE(pub.publish(message));
+        ASSERT_TRUE(until([&] { return gate.enqueued.load() >= i + 1; }));
+    }
+    // 等最后一次push完成，入队前打点本身不能当成队列提交屏障。
+    std::this_thread::sleep_for(5ms);
+    EXPECT_EQ(gate.assisted.load(), 0u);
+    for (unsigned expected : {4u, 5u}) {
+        dzIPC::Sample sample; ASSERT_TRUE(sub.get(sample, 1000));
+        EXPECT_EQ(sample.view<dzIPC::Msg::StdImageFlat>().data()[0], expected);
+    }
+    dzIPC::Sample sample; EXPECT_FALSE(sub.try_get(sample));
+}
+
+TEST(SharedNetPublicApi, ConcurrentGettersDeliverEachSequenceOnceAndCancelInfiniteWait) {
+    PublicFixture f; AssistGate gate;
+    dzIPC::shared_net::Subscriber sub(f.model(), f.topic.descriptor.topic, 0, 8); sub.InitChannel();
+    dzIPC::shared_net::Publisher pub(f.model(), f.topic.descriptor.topic, 0); pub.InitChannel();
+    constexpr unsigned count = 200;
+    std::array<std::atomic<unsigned>, count> seen{};
+    std::atomic<unsigned> received{0}, entered{0}, bad{0}; std::atomic<bool> done{false}; std::vector<std::future<void>> readers;
+    for (unsigned i = 0; i < 4; ++i) readers.push_back(std::async(std::launch::async, [&] {
+        ++entered;
+        while (!done.load()) {
+            dzIPC::Sample sample;
+            if (!sub.get(sample, 50)) continue;
+            auto view = sample.view<dzIPC::Msg::StdImageFlat>();
+            if (!view.valid() || !view.data().size() || view.data()[0] >= count) { ++bad; continue; }
+            ++seen[view.data()[0]]; ++received;
+        }
+    }));
+    EXPECT_TRUE(until([&] { return entered.load() == 4; }));
+    bool sent = true;
+    for (unsigned i = 0; i < count; ++i) {
+        auto message = f.message(); message->data[0] = i;
+        if (!pub.publish(message) || !until([&] { return received.load() >= i + 1; })) { sent = false; break; }
+    }
+    done.store(true);
+    for (auto& reader : readers) { EXPECT_EQ(reader.wait_for(500ms), std::future_status::ready); reader.get(); }
+    EXPECT_TRUE(sent); EXPECT_EQ(bad.load(), 0u); EXPECT_EQ(received.load(), count);
+    for (auto& value : seen) EXPECT_EQ(value.load(), 1u);
+    std::vector<std::future<bool>> infinite;
+    for (unsigned i = 0; i < 4; ++i) infinite.push_back(std::async(std::launch::async, [&, i] {
+        AssistGate::slot = i; dzIPC::Sample sample; return sub.get(sample, UINT64_MAX);
+    }));
+    EXPECT_TRUE(until([&] { return std::all_of(gate.waiting.begin(), gate.waiting.end(), [](const auto& flag) { return flag.load(); }); }));
+    sub.reset_message(f.model());
+    for (auto& reader : infinite) { EXPECT_EQ(reader.wait_for(500ms), std::future_status::ready); EXPECT_FALSE(reader.get()); }
+    ASSERT_TRUE(pub.publish(f.message())); dzIPC::Sample sample; EXPECT_TRUE(sub.get(sample, 1000));
+}
+
+TEST(SharedNetPublicApi, WaitingLeaseReleasesAcrossUnderlyingShmGenerationRebuild) {
+    PublicFixture f; AssistGate gate;
+    dzIPC::shm::shm_sub_ipc sub(f.model(), f.topic.descriptor.topic, 0, 8);
+    sub.enable_cancellable_wait(); ASSERT_TRUE(sub.enable_receive_assist()); sub.InitChannel();
+    dzIPC::shm::shm_pub_ipc pub(f.model(), f.topic.descriptor.topic, 0); pub.InitChannel();
+    ASSERT_TRUE(until([&] { return sub.connected_generation() != 0; }));
+    const auto old_generation = sub.connected_generation();
+    auto reading = std::async(std::launch::async, [&] {
+        AssistGate::slot = 0; dzIPC::Sample sample; return sub.get_cancellable(sample, 2000) && sample.valid();
+    });
+    EXPECT_TRUE(until([&] { return gate.waiting[0].load(); }));
+    dzIPC::control_plane_shm::TopicControlPlane control;
+    const bool opened = control.open(shm_topic_mpmc_control_name(f.topic.descriptor.topic, 0));
+    EXPECT_TRUE(opened);
+    if (opened) {
+        const auto next_generation = control.begin_rebuild(); control.set_ready();
+        EXPECT_GT(next_generation, old_generation);
+        EXPECT_TRUE(until([&] { return sub.connected_generation() == next_generation; }, 1000ms));
+    }
+    EXPECT_TRUE(pub.publish(f.message()));
+    EXPECT_EQ(reading.wait_for(1000ms), std::future_status::ready);
+    sub.cancel_waits();
+    EXPECT_TRUE(reading.get());
+}
 TEST(SharedNetPublicApi, FactoryCoversPublishVariantsSampleCloneAndWait) {
     PublicFixture f; auto model = f.model();
     dzIPC::pimpl::subscriber_ipc_impl sub(model, f.topic.descriptor.topic, 0, 8, dzIPC::IPCType::Socket); sub.InitChannel();

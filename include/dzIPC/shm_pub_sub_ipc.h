@@ -263,6 +263,7 @@ public:
     ~shm_sub_ipc();
     void set_receive_notifier(std::function<void()> notify);
     void enable_cancellable_wait();
+    bool enable_receive_assist(); // 仅首次InitChannel前调用；共享MPMC内部reader使用。
     void cancel_waits();
     bool get_cancellable(Sample&, std::uint64_t timeout_ms);
     bool get_clone_cancellable(std::shared_ptr<TopicData>&, std::uint64_t timeout_ms);

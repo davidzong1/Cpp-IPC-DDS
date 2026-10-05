@@ -174,6 +174,9 @@
  *   · 兼容线程启动前 try_claim_recv(compat_thread)；退出后 release_recv()；
  *   · add_route() 只在 try_claim_recv(worker) 成功时接管，否则返回 busy；
  *   · remove_route() 第 6 步把 owner 归还 none，之后兼容线程才允许重新接管。
+ * shared_v1的MPMC宿主另有显式协作模式：owner仍为worker，getter与worker使用同一
+ * 宿主消费锁串行执行完整recv→入队。getter不进入池的route表、不改变固定worker归属；
+ * 宿主stop_and_wake拒绝新lease，wait_quiescent还须覆盖getter的等待/接收lease。
  *
  * ================== 能力探测与显式回退（禁止忙轮询）==================
  * 平台探测**只做一次**并缓存（Linux: futex_waitv；由 ipc::recv_wait_set 内部完成，

@@ -182,6 +182,13 @@ public:
         cv_.notify_all();
     }
 
+    // 等待token前复核：若stop的通知已早于序号快照，不能再持旧lease入睡。
+    bool receive_current(const ReceiveLease& lease) const
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return !stopping_ && !rebuilding_ && route_ == lease.route && generation_ == lease.generation;
+    }
+
     void begin_rebuild(uint32_t new_generation,
                        const std::function<std::shared_ptr<Channel>()>& create)
     {

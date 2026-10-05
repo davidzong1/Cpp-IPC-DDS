@@ -105,6 +105,39 @@ void recv_wait_set_wake(const std::atomic<std::uint32_t>* seq, void* wake_handle
 #endif
 }
 
+bool recv_wait_change_supported() noexcept {
+#if defined(__linux__)
+    return backend_supported();
+#else
+    return false;
+#endif
+}
+
+recv_wait_result recv_wait_change(const recv_wait_token& token, std::uint32_t expected,
+    const std::atomic<std::uint32_t>& signal, std::uint32_t signal_expected,
+    std::uint64_t timeout_ns) noexcept {
+#if defined(__linux__)
+    if (!backend_supported()) return recv_wait_result::unavailable;
+    futex_waitv_abi slots[2]{}; unsigned count = 0;
+    if (token.valid()) slots[count++] = {expected, reinterpret_cast<std::uint64_t>(token.sequence()), kFutex32, 0};
+    slots[count++] = {signal_expected, reinterpret_cast<std::uint64_t>(&signal), kFutex32, 0};
+    timespec end{}, *deadline = nullptr;
+    if (timeout_ns != UINT64_MAX) {
+        if (::clock_gettime(CLOCK_MONOTONIC, &end)) return recv_wait_result::unavailable;
+        end.tv_sec += timeout_ns / 1000000000ull;
+        end.tv_nsec += timeout_ns % 1000000000ull;
+        if (end.tv_nsec >= 1000000000L) { ++end.tv_sec; end.tv_nsec -= 1000000000L; }
+        deadline = &end;
+    }
+    const auto result = ::syscall(kFutexWaitvSyscall, slots, count, 0, deadline, CLOCK_MONOTONIC);
+    if (result >= 0 || errno == EAGAIN || errno == EINTR) return recv_wait_result::changed;
+    return errno == ETIMEDOUT ? recv_wait_result::timeout : recv_wait_result::unavailable;
+#else
+    (void)token; (void)expected; (void)signal; (void)signal_expected; (void)timeout_ns;
+    return recv_wait_result::unavailable;
+#endif
+}
+
 recv_wait_set::recv_wait_set() : impl_(new impl) {}
 recv_wait_set::~recv_wait_set() { stop(); delete impl_; impl_ = nullptr; }
 

@@ -192,6 +192,12 @@ const ProcessConfig &process_config()
     static const ProcessConfig result = [] {
         ProcessConfig c;
         c.status = parse_backend(std::getenv("DZIPC_NET_BACKEND"), c.backend);
+        if (c.status && c.backend == Backend::SharedV1) {
+            const char* assist = std::getenv("DZIPC_SHARED_RECV_ASSIST");
+            if (assist && std::string(assist) != "0" && std::string(assist) != "1")
+                c.status = fail(ConfigCode::InvalidOption, "DZIPC_SHARED_RECV_ASSIST 仅接受0或1");
+            c.receive_assist = !assist || std::string(assist) == "1";
+        }
         if (const auto *path = std::getenv("DZIPC_GATEWAY_CONTROL"))
             c.control_path = path;
         return c;

@@ -60,6 +60,7 @@ bool shared_net_built() noexcept;
 struct ProcessConfig
 {
     Backend backend = Backend::Legacy;
+    bool receive_assist = true;
     std::string control_path;
     ConfigStatus status;
 };

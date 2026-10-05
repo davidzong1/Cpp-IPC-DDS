@@ -35,6 +35,37 @@ namespace shm {
 using namespace ipc;
 using dzIPC::control_plane_shm::TopicState;
 
+struct SubRecvState
+{
+    // 首次注册前决定；不改变既有SHM对象/Sample布局。只有shared_v1显式启用。
+    bool assist_requested{false};
+    std::atomic<bool> assist_disabled{false}, cancelled{false};
+    std::mutex consume_mutex;
+    alignas(4) std::atomic<std::uint32_t> signal{0};
+    void notify() noexcept {
+        signal.fetch_add(1, std::memory_order_release);
+        ipc::recv_wait_set_wake(&signal);
+    }
+    /* route key = **数据段名**（稳定量，见 name_operator.h）+ domain_id。
+     * ⛔ **不得**把 generation 拼进来 —— 那会让每次重建换 worker，破坏固定归属与
+     * worker 线程内 thread_local 分片缓存亲和（W04 R-17；实测 L9 判据）。 */
+    std::string route_name;
+    std::uint32_t domain_id{0};
+
+    /* 单 route 单消费者（契约 §4.6）：宿主三行 CAS。
+     * worker 注册走 route->try_claim_recv，兼容收包线程走同一个原子量 ⇒ 两路不可能
+     * 同时成功；两路都必须在**所有**出口归还（漏一次 ⇒ 重新 add_route 永久 busy ⇒ 静默丢包）。 */
+    std::atomic<dzIPC::threepools::RecvOwner> owner{dzIPC::threepools::RecvOwner::none};
+
+    /* 注销第 3 步（stop_and_wake）置位：拒绝新的 recv_once。 */
+    std::atomic<bool> stopping{false};
+
+    /* 诊断计数（只增不减；remove_route 之后读是安全的）。 */
+    std::atomic<std::uint64_t> recv_once_calls{0};
+    std::atomic<std::uint64_t> bytes_received{0};
+    std::atomic<std::uint64_t> artifacts{0};
+};
+
 namespace {
 
 /* 单 topic 的接收方上限 = libipc 连接位图的位宽(circ::cc_t = uint32_t)。
@@ -565,9 +596,22 @@ struct SubRecvOutcome
 
 SubRecvOutcome sub_recv_attempt(dzIPC::shm::ShmRouteSession& session,
                                 const std::shared_ptr<SubState>& state,
-                                std::uint64_t wait_ms)
+                                std::uint64_t wait_ms, SubRecvState* arbitration = nullptr,
+                                bool caller = false)
 {
     SubRecvOutcome out;
+    std::unique_lock<std::mutex> consume;
+    if (arbitration && arbitration->assist_requested) {
+        if (caller) {
+            consume = std::unique_lock<std::mutex>(arbitration->consume_mutex, std::try_to_lock);
+            if (!consume.owns_lock() || arbitration->assist_disabled.load() || arbitration->cancelled.load() ||
+                arbitration->stopping.load(std::memory_order_acquire) ||
+                arbitration->owner.load(std::memory_order_acquire) != dzIPC::threepools::RecvOwner::worker) return out;
+        } else {
+            detail::FireSeam({detail::SeamPoint::kBeforeWorkerReceive, 0, nullptr, nullptr, 0});
+            consume = std::unique_lock<std::mutex>(arbitration->consume_mutex);
+        }
+    }
     auto lease = session.acquire_receive();
     if (!lease.has_value())
     {
@@ -606,41 +650,62 @@ SubRecvOutcome sub_recv_attempt(dzIPC::shm::ShmRouteSession& session,
     out.bytes = raw_data.size();
     out.step = SubRecvStep::received;
     process_received_buffer(state, std::move(raw_data));
+    if (caller) detail::FireSeam({detail::SeamPoint::kCallerAssistedReceive, lease->generation, nullptr, nullptr, out.bytes});
     return out;
+}
+
+template<class Message>
+bool assisted_pop(ShmRouteSession& session, const std::shared_ptr<SubState>& state,
+                  const std::shared_ptr<SubRecvState>& arbitration, CircularQueue<Message>& queue,
+                  std::shared_ptr<Message>& out, std::uint64_t timeout) {
+    using Clock = std::chrono::steady_clock;
+    if (!arbitration || !arbitration->assist_requested || arbitration->assist_disabled.load())
+        return queue.pop_cancellable(out, timeout);
+    const auto start = Clock::now();
+    const auto max_ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::time_point::max() - start).count();
+    const auto end = timeout >= static_cast<std::uint64_t>(max_ms) ? Clock::time_point::max() : start + std::chrono::milliseconds(timeout);
+    const auto remaining = [&]() -> std::uint64_t {
+        if (end == Clock::time_point::max()) return UINT64_MAX;
+        const auto now = Clock::now();
+        return now >= end ? 0 : std::chrono::duration_cast<std::chrono::nanoseconds>(end - now).count();
+    };
+    for (;;) {
+        if (arbitration->cancelled.load()) return false;
+        const auto signal = arbitration->signal.load(std::memory_order_acquire);
+        if (queue.try_pop(out)) return true;
+        // lease在等待期间保活token映射；不持消费锁跨wait或控制面操作。
+        auto lease = session.acquire_receive();
+        struct Release { ShmRouteSession& session; bool held; ~Release() { if (held) session.release_receive(); } } release{session, bool(lease)};
+        const auto token = lease ? lease->route->read_wait_token() : ipc::recv_wait_token{};
+        const auto sequence = token.valid() ? token.sequence()->load(std::memory_order_acquire) : 0;
+        if (lease) sub_recv_attempt(session, state, 0, arbitration.get(), true);
+        if (arbitration->cancelled.load()) return false;
+        if (queue.try_pop(out)) return true;
+        if (!timeout || !remaining()) return false;
+        // stop可能发生在序号快照之前；此时必须释放旧lease，不能等待下一次通知。
+        if (lease && !session.receive_current(*lease)) continue;
+        if (arbitration->assist_disabled.load()) break;
+        detail::FireSeam({detail::SeamPoint::kBeforeCallerWait, 0, nullptr, nullptr, 0});
+        const auto result = ipc::recv_wait_change(token, sequence, arbitration->signal, signal, remaining());
+        if (result == ipc::recv_wait_result::timeout) return !arbitration->cancelled.load() && queue.try_pop(out);
+        if (result == ipc::recv_wait_result::unavailable) {
+            arbitration->assist_disabled.store(true);
+            arbitration->notify();
+            break;
+        }
+    }
+    // 后端错误显式停用协作；仍沿用原截止时间与可取消条件变量。
+    const auto left = remaining();
+    return queue.pop_cancellable(out, left == UINT64_MAX ? UINT64_MAX : (left + 999999) / 1000000);
 }
 
 }   // namespace
 
-/* W06：订阅 route 的模块侧独立状态。
- *
- * ⛔ 收包 worker **只**通过 SubRecvRoute 接触它，不持裸 `shm_sub_ipc*`：这是
- * "remove_route 返回后 worker 不再回调已析构对象"的前提（契约 §4.4/§4.5 所有权表）。
- * `route_name`/`domain_id` 在注册期只读、字符串由宿主保活（remove_route 之后才 reset）。 */
-struct SubRecvState
-{
-    /* route key = **数据段名**（稳定量，见 name_operator.h）+ domain_id。
-     * ⛔ **不得**把 generation 拼进来 —— 那会让每次重建换 worker，破坏固定归属与
-     * worker 线程内 thread_local 分片缓存亲和（W04 R-17；实测 L9 判据）。 */
-    std::string route_name;
-    std::uint32_t domain_id{0};
-
-    /* 单 route 单消费者（契约 §4.6）：宿主三行 CAS。
-     * worker 注册走 route->try_claim_recv，兼容收包线程走同一个原子量 ⇒ 两路不可能
-     * 同时成功；两路都必须在**所有**出口归还（漏一次 ⇒ 重新 add_route 永久 busy ⇒ 静默丢包）。 */
-    std::atomic<dzIPC::threepools::RecvOwner> owner{dzIPC::threepools::RecvOwner::none};
-
-    /* 注销第 3 步（stop_and_wake）置位：拒绝新的 recv_once。 */
-    std::atomic<bool> stopping{false};
-
-    /* 诊断计数（只增不减；remove_route 之后读是安全的）。 */
-    std::atomic<std::uint64_t> recv_once_calls{0};
-    std::atomic<std::uint64_t> bytes_received{0};
-    std::atomic<std::uint64_t> artifacts{0};
-};
-
 /* SubRecvRoute：本订阅的**数据段 route** 在共享层里的适配器。
  * 只暴露数据段 route；控制面段（TopicControlPlane）、msg/view 队列、LocalPubSubRegistry
- * 与用户回调**都不进 worker**（裁决 D1 的同一条边界：worker 只做"取一次"）。 */
+ * 与用户回调**都不进 worker**（裁决 D1 的同一条边界：worker 只做"取一次"）。
+ * shared_v1的MPMC getter可在owner=worker期间协作取包；完整recv→入队由同一消费锁
+ * 串行化，wait_quiescent同时覆盖getter的等待lease。worker归属和后台drain不变。 */
 class SubRecvRoute final : public dzIPC::threepools::RecvRouteSource
 {
 public:
@@ -677,7 +742,7 @@ public:
         {
             return 0;
         }
-        const SubRecvOutcome out = sub_recv_attempt(*session_, sub_state_, /*wait_ms=*/0);
+        const SubRecvOutcome out = sub_recv_attempt(*session_, sub_state_, /*wait_ms=*/0, state_.get());
         if (out.step == SubRecvStep::received)
         {
             state_->bytes_received.fetch_add(out.bytes, std::memory_order_relaxed);
@@ -2062,6 +2127,7 @@ void shm_sub_ipc::after_generation_rebuild() noexcept
     try
     {
         start_recv_path();
+        if (recv_state_ && recv_state_->assist_requested) recv_state_->notify();
     }
     catch (const std::exception& e)
     {
@@ -2331,6 +2397,10 @@ void shm_sub_ipc::start_compat_recv_thread()
             std::shared_ptr<ShmRouteSession> alias(&route_session_, [](ShmRouteSession*) {});
             recv_route_ = std::make_shared<SubRecvRoute>(recv_state_, sub_state_, std::move(alias));
         }
+        if (recv_state_->assist_requested) {
+            recv_state_->assist_disabled.store(true);
+            recv_state_->notify();
+        }
         subscribe_thread_ = new std::thread(&shm_sub_ipc::compat_recv_loop, this);
         dzIPC::ThreadDispatch::apply_thread_options(subscribe_thread_, thread_options_, verbose_,
                                                     topic_name_ + "_SubReceiveThread");
@@ -2384,7 +2454,7 @@ void shm_sub_ipc::compat_recv_loop(shm_sub_ipc* self)
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
-        const SubRecvOutcome out = sub_recv_attempt(self->route_session_, self->sub_state_, /*wait_ms=*/50);
+        const SubRecvOutcome out = sub_recv_attempt(self->route_session_, self->sub_state_, /*wait_ms=*/50, state.get());
         if (out.step == SubRecvStep::no_lease)
         {
             /* stopping / rebuilding / 尚无 route：与未握手时同样睡 50ms（阶段 2 说明 §3），
@@ -2651,19 +2721,35 @@ void shm_sub_ipc::enable_cancellable_wait() {
     sub_state_->view_queue->enable_cancellable_wait();
     sub_state_->msg_queue->enable_cancellable_wait();
 }
+bool shm_sub_ipc::enable_receive_assist() {
+    if (!shm_mpmc_enabled() || !ipc::recv_wait_change_supported()) return false;
+    if (!recv_state_) {
+        recv_state_ = std::make_shared<SubRecvState>();
+        recv_state_->route_name = topic_name_;
+        recv_state_->domain_id = static_cast<std::uint32_t>(domain_id_);
+    }
+    recv_state_->assist_requested = true;
+    const std::weak_ptr<SubRecvState> weak = recv_state_;
+    set_receive_notifier([weak] { if (auto state = weak.lock()) state->notify(); });
+    return true;
+}
 void shm_sub_ipc::cancel_waits() {
+    if (recv_state_ && recv_state_->assist_requested) {
+        recv_state_->cancelled.store(true);
+        recv_state_->notify();
+    }
     sub_state_->view_queue->cancel_waits();
     sub_state_->msg_queue->cancel_waits();
 }
 bool shm_sub_ipc::get_cancellable(Sample& out, std::uint64_t timeout) {
     std::shared_ptr<Sample> sample;
-    if (!sub_state_->view_queue->pop_cancellable(sample, timeout) || !sample) return false;
+    if (!assisted_pop(route_session_, sub_state_, recv_state_, *sub_state_->view_queue, sample, timeout) || !sample) return false;
     detail::FireSeam({detail::SeamPoint::kAfterViewDequeue, 0, nullptr, sample->data(), sample->size()});
     out = std::move(*sample); return true;
 }
 bool shm_sub_ipc::get_clone_cancellable(std::shared_ptr<TopicData>& out, std::uint64_t timeout) {
     std::shared_ptr<IpcMsgBase> message;
-    if (!sub_state_->msg_queue->pop_cancellable(message, timeout) || !message) return false;
+    if (!assisted_pop(route_session_, sub_state_, recv_state_, *sub_state_->msg_queue, message, timeout) || !message) return false;
     if (message->dzflat_is_borrowed()) sub_state_->adopt_borrowed.fetch_sub(1, std::memory_order_relaxed);
     out->update(message); return true;
 }

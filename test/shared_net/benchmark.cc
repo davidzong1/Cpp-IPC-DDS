@@ -26,16 +26,19 @@ namespace {
 constexpr std::size_t trace_capacity = 65536;
 struct ReceiveTrace {
     std::atomic<std::uint64_t> begin{0}, received{0}, enqueue{0}, dequeue{0};
+    std::atomic<unsigned> assisted{0};
 };
 std::unique_ptr<ReceiveTrace[]> traces;
 std::atomic<std::uint64_t> trace_overflow{0};
 thread_local std::uint64_t recv_begin = 0;
+thread_local std::uint64_t receive_sequence = UINT64_MAX;
 void receive_trace(const dzIPC::detail::SeamEvent& event) noexcept {
     // 数值属于内部缝的稳定编号，同一源码也能链接尚无2/3/4打点的f066a82。
     const auto point = static_cast<int>(event.point);
+    if (point == 5) { if (receive_sequence < trace_capacity) traces[receive_sequence].assisted.store(1); return; }
     if (point != 0 && point != 2 && point != 3 && point != 4) return;
     const auto stamp = now();
-    if (point == 2) { recv_begin = stamp; return; }
+    if (point == 2) { recv_begin = stamp; receive_sequence = UINT64_MAX; return; }
     if (!event.data || !event.size) return;
     const auto view = dzIPC::Msg::StdImageFlat::view_t::bind(event.data, event.size);
     if (!view.valid() || view.data().size() < 64) return;
@@ -43,7 +46,7 @@ void receive_trace(const dzIPC::detail::SeamEvent& event) noexcept {
     std::memcpy(&sequence, view.data().data() + 8, 8);
     if (sequence >= trace_capacity) { trace_overflow.fetch_add(1, std::memory_order_relaxed); return; }
     auto& trace = traces[sequence];
-    if (point == 0) { trace.begin.store(recv_begin, std::memory_order_relaxed); trace.received.store(stamp, std::memory_order_relaxed); }
+    if (point == 0) { receive_sequence = sequence; trace.begin.store(recv_begin, std::memory_order_relaxed); trace.received.store(stamp, std::memory_order_relaxed); }
     if (point == 3) trace.enqueue.store(stamp, std::memory_order_relaxed);
     if (point == 4) trace.dequeue.store(stamp, std::memory_order_relaxed);
 }
@@ -73,7 +76,7 @@ int main(int argc, char** argv) try {
         auto sub = dzIPC::SubscriberIPCPtrMake(model, topic, 0, 1024, transport); sub->InitChannel();
         std::atomic<bool> running{true}; std::uint64_t count = 0, invalid = 0;
         csv << "sequence,read_ns,elapsed_ns,bytes";
-        if (tracing) csv << ",recv_begin_ns,recv_return_ns,enqueue_before_ns,dequeue_after_ns";
+        if (tracing) csv << ",recv_begin_ns,recv_return_ns,enqueue_before_ns,dequeue_after_ns,assisted";
         csv << '\n';
         std::thread reader([&] {
             while (running.load()) {
@@ -90,10 +93,10 @@ int main(int argc, char** argv) try {
                 if (data[16]) {
                     ++count; csv << sequence << ',' << received << ',' << received - stamp << ',' << sample.size();
                     if (tracing) {
-                        if (sequence >= trace_capacity) { ++invalid; csv << ",0,0,0,0"; }
+                        if (sequence >= trace_capacity) { ++invalid; csv << ",0,0,0,0,0"; }
                         else {
                             const auto& trace = traces[sequence];
-                            csv << ',' << trace.begin.load() << ',' << trace.received.load() << ',' << trace.enqueue.load() << ',' << trace.dequeue.load();
+                            csv << ',' << trace.begin.load() << ',' << trace.received.load() << ',' << trace.enqueue.load() << ',' << trace.dequeue.load() << ',' << trace.assisted.load();
                         }
                     }
                     csv << '\n';
