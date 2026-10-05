@@ -349,7 +349,21 @@ ProtocolStatus encode_outbox(const OutboxHeader &h, ByteView payload, Bytes &out
     if (!s)
         return s;
     Bytes b(112 + payload.size);
-    auto *d = b.data();
+    s = encode_outbox_into(h, payload, b.data(), b.size());
+    if (s)
+        out.swap(b);
+    return s;
+}
+ProtocolStatus encode_outbox_into(const OutboxHeader &h, ByteView payload, void *loan,
+                                  std::size_t capacity)
+{
+    const auto s = validate_outbox(h, payload, kMaxMessageBytes);
+    if (!s)
+        return s;
+    if (!loan || capacity < 112 + payload.size)
+        return error(ProtocolCode::BadLength);
+    auto *d = static_cast<std::uint8_t *>(loan);
+    std::memset(d, 0, 112);
     std::memcpy(d, "DZTX", 4);
     put(d + 4, 2, 2);
     put(d + 6, 112, 2);
@@ -366,7 +380,6 @@ ProtocolStatus encode_outbox(const OutboxHeader &h, ByteView payload, Bytes &out
     put(d + 96, h.request_id, 8);
     put(d + 104, h.deadline_monotonic_ns, 8);
     std::memcpy(d + 112, payload.data, payload.size);
-    out.swap(b);
     return {};
 }
 ProtocolStatus decode_outbox(ByteView b, OutboxHeader &out, ByteView &payload,

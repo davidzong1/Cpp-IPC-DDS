@@ -1,5 +1,6 @@
 #include "dzIPC/net/client_runtime.h"
 #include "byte_codec.h"
+#include "dzIPC/net/outbox.h"
 #include "local_control_linux.h"
 #include <atomic>
 #include <condition_variable>
@@ -130,6 +131,9 @@ struct ClientRuntime::Impl
     std::thread thread;
     mutable std::mutex mutex;
     std::mutex stop_mutex;
+    std::mutex attach_mutex;
+    std::shared_ptr<OutboxSender> outbox;
+    std::uint64_t credit_request = 0, credit_retry_after = 0;
     std::condition_variable changed;
     std::map<std::uint64_t, std::shared_ptr<Waiter>> pending;
     std::deque<Outgoing> outgoing;
@@ -170,6 +174,8 @@ struct ClientRuntime::Impl
         if (!healthy.exchange(false))
             return;
         failure = reason;
+        if (outbox)
+            outbox->stop();
         outgoing.clear();
         outgoing_bytes = 0;
         sends.disconnect();
@@ -235,6 +241,8 @@ struct ClientRuntime::Impl
                             throw std::runtime_error("累计授予不一致");
                         granted.bytes = std::max(granted.bytes, value.bytes);
                         granted.records = std::max(granted.records, value.records);
+                        if (outbox)
+                            outbox->grant(value);
                     }
                     else if (header.kind == LocalKind::TxProgress)
                     {
@@ -245,6 +253,8 @@ struct ClientRuntime::Impl
                             throw std::runtime_error("累计出站进度不一致");
                         released.bytes = std::max(released.bytes, value.bytes);
                         released.records = std::max(released.records, value.records);
+                        if (outbox)
+                            outbox->progress(value);
                     }
                     else if (header.kind == LocalKind::RouteState)
                     {
@@ -261,6 +271,14 @@ struct ClientRuntime::Impl
                         SendResultBody result;
                         decode_send_result(body, result);
                         sends.complete(header.request_id, result);
+                    }
+                    if (credit_request && header.request_id == credit_request)
+                    {
+                        if (header.kind != LocalKind::CreditGrant &&
+                            header.kind != LocalKind::Error)
+                            throw std::runtime_error("信用补充响应类型错误");
+                        credit_request = 0;
+                        credit_retry_after = local::monotonic_ns() + 1000000;
                     }
                     const auto found = pending.find(header.request_id);
                     if (found != pending.end())
@@ -528,5 +546,88 @@ std::string ClientRuntime::status()
     if (reply.header.kind != LocalKind::State)
         throw std::runtime_error("状态响应类型错误");
     return std::string(reply.body.begin() + 4, reply.body.end());
+}
+} // namespace dzIPC::net
+
+namespace dzIPC::net
+{
+void ClientRuntime::attach_outbox()
+{
+    check_process();
+    std::lock_guard<std::mutex> starting(impl_->attach_mutex);
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        if (!healthy())
+            throw std::runtime_error("网关已离线");
+        if (impl_->outbox)
+            return;
+    }
+    auto sender = std::make_shared<OutboxSender>(impl_->welcome, impl_->session, impl_->epoch);
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        sender->grant(impl_->granted);
+        impl_->outbox = sender;
+    }
+    try
+    {
+        request(LocalKind::AttachTx, {}, std::chrono::seconds(2), sender->event_fd());
+        sender->ready();
+    }
+    catch (...)
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        impl_->fail_locked("出站 SHM 初始化失败");
+        throw;
+    }
+}
+OutboxSubmit ClientRuntime::submit_outbox(const OutboxHeader &header, ByteView blob)
+{
+    check_process();
+    std::shared_ptr<OutboxSender> sender;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        if (!healthy() || !impl_->outbox)
+            return {};
+        sender = impl_->outbox;
+    }
+    for (;;)
+    {
+        OutboxSubmit result;
+        try { result = sender->submit(header, blob); }
+        catch (...) { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->fail_locked("出站提交前失败"); throw; }
+        if (result.state == SubmitState::Indeterminate)
+        {
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            impl_->fail_locked("出站提交状态不确定");
+            return result;
+        }
+        if (result.code != OutboxCode::CreditUnavailable &&
+            result.code != OutboxCode::LoanUnavailable)
+            return result;
+        const auto need = sender->needed(blob.size);
+        if (need.bytes || need.records)
+        {
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            if (healthy() && !impl_->credit_request &&
+                local::monotonic_ns() >= impl_->credit_retry_after)
+            {
+                Bytes body;
+                codec::append(body, need.bytes, 4);
+                codec::append(body, need.records, 4);
+                const auto id = impl_->next_id();
+                try
+                {
+                    impl_->enqueue(LocalKind::CreditRequest, id, body);
+                    impl_->credit_request = id;
+                }
+                catch (...)
+                {
+                    impl_->fail_locked("信用补充请求无法排队");
+                }
+            }
+        }
+        if (header.delivery != Delivery::Reliable || !sender->wait(header.deadline_monotonic_ns))
+            return result;
+    }
 }
 } // namespace dzIPC::net

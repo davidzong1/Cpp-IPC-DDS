@@ -41,6 +41,7 @@ struct ControlReply
     LocalHeader header;
     Bytes body;
 };
+struct OutboxSubmit;
 class ClientRuntime : public std::enable_shared_from_this<ClientRuntime>
 {
   public:
@@ -62,6 +63,8 @@ class ClientRuntime : public std::enable_shared_from_this<ClientRuntime>
     SendTicket prepare_send(Identity publisher, std::uint64_t sequence);
     SendResultBody wait_send(const SendTicket &, std::uint64_t deadline_ns);
     std::string status();
+    void attach_outbox();
+    OutboxSubmit submit_outbox(const OutboxHeader &, ByteView blob);
 
   private:
     explicit ClientRuntime(const std::string &path);

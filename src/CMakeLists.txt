@@ -25,7 +25,9 @@ if(DZIPC_BUILD_SHARED_NET)
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/local_protocol.cc
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/wire_blob.cc
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/local_control_linux.cc
-    ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/client_runtime.cc
+    ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/outbox.cc
+        dzIPC/net/outbox_service.cc
+        dzIPC/net/client_runtime.cc
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/gateway_runtime.cc
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/datagram_endpoint_linux.cc)
 endif()

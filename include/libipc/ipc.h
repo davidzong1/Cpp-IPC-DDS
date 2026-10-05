@@ -157,6 +157,9 @@ namespace ipc
      * 失败时**必须**回退到 send/try_send —— 借样不是必成的, 池子只有 10 块/档位。
      * 成功后可发布、显式归还，或由最后一个未发布副本析构归还。
      */
+    // 严格单 loan 接收，不触发 WT 等待器；consumed 区分空队列与损坏/分配失败。
+    static buff_t try_recv_loan(ipc::handle_t h, bool &consumed, bool verbose);
+
     static ipc::loan_t loan(ipc::handle_t h, std::size_t size, bool verbose);
 
     /** \brief 带**失败原因出口**的 loan（t46）。`*st` 为空指针时与上面那条逐位等价。
@@ -169,6 +172,9 @@ namespace ipc
     /// 投递失败会归还 chunk；重复 discard_loan 不会再次归还。
     static bool publish_loan(ipc::handle_t h, ipc::loan_t const &lo,
                              std::uint64_t tm, bool verbose);
+
+    /// 非覆盖提交：队列满时失败并归还 loan，不执行 force_push。
+    static bool try_publish_loan(ipc::handle_t h, ipc::loan_t const &lo, bool verbose, bool wake_readers);
 
     /// \brief 放弃一块未投递的 chunk, 立刻归还池子。幂等于无效 loan。
     static void discard_loan(ipc::handle_t h, ipc::loan_t const &lo);
@@ -390,6 +396,10 @@ namespace ipc
     {
       return detail_t::publish_loan(h_, lo, tm, verbose_);
     }
+
+    buff_t try_recv_loan(bool &consumed) { return detail_t::try_recv_loan(h_, consumed, verbose_); }
+
+    bool try_publish_loan(loan_t const &lo, bool wake_readers = true) { return detail_t::try_publish_loan(h_, lo, verbose_, wake_readers); }
 
     void discard_loan(loan_t const &lo) { detail_t::discard_loan(h_, lo); }
   };

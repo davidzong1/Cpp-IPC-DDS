@@ -198,7 +198,8 @@ TEST(DzFlatFallbackSemantics, DeliveredAttemptIsNeverCountedAsFallback)
  *   +8     = W09/t19（path_selection_* / fallback_reason_unknown / borrow_failed_*）
  *   +4     = W03/t44（R0-9/R0-10 结束值接口：scan_ready_routes_total /
  *            deferred_depth_after_last / deferred_depth_after_max / deferred_depth_after_total）
- *   ⇒ 66
+ *   +3     = e887d5e（hybrid_publish_calls / hybrid_shm_sends / hybrid_udp_sends）
+ *   ⇒ 69
  *
  * 本条之所以必须同步：判据本身用来证明"追加不移动既有 ID"，因此它的常量是**代码镜像**，
  * 代码追加而它不改时它会**正确报红**（本次即如此），说明闸门有效。
@@ -209,8 +210,11 @@ TEST(DzFlatFallbackSemantics, AppendedCountersDoNotShiftExistingIds)
     /* W03 已交付的字段名与顺序是历史对比的键 ⇒ 追加不得改变既有项。
      * ⚠️ W03 交付文档写"47 个计数"，但代码里 counter_table 实际是 54 项
      * （差额 7 已登记为 W19-F1：文档与代码不一致）——本判据按**代码**为准。 */
-    EXPECT_EQ(kCounterCount, static_cast<std::size_t>(54 + 8 + 4))
-        << "计数总数已变: 请按变更史同步本行 (54=W03, +8=W09/t19, +4=W03/t44) 并写进交付";
+    EXPECT_EQ(kCounterCount, static_cast<std::size_t>(54 + 8 + 4 + 3))
+        << "计数总数已变: 请按变更史同步本行 (54=W03, +8=W09/t19, +4=W03/t44, +3=e887d5e) 并写进交付";
+    EXPECT_EQ(CounterId::hybrid_publish_calls, static_cast<CounterId>(66));
+    EXPECT_EQ(CounterId::hybrid_shm_sends, static_cast<CounterId>(67));
+    EXPECT_EQ(CounterId::hybrid_udp_sends, static_cast<CounterId>(68));
     EXPECT_EQ(CounterId::tlv_messages, static_cast<CounterId>(0));
     EXPECT_EQ(CounterId::fallback_total, static_cast<CounterId>(8));
     /* t44 追加项必须排在既有项之后（不插入、不重排），且与 scan 族一致地受诊断门控。 */

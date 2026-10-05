@@ -103,6 +103,8 @@ struct OutboxHeader
     std::uint64_t request_id = 0, deadline_monotonic_ns = 0;
 };
 ProtocolStatus encode_outbox(const OutboxHeader &, ByteView blob, Bytes &out);
+ProtocolStatus encode_outbox_into(const OutboxHeader &, ByteView blob, void *loan,
+                                  std::size_t capacity);
 // 输入为 loan 容量；只返回 payload_size 范围，填充字节不属于 blob。
 ProtocolStatus decode_outbox(ByteView loan, OutboxHeader &out, ByteView &blob,
                              std::uint32_t max_message = kMaxMessageBytes);

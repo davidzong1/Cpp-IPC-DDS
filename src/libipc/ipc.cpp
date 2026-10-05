@@ -1575,8 +1575,9 @@ namespace
           h, data, size, verbose);
     }
 
-    static ipc::buff_t recv(ipc::handle_t h, std::uint64_t tm, bool verbose)
+    static ipc::buff_t recv(ipc::handle_t h, std::uint64_t tm, bool verbose, bool *consumed = nullptr)
     {
+      if (consumed) *consumed = false;
       auto que = queue_of(h);
       if (que == nullptr)
       {
@@ -1612,12 +1613,15 @@ namespace
           // pop failed, just return.
           return {};
         }
-        if (writable)
+        if (consumed) *consumed = true;
+        if (consumed && !msg.storage_) return {};
+        if (writable && !consumed)
         {
           notify_writers(inf);
         }
         if ((inf->acc() != nullptr) && (msg.cc_id_ == inf->cc_id_))
         {
+          if (consumed) return {};
           continue; // ignore message to self
         }
         // msg.remain_ may minus & abs(msg.remain_) < data_length
@@ -1682,6 +1686,7 @@ namespace
                 "fail: shm::handle for large message. msg_id: %zd, buf_id: %zd, "
                 "size: %zd\n",
                 msg.id_, buf_id, msg_size);
+            if (consumed) return {};
             continue;
           }
         }
@@ -1841,7 +1846,7 @@ namespace
     }
 
     static bool publish_loan_impl(ipc::handle_t h, ipc::loan_t const &lo,
-                             std::uint64_t tm, bool verbose)
+                             std::uint64_t tm, bool verbose, bool allow_overwrite, bool wake_readers)
     {
       if (!lo.valid() || !ipc::detail::valid_storage(lo.id))
         return false;
@@ -1875,24 +1880,26 @@ namespace
           {
             /* 同上: push 覆写被套圈的格子时也要归还被丢弃消息的 chunk。 */
             return !que->push(
-                [inf](void *p, ipc::circ::cc_t rem_cc)
+                [inf, &lo](void *p, ipc::circ::cc_t rem_cc)
                 {
-                  return clear_message<typename queue_t::value_t, flag_t>(inf, p,
-                                                                          rem_cc);
+                  const bool ready = clear_message<typename queue_t::value_t, flag_t>(inf, p, rem_cc);
+                  if (ready) mark_published(inf, lo.size, lo.id);
+                  return ready;
                 },
                 inf->cc_id_, msg_id, remain, &id, 0);
           },
           tm);
-      if (!pushed)
+      if (!pushed && allow_overwrite)
       {
         if (verbose)
           ipc::log("publish_loan force_push: msg_id = %zd, cap = %zd\n", msg_id,
                    lo.size);
         pushed = que->force_push(
-            [inf](void *p, ipc::circ::cc_t rem_cc)
+            [inf, &lo](void *p, ipc::circ::cc_t rem_cc)
             {
-              return clear_message<typename queue_t::value_t, flag_t>(inf, p,
-                                                                      rem_cc);
+              const bool ready = clear_message<typename queue_t::value_t, flag_t>(inf, p, rem_cc);
+              if (ready) mark_published(inf, lo.size, lo.id);
+              return ready;
             },
             inf->cc_id_, msg_id, remain, &id, 0);
       }
@@ -1903,19 +1910,24 @@ namespace
           ipc::error("fail: publish_loan, push failed; chunk returned\n");
         return false;
       }
-      /* UF-003: 借样已进队列 ⇒ 置"已发布", 清扫方自此刻才可接手处置。 */
-      mark_published(inf, lo.size, lo.id);
-      notify_readers(inf);
+      /* 标记已在队列发布前的槽位回调内完成。接收者可能已归还甚至复用了
+       * chunk；发布可见后绝不能再按旧 storage id 修改该块元数据。 */
+      if (wake_readers) notify_readers(inf);
       return true;
     }
 
     static bool publish_loan(ipc::handle_t h, ipc::loan_t const& lo,
-                             std::uint64_t tm, bool verbose) {
+                             std::uint64_t tm, bool verbose, bool allow_overwrite = true, bool wake_readers = true) {
       if (!lo.valid() || !lo.lifetime) return false;
       auto* inf = info_of(h);
       std::lock_guard<std::mutex> guard(lo.lifetime->mutex);
       if (lo.lifetime->finished || !inf || inf->topic_pool_ != lo.lifetime->pool) return false;
-      const bool okay = publish_loan_impl(h, lo, tm, verbose);
+      bool okay;
+      try { okay = publish_loan_impl(h, lo, tm, verbose, allow_overwrite, wake_readers); }
+      catch (...) {
+        // 可见性未知时封住本地归还；由独占会话关闭/接收所有者完成清理，不能归还仍可见 chunk。
+        lo.lifetime->finished = true; lo.lifetime->give_back = {}; lo.lifetime->pool.reset(); throw;
+      }
       lo.lifetime->finished = true;
       auto give_back = std::move(lo.lifetime->give_back);
       if (!okay && give_back) give_back();
@@ -2083,6 +2095,12 @@ namespace ipc
   }
 
   template <typename Flag>
+  buff_t chan_impl<Flag>::try_recv_loan(ipc::handle_t h, bool &consumed, bool verbose)
+  {
+    return detail_impl<policy_t<Flag>>::recv(h, 0, verbose, &consumed);
+  }
+
+  template <typename Flag>
   ipc::loan_t chan_impl<Flag>::loan(ipc::handle_t h, std::size_t size,
                                     bool verbose)
   {
@@ -2101,6 +2119,12 @@ namespace ipc
                                      std::uint64_t tm, bool verbose)
   {
     return detail_impl<policy_t<Flag>>::publish_loan(h, lo, tm, verbose);
+  }
+
+  template <typename Flag>
+  bool chan_impl<Flag>::try_publish_loan(ipc::handle_t h, ipc::loan_t const &lo, bool verbose, bool wake_readers)
+  {
+    return detail_impl<policy_t<Flag>>::publish_loan(h, lo, 0, verbose, false, wake_readers);
   }
 
   template <typename Flag>

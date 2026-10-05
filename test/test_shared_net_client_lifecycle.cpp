@@ -169,7 +169,7 @@ TEST(SharedNetClient, CreditsReplayQuotaAndZeroInitialGrant)
     EXPECT_EQ(h.kind, LocalKind::Error);
     client.fd.reset();
     ASSERT_TRUE(until([&] {
-        return gateway.status_json().find("\"unused_granted_bytes\":\"0\"") != std::string::npos;
+        return gateway.status_json().find("\"allocated_send_bytes\":\"0\"") != std::string::npos;
     }));
 }
 TEST(SharedNetClient, WrongLocalityAndClockAreRejectedAndAncillaryFdClosed)

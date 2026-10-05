@@ -2,6 +2,8 @@
 #include "byte_codec.h"
 #include "dzIPC/net/datagram_endpoint.h"
 #include "local_control_linux.h"
+#include "outbox_service.h"
+#include <algorithm>
 #include <atomic>
 #include <deque>
 #include <map>
@@ -51,7 +53,9 @@ struct GatewayRuntime::Impl
         local::Credentials peer;
         std::uint64_t id = 0, last_request = 0, connected_at = 0;
         bool welcomed = false;
-        CreditCounters granted;
+        WelcomeBody welcome;
+        std::shared_ptr<SendAccount> account;
+        std::shared_ptr<OutboxAttachment> outbox;
         std::map<std::uint64_t, Cached> cache;
         std::size_t cache_bytes = 0, output_bytes = 0;
         std::deque<Bytes> output;
@@ -63,23 +67,28 @@ struct GatewayRuntime::Impl
     local::Fd wake;
     std::vector<std::unique_ptr<DatagramEndpoint>> endpoints;
     std::map<int, Session> sessions;
+    std::unique_ptr<SendBudget> send_budget;
+    std::unique_ptr<OutboxService> outboxes;
     std::thread thread;
     std::mutex stop_mutex;
     std::atomic<bool> running{true};
-    std::atomic<std::uint64_t> session_count{0}, granted_bytes{0}, granted_records{0}, rejected{0};
+    std::atomic<std::uint64_t> session_count{0}, rejected{0}, outbox_records{0}, credit_requests{0};
     std::size_t control_memory = 0;
     std::string status() const
     {
         std::ostringstream s;
+        const auto occupied = send_budget->occupied();
         s << "{\"protocol_version\":1,\"local_protocol_version\":2,\"gateway_id\":"
           << json_string(local::hex(identity)) << ",\"gateway_epoch\":\"" << epoch
           << "\",\"state\":\"" << (running.load() ? "ControlReady" : "Stopped")
           << "\",\"data_plane_ready\":false,\"listen_ip\":" << json_string(config.listen_ip)
           << ",\"interface\":" << json_string(config.interface)
           << ",\"udp_sockets\":" << (running.load() ? config.data_shards + 2 : 0)
-          << ",\"client_sessions\":" << session_count.load() << ",\"unused_granted_bytes\":\""
-          << granted_bytes.load() << "\",\"unused_granted_records\":\"" << granted_records.load()
-          << "\",\"rejected\":\"" << rejected.load() << "\",\"data_ports\":[";
+          << ",\"client_sessions\":" << session_count.load() << ",\"allocated_send_bytes\":\""
+          << occupied.bytes << "\",\"allocated_send_records\":\"" << occupied.records
+          << "\",\"outbox_records\":\"" << outbox_records.load() << "\",\"credit_requests\":\""
+          << credit_requests.load() << "\",\"rejected\":\"" << rejected.load()
+          << "\",\"data_ports\":[";
         for (std::uint64_t i = 0; i < config.data_shards; ++i)
         {
             if (i)
@@ -122,8 +131,9 @@ struct GatewayRuntime::Impl
     }
     void close_session(std::map<int, Session>::iterator i)
     {
-        granted_bytes -= i->second.granted.bytes;
-        granted_records -= i->second.granted.records;
+        outboxes->cancel(i->second.outbox);
+        if (i->second.account)
+            i->second.account->close();
         control_memory -= i->second.output_bytes + i->second.cache_bytes;
         if (i->second.welcomed)
             --session_count;
@@ -131,6 +141,13 @@ struct GatewayRuntime::Impl
     }
     void remember(Session &session, std::uint64_t id, const Bytes &request, const Bytes &reply)
     {
+        if (auto old = session.cache.find(id); old != session.cache.end())
+        {
+            const auto old_size = old->second.request.size() + old->second.response.size();
+            session.cache_bytes -= old_size;
+            control_memory -= old_size;
+            session.cache.erase(old);
+        }
         const auto size = request.size() + reply.size();
         while (!session.cache.empty() &&
                (session.cache.size() >= 64 || session.cache_bytes + size > 64 * 1024 ||
@@ -154,7 +171,9 @@ struct GatewayRuntime::Impl
     {
         LocalHeader h;
         ByteView body;
-        if (!decode_local(ByteView(packet.bytes), h, body) || !packet.descriptors.empty())
+        if (!decode_local(ByteView(packet.bytes), h, body) ||
+            (h.kind == LocalKind::AttachTx ? packet.descriptors.size() != 1
+                                           : !packet.descriptors.empty()))
             throw std::runtime_error("无效控制包或未支持的附带 FD");
         if (session.welcomed && h.kind != LocalKind::Hello &&
             (h.session_id != session.id || h.gateway_epoch != epoch))
@@ -164,7 +183,7 @@ struct GatewayRuntime::Impl
             const auto cached = session.cache.find(h.request_id);
             if (cached == session.cache.end() || cached->second.request != packet.bytes)
                 queue(session, error(session, h.request_id, 2, "RequestConflict"));
-            else
+            else if (!cached->second.response.empty())
                 queue(session, cached->second.response);
             return;
         }
@@ -179,19 +198,16 @@ struct GatewayRuntime::Impl
                 throw std::runtime_error("HELLO 身份或时钟域不匹配");
             session.welcomed = true;
             ++session_count;
-            session.granted.bytes = std::min(config.limits.initial_send_bytes,
-                                             config.limits.send_bytes - granted_bytes.load());
-            session.granted.records = std::min(config.limits.initial_send_records,
-                                               config.limits.send_records - granted_records.load());
-            granted_bytes += session.granted.bytes;
-            granted_records += session.granted.records;
-            WelcomeBody welcome;
+            session.account = send_budget->open(
+                {config.limits.initial_send_bytes, config.limits.initial_send_records});
+            const auto granted = session.account->granted();
+            auto &welcome = session.welcome;
             welcome.locality = identity;
             welcome.max_message_bytes = config.limits.message_bytes;
             welcome.outbox_limit_bytes = config.limits.outbox_bytes;
             welcome.outbox_record_limit = config.limits.outbox_records;
-            welcome.granted_bytes = session.granted.bytes;
-            welcome.granted_records = session.granted.records;
+            welcome.granted_bytes = granted.bytes;
+            welcome.granted_records = granted.records;
             welcome.tx_name = outbox_name(identity, epoch, session.id);
             Bytes encoded;
             if (!encode_welcome(welcome, encoded))
@@ -213,20 +229,36 @@ struct GatewayRuntime::Impl
         }
         else if (h.kind == LocalKind::CreditRequest)
         {
+            ++credit_requests;
             const auto bytes = codec::get(body.data, 4), records = codec::get(body.data + 4, 4);
-            if (bytes > config.limits.session_send_bytes - session.granted.bytes ||
-                records > config.limits.session_send_records - session.granted.records ||
-                bytes > config.limits.send_bytes - granted_bytes.load() ||
-                records > config.limits.send_records - granted_records.load())
+            if (!session.account->grant({bytes, records}))
                 reply = error(session, h.request_id, 3, "Busy");
             else
-            {
-                session.granted.bytes += bytes;
-                session.granted.records += records;
-                granted_bytes += bytes;
-                granted_records += records;
                 reply = response(session, LocalKind::CreditGrant, h.request_id,
-                                 encode_credit_grant(session.granted));
+                                 encode_credit_grant(session.account->granted()));
+        }
+        else if (h.kind == LocalKind::AttachTx)
+        {
+            if (session.outbox)
+                reply = error(session, h.request_id, 2, "AlreadyAttached");
+            else
+            {
+                auto attachment = std::make_shared<OutboxAttachment>();
+                attachment->welcome = session.welcome;
+                attachment->session = session.id;
+                attachment->epoch = epoch;
+                attachment->request = h.request_id;
+                attachment->account = session.account;
+                attachment->event = std::move(packet.descriptors.front());
+                if (!outboxes->attach(attachment))
+                    reply = error(session, h.request_id, 3, "Busy");
+                else
+                {
+                    session.outbox = std::move(attachment);
+                    session.last_request = h.request_id;
+                    remember(session, h.request_id, packet.bytes, {});
+                    return;
+                }
             }
         }
         else
@@ -235,12 +267,87 @@ struct GatewayRuntime::Impl
         remember(session, h.request_id, packet.bytes, reply);
         queue(session, std::move(reply));
     }
+    void process_outboxes()
+    {
+        if (!outboxes->healthy())
+            throw std::runtime_error("出站消费线程异常退出");
+        unsigned count = 0;
+        for (; count < 64; ++count)
+        {
+            OutboxEvent event;
+            if (!outboxes->pop(event))
+                break;
+            auto found = std::find_if(sessions.begin(), sessions.end(), [&](const auto &item) {
+                return item.second.id == event.attachment->session;
+            });
+            if (found == sessions.end())
+                continue;
+            auto &session = found->second;
+            try
+            {
+                if (event.attachment->cancelled.load())
+                    throw std::runtime_error("出站通道失效");
+                if (event.kind == OutboxEvent::Kind::Ready)
+                {
+                    Bytes request;
+                    encode_local(
+                        {LocalKind::AttachTx, event.attachment->request, session.id, epoch}, {},
+                        request);
+                    auto reply =
+                        response(session, LocalKind::TxReady, event.attachment->request, {});
+                    remember(session, event.attachment->request, request, reply);
+                    queue(session, std::move(reply));
+                }
+                else if (event.kind == OutboxEvent::Kind::Progress)
+                {
+                    queue(session, response(session, LocalKind::TxProgress, 0,
+                                            encode_tx_progress(event.progress)));
+                }
+                else if (event.kind == OutboxEvent::Kind::Record)
+                {
+                    ++outbox_records;
+                    const auto h = event.record.header;
+                    event.record.release();
+                    // 业务路由尚未接入时明确拒绝可靠发送，不能伪报 NoSubscribers/成功。
+                    if (h.delivery == Delivery::Reliable)
+                    {
+                        SendResultBody result;
+                        result.publisher_id = h.publisher_id;
+                        result.sequence = h.sequence;
+                        result.result = SendResultCode::Rejected;
+                        Bytes body;
+                        encode_send_result(result, body);
+                        queue(session,
+                              response(session, LocalKind::SendResult, h.request_id, body));
+                    }
+                    queue(session, response(session, LocalKind::CreditGrant, 0,
+                                            encode_credit_grant(session.account->granted())));
+                }
+                else
+                    throw std::runtime_error("出站初始化或消费失败");
+            }
+            catch (...)
+            {
+                ++rejected;
+                close_session(found);
+            }
+        }
+        if (count == 64)
+            local::notify(wake.get());
+        for (auto it = sessions.begin(); it != sessions.end();)
+        {
+            auto current = it++;
+            if (current->second.outbox && current->second.outbox->cancelled.load())
+                close_session(current);
+        }
+    }
     void run() noexcept
     {
         try
         {
             while (running.load())
             {
+                process_outboxes();
                 std::vector<pollfd> fds{{wake.get(), POLLIN, 0}, {listener->fd(), POLLIN, 0}};
                 std::vector<std::uint64_t> generations{0, 0};
                 for (const auto &entry : sessions)
@@ -349,6 +456,12 @@ GatewayRuntime::GatewayRuntime(GatewayConfig config) : impl_(new Impl)
     impl_->listener = std::make_unique<local::Listener>(impl_->config.control_path);
     impl_->endpoints = open_gateway_endpoints(impl_->config);
     impl_->wake = local::event();
+    impl_->send_budget = std::make_unique<SendBudget>(
+        CreditCounters{impl_->config.limits.send_bytes, impl_->config.limits.send_records},
+        CreditCounters{impl_->config.limits.session_send_bytes,
+                       impl_->config.limits.session_send_records});
+    impl_->outboxes = std::make_unique<OutboxService>(
+        impl_->wake.get(), impl_->config.limits.init_tasks, impl_->config.limits.command_records);
     impl_->thread = std::thread([p = impl_.get()] { p->run(); });
 }
 GatewayRuntime::~GatewayRuntime()
@@ -362,6 +475,7 @@ void GatewayRuntime::stop()
     local::notify(impl_->wake.get());
     if (impl_->thread.joinable())
         impl_->thread.join();
+    impl_->outboxes.reset();
     impl_->endpoints.clear();
     impl_->listener.reset();
 }
