@@ -24,6 +24,10 @@
 #include <iostream>
 #include <thread>
 #include <vector>
+#if defined(__linux__)
+#include <sched.h>
+#include <time.h>
+#endif
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 static std::uint64_t now() { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); }
@@ -41,8 +45,39 @@ thread_local std::uint64_t handoff_start = 0, handoff_elapsed = 0;
 #ifdef DZIPC_BENCH_PUBLISH_TRACE
 thread_local std::array<std::uint64_t, static_cast<unsigned>(ipc::detail::PublishPoint::Count)> publish_stamps{};
 thread_local bool publish_active = false;
+thread_local bool publish_cpu_tracing = false;
+struct CopyCpuTrace {
+    std::uint64_t cpu_begin{0}, cpu_end{0}, outer_begin{0}, outer_end{0};
+    int begin_cpu{-1}, end_cpu{-1};
+};
+thread_local CopyCpuTrace copy_cpu;
+static std::uint64_t thread_cpu_now() noexcept {
+#if defined(__linux__)
+    timespec value{};
+    if (::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) == 0)
+        return std::uint64_t(value.tv_sec) * 1000000000ull + value.tv_nsec;
+#endif
+    return 0;
+}
 void publish_trace(ipc::detail::PublishPoint point) noexcept {
-    if (publish_active) publish_stamps[static_cast<unsigned>(point)] = now();
+    if (!publish_active) return;
+#if defined(__linux__)
+    if (publish_cpu_tracing && point == ipc::detail::PublishPoint::BeforeCopy) {
+        copy_cpu.begin_cpu = ::sched_getcpu();
+        copy_cpu.outer_begin = now();
+        copy_cpu.cpu_begin = thread_cpu_now();
+        publish_stamps[static_cast<unsigned>(point)] = now();
+        return;
+    }
+    if (publish_cpu_tracing && point == ipc::detail::PublishPoint::AfterCopy) {
+        publish_stamps[static_cast<unsigned>(point)] = now();
+        copy_cpu.cpu_end = thread_cpu_now();
+        copy_cpu.outer_end = now();
+        copy_cpu.end_cpu = ::sched_getcpu();
+        return;
+    }
+#endif
+    publish_stamps[static_cast<unsigned>(point)] = now();
 }
 #endif
 void receive_trace(const dzIPC::detail::SeamEvent& event) noexcept {
@@ -137,13 +172,20 @@ int main(int argc, char** argv) try {
     const auto start = Clock::now(); const auto warmup = 2u; const auto total = std::uint64_t(seconds + warmup) * rate;
     std::uint64_t accepted = 0, rejected = 0;
     const bool publish_tracing = std::getenv("DZIPC_TEST_PUBLISH_TRACE") && std::string(std::getenv("DZIPC_TEST_PUBLISH_TRACE")) == "1";
+    const bool cpu_tracing = std::getenv("DZIPC_TEST_PUBLISH_CPU_TRACE") && std::string(std::getenv("DZIPC_TEST_PUBLISH_CPU_TRACE")) == "1";
+    if (cpu_tracing && !publish_tracing) throw std::runtime_error("CPU诊断必须同时开启发布分段");
+#if !defined(__linux__)
+    if (cpu_tracing) throw std::runtime_error("当前平台不支持复制CPU诊断");
+#endif
 #ifdef DZIPC_BENCH_PUBLISH_TRACE
+    publish_cpu_tracing = cpu_tracing;
     if (publish_tracing) ipc::detail::set_publish_hook(publish_trace);
 #else
     if (publish_tracing) throw std::runtime_error("该库没有发布分段诊断能力");
 #endif
     csv << "sequence,start_ns,elapsed_ns,success,bytes";
     if (publish_tracing) csv << ",loan_begin_ns,loan_end_ns,copy_begin_ns,copy_end_ns,commit_begin_ns,notify_begin_ns,notify_end_ns,commit_end_ns";
+    if (cpu_tracing) csv << ",copy_cpu_begin_ns,copy_cpu_end_ns,copy_outer_begin_ns,copy_outer_end_ns,copy_begin_cpu,copy_end_cpu";
     csv << '\n';
     for (std::uint64_t sequence = 0; sequence < total; ++sequence) {
         std::this_thread::sleep_until(start + std::chrono::nanoseconds(sequence * 1000000000ull / rate));
@@ -151,6 +193,7 @@ int main(int argc, char** argv) try {
         std::memcpy(blob.data() + offset, &stamp, 8); std::memcpy(blob.data() + offset + 8, &sequence, 8); blob[offset + 16] = measured;
 #ifdef DZIPC_BENCH_PUBLISH_TRACE
         if (publish_tracing) { publish_stamps.fill(0); publish_active = true; }
+        if (cpu_tracing) copy_cpu = {};
 #endif
         const auto success = pub->publish_prebuilt_segment(blob.data(), blob.size()); const auto returned = now();
 #ifdef DZIPC_BENCH_PUBLISH_TRACE
@@ -161,6 +204,7 @@ int main(int argc, char** argv) try {
             csv << sequence << ',' << stamp << ',' << returned - stamp << ',' << success << ',' << blob.size();
 #ifdef DZIPC_BENCH_PUBLISH_TRACE
             if (publish_tracing) for (const auto stamp : publish_stamps) csv << ',' << stamp;
+            if (cpu_tracing) csv << ',' << copy_cpu.cpu_begin << ',' << copy_cpu.cpu_end << ',' << copy_cpu.outer_begin << ',' << copy_cpu.outer_end << ',' << copy_cpu.begin_cpu << ',' << copy_cpu.end_cpu;
 #endif
             csv << '\n';
         }
