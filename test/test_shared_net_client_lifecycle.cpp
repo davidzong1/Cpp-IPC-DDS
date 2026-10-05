@@ -94,6 +94,53 @@ TEST(SharedNetClient, UnexpectedReplyFailsPendingAndReliableWaiters)
     EXPECT_EQ(client->wait_send(ticket, local::monotonic_ns()).result, SendResultCode::GatewayLost);
     gateway.worker.get();
 }
+
+TEST(SharedNetClient, RouteHintTracksSynchronizationVersionsRemoteJoinAndLoss)
+{
+    Directory dir; Identity pub{}; pub[0] = 17;
+    std::array<std::promise<void>, 5> release;
+    std::array<std::future<void>, 5> released;
+    for (unsigned i = 0; i < release.size(); ++i) released[i] = release[i].get_future();
+    std::promise<void> finish; auto finished = finish.get_future();
+    FakeGateway gateway(dir.control(), [&](int fd, auto session, auto epoch) {
+        for (unsigned i = 0; i < release.size(); ++i) {
+            released[i].wait_for(2s);
+            RouteStateBody state; state.publisher_id = pub;
+            state.state_version = i == 2 ? 1 : i + 1;
+            state.synchronized = i != 0;
+            state.remote_ready_count = (i == 2 || i == 3) ? 1 : 0;
+            Bytes body;
+            if (!encode_route_state(state, body)) throw std::runtime_error("路由提示编码失败");
+            transmit(fd, encode(LocalKind::RouteState, 0, session, epoch, body));
+            transmit(fd, encode(LocalKind::CreditGrant, 0, session, epoch,
+                encode_credit_grant({(i + 1) * 1024u, i + 1})));
+        }
+        finished.wait_for(2s);
+    });
+    auto client = ClientRuntime::acquire(dir.control());
+    auto hint = client->watch_route(pub);
+    EXPECT_EQ(hint, client->watch_route(pub));
+    EXPECT_FALSE(hint->local_only());
+    release[0].set_value();
+    EXPECT_TRUE(until([&] { return client->route_state(pub).state_version == 1; }));
+    EXPECT_FALSE(hint->local_only());
+    release[1].set_value();
+    EXPECT_TRUE(until([&] { return hint->local_only(); }));
+    release[2].set_value();
+    // 同一控制连接上的后继信用包作屏障，确定旧版本已处理，避免用sleep猜时序。
+    EXPECT_TRUE(until([&] { return client->granted().records >= 3; }));
+    EXPECT_EQ(client->route_state(pub).state_version, 2u);
+    EXPECT_TRUE(hint->local_only());
+    release[3].set_value();
+    EXPECT_TRUE(until([&] { return client->route_state(pub).state_version == 4; }));
+    EXPECT_FALSE(hint->local_only());
+    release[4].set_value();
+    EXPECT_TRUE(until([&] { return hint->local_only(); }));
+    finish.set_value(); gateway.worker.get();
+    EXPECT_TRUE(until([&] { return !client->healthy() && !hint->local_only(); }));
+    client.reset();
+    EXPECT_FALSE(hint->local_only()); // 提示可保活，但失效会话不能重新变成本机快路。
+}
 TEST(SharedNetClient, PendingRequestDeadlineFailsSession)
 {
     Directory dir;

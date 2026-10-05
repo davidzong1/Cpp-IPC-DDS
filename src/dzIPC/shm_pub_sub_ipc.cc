@@ -43,11 +43,8 @@ struct SubRecvState
     std::atomic<bool> assist_disabled{false}, cancelled{false};
     std::mutex consume_mutex;
     std::atomic<const dzIPC::threepools::RecvRouteSource*> assist_route{nullptr};
-    alignas(4) std::atomic<std::uint32_t> signal{0};
-    void notify() noexcept {
-        signal.fetch_add(1, std::memory_order_release);
-        ipc::recv_wait_set_wake(&signal);
-    }
+    ipc::recv_local_signal signal;
+    void notify() noexcept { signal.notify(); }
     /* route key = **数据段名**（稳定量，见 name_operator.h）+ domain_id。
      * ⛔ **不得**把 generation 拼进来 —— 那会让每次重建换 worker，破坏固定归属与
      * worker 线程内 thread_local 分片缓存亲和（W04 R-17；实测 L9 判据）。 */
@@ -678,7 +675,7 @@ bool assisted_pop(ShmRouteSession& session, const std::shared_ptr<SubState>& sta
         arbitration->assist_route.load(std::memory_order_acquire)) : dzIPC::threepools::RecvWorker::AssistLease{};
     for (;;) {
         if (arbitration->cancelled.load()) return false;
-        const auto signal = arbitration->signal.load(std::memory_order_acquire);
+        const auto signal = arbitration->signal.snapshot();
         if (queue.try_pop(out)) return true;
         // lease在等待期间保活token映射；不持消费锁跨wait或控制面操作。
         auto lease = session.acquire_receive();
@@ -695,7 +692,7 @@ bool assisted_pop(ShmRouteSession& session, const std::shared_ptr<SubState>& sta
         if (lease && !session.receive_current(*lease)) continue;
         if (arbitration->assist_disabled.load()) break;
         detail::FireSeam({detail::SeamPoint::kBeforeCallerWait, 0, nullptr, nullptr, 0});
-        const auto result = ipc::recv_wait_change(token, sequence, arbitration->signal, signal, remaining());
+        const auto result = arbitration->signal.wait(token, sequence, signal, remaining());
         if (result == ipc::recv_wait_result::timeout) return !arbitration->cancelled.load() && queue.try_pop(out);
         if (result == ipc::recv_wait_result::unavailable) {
             arbitration->assist_disabled.store(true);

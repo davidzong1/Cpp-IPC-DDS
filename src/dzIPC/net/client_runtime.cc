@@ -153,7 +153,15 @@ struct ClientRuntime::Impl
     std::map<std::uint64_t, std::shared_ptr<Waiter>> pending;
     std::deque<Outgoing> outgoing;
     std::size_t outgoing_bytes = 0;
-    std::map<Identity, RouteStateBody> routes;
+    std::map<Identity, std::shared_ptr<RouteStateHint>> routes;
+    std::shared_ptr<RouteStateHint> route_hint(const Identity& publisher) {
+        const auto found = routes.find(publisher);
+        if (found != routes.end()) return found->second;
+        if (routes.size() >= 8192) throw std::runtime_error("路由提示达到上限");
+        auto hint = std::make_shared<RouteStateHint>();
+        routes.emplace(publisher, hint);
+        return hint;
+    }
     SendWaitTable sends;
     WelcomeBody welcome;
     CreditCounters granted, released;
@@ -188,6 +196,7 @@ struct ClientRuntime::Impl
     {
         if (!healthy.exchange(false))
             return;
+        for (auto& route : routes) route.second->local_only_.store(false, std::memory_order_release);
         if (!closing) metrics.add(NetMetric::gateway_lost);
         failure = reason;
         if (outbox)
@@ -276,11 +285,12 @@ struct ClientRuntime::Impl
                     {
                         RouteStateBody value;
                         decode_route_state(body, value);
-                        if (routes.size() >= 8192 && !routes.count(value.publisher_id))
-                            throw std::runtime_error("路由提示达到上限");
-                        auto &old = routes[value.publisher_id];
-                        if (value.state_version >= old.state_version)
-                            old = value;
+                        auto hint = route_hint(value.publisher_id);
+                        if (value.state_version >= hint->state_.state_version) {
+                            hint->state_ = value;
+                            hint->local_only_.store(value.state_version && value.synchronized &&
+                                value.remote_ready_count == 0, std::memory_order_release);
+                        }
                     }
                     else if (header.kind == LocalKind::SendResult)
                     {
@@ -541,7 +551,13 @@ RouteStateBody ClientRuntime::route_state(const Identity &publisher) const
     check_process();
     std::lock_guard<std::mutex> lock(impl_->mutex);
     const auto i = impl_->routes.find(publisher);
-    return i == impl_->routes.end() ? RouteStateBody{} : i->second;
+    return i == impl_->routes.end() ? RouteStateBody{} : i->second->state_;
+}
+std::shared_ptr<const RouteStateHint> ClientRuntime::watch_route(const Identity& publisher)
+{
+    check_process();
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->route_hint(publisher);
 }
 SendTicket ClientRuntime::prepare_send(Identity publisher, std::uint64_t sequence)
 {

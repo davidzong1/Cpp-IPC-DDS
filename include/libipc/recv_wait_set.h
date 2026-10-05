@@ -43,6 +43,18 @@ IPC_EXPORT recv_wait_result recv_wait_change(const recv_wait_token& token, std::
     const std::atomic<std::uint32_t>& signal, std::uint32_t signal_expected,
     std::uint64_t timeout_ns) noexcept;
 
+// 进程内的队列/取消通知；不改变跨进程SHM序号或原双槽接口。
+class IPC_EXPORT recv_local_signal {
+public:
+    std::uint32_t snapshot() const noexcept { return sequence_.load(std::memory_order_seq_cst); }
+    void notify() noexcept;
+    recv_wait_result wait(const recv_wait_token& token, std::uint32_t expected,
+                          std::uint32_t local_expected, std::uint64_t timeout_ns) noexcept;
+private:
+    alignas(4) std::atomic<std::uint32_t> sequence_{0};
+    std::atomic<unsigned> waiters_{0};
+};
+
 class IPC_EXPORT recv_wait_set
 {
 public:
@@ -55,6 +67,8 @@ public:
     bool remove(const recv_wait_token& token);
     // 保留注册槽位和观察序号；中断旧快照后再按启用状态构造等待集合。
     bool set_enabled(const recv_wait_token& token, bool enabled);
+    // 调用方释放上层锁后必须interrupt；用于将交接唤醒移出worker表临界区。
+    bool set_enabled_deferred(const recv_wait_token& token, bool enabled);
     void interrupt() noexcept;
     bool wait(std::chrono::milliseconds timeout);
     std::vector<recv_wait_token> consume_ready();

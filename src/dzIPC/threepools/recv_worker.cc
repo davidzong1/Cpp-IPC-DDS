@@ -970,23 +970,34 @@ void RecvWorker::AssistLease::reset() noexcept {
 }
 RecvWorker::AssistLease RecvWorker::assist_route(const RecvRouteSource* route) {
     if (!impl_ || !route) return {};
-    std::lock_guard<std::mutex> lock(impl_->mtx);
-    if (impl_->stopping.load()) return {};
-    for (const auto& entry : impl_->routes) {
-        if (entry->key != route || entry->removed.load()) continue;
-        if (!entry->assisting.load() && !impl_->wait_set.set_enabled(entry->token, false)) return {};
-        entry->assisting.fetch_add(1, std::memory_order_release);
-        return AssistLease(this, entry);
+    std::shared_ptr<Impl::Entry> selected;
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mtx);
+        if (impl_->stopping.load()) return {};
+        for (const auto& entry : impl_->routes) {
+            if (entry->key != route || entry->removed.load()) continue;
+            changed = !entry->assisting.load();
+            if (changed && !impl_->wait_set.set_enabled_deferred(entry->token, false)) return {};
+            entry->assisting.fetch_add(1, std::memory_order_release);
+            selected = entry;
+            break;
+        }
     }
-    return {};
+    // 唤醒后worker可立即取得表锁；通知不再与表锁交叉造成二次阻塞。
+    if (changed) impl_->wait_set.interrupt();
+    return selected ? AssistLease(this, selected) : AssistLease{};
 }
 void RecvWorker::release_assist(const std::shared_ptr<void>& opaque) noexcept {
     const auto entry = std::static_pointer_cast<Impl::Entry>(opaque);
-    std::lock_guard<std::mutex> lock(impl_->mtx);
-    if (entry->assisting.fetch_sub(1, std::memory_order_acq_rel) != 1 || entry->removed.load() || impl_->stopping.load()) return;
-    // 必须显式重查：暂停不是空读，不能等下一次发布才恢复后台缓冲。
-    entry->force_recheck = true;
-    impl_->wait_set.set_enabled(entry->token, true);
+    {
+        std::lock_guard<std::mutex> lock(impl_->mtx);
+        if (entry->assisting.fetch_sub(1, std::memory_order_acq_rel) != 1 || entry->removed.load() || impl_->stopping.load()) return;
+        // 必须显式重查：暂停不是空读，不能等下一次发布才恢复后台缓冲。
+        entry->force_recheck = true;
+        impl_->wait_set.set_enabled_deferred(entry->token, true);
+    }
+    impl_->wait_set.interrupt();
 }
 
 RecvWorkerStats RecvWorker::stats() const

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <array>
 #include <cerrno>
 #include <climits>
 #include <mutex>
@@ -44,10 +45,10 @@ constexpr long kFutexWaitvSyscall = -1;
 constexpr std::uint32_t kFutex32 = 2;
 struct futex_waitv_abi { std::uint64_t val, uaddr; std::uint32_t flags, reserved; };
 
-int futex_wake(const std::uint32_t* p) noexcept
+int futex_wake(const std::uint32_t* p, bool local = false) noexcept
 {
     if (p == nullptr) return 0;
-    return static_cast<int>(::syscall(SYS_futex, p, FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0));
+    return static_cast<int>(::syscall(SYS_futex, p, local ? FUTEX_WAKE_PRIVATE : FUTEX_WAKE, INT_MAX, nullptr, nullptr, 0));
 }
 
 bool backend_supported() noexcept
@@ -85,6 +86,8 @@ struct recv_wait_set::impl
     bool stopped{false};
 #if defined(__linux__)
     alignas(4) std::atomic<std::uint32_t> interrupt{0};
+    std::atomic<unsigned> waiters{0};
+    std::uint32_t observed_interrupt{0}; // mutex保护，保留“全扫后、入睡前”的控制通知
 #elif defined(_WIN32)
     HANDLE stop_event{::CreateEventA(nullptr, FALSE, FALSE, nullptr)};
     ~impl() { if (stop_event != nullptr) ::CloseHandle(stop_event); }
@@ -113,14 +116,14 @@ bool recv_wait_change_supported() noexcept {
 #endif
 }
 
-recv_wait_result recv_wait_change(const recv_wait_token& token, std::uint32_t expected,
+static recv_wait_result wait_change(const recv_wait_token& token, std::uint32_t expected,
     const std::atomic<std::uint32_t>& signal, std::uint32_t signal_expected,
-    std::uint64_t timeout_ns) noexcept {
+    std::uint64_t timeout_ns, bool local) noexcept {
 #if defined(__linux__)
     if (!backend_supported()) return recv_wait_result::unavailable;
     futex_waitv_abi slots[2]{}; unsigned count = 0;
     if (token.valid()) slots[count++] = {expected, reinterpret_cast<std::uint64_t>(token.sequence()), kFutex32, 0};
-    slots[count++] = {signal_expected, reinterpret_cast<std::uint64_t>(&signal), kFutex32, 0};
+    slots[count++] = {signal_expected, reinterpret_cast<std::uint64_t>(&signal), kFutex32 | (local ? FUTEX_PRIVATE_FLAG : 0u), 0};
     timespec end{}, *deadline = nullptr;
     if (timeout_ns != UINT64_MAX) {
         if (::clock_gettime(CLOCK_MONOTONIC, &end)) return recv_wait_result::unavailable;
@@ -133,9 +136,31 @@ recv_wait_result recv_wait_change(const recv_wait_token& token, std::uint32_t ex
     if (result >= 0 || errno == EAGAIN || errno == EINTR) return recv_wait_result::changed;
     return errno == ETIMEDOUT ? recv_wait_result::timeout : recv_wait_result::unavailable;
 #else
-    (void)token; (void)expected; (void)signal; (void)signal_expected; (void)timeout_ns;
+    (void)token; (void)expected; (void)signal; (void)signal_expected; (void)timeout_ns; (void)local;
     return recv_wait_result::unavailable;
 #endif
+}
+
+recv_wait_result recv_wait_change(const recv_wait_token& token, std::uint32_t expected,
+    const std::atomic<std::uint32_t>& signal, std::uint32_t signal_expected,
+    std::uint64_t timeout_ns) noexcept {
+    return wait_change(token, expected, signal, signal_expected, timeout_ns, false);
+}
+void recv_local_signal::notify() noexcept {
+    // 与wait的登记/复查构成顺序一致的StoreLoad握手，不能同时看不见对方。
+    sequence_.fetch_add(1, std::memory_order_seq_cst);
+#if defined(__linux__)
+    if (waiters_.load(std::memory_order_seq_cst))
+        futex_wake(reinterpret_cast<const std::uint32_t*>(&sequence_), true);
+#endif
+}
+recv_wait_result recv_local_signal::wait(const recv_wait_token& token, std::uint32_t expected,
+    std::uint32_t local_expected, std::uint64_t timeout_ns) noexcept {
+    waiters_.fetch_add(1, std::memory_order_seq_cst);
+    const auto result = snapshot() != local_expected ? recv_wait_result::changed
+        : wait_change(token, expected, sequence_, local_expected, timeout_ns, true);
+    waiters_.fetch_sub(1, std::memory_order_seq_cst);
+    return result;
 }
 
 recv_wait_set::recv_wait_set() : impl_(new impl) {}
@@ -166,12 +191,7 @@ bool recv_wait_set::remove(const recv_wait_token& token)
     impl_->entries.erase(std::remove_if(impl_->entries.begin(), impl_->entries.end(),
                                         [&](const auto& e) { return e.token == token; }),
                          impl_->entries.end());
-#if defined(__linux__)
-    impl_->interrupt.fetch_add(1, std::memory_order_release);
-    futex_wake(reinterpret_cast<const std::uint32_t*>(&impl_->interrupt));
-#elif defined(_WIN32)
-    if (impl_->stop_event != nullptr) ::SetEvent(impl_->stop_event);
-#endif
+    interrupt();
     return true;
 }
 
@@ -188,14 +208,20 @@ bool recv_wait_set::wait(std::chrono::milliseconds timeout)
         }
         return !impl_->ready.empty();
     };
-    if (scan() || impl_->stopped) return true;
+    const bool ready = scan();
 #if defined(__linux__)
-    std::vector<futex_waitv_abi> waiters;
-    waiters.reserve(impl_->entries.size() + 1);
+    const auto pending_interrupt = impl_->interrupt.load(std::memory_order_seq_cst);
+    if (ready || impl_->stopped || pending_interrupt != impl_->observed_interrupt) {
+        impl_->observed_interrupt = pending_interrupt;
+        return true;
+    }
+    std::array<futex_waitv_abi, kMaxRoutes + 1> waiters;
+    std::size_t count = 0;
     for (const auto& entry : impl_->entries)
-        if (entry.enabled) waiters.push_back({entry.last, reinterpret_cast<std::uint64_t>(entry.token.sequence()), kFutex32, 0});
-    const auto interrupt_value = impl_->interrupt.load(std::memory_order_acquire);
-    waiters.push_back({interrupt_value, reinterpret_cast<std::uint64_t>(&impl_->interrupt), kFutex32, 0});
+        if (entry.enabled) waiters[count++] = {entry.last, reinterpret_cast<std::uint64_t>(entry.token.sequence()), kFutex32, 0};
+    impl_->waiters.fetch_add(1, std::memory_order_seq_cst);
+    const auto interrupt_value = impl_->observed_interrupt;
+    waiters[count++] = {interrupt_value, reinterpret_cast<std::uint64_t>(&impl_->interrupt), kFutex32 | FUTEX_PRIVATE_FLAG, 0};
     timespec ts{}; timespec* tsp = nullptr;
     if (timeout.count() >= 0) {
         ::clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -205,9 +231,11 @@ bool recv_wait_set::wait(std::chrono::milliseconds timeout)
         tsp = &ts;
     }
     lock.unlock();
-    const long rc = ::syscall(kFutexWaitvSyscall, waiters.data(), waiters.size(), 0, tsp, CLOCK_MONOTONIC);
+    const long rc = ::syscall(kFutexWaitvSyscall, waiters.data(), count, 0, tsp, CLOCK_MONOTONIC);
     const int error = errno;
+    impl_->waiters.fetch_sub(1, std::memory_order_seq_cst);
     lock.lock();
+    impl_->observed_interrupt = impl_->interrupt.load(std::memory_order_seq_cst);
     if (rc < 0 && error == ETIMEDOUT) return false;
     if (rc < 0 && error != EAGAIN && error != EINTR) {
         ipc::error("recv_wait_set futex_waitv failed: %d\n", error);
@@ -216,6 +244,7 @@ bool recv_wait_set::wait(std::chrono::milliseconds timeout)
     scan();
     return true;
 #elif defined(_WIN32)
+    if (ready || impl_->stopped) return true;
     if (impl_->stop_event == nullptr) return false;
     std::vector<HANDLE> handles;
     handles.reserve(impl_->entries.size() + 1);
@@ -250,6 +279,13 @@ bool recv_wait_set::wait(std::chrono::milliseconds timeout)
 
 bool recv_wait_set::set_enabled(const recv_wait_token& token, bool enabled)
 {
+    if (!set_enabled_deferred(token, enabled)) return false;
+    interrupt();
+    return true;
+}
+
+bool recv_wait_set::set_enabled_deferred(const recv_wait_token& token, bool enabled)
+{
     if (!impl_) return false;
     std::lock_guard<std::mutex> lock(impl_->mutex);
     const auto entry = std::find_if(impl_->entries.begin(), impl_->entries.end(),
@@ -257,12 +293,6 @@ bool recv_wait_set::set_enabled(const recv_wait_token& token, bool enabled)
     if (entry == impl_->entries.end()) return false;
     if (entry->enabled == enabled) return true;
     entry->enabled = enabled;
-#if defined(__linux__)
-    impl_->interrupt.fetch_add(1, std::memory_order_release);
-    futex_wake(reinterpret_cast<const std::uint32_t*>(&impl_->interrupt));
-#elif defined(_WIN32)
-    if (impl_->stop_event != nullptr) ::SetEvent(impl_->stop_event);
-#endif
     return true;
 }
 
@@ -279,8 +309,9 @@ void recv_wait_set::interrupt() noexcept
 {
     if (!impl_) return;
 #if defined(__linux__)
-    impl_->interrupt.fetch_add(1, std::memory_order_release);
-    futex_wake(reinterpret_cast<const std::uint32_t*>(&impl_->interrupt));
+    impl_->interrupt.fetch_add(1, std::memory_order_seq_cst);
+    if (impl_->waiters.load(std::memory_order_seq_cst))
+        futex_wake(reinterpret_cast<const std::uint32_t*>(&impl_->interrupt), true);
 #elif defined(_WIN32)
     if (impl_->stop_event != nullptr) ::SetEvent(impl_->stop_event);
 #endif
@@ -291,11 +322,6 @@ void recv_wait_set::stop() noexcept
     if (!impl_) return;
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->stopped = true;
-#if defined(__linux__)
-    impl_->interrupt.fetch_add(1, std::memory_order_release);
-    futex_wake(reinterpret_cast<const std::uint32_t*>(&impl_->interrupt));
-#elif defined(_WIN32)
-    if (impl_->stop_event != nullptr) ::SetEvent(impl_->stop_event);
-#endif
+    interrupt();
 }
 }  // namespace ipc

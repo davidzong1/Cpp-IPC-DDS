@@ -44,6 +44,15 @@ struct ControlReply
     Bytes body;
 };
 struct OutboxSubmit;
+// 与一个publisher和ClientRuntime会话绑定；完整状态仅由runtime在mutex内访问。
+class RouteStateHint {
+public:
+    bool local_only() const noexcept { return local_only_.load(std::memory_order_acquire); }
+private:
+    friend class ClientRuntime;
+    RouteStateBody state_;
+    std::atomic<bool> local_only_{false};
+};
 class ClientRuntime : public std::enable_shared_from_this<ClientRuntime>
 {
   public:
@@ -62,6 +71,7 @@ class ClientRuntime : public std::enable_shared_from_this<ClientRuntime>
     CreditCounters granted() const;
     CreditCounters released() const;
     RouteStateBody route_state(const Identity &publisher) const;
+    std::shared_ptr<const RouteStateHint> watch_route(const Identity &publisher);
     SendTicket prepare_send(Identity publisher, std::uint64_t sequence);
     SendResultBody wait_send(const SendTicket &, std::uint64_t deadline_ns);
     SendResultBody cancel_send(const SendTicket &, SendResultCode);

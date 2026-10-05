@@ -82,6 +82,7 @@ TEST(RecvWaitSet, DisabledEntryRetainsChangesUntilReenabled)
     const auto token = pair.sub->read_wait_token();
     if (!require_backend(set, token)) GTEST_SKIP();
     ASSERT_TRUE(set.set_enabled(token, false));
+    EXPECT_TRUE(set.wait(0ms)); // 消费暂停的控制通知，随后才度量真实空闲等待。
     ASSERT_TRUE(pair.pub->try_send("paused", sizeof("paused"), 100));
     EXPECT_FALSE(set.wait(20ms));
     EXPECT_TRUE(set.consume_ready().empty());
@@ -91,6 +92,80 @@ TEST(RecvWaitSet, DisabledEntryRetainsChangesUntilReenabled)
     EXPECT_FALSE(pair.sub->recv(0).empty());
     EXPECT_TRUE(set.remove(token));
     EXPECT_FALSE(set.set_enabled(token, true));
+}
+
+TEST(RecvLocalSignal, NotificationBeforeRegistrationAndBothWakeSources)
+{
+    if (!ipc::recv_wait_change_supported()) GTEST_SKIP();
+    ipc::recv_local_signal signal;
+    const auto old = signal.snapshot();
+    signal.notify(); // 没有等待者：跳过系统调用后，旧快照依然必须立即返回。
+    EXPECT_EQ(signal.wait({}, 0, old, 1000000000), ipc::recv_wait_result::changed);
+    EXPECT_EQ(signal.wait({}, 0, signal.snapshot(), 1000000), ipc::recv_wait_result::timeout);
+    RoutePair pair{"private_signal"}; const auto token = pair.sub->read_wait_token();
+    for (bool local : {false, true}) {
+        const auto seq = token.sequence()->load(); const auto snapshot = signal.snapshot();
+        std::vector<std::future<ipc::recv_wait_result>> waiters;
+        for (unsigned i = 0; i < 4; ++i) waiters.push_back(std::async(std::launch::async, [&] {
+            return signal.wait(token, seq, snapshot, 1000000000);
+        }));
+        for (auto& waiter : waiters) EXPECT_EQ(waiter.wait_for(5ms), std::future_status::timeout);
+        if (local) signal.notify();
+        else ASSERT_TRUE(pair.pub->try_send("all", sizeof("all"), 100));
+        for (auto& waiter : waiters) {
+            EXPECT_EQ(waiter.wait_for(500ms), std::future_status::ready);
+            EXPECT_EQ(waiter.get(), ipc::recv_wait_result::changed);
+        }
+        if (!local) EXPECT_FALSE(pair.sub->recv(0).empty());
+    }
+}
+
+TEST(RecvLocalSignal, ConcurrentRegistrationDoesNotLoseNotification)
+{
+    if (!ipc::recv_wait_change_supported()) GTEST_SKIP();
+    ipc::recv_local_signal signal;
+    std::atomic<unsigned> request{0}, acknowledged{0};
+    auto notifier = std::async(std::launch::async, [&] {
+        for (unsigned i = 1; i <= 1000; ++i) {
+            while (request.load() != i) std::this_thread::yield();
+            signal.notify(); acknowledged.store(i);
+        }
+    });
+    for (unsigned i = 1; i <= 1000; ++i) {
+        const auto snapshot = signal.snapshot(); request.store(i);
+        EXPECT_EQ(signal.wait({}, 0, snapshot, 100000000), ipc::recv_wait_result::changed);
+        while (acknowledged.load() != i) std::this_thread::yield();
+    }
+    notifier.get();
+}
+
+TEST(RecvWaitSet, DeferredResumeInterruptsExistingSnapshot)
+{
+    RoutePair pair{"deferred_resume"}; ipc::recv_wait_set set;
+    const auto token = pair.sub->read_wait_token();
+    if (!require_backend(set, token)) GTEST_SKIP();
+    ASSERT_TRUE(set.set_enabled(token, false));
+    EXPECT_TRUE(set.wait(0ms));
+    auto blocked = std::async(std::launch::async, [&] { return set.wait(1000ms); });
+    EXPECT_EQ(blocked.wait_for(10ms), std::future_status::timeout);
+    ASSERT_TRUE(pair.pub->try_send("ready", sizeof("ready"), 100));
+    ASSERT_TRUE(set.set_enabled_deferred(token, true));
+    set.interrupt();
+    EXPECT_EQ(blocked.wait_for(500ms), std::future_status::ready);
+    EXPECT_TRUE(blocked.get());
+    EXPECT_EQ(set.consume_ready().size(), 1u);
+}
+
+TEST(RecvWaitSet, ControlNotificationBeforeWaitIsNotLost)
+{
+    RoutePair pair{"early_interrupt"}; ipc::recv_wait_set set;
+    if (!require_backend(set, pair.sub->read_wait_token())) GTEST_SKIP();
+    set.interrupt(); // 对应worker全扫后、尚未进入wait时的最后一个getter释放。
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_TRUE(set.wait(1000ms));
+    EXPECT_LT(std::chrono::steady_clock::now() - start, 200ms);
+    EXPECT_TRUE(set.consume_ready().empty());
+    EXPECT_FALSE(set.wait(1ms));
 }
 
 TEST(RecvWaitSet, OneRouteMessageProducesOneReadyToken)

@@ -1,6 +1,21 @@
 #include "shared_net/public_fixture.h"
 #include "gtest/gtest.h"
 using namespace shared_net_test;
+TEST(SharedNetPrebuilt, LargeCopyIsVisibleImmediatelyAfterSharedCommit) {
+    PublicFixture f; dzIPC::shared_net::Subscriber sub(f.model(), f.topic.descriptor.topic, 0, 8); sub.InitChannel();
+    dzIPC::shared_net::Publisher pub(f.topic.generic(), f.topic.descriptor.topic, 0); pub.InitChannel();
+    auto message = f.message(); message->data.resize(1024 * 1024 + 37);
+    for (unsigned turn = 0; turn < 8; ++turn) {
+        for (std::size_t i = 0; i < message->data.size(); ++i) message->data[i] = (i * 7 + turn) & 255;
+        WireBlob blob; ASSERT_TRUE(WireEncoder::encode(*message, true, blob));
+        auto received = std::async(std::launch::async, [&] {
+            dzIPC::Sample sample;
+            return sub.get(sample, 1000) && sample.size() == blob.size() && std::memcmp(sample.data(), blob.view().data, blob.size()) == 0;
+        });
+        ASSERT_TRUE(pub.publish_prebuilt_segment(blob.view().data, blob.size()));
+        EXPECT_TRUE(received.get());
+    }
+}
 TEST(SharedNetPrebuilt, GenericPublisherUsesCallerSchemaWithoutTlvRoundTrip) {
     PublicFixture f; dzIPC::shared_net::Subscriber sub(f.model(), f.topic.descriptor.topic, 0, 8); sub.InitChannel();
     dzIPC::shared_net::Publisher pub(f.topic.generic(), f.topic.descriptor.topic, 0); pub.InitChannel();

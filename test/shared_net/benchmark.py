@@ -136,7 +136,8 @@ def host(args):
                 'cpu_seconds': [b['cpu_seconds']-a['cpu_seconds'] for a,b in zip(before,after)],
                 'gateway_metrics': gateway_metrics, 'shm_peak_sample_bytes': peak_shm, 'idle_gateway': idle, 'idle_status': status,
                 'stage_window': '应用直方图含2秒预热，网关指标为进程累计；精确端到端CSV仅正式窗口',
-                'environment': {'DZIPC_SHM_MPMC': '1', 'DZIPC_SHM_RECV_WORKERS': '1', 'DZIPC_SHARED_RECV_ASSIST': args.receive_assist, 'receive_trace': args.receive_trace, 'publish_trace': args.publish_trace, 'nodelet': False, 'wire': 'prebuilt StdImage DZFlat'}}
+                'environment': {'DZIPC_SHM_MPMC': '1', 'DZIPC_SHM_RECV_WORKERS': '1', 'DZIPC_SHARED_RECV_ASSIST': args.receive_assist,
+                    'receive_trace': args.receive_trace, 'publish_trace': args.publish_trace, 'nodelet': False, 'wire': 'prebuilt StdImage DZFlat'}}
             (directory/'result.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2)+'\n')
             assert result['accepted'] == args.seconds * args.rate and result['rejected'] == 0, evidence
             assert all(x['count'] == result['accepted'] and not x['lost'] and not x['duplicates'] and not x['invalid'] for x in receiver_stats), evidence

@@ -35,6 +35,8 @@ export DZIPC_GATEWAY_CONTROL=/tmp/dzipc-gateway-$UID/control.sock
 
 shared_v1 的共享内存订阅默认允许调用线程协作取包，以减少串行唤醒。getter 活跃期间暂停对应 worker 的 SHM 等待，减少同一次发布的重复唤醒；最后一个 getter 退出后立即恢复后台收包与积压检查。后台接收 worker 在无 getter 时负责缓冲和淘汰；并发 getter 共用原消费队列，取消和代次重建保留原屏障。Linux 的 futex_waitv 不可用时自动使用原可取消队列等待。排障回退可在启动应用前设置 `DZIPC_SHARED_RECV_ASSIST=0`（仅接受 0/1，默认 1）；不需要改变网关或网络协议。
 
+本机快速发布读取随会话保活的原子路由提示，避免逐消息与控制IO争锁。缺失或未同步的提示仍走保守路径；远端加入、旧版本通知和会话失效按原规则处理，可靠发送不跳过网络裁决。载荷复制保持标准memcpy。
+
 ## 返回值与生命周期
 
 - 发布先尝试本机，再接管网络；源网关不回注源主机。网络离线或额度不足不会撤销本机已提交的消息。
@@ -86,6 +88,8 @@ shared_v1 的共享内存订阅默认允许调用线程协作取包，以减少�
 当前没有 DZTX enqueue 时间字段；完整应用出站排队、网络单程时间和跨主机时钟误差仍不可从这些直方图推算。协议头未挪用保留字段。
 
 接收侧排查可在`test/shared_net/benchmark.py`或`performance_matrix.py`中显式加`--receive-trace`，导出每条DZFlat消息的`recv_begin_ns/recv_return_ns/enqueue_before_ns/dequeue_after_ns`，并用`assisted`标记是否由getter协作接收（后台worker的收包计数仅覆盖worker路径，不能据此推算协作后的总交付数）。这些是默认关闭的内部测试缝，不属于网关常开直方图，也不增加Sample或协议字段。发布→recv返回包含提交、等待、worker调度和取包；入队前→出队后包含入队、排队、唤醒与出队。`summarize_receive.py`核对分段和，并用同一批端到端最慢1%消息做归因。打点有观测成本，诊断结果单独保存；旧基线没有的新打点明确标为未采样。
+
+新增`handoff_ns`单独记录getter恢复worker的成本；该成本已包含在入队前→出队后区间，不可再次累加。发布侧使用`benchmark.py --publish-trace`与`summarize_publish.py`记录同次调用的准备、loan、复制、MPMC提交和通知；只支持带新诊断能力的库。`publish_diagnostic.py`中的baseline标签指同库SHM入口控制，明确不同于正式矩阵的f066a82基线。
 
 ## 错误与退出码
 

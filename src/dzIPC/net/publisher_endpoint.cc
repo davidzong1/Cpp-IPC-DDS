@@ -17,14 +17,14 @@ struct PublisherEndpoint::Impl {
     std::shared_ptr<ClientRuntime> runtime; RouteDescriptor descriptor;
     Identity id = local::random_identity(); std::atomic<std::uint64_t> sequence{0};
     std::unique_ptr<ShmWireWriter> writer;
+    std::shared_ptr<const RouteStateHint> route_hint;
     bool closed = false;
     std::uint64_t next() {
         auto old = sequence.load(); do { if (old == UINT64_MAX) throw std::runtime_error("发布序号耗尽"); } while (!sequence.compare_exchange_weak(old, old + 1)); return old + 1;
     }
     bool network_required(Delivery delivery) const {
         if (delivery == Delivery::Reliable || !runtime->healthy()) return true;
-        const auto hint = runtime->route_state(id);
-        return hint.publisher_id != id || !hint.state_version || !hint.synchronized || hint.remote_ready_count != 0;
+        return !route_hint || !route_hint->local_only();
     }
     PublishOutcome deliver(const WireBlob& blob, Delivery delivery, std::uint64_t deadline, bool local_required) {
         PublishOutcome out; out.sequence = next(); out.remote.publisher_id = id; out.remote.sequence = out.sequence;
@@ -64,7 +64,7 @@ PublisherEndpoint::PublisherEndpoint(std::shared_ptr<ClientRuntime> runtime, Rou
     if (!impl_->runtime || !impl_->runtime->healthy()) throw std::runtime_error("网关会话不可用");
     const auto reply = impl_->runtime->request(LocalKind::RegisterPub, registration_body(impl_->id, impl_->descriptor));
     if (reply.header.kind != LocalKind::PubRegistered) throw std::runtime_error("发布者登记失败");
-    try { impl_->writer = std::make_unique<ShmWireWriter>(impl_->descriptor, false, impl_->runtime->gateway_epoch(), &impl_->runtime->metrics()); impl_->runtime->attach_outbox(); }
+    try { impl_->route_hint = impl_->runtime->watch_route(impl_->id); impl_->writer = std::make_unique<ShmWireWriter>(impl_->descriptor, false, impl_->runtime->gateway_epoch(), &impl_->runtime->metrics()); impl_->runtime->attach_outbox(); }
     catch (...) { try { Bytes b(impl_->id.begin(), impl_->id.end()); b.push_back(1); impl_->runtime->request(LocalKind::Unregister, b); } catch (...) {} throw; }
 }
 PublisherEndpoint::~PublisherEndpoint() { if (impl_->owner != getpid()) { impl_.release(); return; } close(); }
