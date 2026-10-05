@@ -31,6 +31,7 @@ struct GatewayData::Impl {
             }
         }
         OutboxRecord record;
+        std::shared_ptr<LocalRegistration> source;
         std::vector<Target> targets;
         std::size_t cursor = 0;
         std::uint64_t expires = 0;
@@ -54,7 +55,28 @@ struct GatewayData::Impl {
         void capture() { std::lock_guard<std::mutex> lock(stats_mutex); if (receive) snapshot = receive->stats(); }
         std::shared_ptr<const GatewayDataView> view;
         std::unique_ptr<ReassemblyShard> receive;
-        std::deque<std::unique_ptr<Tx>> sends;
+        std::map<RouteKey, std::deque<std::unique_ptr<Tx>>> sends;
+        std::deque<RouteKey> ready_routes;
+        std::size_t send_count = 0;
+        void queue_send(std::unique_ptr<Tx> tx) {
+            const auto key = tx->record.header.route; auto& queue = sends[key];
+            const bool empty = queue.empty();
+            try {
+                queue.push_back(std::move(tx));
+                try { if (empty) ready_routes.push_back(key); }
+                catch (...) { queue.pop_back(); throw; }
+            } catch (...) { if (queue.empty()) sends.erase(key); throw; }
+            ++send_count;
+        }
+        std::unique_ptr<Tx> pop_send() {
+            const auto key = ready_routes.front(); auto found = sends.find(key);
+            // 先完成可能分配的轮转，再转移事务，异常时队列仍保持一致。
+            if (found->second.size() > 1) ready_routes.push_back(key);
+            ready_routes.pop_front();
+            auto tx = std::move(found->second.front()); found->second.pop_front(); --send_count;
+            if (found->second.empty()) sends.erase(found);
+            return tx;
+        }
         std::map<std::pair<Identity, std::uint64_t>, Tx*> active;
         std::uint64_t send_blocked_until = 0;
         bool send_progress = false;
@@ -72,6 +94,19 @@ struct GatewayData::Impl {
                         receive->retire_route(route);
                 }
             }
+            // 确认注销屏障前，取消该逻辑发布者尚未终结的网络事务。
+            for (auto route = sends.begin(); route != sends.end();) {
+                auto& queue = route->second;
+                for (auto item = queue.begin(); item != queue.end();) {
+                    if ((*item)->source && !(*item)->source->active.load()) {
+                        auto tx = std::move(*item); item = queue.erase(item); --send_count;
+                        finish(std::move(tx), SendResultCode::Cancelled);
+                    } else ++item;
+                }
+                if (queue.empty()) route = sends.erase(route); else ++route;
+            }
+            ready_routes.erase(std::remove_if(ready_routes.begin(), ready_routes.end(),
+                [&](const auto& key) { return sends.find(key) == sends.end(); }), ready_routes.end());
             view = std::move(next); // 旧 bridge 的最后引用必须先释放，再确认屏障。
         }
         void feedback(ReceiveFeedback f) {
@@ -99,7 +134,10 @@ struct GatewayData::Impl {
             GatewayDataEvent event; event.header = tx->record.header; event.result.publisher_id = event.header.publisher_id;
             event.result.sequence = event.header.sequence; event.result.result = result;
             event.result.target_count = tx->targets.size(); event.result.possible_remote_delivery = tx->sent;
-            if (tx->reliable && tx->reliable->result()) event.result = *tx->reliable->result();
+            if (tx->reliable) {
+                if (!tx->reliable->result()) tx->reliable->cancel(result);
+                event.result = *tx->reliable->result();
+            }
             if (tx->reliable) { const auto stats = tx->reliable->stats(); parent.retry_packets += stats.retry_packets; parent.nacks += stats.nacks; parent.ignored_controls += stats.ignored_controls; }
             result = event.result.result;
             const auto key = std::make_pair(event.header.publisher_id, event.header.sequence);
@@ -115,6 +153,7 @@ struct GatewayData::Impl {
             return h;
         }
         void prepare(std::unique_ptr<Tx> tx) {
+            if (tx->source && !tx->source->active.load()) { finish(std::move(tx), SendResultCode::Cancelled); return; }
             const auto& h = tx->record.header;
             const auto key = std::make_pair(h.publisher_id, h.sequence);
             if (active.count(key)) { finish(std::move(tx), SendResultCode::Rejected); return; }
@@ -128,39 +167,51 @@ struct GatewayData::Impl {
                 tx->reliable = std::make_unique<ReliableSession>(base(*tx), std::move(targets), tx->expires,
                     parent.config.retry_initial_ms * 1000000, parent.config.retry_max_ms * 1000000, parent.config.nack_interval_ms * 1000000);
             }
-            active.emplace(key, tx.get()); sends.push_back(std::move(tx));
+            active.emplace(key, tx.get()); queue_send(std::move(tx));
         }
         void sending() {
             send_progress = false;
             const auto deadline = local::monotonic_ns() + parent.config.io_round_us * 1000;
-            std::size_t packets = 0, bytes = 0;
-            for (std::size_t visit = 0, count = sends.size(); visit < count && !sends.empty() && packets < parent.config.io_round_packets && bytes < parent.config.io_round_bytes && local::monotonic_ns() < deadline; ++visit) {
-                auto tx = std::move(sends.front()); sends.pop_front();
+            std::size_t packets = 0, bytes = 0, retried = 0;
+            const bool initial_pending = std::any_of(active.begin(), active.end(), [](const auto& item) {
+                return !item.second->reliable || item.second->reliable->has_initial_pending();
+            });
+            const auto retry_limit = initial_pending ? std::min(parent.config.io_round_packets / 2, parent.config.io_round_bytes / (2 * 1184)) : parent.config.io_round_packets;
+            for (std::size_t visit = 0, count = send_count; visit < count && !ready_routes.empty() && packets < parent.config.io_round_packets && bytes < parent.config.io_round_bytes && local::monotonic_ns() < deadline; ++visit) {
+                auto tx = pop_send();
+                if (tx->source && !tx->source->active.load()) { finish(std::move(tx), SendResultCode::Cancelled); continue; }
                 if (tx->reliable) {
                     const auto now = local::monotonic_ns();
                     const auto allowance = std::min<std::uint64_t>({parent.config.io_batch_max, parent.config.io_round_packets - packets,
                         std::max<std::uint64_t>(1, (parent.config.io_round_bytes - bytes) / 1184)});
-                    const auto& batch = tx->reliable->batch(now, allowance);
+                    const auto& batch = tx->reliable->batch(now, allowance, retry_limit - retried);
                     if (tx->reliable->result()) { finish(std::move(tx), SendResultCode::Completed); continue; }
-                    const auto count = std::min<std::size_t>(batch.size(), allowance);
-                    if (!count) { sends.push_back(std::move(tx)); continue; }
+                    auto count = std::min<std::size_t>(batch.size(), allowance);
+                    std::size_t retry_prefix = 0;
+                    for (std::size_t n = 0; n < count; ++n) {
+                        if (batch[n].retry && ++retry_prefix > retry_limit - retried) { count = n; break; }
+                    }
+                    if (!count) { queue_send(std::move(tx)); continue; }
                     std::vector<Bytes> storage(count); std::vector<OutgoingDatagram> outgoing(count);
                     for (unsigned n = 0; n < count; ++n) {
                         const auto h = tx->reliable->header(batch[n]); const auto offset = std::size_t(h.fragment_index) * 1024;
                         encode_packet(h, {tx->record.blob.view().data + offset, std::min<std::size_t>(1024, tx->record.blob.size() - offset)}, storage[n]);
                         outgoing[n] = {tx->reliable->destination(batch[n]), ByteView(storage[n])};
                     }
+                    tx->reliable->tick(local::monotonic_ns());
+                    if (tx->reliable->result()) { finish(std::move(tx), SendResultCode::TimedOut); continue; }
                     const auto result = endpoint->send_batch(outgoing.data(), outgoing.size());
                     if (result.status == IoStatus::WouldBlock) ++parent.send_eagain;
                     if (result.status == IoStatus::Fatal) ++parent.send_error;
                     for (unsigned n = 0; n < result.count; ++n) parent.tx_bytes += storage[n].size();
+                    for (unsigned n = 0; n < result.count; ++n) retried += batch[n].retry;
                     tx->reliable->accepted(result.count, local::monotonic_ns()); tx->sent |= result.count != 0;
                     packets += result.count; parent.sent_packets += result.count;
                     send_progress |= result.count != 0;
                     for (unsigned n = 0; n < result.count; ++n) bytes += storage[n].size();
                     if (!result.count && result.status == IoStatus::WouldBlock) send_blocked_until = local::monotonic_ns() + 1000000;
                     if (result.status == IoStatus::Fatal) finish(std::move(tx), SendResultCode::Rejected);
-                    else sends.push_back(std::move(tx));
+                    else queue_send(std::move(tx));
                     continue;
                 }
                 if (local::monotonic_ns() >= tx->expires) { finish(std::move(tx), SendResultCode::TimedOut); continue; }
@@ -181,6 +232,7 @@ struct GatewayData::Impl {
                     encode_packet(h, {blob.view().data + offset, std::min<std::size_t>(1024, blob.size() - offset)}, storage[n]);
                     outgoing[n] = {{target.peer.admission->ipv4, data_port(h.route, target.peer.admission->hello.data_base_port, target.peer.admission->hello.data_shards)}, ByteView(storage[n])};
                 }
+                if (local::monotonic_ns() >= tx->expires) { finish(std::move(tx), SendResultCode::TimedOut); continue; }
                 const auto result = endpoint->send_batch(outgoing.data(), outgoing.size());
                     if (result.status == IoStatus::WouldBlock) ++parent.send_eagain;
                     if (result.status == IoStatus::Fatal) ++parent.send_error;
@@ -192,7 +244,7 @@ struct GatewayData::Impl {
                 tx->sent |= result.count != 0;
                 if (result.status == IoStatus::Fatal) { finish(std::move(tx), SendResultCode::Rejected); continue; }
                 if (target.fragment == h.fragment_count && ++tx->cursor == tx->targets.size()) finish(std::move(tx), SendResultCode::Completed);
-                else sends.push_back(std::move(tx));
+                else queue_send(std::move(tx));
             }
         }
         void run() noexcept {
@@ -215,7 +267,7 @@ struct GatewayData::Impl {
                     }
                     pollfd fds[]{{wake.get(), POLLIN, 0}, {endpoint->native_handle(), POLLIN, 0}};
                     // 不可因 EAGAIN 忙转；定时轮次保持短上界，不等待凑批。
-                    const bool deferred = send_progress && !sends.empty() && local::monotonic_ns() >= send_blocked_until;
+                    const bool deferred = send_progress && !ready_routes.empty() && local::monotonic_ns() >= send_blocked_until;
                     if (::poll(fds, 2, deferred ? 0 : 1) < 0 && errno != EINTR) throw std::runtime_error("数据 shard 轮询失败");
                     if (fds[0].revents) local::drain_event(wake.get());
                     if (fds[1].revents & POLLIN) {
@@ -238,7 +290,12 @@ struct GatewayData::Impl {
                     capture();
                 }
             } catch (...) { parent.stopped.store(true); local::notify(parent.control_wake); }
-            while (!sends.empty()) { auto tx = std::move(sends.front()); sends.pop_front(); finish(std::move(tx), SendResultCode::GatewayLost); }
+            while (!sends.empty()) {
+                auto found = sends.begin(); auto tx = std::move(found->second.front()); found->second.pop_front();
+                if (found->second.empty()) sends.erase(found);
+                finish(std::move(tx), SendResultCode::GatewayLost);
+            }
+            ready_routes.clear(); send_count = 0;
             { std::lock_guard<std::mutex> lock(mutex); for (auto& command : commands) { --parent.queued_commands; parent.queued_bytes -= command.charged_bytes; if (command.tx) finish(std::move(command.tx), SendResultCode::GatewayLost); } commands.clear(); }
             capture(); active.clear(); receive.reset(); view.reset();
         }
@@ -309,8 +366,9 @@ std::shared_future<void> GatewayData::synchronize(std::shared_ptr<const GatewayD
     }
     return future;
 }
-bool GatewayData::submit(OutboxRecord& record, std::vector<PeerView> peers) {
+bool GatewayData::submit(OutboxRecord& record, std::vector<PeerView> peers, std::shared_ptr<LocalRegistration> source) {
     auto tx = std::make_unique<Impl::Tx>();
+    tx->source = std::move(source);
     tx->quota_owner = impl_.get(); tx->charged_publisher = record.header.publisher_id;
     if (record.header.delivery == Delivery::Reliable) {
         std::lock_guard<std::mutex> lock(impl_->quota_mutex);

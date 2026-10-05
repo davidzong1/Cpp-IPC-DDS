@@ -12,6 +12,7 @@ struct LocalRegistration {
     Identity id{};
     std::uint64_t session = 0;
     bool publisher = false, ready = false;
+    std::atomic<bool> active{true};
     std::shared_ptr<LocalBinding> binding;
     std::uint64_t highest_sequence = 0;
     std::array<std::uint64_t, 64> sequences{};

@@ -2,6 +2,7 @@
 #include "shared_net/shm_wire_fixture.h"
 #include "gtest/gtest.h"
 #include <algorithm>
+#include <set>
 using namespace shared_net_test;
 TEST(SharedNetReassembly, BoundarySizesReverseOrderAndDuplicatesPreserveEveryByte) {
     for (const auto size : {1023u, 1024u, 1025u, 1024u * 1024, kMaxMessageBytes}) {
@@ -83,5 +84,50 @@ TEST(SharedNetReassembly, AckOnlyFollowsRealShmCommit) {
     const auto data = flat_blob(4096); EXPECT_EQ(f.feed(data).disposition, ReceiveDisposition::CommitPending); EXPECT_TRUE(rx.try_recv().empty());
     auto replies = f.shard->tick(2, [&](const auto&, const auto& blob) { return bridge.try_commit(blob); });
     ASSERT_EQ(replies.size(), 1u); EXPECT_EQ(reply_kind(replies.front()), PacketKind::Ack); auto sample = rx.try_recv(); ASSERT_EQ(sample.size(), data.size()); EXPECT_EQ(std::memcmp(sample.data(), data.data(), data.size()), 0);
+    EXPECT_TRUE(rx.try_recv().empty());
+}
+TEST(SharedNetReassembly, FullDomainsZeroIdAndLongNamesStayDistinctOnOneShard) {
+    std::vector<std::unique_ptr<ReassemblyFixture>> routes;
+    std::vector<Bytes> originals;
+    std::vector<std::vector<ReceivedDatagram>> packets;
+    const std::array<std::uint64_t, 4> domains{0, 1ull << 32, (1ull << 40) + 3, UINT64_MAX};
+    const std::string prefix(127, 'x');
+    for (auto domain : domains) for (const auto* suffix : {"/alpha", "/beta"}) {
+        auto f = std::make_unique<ReassemblyFixture>(); f->route(prefix + suffix);
+        auto& p = f->admission.publisher->descriptor; auto& s = f->admission.subscriber->descriptor;
+        p.key.scope = dzIPC::common::channel_scope_token(p.topic, domain, dzIPC::common::ScopeKind::PubSub);
+        p.key.msg_id = 0; s.key = p.key;
+        f->admission.peer->hello.data_shards = 1; // 全部共用相同来源端口和接收 shard。
+        Bytes encoded; ASSERT_TRUE(encode_descriptor(p, false, encoded)); RouteDescriptor decoded;
+        ASSERT_TRUE(decode_descriptor(ByteView(encoded), false, decoded)); EXPECT_EQ(decoded.topic, p.topic); EXPECT_EQ(decoded.key, p.key);
+        auto bytes = flat_blob(4096, routes.size() + 1); dzflat::SegHeader h{};
+        std::memcpy(&h, bytes.data(), sizeof(h)); h.msg_id = 0; std::memcpy(bytes.data(), &h, sizeof(h));
+        packets.push_back(f->packets(bytes, 7, 1)); originals.push_back(std::move(bytes)); routes.push_back(std::move(f));
+    }
+    for (int fragment = 3; fragment >= 0; --fragment) for (unsigned i = 0; i < routes.size(); ++i)
+        routes.front()->shard->ingest(packets[i][fragment], routes[i]->admission, 1);
+    std::set<RouteKey> committed;
+    routes.front()->shard->tick(2, [&](const WireHeader& h, const WireBlob& blob) {
+        const auto i = std::find_if(routes.begin(), routes.end(), [&](const auto& f) { return f->admission.publisher->descriptor.key == h.route; });
+        EXPECT_NE(i, routes.end());
+        if (i != routes.end()) EXPECT_EQ(std::memcmp(blob.view().data, originals[i-routes.begin()].data(), blob.size()), 0);
+        EXPECT_TRUE(committed.insert(h.route).second); return SubmitState::Committed;
+    });
+    EXPECT_EQ(committed.size(), 8u);
+}
+TEST(SharedNetReassembly, DifferentShardCountsAndDuplicateEndpointsCommitOnlyAtOwner) {
+    BusinessTopic topic; ReassemblyFixture f; f.route(topic.descriptor.topic);
+    ShmWireBridge bridge(topic.descriptor); ipc::mpmc_channel rx(topic.segment().c_str(), ipc::receiver, false);
+    const auto owner = route_hash(topic.descriptor.key) % 2;
+    ReassemblyShard first(f.local, 3, 0, 2, f.budget), second(f.local, 3, 1, 2, f.budget);
+    const auto bytes = flat_blob(4096);
+    for (const auto& packet : f.packets(bytes)) {
+        first.ingest(packet, f.admission, 1); second.ingest(packet, f.admission, 1);
+    }
+    unsigned commits = 0;
+    auto commit = [&](const auto&, const auto& blob) { ++commits; return bridge.try_commit(blob); };
+    const auto a = first.tick(2, commit), b = second.tick(2, commit);
+    EXPECT_EQ(commits, 1u); EXPECT_EQ(a.size(), owner == 0 ? 1u : 0u); EXPECT_EQ(b.size(), owner == 1 ? 1u : 0u);
+    auto sample = rx.try_recv(); ASSERT_EQ(sample.size(), bytes.size()); EXPECT_EQ(std::memcmp(sample.data(), bytes.data(), bytes.size()), 0);
     EXPECT_TRUE(rx.try_recv().empty());
 }

@@ -34,7 +34,7 @@ public:
                 std::vector<std::unique_ptr<DatagramEndpoint>> endpoints);
     ~GatewayData();
     std::shared_future<void> synchronize(std::shared_ptr<const GatewayDataView>);
-    bool submit(OutboxRecord&, std::vector<PeerView> targets);
+    bool submit(OutboxRecord&, std::vector<PeerView> targets, std::shared_ptr<LocalRegistration> source = {});
     bool control(const ReceivedDatagram&);
     bool pop(GatewayDataEvent&);
     bool healthy() const;

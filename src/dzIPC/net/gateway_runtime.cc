@@ -100,7 +100,7 @@ struct GatewayRuntime::Impl
     std::deque<CatalogRequest> catalog_requests;
     std::uint64_t catalog_bytes = 0, next_hello = 0, last_local_version = 0, last_peer_revision = 0, route_revision = 1;
     std::size_t hint_cursor = 0;
-    double control_tokens = 0;
+    double control_tokens = 0; unsigned non_catalog_opportunities = 0;
     std::uint64_t token_time = 0;
     std::map<Identity, std::pair<double, std::uint64_t>> peer_tokens;
     std::map<Identity, std::pair<double, std::uint64_t>> receive_tokens;
@@ -240,7 +240,7 @@ struct GatewayRuntime::Impl
         codec::append(body, text.size(), 2);
         body.insert(body.end(), text.begin(), text.end());
         ++rejected;
-        { std::lock_guard<std::mutex> lock(error_mutex); last_error_code = code; last_error = text.substr(0, 160); }
+        { std::lock_guard<std::mutex> lock(error_mutex); last_error_code = code; std::size_t length = std::min<std::size_t>(160, text.size()); while (length < text.size() && length && (static_cast<unsigned char>(text[length]) & 0xc0) == 0x80) --length; last_error = text.substr(0, length); }
         return response(session, LocalKind::Error, request_id, body);
     }
     void close_session(std::map<int, Session>::iterator i)
@@ -514,17 +514,21 @@ struct GatewayRuntime::Impl
         }
         Bytes body; encode_send_result(result, body); queue(session, response(session, LocalKind::SendResult, header.request_id, body));
     }
-    bool allow_control(const Identity& id, std::uint64_t now, bool incoming = false)
+    bool allow_control(const Identity& id, std::uint64_t now, bool incoming = false, bool catalog = false)
     {
+        if (!incoming && !catalog && (!page_sends.empty() || !catalog_requests.empty()) && non_catalog_opportunities >= 9) return false;
         auto& stamp = incoming ? receive_token_time : token_time;
         auto& global = incoming ? receive_control_tokens : control_tokens;
         if (!stamp) { stamp = now; global = config.control_burst; }
         global = std::min<double>(config.control_burst, global + (now - stamp) * 1e-9 * config.control_rate); stamp = now;
         auto& token = (incoming ? receive_tokens : peer_tokens)[id];
-        if (!token.second) { token.first = config.control_burst; token.second = now; }
-        token.first = std::min<double>(config.control_burst, token.first + (now - token.second) * 1e-9 * config.peer_control_rate); token.second = now;
+        const auto peer_burst = std::min<std::uint64_t>(16, config.control_burst);
+        if (!token.second) { token.first = peer_burst; token.second = now; }
+        token.first = std::min<double>(peer_burst, token.first + (now - token.second) * 1e-9 * config.peer_control_rate); token.second = now;
         if (global < 1 || token.first < 1) return false;
-        --global; --token.first; return true;
+        --global; --token.first;
+        if (!incoming) { if (catalog) non_catalog_opportunities = 0; else if (non_catalog_opportunities < 9) ++non_catalog_opportunities; }
+        return true;
     }
     void process_network_control()
     {
@@ -576,7 +580,7 @@ struct GatewayRuntime::Impl
             auto request = std::move(catalog_requests.front()); catalog_requests.pop_front();
             CatalogHeader h; ByteView body; decode_catalog(ByteView(request.packet), h, body);
             if (!peer_directory->reachable(h.target_id, now)) { catalog_bytes -= request.packet.size(); continue; }
-            if (!allow_control(h.target_id, now)) { catalog_requests.push_back(std::move(request)); continue; }
+            if (!allow_control(h.target_id, now, false, true)) { catalog_requests.push_back(std::move(request)); continue; }
             const auto result = control->send(ByteView(request.packet), request.destination);
             if (result.status == IoStatus::WouldBlock) { catalog_requests.push_back(std::move(request)); continue; }
             catalog_bytes -= request.packet.size();
@@ -586,7 +590,7 @@ struct GatewayRuntime::Impl
             if (it == page_sends.end()) it = page_sends.begin(); page_cursor = it->first;
             auto& work = it->second; const auto peer = peer_directory->peer(it->first);
             if (peer.admission != work.peer.admission || !peer_directory->reachable(it->first, now)) { page_sends.erase(it); continue; }
-            if (!allow_control(it->first, now)) continue;
+            if (!allow_control(it->first, now, false, true)) continue;
             CatalogHeader h; h.source_id = identity; h.source_epoch = epoch; h.target_id = it->first; h.target_epoch = work.peer.admission->hello.gateway_epoch;
             auto packet = catalog_page(*work.snapshot, h, work.page);
             const auto result = control->send(ByteView(packet), {work.peer.admission->ipv4, work.peer.admission->hello.control_port});
@@ -670,7 +674,7 @@ struct GatewayRuntime::Impl
                         (!publisher->binding->descriptor.schema_hash || h.encoding == Encoding::Tlv || publisher->binding->descriptor.schema_hash == h.schema_hash) &&
                         publisher->accept_sequence(h.sequence)) {
                         failure = SendResultCode::Busy;
-                        if (data->submit(event.record, peer_directory->targets(publisher->binding->descriptor))) continue;
+                        if (data->submit(event.record, peer_directory->targets(publisher->binding->descriptor), publisher)) continue;
                     }
                     event.record.release();
                     // 未登记或无法接管的记录明确拒绝，不伪报 NoSubscribers/成功。

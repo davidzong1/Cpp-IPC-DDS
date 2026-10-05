@@ -1,4 +1,6 @@
 #include "dzIPC/net/publisher_endpoint.h"
+#include "dzIPC/dzipc.h"
+#include "ipc_msg/ipc_msg_base/generic_message.hpp"
 #include "dzIPC/common/channel_scope.h"
 #include "dzIPC/common/name_operator.h"
 #include "dzIPC/shm_pub_sub_ipc.h"
@@ -9,6 +11,8 @@
 #include <iostream>
 #include <sstream>
 #include <thread>
+#include <set>
+#include <algorithm>
 
 using namespace dzIPC::net;
 namespace {
@@ -29,6 +33,7 @@ int main(int argc, char** argv) try {
     descriptor.key.scope = dzIPC::common::channel_scope_token(descriptor.topic, 0, dzIPC::common::ScopeKind::PubSub);
     auto runtime = ClientRuntime::acquire(argv[1]);
     std::unique_ptr<PublisherEndpoint> publisher;
+    dzIPC::PublisherIPCPtr public_publisher;
     if (role != "sub") publisher = std::make_unique<PublisherEndpoint>(runtime, descriptor);
     Identity sub{}; std::unique_ptr<ipc::mpmc_channel> receiver;
     if (role != "pub") {
@@ -58,6 +63,45 @@ int main(int argc, char** argv) try {
             std::cout << "{\"success\":" << (result.success ? "true" : "false") << ",\"local\":" << static_cast<int>(result.local)
                       << ",\"network\":" << static_cast<int>(result.network) << ",\"sequence\":" << result.sequence
                       << ",\"result\":" << static_cast<unsigned>(result.remote.result) << ",\"crc\":" << crc32c(ByteView(bytes)) << "}" << std::endl;
+        } else if (command == "load" && publisher) {
+            unsigned seconds, size; double rate; input >> seconds >> rate >> size;
+            if (!seconds || seconds > 60 || rate < 0 || rate > 10000) throw std::invalid_argument("负载参数无效");
+            if (!public_publisher) {
+                dzIPC::EnableDzFlat(true); dzIPC::EnableNodelet(false);
+                auto model = std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::GenericMessage>(), 71);
+                public_publisher = dzIPC::PublisherIPCPtrMake(model, descriptor.topic, 0, dzIPC::IPC_SOCKET);
+                public_publisher->InitChannel();
+            }
+            const auto start = std::chrono::steady_clock::now(), end = start + std::chrono::seconds(seconds);
+            std::uint64_t count = 0, failed = 0; std::vector<std::uint64_t> latency;
+            while (std::chrono::steady_clock::now() < end && count < 600000) {
+                if (rate) std::this_thread::sleep_until(start + std::chrono::nanoseconds(static_cast<std::uint64_t>(count * 1000000000.0 / rate)));
+                if (std::chrono::steady_clock::now() >= end) break;
+                auto bytes = payload(size, 1, ++count); auto message = std::make_shared<dzIPC::GenericMessage>();
+                message->set_msg_id(71); if (!message->dzflat_read(bytes.data(), bytes.size())) throw std::runtime_error("负载段无效");
+                const auto began = std::chrono::steady_clock::now();
+                failed += !public_publisher->publish_blocking(message, 1000);
+                latency.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - began).count());
+            }
+            std::sort(latency.begin(), latency.end());
+            const auto percentile = [&](double p) { return latency.empty() ? 0ull : static_cast<unsigned long long>(latency[std::min(latency.size()-1, static_cast<std::size_t>(latency.size()*p))]); };
+            std::cout << "{\"sent\":" << count << ",\"failed\":" << failed << ",\"p50_ns\":" << percentile(.50)
+                      << ",\"p95_ns\":" << percentile(.95) << ",\"p99_ns\":" << percentile(.99) << ",\"max_ns\":" << percentile(1) << "}" << std::endl;
+        } else if (command == "drain" && receiver) {
+            unsigned seconds; input >> seconds; if (!seconds || seconds > 65) throw std::invalid_argument("接收窗口无效");
+            const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+            std::uint64_t count = 0, bad = 0, duplicates = 0, gap = 0; std::set<std::uint64_t> seen;
+            auto last = std::chrono::steady_clock::time_point{};
+            while (std::chrono::steady_clock::now() < end) {
+                auto sample = receiver->try_recv(); if (sample.empty()) { std::this_thread::sleep_for(std::chrono::microseconds(100)); continue; }
+                const auto now = std::chrono::steady_clock::now();
+                if (last != std::chrono::steady_clock::time_point{}) gap = std::max(gap, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now-last).count())); last = now;
+                ++count; if (sample.size() < 48 || sample.size() > kMaxMessageBytes) { ++bad; continue; }
+                std::uint64_t tag, sequence; std::memcpy(&tag, static_cast<const std::uint8_t*>(sample.data())+32, 8); std::memcpy(&sequence, static_cast<const std::uint8_t*>(sample.data())+40, 8);
+                if (!seen.insert(sequence).second) ++duplicates;
+                const auto expected = payload(sample.size(),tag,sequence); bad += std::memcmp(expected.data(),sample.data(),sample.size()) != 0;
+            }
+            std::cout << "{\"received\":" << count << ",\"invalid\":" << bad << ",\"duplicates\":" << duplicates << ",\"max_gap_ns\":" << gap << "}" << std::endl;
         } else if (command == "recv" && receiver) {
             unsigned count, timeout; input >> count >> timeout;
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);

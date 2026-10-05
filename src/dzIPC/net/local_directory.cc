@@ -45,7 +45,7 @@ LocalDirectory::LocalDirectory(std::shared_ptr<DirectoryBudget> budget, Limits l
     impl_->current = impl_->budget->replace({}, 1);
     if (!impl_->current) throw std::runtime_error("空目录配额不足");
 }
-LocalDirectory::~LocalDirectory() { for (const auto& [key, route] : impl_->current->routes) route->active.store(false); }
+LocalDirectory::~LocalDirectory() { for (const auto& [id, registration] : impl_->handles) registration->active.store(false); for (const auto& [key, route] : impl_->current->routes) route->active.store(false); }
 std::shared_ptr<LocalRegistration> LocalDirectory::add(std::uint64_t session, Identity id, RouteDescriptor descriptor, bool publisher) {
     if (!impl_->healthy) throw std::runtime_error("路由目录已失效");
     Bytes check;
@@ -101,6 +101,7 @@ bool LocalDirectory::remove(std::uint64_t session, Identity id, bool publisher) 
     auto registration = find(session, id);
     if (!registration) return true;
     if (registration->publisher != publisher) return false;
+    registration->active.store(false);
     auto i = impl_->topics.find(registration->binding->descriptor.key.scope); auto& topic = i->second;
     publisher ? --topic.pubs : --topic.subs;
     if (registration->ready) --topic.ready;

@@ -67,13 +67,13 @@ ReliableSession::ReliableSession(WireHeader base, std::vector<ReliableTarget> ta
     }
 }
 ReliableSession::~ReliableSession() = default;
-const std::vector<SendFragment>& ReliableSession::batch(std::uint64_t now, std::size_t maximum) {
+const std::vector<SendFragment>& ReliableSession::batch(std::uint64_t now, std::size_t maximum, std::size_t max_retries) {
     impl_->tick(now); if (impl_->terminal || !impl_->pending.empty() || !maximum) return impl_->pending;
     // 不改变已发送进度。临时位置只用于形成一个有限批次；失败后原批次保持原样。
     std::vector<std::uint32_t> initial; initial.reserve(impl_->targets.size());
     std::vector<std::uint32_t> retry_cursor(impl_->targets.size());
     for (const auto& target : impl_->targets) initial.push_back(target.initial);
-    std::size_t idle = 0;
+    std::size_t idle = 0, retries = 0;
     while (impl_->pending.size() < maximum && idle < impl_->targets.size()) {
         const auto index = impl_->cursor++ % impl_->targets.size(); const auto& target = impl_->targets[index];
         if (target.acked) { ++idle; continue; }
@@ -86,7 +86,7 @@ const std::vector<SendFragment>& ReliableSession::batch(std::uint64_t now, std::
             if (bits) { f = (f / 64) * 64 + __builtin_ctzll(bits); break; }
             f = (f / 64 + 1) * 64;
         }
-        if (f < impl_->base.fragment_count) { impl_->pending.push_back({index, f++, true}); idle = 0; }
+        if (f < impl_->base.fragment_count && retries < max_retries) { impl_->pending.push_back({index, f++, true}); ++retries; idle = 0; }
         else ++idle;
     }
     return impl_->pending;
@@ -124,6 +124,12 @@ void ReliableSession::control(const ReceivedDatagram& packet, std::uint64_t now)
         impl_->tick(now); return;
     }
     ++impl_->stats.ignored_controls;
+}
+void ReliableSession::cancel(SendResultCode code) { if (!impl_->terminal) impl_->finish(code); }
+bool ReliableSession::has_initial_pending() const {
+    if (impl_->terminal) return false;
+    for (const auto& target : impl_->targets) if (!target.acked && target.initial < impl_->base.fragment_count) return true;
+    return false;
 }
 void ReliableSession::tick(std::uint64_t now) { impl_->tick(now); }
 WireHeader ReliableSession::header(const SendFragment& f) const { auto h = impl_->header(f.target); h.fragment_index = f.fragment; return h; }

@@ -9,3 +9,9 @@ set_target_properties(shared_net_probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMA
 if(UNIX AND NOT APPLE)
     set_target_properties(dzipc_gateway PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
 endif()
+
+if(LIBIPC_BUILD_TESTS)
+    add_executable(shared_net_benchmark ../../test/shared_net/benchmark.cc)
+    target_link_libraries(shared_net_benchmark PRIVATE ipc)
+    set_target_properties(shared_net_benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

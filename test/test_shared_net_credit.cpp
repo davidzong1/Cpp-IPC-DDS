@@ -73,3 +73,21 @@ TEST(SharedNetCredit, ReplayedOutboxSequenceDoesNotStartAnotherTransmission) {
     ASSERT_TRUE(until([&] { return client->status().find("\"outbox_records\":\"2\"") != std::string::npos; }));
     ReceivedDatagram duplicate; EXPECT_EQ(peer.data.receive(duplicate).status, IoStatus::WouldBlock);
 }
+TEST(SharedNetCredit, UnregisterFenceCancelsPendingPublisherBeforeReturning) {
+    BusinessTopic topic; Directory dir; auto config = configuration(dir); GatewayRuntime gateway(config);
+    auto client = ClientRuntime::acquire(dir.control()); PublisherEndpoint publisher(client, topic.descriptor);
+    PeerStub peer; peer.announce(config, topic.descriptor, client, publisher.publisher_id());
+    const auto bytes = flat_blob(1024);
+    auto call = std::async(std::launch::async, [&] { return publisher.prebuilt(ByteView(bytes), Delivery::Reliable, 5000); });
+    ReceivedDatagram packet; ASSERT_TRUE(until([&] { return peer.data.receive(packet).status == IoStatus::Data; }));
+    const auto id = publisher.publisher_id(); Bytes body(id.begin(), id.end()); body.push_back(1);
+    ASSERT_EQ(client->request(LocalKind::Unregister, body).header.kind, LocalKind::Unregistered);
+    ASSERT_EQ(call.wait_for(500ms), std::future_status::ready); const auto result = call.get();
+    EXPECT_FALSE(result.success); EXPECT_EQ(result.remote.result, SendResultCode::Cancelled);
+    EXPECT_TRUE(result.remote.possible_remote_delivery);
+    // 注销已确认后不再出现新的首发或重试，已发网络包不作撤回承诺。
+    const auto status = client->status();
+    const auto start = status.find("\"sent_packets\":"); ASSERT_NE(start, std::string::npos);
+    const auto value = status.substr(start, status.find(',', start)-start);
+    std::this_thread::sleep_for(20ms); EXPECT_NE(client->status().find(value), std::string::npos);
+}

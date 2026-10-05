@@ -97,7 +97,7 @@ def host(args):
                 raise AssertionError(gateway.stderr.read().decode())
             assert time.monotonic() < end, '网关启动超时'
             time.sleep(.01)
-        for role in ('both', 'sub'):
+        for role in ['both'] + ['sub'] * (args.local_subscribers - 1) + ['pub'] * (args.local_publishers - 1):
             probe = Process([args.probe, control, args.topic, role], env)
             probes.append(probe)
             assert probe.receive()['ready']
@@ -109,12 +109,16 @@ def host(args):
                 break
             if command[0] == 'probe':
                 result = probes[command[1]].request(command[2])
+            elif command[0] == 'close_probe':
+                probe = probes[command[1]]
+                probe.p.stdin.write('quit\n'); probe.p.stdin.flush()
+                result = {'closed': probe.p.wait(timeout=5) == 0}
             elif command[0] == 'signal':
                 gateway.send_signal(command[1])
                 result = {'signaled': True}
             elif command[0] == 'resources':
                 result = {'gateway_udp': udp_count(gateway.pid),
-                          'application_udp': [udp_count(p.p.pid) for p in probes]}
+                          'application_udp': [udp_count(p.p.pid) for p in probes if p.p.poll() is None]}
             else:
                 raise AssertionError(command)
             print(json.dumps(result), flush=True)
@@ -175,7 +179,7 @@ def driver(args):
                 command = ['unshare', '--user', '--map-root-user', '--mount', '--ipc',
                     sys.executable, __file__, '--host', '--gateway', args.gateway,
                     '--probe', args.probe, '--control', directory + f'/host{i}/control.sock',
-                    '--base', str(bases[i]), '--discovery', str(discovery), '--topic', 'shared_net_e2e']
+                    '--base', str(bases[i]), '--discovery', str(discovery), '--topic', 'shared_net_e2e', '--local-subscribers', str(args.local_subscribers)]
                 hosts.append(Process(command, group=True))
             for host_process in hosts:
                 host_process.receive()
@@ -190,7 +194,7 @@ def driver(args):
                 time.sleep(.05)
             for i in range(2):
                 resources = request(i, ['resources'])
-                assert resources == {'gateway_udp': 6, 'application_udp': [0, 0]}, resources
+                assert resources == {'gateway_udp': 6, 'application_udp': [0] * args.local_subscribers}, resources
                 evidence['resources'].append(resources)
             expected_remote = [0, 0]
             for seed, size in enumerate((64, 1023, 1024, 1025, 4096, 1048576), 1):
@@ -200,7 +204,7 @@ def driver(args):
                     if args.reliable:
                         assert sent['result'] == 0, sent
                     for receiver in range(2):
-                        for app in range(2):
+                        for app in range(args.local_subscribers):
                             result = request(receiver, ['probe', app, 'recv 1 3000'])['received']
                             assert len(result) == 1 and result[0]['valid'], result
                             assert (result[0]['tag'], result[0]['seed'], result[0]['size'], result[0]['crc']) == (sender + 1, seed, size, sent['crc']), result
@@ -209,14 +213,14 @@ def driver(args):
             for host_index in range(2):
                 status = request(host_index, ['probe', 0, 'status'])
                 assert status['source_injections'] == 0 and status['committed_messages'] == expected_remote[host_index], status
-                for app in range(2):
+                for app in range(args.local_subscribers):
                     assert not request(host_index, ['probe', app, 'recv 1 30'])['received'], '出现重复或回流'
             request(0, ['signal', signal.SIGSTOP])
             # 等待客户端判定网络离线，既有本机发布者和两个订阅进程仍应工作。
             time.sleep(3.3)
             sent = request(0, ['probe', 0, 'send 4096 9 99'])
             assert sent['success'] and sent['local'] == 2 and sent['network'] == 1, sent
-            for app in range(2):
+            for app in range(args.local_subscribers):
                 result = request(0, ['probe', app, 'recv 1 500'])['received']
                 assert len(result) == 1 and result[0]['valid'] and result[0]['tag'] == 9, result
             assert not request(1, ['probe', 0, 'recv 1 50'])['received']
@@ -241,6 +245,8 @@ if __name__ == '__main__':
     parser.add_argument('--probe', required=True)
     parser.add_argument('--host', action='store_true')
     parser.add_argument('--reliable', action='store_true')
+    parser.add_argument('--local-subscribers', type=int, default=2)
+    parser.add_argument('--local-publishers', type=int, default=1)
     parser.add_argument('--control')
     parser.add_argument('--topic')
     parser.add_argument('--base', type=int)

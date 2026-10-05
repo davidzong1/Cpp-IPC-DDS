@@ -14,10 +14,12 @@ public:
                     std::uint64_t initial_retry_ns = 2000000, std::uint64_t max_retry_ns = 100000000,
                     std::uint64_t nack_interval_ns = 2000000);
     ~ReliableSession();
-    const std::vector<SendFragment>& batch(std::uint64_t now_ns, std::size_t max_packets);
+    const std::vector<SendFragment>& batch(std::uint64_t now_ns, std::size_t max_packets, std::size_t max_retries = static_cast<std::size_t>(-1));
     void accepted(std::size_t prefix, std::uint64_t now_ns);
     void control(const ReceivedDatagram&, std::uint64_t now_ns);
     void tick(std::uint64_t now_ns);
+    bool has_initial_pending() const;
+    void cancel(SendResultCode);
     WireHeader header(const SendFragment&) const;
     Ipv4Address destination(const SendFragment&) const;
     std::optional<SendResultBody> result() const;

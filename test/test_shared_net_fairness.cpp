@@ -22,3 +22,18 @@ TEST(SharedNetFairness, NackStormIsCoalescedAndProbeBackoffIsBounded) {
     const auto probe = tx.batch(2001000, 32); ASSERT_EQ(probe.size(), 1u); EXPECT_EQ(probe[0].fragment, 0u);
     tx.accepted(1, 2001000); EXPECT_TRUE(tx.batch(3000000, 32).empty());
 }
+TEST(SharedNetFairness, RetryAllowanceReservesTheRoundForOtherOriginalTraffic) {
+    ReliableFixture f(1024 * 10); ReliableSession tx(f.header, {f.target}, 5000000000ull);
+    EXPECT_TRUE(tx.has_initial_pending());
+    auto first = tx.batch(1, 32, 0); ASSERT_EQ(first.size(), 10u); tx.accepted(first.size(), 1);
+    EXPECT_FALSE(tx.has_initial_pending());
+    auto nack = changed_packet(f.ack(), [](auto& h, auto& body) {
+        h.kind = PacketKind::Nack; body = {0,0,0,1, 0,0,0,2, 0,0,0,3};
+    });
+    tx.control(nack, 1000);
+    EXPECT_TRUE(tx.batch(1001, 32, 0).empty());
+    auto limited = tx.batch(1002, 32, 1); ASSERT_EQ(limited.size(), 1u); EXPECT_TRUE(limited[0].retry);
+    tx.accepted(1, 1003); EXPECT_EQ(tx.batch(1004, 32, 1).size(), 1u);
+    tx.tick(5000000000ull); ASSERT_TRUE(tx.result()); EXPECT_EQ(tx.result()->result, SendResultCode::TimedOut);
+    EXPECT_TRUE(tx.batch(5000000001ull, 32).empty());
+}
