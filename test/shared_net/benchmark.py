@@ -18,6 +18,7 @@ def sample(pid):
     fields = (root / 'stat').read_text().split(') ', 1)[1].split()
     status = dict(line.split(':', 1) for line in (root / 'status').read_text().splitlines())
     return {'cpu_seconds': (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK'),
+            'loaded_libraries': sorted({line.split()[-1] for line in (root / 'maps').read_text().splitlines() if 'libipc.so' in line}),
             'rss_kib': int(status.get('VmRSS', '0 kB').split()[0]),
             'threads': int(status['Threads']), 'fd': len(list((root / 'fd').iterdir())),
              'udp': udp_count(pid),
@@ -41,6 +42,7 @@ def host(args):
     directory.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, DZIPC_SHM_MPMC='1', DZIPC_SHM_RECV_WORKERS='1',
                DZIPC_NET_BACKEND='shared_v1' if args.mode == 'shared_v1' else 'legacy')
+    env['DZIPC_TEST_RECEIVE_TRACE'] = '1' if args.receive_trace else '0'
     processes = []
     gateway = None
     with tempfile.TemporaryDirectory(prefix='dzipc-bench-') as control_dir:
@@ -103,6 +105,20 @@ def host(args):
                 sequences = [int(row['sequence']) for row in rows]
                 stats = quantiles([int(row['elapsed_ns']) for row in rows])
                 stats.update(lost=len(accepted - set(sequences)), duplicates=len(sequences)-len(set(sequences)), invalid=sub_result['invalid'])
+                if args.receive_trace:
+                    stats['trace_overflow'] = sub_result['trace_overflow']
+                    stats['trace_missing_or_unordered'] = 0
+                    for row in rows:
+                        read = int(row['read_ns'])
+                        start = read - int(row['elapsed_ns'])
+                        stamps = [int(row[key]) for key in ('recv_begin_ns', 'recv_return_ns', 'enqueue_before_ns', 'dequeue_after_ns')]
+                        if args.mode == 'baseline':
+                            valid_trace = start <= stamps[1] <= read and stamps[1] != 0
+                        else:
+                            # recv可能在发布起点前已开始，不能把真实并发交叠误判为坏样本。
+                            valid_trace = all(stamps) and stamps == sorted(stamps) and start <= stamps[1] and stamps[-1] <= read
+                        if not valid_trace:
+                            stats['trace_missing_or_unordered'] += 1
                 receiver_stats.append(stats)
             evidence = {'affinity_plan': affinity, 'host_loadavg_after': list(os.getloadavg()), 'mode': args.mode, 'bytes': args.bytes, 'subscribers': args.subscribers,
                 'seconds': args.seconds, 'rate': args.rate, 'cpu_window_seconds': wall, 'publish': result,
@@ -112,10 +128,12 @@ def host(args):
                 'cpu_seconds': [b['cpu_seconds']-a['cpu_seconds'] for a,b in zip(before,after)],
                 'gateway_metrics': gateway_metrics, 'shm_peak_sample_bytes': peak_shm, 'idle_gateway': idle, 'idle_status': status,
                 'stage_window': '应用直方图含2秒预热，网关指标为进程累计；精确端到端CSV仅正式窗口',
-                'environment': {'DZIPC_SHM_MPMC': '1', 'DZIPC_SHM_RECV_WORKERS': '1', 'nodelet': False, 'wire': 'prebuilt StdImage DZFlat'}}
+                'environment': {'DZIPC_SHM_MPMC': '1', 'DZIPC_SHM_RECV_WORKERS': '1', 'receive_trace': args.receive_trace, 'nodelet': False, 'wire': 'prebuilt StdImage DZFlat'}}
             (directory/'result.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2)+'\n')
             assert result['accepted'] > 0 and all(x['count'] > 0 for x in receiver_stats), evidence
             assert all(not x['duplicates'] and not x['invalid'] for x in receiver_stats), evidence
+            if args.receive_trace:
+                assert all(not x['trace_overflow'] and not x['trace_missing_or_unordered'] for x in receiver_stats), evidence
             assert all(x['udp'] == 0 for x in after[:len(processes)]), evidence
             print(json.dumps({'output': str(directory), 'passed_content': True, 'accepted': result['accepted'],
                               'lost': sum(x['lost'] for x in receiver_stats)}), flush=True)
@@ -133,6 +151,7 @@ def host(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--host', action='store_true')
+    parser.add_argument('--receive-trace', action='store_true', help='开启接收缝分段诊断；不是无观测成本的正式验收')
     parser.add_argument('--affinity', help='可选JSON：publisher/gateway CPU及subscribers CPU列表；两模式必须一致')
     parser.add_argument('--binary', required=True)
     parser.add_argument('--gateway', required=True)

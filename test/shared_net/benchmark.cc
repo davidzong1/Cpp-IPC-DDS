@@ -6,6 +6,7 @@
 #define DZIPC_BENCH_STAGE_METRICS 1
 #endif
 #include "dzIPC/common/sample_message.h"
+#include "dzIPC/detail/shm_sub_seam.h"
 #include "ipc_msg/ipc_msg_base/generic_message.hpp"
 #include "ipc_msg/std_msgs/std_image.hpp"
 #include "ipc_msg/ipc_msg_base/dzflat.h"
@@ -13,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <thread>
@@ -20,6 +22,32 @@
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 static std::uint64_t now() { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); }
+namespace {
+constexpr std::size_t trace_capacity = 65536;
+struct ReceiveTrace {
+    std::atomic<std::uint64_t> begin{0}, received{0}, enqueue{0}, dequeue{0};
+};
+std::unique_ptr<ReceiveTrace[]> traces;
+std::atomic<std::uint64_t> trace_overflow{0};
+thread_local std::uint64_t recv_begin = 0;
+void receive_trace(const dzIPC::detail::SeamEvent& event) noexcept {
+    // 数值属于内部缝的稳定编号，同一源码也能链接尚无2/3/4打点的f066a82。
+    const auto point = static_cast<int>(event.point);
+    if (point != 0 && point != 2 && point != 3 && point != 4) return;
+    const auto stamp = now();
+    if (point == 2) { recv_begin = stamp; return; }
+    if (!event.data || !event.size) return;
+    const auto view = dzIPC::Msg::StdImageFlat::view_t::bind(event.data, event.size);
+    if (!view.valid() || view.data().size() < 64) return;
+    std::uint64_t sequence = 0;
+    std::memcpy(&sequence, view.data().data() + 8, 8);
+    if (sequence >= trace_capacity) { trace_overflow.fetch_add(1, std::memory_order_relaxed); return; }
+    auto& trace = traces[sequence];
+    if (point == 0) { trace.begin.store(recv_begin, std::memory_order_relaxed); trace.received.store(stamp, std::memory_order_relaxed); }
+    if (point == 3) trace.enqueue.store(stamp, std::memory_order_relaxed);
+    if (point == 4) trace.dequeue.store(stamp, std::memory_order_relaxed);
+}
+}
 int main(int argc, char** argv) try {
     if (argc != 7) { std::cerr << "用法：benchmark pub|sub|scale shm|socket topic bytes output rate\n"; return 2; }
     const std::string role = argv[1], topic = argv[3], output = argv[5];
@@ -40,9 +68,13 @@ int main(int argc, char** argv) try {
     if (size < 64 || size > 16 * 1024 * 1024 || !rate) return 2;
     std::ofstream csv(output); if (!csv) throw std::runtime_error("不能创建样本文件");
     if (role == "sub") {
+        const bool tracing = std::getenv("DZIPC_TEST_RECEIVE_TRACE") && std::string(std::getenv("DZIPC_TEST_RECEIVE_TRACE")) == "1";
+        if (tracing) { traces.reset(new ReceiveTrace[trace_capacity]); dzIPC::detail::SetSeamHook(receive_trace); }
         auto sub = dzIPC::SubscriberIPCPtrMake(model, topic, 0, 1024, transport); sub->InitChannel();
         std::atomic<bool> running{true}; std::uint64_t count = 0, invalid = 0;
-        csv << "sequence,read_ns,elapsed_ns,bytes\n";
+        csv << "sequence,read_ns,elapsed_ns,bytes";
+        if (tracing) csv << ",recv_begin_ns,recv_return_ns,enqueue_before_ns,dequeue_after_ns";
+        csv << '\n';
         std::thread reader([&] {
             while (running.load()) {
                 dzIPC::Sample sample;
@@ -55,13 +87,24 @@ int main(int argc, char** argv) try {
                 bool valid = received >= stamp;
                 for (std::size_t i = 17; i < size; ++i) valid &= data[i] == 0xa5;
                 if (!valid) ++invalid;
-                if (data[16]) { ++count; csv << sequence << ',' << received << ',' << received - stamp << ',' << sample.size() << '\n'; }
+                if (data[16]) {
+                    ++count; csv << sequence << ',' << received << ',' << received - stamp << ',' << sample.size();
+                    if (tracing) {
+                        if (sequence >= trace_capacity) { ++invalid; csv << ",0,0,0,0"; }
+                        else {
+                            const auto& trace = traces[sequence];
+                            csv << ',' << trace.begin.load() << ',' << trace.received.load() << ',' << trace.enqueue.load() << ',' << trace.dequeue.load();
+                        }
+                    }
+                    csv << '\n';
+                }
             }
         });
         std::cout << "{\"ready\":true}" << std::endl;
-        std::string command; std::getline(std::cin, command); running.store(false); reader.join(); csv.close();
-        std::cout << "{\"received\":" << count << ",\"invalid\":" << invalid << "}" << std::endl;
-        return invalid ? 1 : 0;
+        std::string command; std::getline(std::cin, command); running.store(false); reader.join(); sub.reset();
+        dzIPC::detail::SetSeamHook(nullptr); csv.close();
+        std::cout << "{\"received\":" << count << ",\"invalid\":" << invalid << ",\"trace_overflow\":" << trace_overflow.load() << "}" << std::endl;
+        return invalid || trace_overflow.load() ? 1 : 0;
     }
     if (role != "pub") return 2;
     auto pub = dzIPC::PublisherIPCPtrMake(model, topic, 0, transport); pub->InitChannel();

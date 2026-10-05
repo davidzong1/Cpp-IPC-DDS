@@ -68,6 +68,13 @@ enum class SeamPoint : int
                               * 此刻 inflight == 0, 重建方可推进到第 5 步 release 旧 route。
                               * 这是唯一允许钩子阻塞的收包点。 */
 
+    /* 接收分段诊断。默认关闭，开启的钩子不得阻塞或分配。
+     * BeforeRecv在成功取得lease之后，未把lease取得时间冒称recv耗时。
+     * 入队前与出队后包围实际队列操作，并非精确的队列驻留时间。 */
+    kBeforeRecv            = 2,
+    kBeforeViewEnqueue     = 3,
+    kAfterViewDequeue      = 4,
+
     /* ---- 析构 (shm_sub_ipc::~shm_sub_ipc, 说明 §5 的八步) ---- */
     kDtorAfterUnregister    = 16,   /* §5 第 1 步: LocalPubSubRegistry 已注销 */
     kDtorAfterStopAndWake   = 17,   /* §5 第 4 步: route_session_.stop_and_wake() 已返回 */

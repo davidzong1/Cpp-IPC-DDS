@@ -20,6 +20,8 @@ def main():
     parser.add_argument('--current', required=True)
     parser.add_argument('--gateway', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--receive-trace', action='store_true')
+    parser.add_argument('--cases', nargs='+', help='可选subscribers:bytes列表；省略时为完整9种组合')
     args = parser.parse_args()
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -37,33 +39,38 @@ def main():
         'affinity_plan': json.loads(args.affinity) if args.affinity else None, 'cpus': sorted(os.sched_getaffinity(0)), 'binary_sha256': frozen,
         'cpu_governors': {str(p): p.read_text().strip() for p in Path('/sys/devices/system/cpu').glob('cpu*/cpufreq/scaling_governor')}, 'clock': '同主机 CLOCK_MONOTONIC', 'commands': []}
     results = []
+    cases = [tuple(map(int, case.split(':'))) for case in args.cases] if args.cases else [(n, b) for n in (1, 8, 32) for b in (64, 4096, 1048576)]
+    if not cases or any(len(case) != 2 or case[0] < 1 or case[1] < 64 for case in cases):
+        raise ValueError('cases必须为正订阅者数:载荷字节数')
+    manifest['receive_trace'] = args.receive_trace
+    manifest['cases'] = cases
     for repeat in (1, 2, 3):
-        for subscribers in (1, 8, 32):
-            for size in (64, 4096, 1048576):
-                for mode in (('baseline', 'shared_v1') if repeat % 2 else ('shared_v1', 'baseline')):
-                    case = f'{mode}-sub{subscribers}-bytes{size}-run{repeat}'
-                    folder = output/case
-                    command = [sys.executable, 'test/shared_net/benchmark.py', '--binary', args.baseline if mode == 'baseline' else args.current,
-                        '--gateway', args.gateway, '--mode', mode, '--output', str(folder), '--subscribers', str(subscribers),
-                        '--bytes', str(size), '--seconds', '30', '--rate', '100']
-                    if args.affinity: command.extend(['--affinity', args.affinity])
-                    manifest['commands'].append(command)
-                    (output/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+'\n')
-                    with (output/(case+'.log')).open('w') as log:
-                        completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
-                    if hashes() != frozen: raise RuntimeError('采样二进制已改变，终止并保留证据')
-                    result = {'case': case, 'returncode': completed.returncode, 'repeat': repeat}
-                    if (folder/'result.json').exists():
-                        result.update(json.loads((folder/'result.json').read_text()))
-                    results.append(result)
-                    (output/'cases.json').write_text(json.dumps(results, ensure_ascii=False, indent=2)+'\n')
-                    for csv in folder.glob('*.csv'):
-                        with csv.open('rb') as source, gzip.open(str(csv)+'.gz', 'wb') as target:
-                            shutil.copyfileobj(source, target)
-                        csv.unlink()
-                    print(json.dumps({'completed': len(results), 'total': 54, 'case': case,
-                                      'returncode': completed.returncode, 'publish': {k: v for k, v in result.get('publish', {}).items() if k != 'diagnostics'},
-                                      'first_receiver': result.get('receivers', [None])[0]}, ensure_ascii=False), flush=True)
+        for subscribers, size in cases:
+            for mode in (('baseline', 'shared_v1') if repeat % 2 else ('shared_v1', 'baseline')):
+                case = f'{mode}-sub{subscribers}-bytes{size}-run{repeat}'
+                folder = output/case
+                command = [sys.executable, 'test/shared_net/benchmark.py', '--binary', args.baseline if mode == 'baseline' else args.current,
+                    '--gateway', args.gateway, '--mode', mode, '--output', str(folder), '--subscribers', str(subscribers),
+                    '--bytes', str(size), '--seconds', '30', '--rate', '100']
+                if args.affinity: command.extend(['--affinity', args.affinity])
+                if args.receive_trace: command.append('--receive-trace')
+                manifest['commands'].append(command)
+                (output/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+'\n')
+                with (output/(case+'.log')).open('w') as log:
+                    completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+                if hashes() != frozen: raise RuntimeError('采样二进制已改变，终止并保留证据')
+                result = {'case': case, 'returncode': completed.returncode, 'repeat': repeat}
+                if (folder/'result.json').exists():
+                    result.update(json.loads((folder/'result.json').read_text()))
+                results.append(result)
+                (output/'cases.json').write_text(json.dumps(results, ensure_ascii=False, indent=2)+'\n')
+                for csv in folder.glob('*.csv'):
+                    with csv.open('rb') as source, gzip.open(str(csv)+'.gz', 'wb') as target:
+                        shutil.copyfileobj(source, target)
+                    csv.unlink()
+                print(json.dumps({'completed': len(results), 'total': len(cases) * 6, 'case': case,
+                                  'returncode': completed.returncode, 'publish': {k: v for k, v in result.get('publish', {}).items() if k != 'diagnostics'},
+                                  'first_receiver': result.get('receivers', [None])[0]}, ensure_ascii=False), flush=True)
     sys.exit(1 if any(case['returncode'] for case in results) else 0)
 
 

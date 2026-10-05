@@ -277,7 +277,9 @@ void process_received_buffer(const std::shared_ptr<SubState>& state, ipc::buff_t
                 return;
             }
             detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatAccepted);
-            state->view_queue->push(std::make_shared<Sample>(std::move(raw_data), seg_id, exp_hash));
+            auto sample = std::make_shared<Sample>(std::move(raw_data), seg_id, exp_hash);
+            detail::FireSeam({detail::SeamPoint::kBeforeViewEnqueue, 0, nullptr, sample->data(), sample->size()});
+            state->view_queue->push(std::move(sample));
             return;
         }
 
@@ -574,6 +576,7 @@ SubRecvOutcome sub_recv_attempt(dzIPC::shm::ShmRouteSession& session,
     }
 
     ipc::buff_t raw_data;
+    detail::FireSeam({detail::SeamPoint::kBeforeRecv, lease->generation, lease->route->legacy_route(), nullptr, 0});
     try
     {
         raw_data = (wait_ms == 0) ? lease->route->recv(0) : lease->route->recv(wait_ms);
@@ -2639,6 +2642,7 @@ void shm_sub_ipc::get(Sample& out)
     sub_state_->view_queue->pop(s);   /* 阻塞直到有 Sample; TLV-only 话题请用 get_clone */
     if (s)
     {
+        detail::FireSeam({detail::SeamPoint::kAfterViewDequeue, 0, nullptr, s->data(), s->size()});
         out = std::move(*s);
     }
 }
@@ -2654,6 +2658,7 @@ void shm_sub_ipc::cancel_waits() {
 bool shm_sub_ipc::get_cancellable(Sample& out, std::uint64_t timeout) {
     std::shared_ptr<Sample> sample;
     if (!sub_state_->view_queue->pop_cancellable(sample, timeout) || !sample) return false;
+    detail::FireSeam({detail::SeamPoint::kAfterViewDequeue, 0, nullptr, sample->data(), sample->size()});
     out = std::move(*sample); return true;
 }
 bool shm_sub_ipc::get_clone_cancellable(std::shared_ptr<TopicData>& out, std::uint64_t timeout) {
@@ -2676,6 +2681,7 @@ bool shm_sub_ipc::get(Sample& out, std::uint64_t tm_ms)
     {
         return false;
     }
+    detail::FireSeam({detail::SeamPoint::kAfterViewDequeue, 0, nullptr, s->data(), s->size()});
     out = std::move(*s);
     return true;
 }
@@ -2691,6 +2697,7 @@ bool shm_sub_ipc::try_get(Sample& out)
     {
         return false;
     }
+    detail::FireSeam({detail::SeamPoint::kAfterViewDequeue, 0, nullptr, s->data(), s->size()});
     out = std::move(*s);
     return true;
 }
