@@ -3,6 +3,7 @@
 #include "shared_net/test_vectors.h"
 #include "gtest/gtest.h"
 #include <algorithm>
+#include "../src/dzIPC/net/byte_codec.h"
 
 using namespace dzIPC::net;
 using shared_net_test::vector;
@@ -165,4 +166,28 @@ TEST(SharedNetWire, DirectoryRolesFullNamesAndStrictOrder)
     ASSERT_TRUE(decode_directory(ByteView(encoded), routes));
     ASSERT_EQ(routes.size(), 1u);
     EXPECT_TRUE(routes[0].topic.empty());
+}
+
+TEST(SharedNetWire, AcceleratedAndPortableCrcMatchIndependentBitwiseReference) {
+    const auto reference = [](ByteView bytes, std::size_t zero) {
+        std::uint32_t c = 0xffffffff;
+        for (std::size_t i = 0; i < bytes.size; ++i) {
+            c ^= i >= zero && i - zero < 4 ? 0 : bytes.data[i];
+            for (unsigned bit = 0; bit < 8; ++bit) c = (c >> 1) ^ (c & 1 ? 0x82f63b78u : 0);
+        }
+        return c ^ 0xffffffff;
+    };
+    Bytes storage(4096 + 16); std::uint32_t seed = 19;
+    for (auto& byte : storage) { seed = seed * 1664525u + 1013904223u; byte = seed >> 24; }
+    for (std::size_t alignment = 0; alignment < 8; ++alignment)
+        for (const std::size_t size : {0u,1u,3u,4u,7u,8u,9u,15u,16u,31u,32u,159u,160u,1024u,1184u,4096u}) {
+            ByteView bytes(storage.data() + alignment, size);
+            for (const std::size_t zero : {std::size_t{0}, std::size_t{5}, std::size_t{7}, size ? size - 1 : 0, size, SIZE_MAX}) {
+                const auto expected = reference(bytes, zero);
+                EXPECT_EQ(codec::packet_crc(bytes, zero), expected) << alignment << '/' << size << '/' << zero;
+                EXPECT_EQ(codec::packet_crc_portable(bytes, zero), expected) << alignment << '/' << size << '/' << zero;
+            }
+        }
+    EXPECT_EQ(codec::packet_crc({nullptr, 7}, 0), 0u);
+    EXPECT_EQ(codec::packet_crc_portable({}, SIZE_MAX), 0u);
 }

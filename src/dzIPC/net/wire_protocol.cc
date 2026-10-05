@@ -1,6 +1,9 @@
 #include "dzIPC/net/wire_protocol.h"
 #include "byte_codec.h"
 #include "dzIPC/common/channel_scope.h"
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#include <nmmintrin.h>
+#endif
 
 namespace dzIPC::net
 {
@@ -21,6 +24,47 @@ const std::array<std::uint32_t, 256> &crc_table()
         return result;
     }();
     return table;
+}
+using CrcUpdate = std::uint32_t (*)(std::uint32_t, const std::uint8_t*, std::size_t) noexcept;
+std::uint32_t crc_update_portable(std::uint32_t c, const std::uint8_t* data, std::size_t size) noexcept {
+    const auto& table = crc_table();
+    for (std::size_t i = 0; i < size; ++i) c = table[(c ^ data[i]) & 255] ^ (c >> 8);
+    return c;
+}
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+__attribute__((target("sse4.2")))
+std::uint32_t crc_update_sse42(std::uint32_t c, const std::uint8_t* data, std::size_t size) noexcept {
+    // memcpy保证非对齐输入与别名规则；仅此函数允许生成CRC指令。
+    while (size >= 8) {
+        std::uint64_t word; std::memcpy(&word, data, sizeof(word));
+        c = static_cast<std::uint32_t>(_mm_crc32_u64(c, word)); data += 8; size -= 8;
+    }
+    while (size--) c = _mm_crc32_u8(c, *data++);
+    return c;
+}
+#endif
+CrcUpdate crc_update() noexcept {
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    static const auto update = []() -> CrcUpdate {
+        __builtin_cpu_init();
+        return __builtin_cpu_supports("sse4.2") ? crc_update_sse42 : crc_update_portable;
+    }();
+    return update;
+#else
+    return crc_update_portable;
+#endif
+}
+std::uint32_t packet_crc_using(ByteView b, std::size_t zero_offset, CrcUpdate update) noexcept {
+    if (!valid(b)) return 0;
+    auto c = std::uint32_t{0xffffffff};
+    if (zero_offset >= b.size) return update(c, b.data, b.size) ^ 0xffffffff;
+    c = update(c, b.data, zero_offset);
+    constexpr std::uint8_t zeros[4]{};
+    const auto length = std::min<std::size_t>(4, b.size - zero_offset);
+    c = update(c, zeros, length);
+    const auto suffix = zero_offset + length;
+    c = update(c, b.data + suffix, b.size - suffix);
+    return c ^ 0xffffffff;
 }
 ProtocolStatus validate_packet(const WireHeader &h, ByteView p, std::uint32_t max_message)
 {
@@ -124,18 +168,12 @@ ProtocolStatus validate_descriptor(const RouteDescriptor &d, bool registration)
     return {};
 }
 } // namespace
-std::uint32_t codec::packet_crc(ByteView b, std::size_t zero_offset) noexcept
-{
-    if (!valid(b))
-        return 0;
-    const auto &table = crc_table();
-    std::uint32_t c = 0xffffffff;
-    for (std::size_t i = 0; i < b.size; ++i)
-    {
-        const auto x = i >= zero_offset && i - zero_offset < 4 ? 0 : b.data[i];
-        c = table[(c ^ x) & 255] ^ (c >> 8);
-    }
-    return c ^ 0xffffffff;
+std::uint32_t codec::packet_crc(ByteView b, std::size_t zero_offset) noexcept {
+    return packet_crc_using(b, zero_offset, crc_update());
+}
+// 私有协议辅助入口，供平台回退与测试核对；不加入公共安装头文件。
+std::uint32_t codec::packet_crc_portable(ByteView b, std::size_t zero_offset) noexcept {
+    return packet_crc_using(b, zero_offset, crc_update_portable);
 }
 std::uint32_t crc32c(ByteView b) noexcept
 {

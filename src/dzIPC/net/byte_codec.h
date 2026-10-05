@@ -45,6 +45,7 @@ inline ProtocolStatus error(ProtocolCode c)
 }
 // CRC 字段归零，不分配临时整包副本。
 std::uint32_t packet_crc(ByteView packet, std::size_t zero_offset) noexcept;
+std::uint32_t packet_crc_portable(ByteView packet, std::size_t zero_offset) noexcept;
 inline bool utf8(ByteView b)
 {
     for (std::size_t i = 0; i < b.size;)

@@ -53,6 +53,7 @@ def host(args):
             elif command[0]=='metrics':
                 result = {category: json.loads(subprocess.check_output([args.gateway,'status','--control',args.control,'--metrics',category],env=env,text=True))
                           for category in ('counters','quota','latency','shards')}
+                result['loaded_library'] = sorted({line.split()[-1] for line in Path(f'/proc/{gateway.pid}/maps').read_text().splitlines() if '/libipc.so' in line})
                 result['applications'] = [p.request('diagnostics') for p in probes]
                 result['routes'] = [json.loads(subprocess.check_output([args.gateway,'status','--control',args.control,'--topic',topic,'--msg-id','71'],env=env,text=True))
                                     for topic in (args.hot,args.cold)]
@@ -90,7 +91,8 @@ def driver(args):
                 assert time.monotonic()<end;time.sleep(.02)
             request(1,['start',1,0,True]);request(0,['start',1,0,True])
             calibrated=request(0,['collect',True])[0];request(1,['collect',True])
-            hot_rate=max(.7,calibrated['sent']*.7)
+            hot_rate=args.hot_rate if args.hot_rate is not None else max(.7,calibrated['sent']*.7)
+            assert hot_rate > 0
             request(1,['start',30,hot_rate,False]);request(0,['start',30,hot_rate,False])
             snapshots=[]
             for n in range(30):
@@ -98,7 +100,7 @@ def driver(args):
                 snapshots.append([request(index,['status']) for index in range(2)])
             sent=request(0,['collect',False]);received=request(1,['collect',False])
             result={'same_shard':args.same_shard,'topics':[hot,cold],'shards':[shard(hot),shard(cold)],
-                'calibration':calibrated,'hot_rate':hot_rate,'seconds':30,'sent':sent,'received':received,'status':snapshots,'metrics':[request(index,['metrics']) for index in range(2)]}
+                'calibration':calibrated,'hot_rate_override':args.hot_rate,'hot_rate':hot_rate,'seconds':30,'sent':sent,'received':received,'status':snapshots,'metrics':[request(index,['metrics']) for index in range(2)]}
             Path(args.output).write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
             assert not calibrated['failed']
             assert all(not x['failed'] and x['max_ns']<=1250000000 for x in sent),sent
@@ -115,6 +117,7 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument('--gateway',required=True);parser.add_argument('--probe',required=True)
     parser.add_argument('--same-shard',action='store_true');parser.add_argument('--output')
+    parser.add_argument('--hot-rate',type=float,help='指定绝对热流速率；省略则使用校准吞吐的70%')
     parser.add_argument('--host',action='store_true');parser.add_argument('--sender',action='store_true')
     parser.add_argument('--control');parser.add_argument('--hot');parser.add_argument('--cold')
     parser.add_argument('--base',type=int);parser.add_argument('--discovery',type=int)

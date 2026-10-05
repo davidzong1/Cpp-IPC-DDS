@@ -87,7 +87,13 @@ int main(int argc, char** argv) try {
             std::sort(latency.begin(), latency.end());
             const auto percentile = [&](double p) { return latency.empty() ? 0ull : static_cast<unsigned long long>(latency[std::min(latency.size()-1, static_cast<std::size_t>(latency.size()*p))]); };
             std::cout << "{\"sent\":" << count << ",\"failed\":" << failed << ",\"p50_ns\":" << percentile(.50)
-                      << ",\"p95_ns\":" << percentile(.95) << ",\"p99_ns\":" << percentile(.99) << ",\"max_ns\":" << percentile(1) << "}" << std::endl;
+                      << ",\"p95_ns\":" << percentile(.95) << ",\"p99_ns\":" << percentile(.99) << ",\"max_ns\":" << percentile(1);
+            if (std::getenv("DZIPC_TEST_LATENCY_SAMPLES")) {
+                std::cout << ",\"latency_samples_ns\":[";
+                for (std::size_t i = 0; i < latency.size(); ++i) { if (i) std::cout << ','; std::cout << latency[i]; }
+                std::cout << ']';
+            }
+            std::cout << "}" << std::endl;
         } else if (command == "drain" && receiver) {
             unsigned seconds; input >> seconds; if (!seconds || seconds > 65) throw std::invalid_argument("接收窗口无效");
             const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
