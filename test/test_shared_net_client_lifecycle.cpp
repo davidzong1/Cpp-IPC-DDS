@@ -127,7 +127,7 @@ TEST(SharedNetClient, ThousandHandlesShareOneConnectionAndConcurrentRequests)
     for (unsigned i = 0; i < 32; ++i)
         requests.push_back(std::async(std::launch::async, [&] { return client->status(); }));
     for (auto &request : requests)
-        EXPECT_NE(request.get().find("ControlReady"), std::string::npos);
+        EXPECT_NE(request.get().find("\"state\":\"Ready\""), std::string::npos);
     EXPECT_THROW(client->request(LocalKind::CreditRequest, Bytes{}), std::runtime_error);
     EXPECT_TRUE(client->healthy());
 }
@@ -311,7 +311,7 @@ TEST(SharedNetClient, SlowReaderDoesNotBlockOtherSessionsOrStop)
         }
     }
     auto fast = ClientRuntime::acquire(dir.control());
-    EXPECT_NE(fast->status().find("ControlReady"), std::string::npos);
+    EXPECT_NE(fast->status().find("\"state\":\"Ready\""), std::string::npos);
     auto stopped = std::async(std::launch::async, [&] { gateway.stop(); });
     EXPECT_EQ(stopped.wait_for(1s), std::future_status::ready);
     stopped.get();

@@ -108,6 +108,17 @@ void SendWaitTable::disconnect()
     }
     impl_->entries.clear();
 }
+SendResultBody SendWaitTable::cancel(const SendTicket& ticket, SendResultCode code)
+{
+    { std::lock_guard<std::mutex> lock(impl_->mutex);
+      auto found = impl_->entries.find(ticket.request_id);
+      if (found != impl_->entries.end()) {
+          SendResultBody result; result.publisher_id = found->second.publisher; result.sequence = found->second.sequence; result.result = code;
+          found->second.promise.set_value(result); impl_->entries.erase(found);
+      }
+    }
+    return ticket.result.get();
+}
 std::size_t SendWaitTable::size() const
 {
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -539,6 +550,10 @@ SendResultBody ClientRuntime::wait_send(const SendTicket &ticket, std::uint64_t 
 {
     check_process();
     return impl_->sends.wait(ticket, deadline);
+}
+SendResultBody ClientRuntime::cancel_send(const SendTicket& ticket, SendResultCode code)
+{
+    check_process(); return impl_->sends.cancel(ticket, code);
 }
 std::string ClientRuntime::status()
 {

@@ -127,7 +127,7 @@ struct PeerDirectory::Impl {
         }
         auto& p = found->second; p.seen = now;
         // HELLO 可能乱序；旧版本只续租，不回退期望目录版本。
-        if (h.snapshot_version > p.desired) { p.desired = h.snapshot_version; p.next_request = 0; p.retry = 100000000; p.needs_snapshot = true; }
+        if (h.snapshot_version > p.desired) { p.desired = h.snapshot_version; p.next_request = 0; p.retry = 100000000; p.needs_snapshot = true; ++revision; }
         if (p.expired) { p.expired = false; p.needs_snapshot = true; p.next_request = 0; p.retry = 100000000; }
         return DirectoryCode::Ok;
     }

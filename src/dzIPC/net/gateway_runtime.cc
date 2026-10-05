@@ -4,6 +4,7 @@
 #include "dzIPC/net/local_directory.h"
 #include "local_control_linux.h"
 #include "outbox_service.h"
+#include "gateway_data.h"
 #include <algorithm>
 #include <atomic>
 #include <deque>
@@ -69,6 +70,7 @@ struct GatewayRuntime::Impl
         std::shared_future<std::shared_ptr<ShmWireBridge>> result;
     };
     struct PendingSub { std::uint64_t session, request; Identity id; Bytes packet; };
+    struct PendingFence { std::uint64_t session, request; Bytes packet, reply; std::shared_future<void> fence; };
     struct PageSend { PeerView peer; std::shared_ptr<const DirectorySnapshot> snapshot; std::uint32_t page = 0; };
     GatewayConfig config;
     Identity identity;
@@ -82,6 +84,11 @@ struct GatewayRuntime::Impl
     std::shared_ptr<DirectoryBudget> directory_budget;
     std::unique_ptr<PeerDirectory> peer_directory;
     std::unique_ptr<LocalDirectory> local_directory;
+    std::unique_ptr<GatewayData> data;
+    std::shared_future<void> last_data_fence;
+    std::shared_ptr<const DirectorySnapshot> bridge_snapshot;
+    std::shared_ptr<const GatewayDataView::Bridges> bridge_map;
+    std::deque<PendingFence> pending_fences;
     std::vector<Initializing> initializing;
     std::deque<PendingSub> pending_subs;
     std::uint64_t pending_sub_bytes = 0;
@@ -103,10 +110,11 @@ struct GatewayRuntime::Impl
     {
         std::ostringstream s;
         const auto occupied = send_budget->occupied();
+        const auto traffic = data ? data->stats() : GatewayDataStats{};
         s << "{\"protocol_version\":1,\"local_protocol_version\":2,\"gateway_id\":"
           << json_string(local::hex(identity)) << ",\"gateway_epoch\":\"" << epoch
-          << "\",\"state\":\"" << (running.load() ? "ControlReady" : "Stopped")
-          << "\",\"data_plane_ready\":false,\"listen_ip\":" << json_string(config.listen_ip)
+          << "\",\"state\":\"" << (running.load() ? "Ready" : "Stopped")
+          << "\",\"data_plane_ready\":" << (running.load() ? "true" : "false") << ",\"listen_ip\":" << json_string(config.listen_ip)
           << ",\"interface\":" << json_string(config.interface)
           << ",\"udp_sockets\":" << (running.load() ? config.data_shards + 2 : 0)
           << ",\"client_sessions\":" << session_count.load() << ",\"allocated_send_bytes\":\""
@@ -115,6 +123,9 @@ struct GatewayRuntime::Impl
           << credit_requests.load() << "\",\"rejected\":\"" << rejected.load()
           << "\",\"snapshot_version\":\"" << snapshot_version.load() << "\",\"active_peers\":" << active_peers.load()
           << ",\"registered_handles\":" << registered_handles.load()
+          << ",\"sent_messages\":" << traffic.sent_messages << ",\"sent_packets\":" << traffic.sent_packets
+          << ",\"committed_messages\":" << traffic.committed_messages << ",\"source_injections\":0"
+          << ",\"reassembly_bytes\":" << traffic.receive_usage.bytes << ",\"target_states\":" << traffic.target_states
           << ",\"data_ports\":[";
         for (std::uint64_t i = 0; i < config.data_shards; ++i)
         {
@@ -159,6 +170,7 @@ struct GatewayRuntime::Impl
     void close_session(std::map<int, Session>::iterator i)
     {
         local_directory->close_session(i->second.id);
+        if (running.load() && data && data->healthy()) synchronize_data();
         outboxes->cancel(i->second.outbox);
         if (i->second.account)
             i->second.account->close();
@@ -303,7 +315,11 @@ struct GatewayRuntime::Impl
                         const auto binding = registration->binding;
                         if (!binding->bridge && std::none_of(initializing.begin(), initializing.end(), [&](const auto& task) { return task.binding == binding; })) {
                             if (initializing.size() >= config.limits.init_tasks) throw std::runtime_error("bridge 初始化队列已满");
-                            auto task = std::make_shared<std::packaged_task<std::shared_ptr<ShmWireBridge>()>>([descriptor] { return std::make_shared<ShmWireBridge>(descriptor); });
+                            const auto fence = last_data_fence;
+                            auto task = std::make_shared<std::packaged_task<std::shared_ptr<ShmWireBridge>()>>([descriptor, fence] {
+                                if (fence.valid()) fence.get();
+                                return std::make_shared<ShmWireBridge>(descriptor);
+                            });
                             auto future = task->get_future().share();
                             if (!outboxes->initialize([task] { (*task)(); })) throw std::runtime_error("初始化队列已满");
                             initializing.push_back({binding, std::move(future)});
@@ -312,6 +328,10 @@ struct GatewayRuntime::Impl
                         session.last_request = h.request_id; remember(session, h.request_id, packet.bytes, {}); return;
                     } catch (...) { local_directory->remove(session.id, id, false); throw; }
                 }
+                if (pending_fences.size() >= config.limits.command_records) throw std::runtime_error("撤销屏障队列已满");
+                synchronize_data();
+                pending_fences.push_back({session.id, h.request_id, packet.bytes, reply, last_data_fence});
+                session.last_request = h.request_id; remember(session, h.request_id, packet.bytes, {}); return;
             } catch (const std::exception& e) { reply = error(session, h.request_id, 3, e.what()); }
         }
         else if (h.kind == LocalKind::SubReady || h.kind == LocalKind::Unregister)
@@ -326,6 +346,10 @@ struct GatewayRuntime::Impl
                     if (!local_directory->remove(session.id, id, body.data[16] == 1)) throw std::runtime_error("句柄角色不匹配");
                     session.route_versions.erase(id); reply = response(session, LocalKind::Unregistered, h.request_id, encoded);
                 }
+                if (pending_fences.size() >= config.limits.command_records) throw std::runtime_error("撤销屏障队列已满");
+                synchronize_data();
+                pending_fences.push_back({session.id, h.request_id, packet.bytes, reply, last_data_fence});
+                session.last_request = h.request_id; remember(session, h.request_id, packet.bytes, {}); return;
             } catch (const std::exception& e) { reply = error(session, h.request_id, 3, e.what()); }
         }
         else
@@ -363,6 +387,44 @@ struct GatewayRuntime::Impl
                 }
                 remember(found->second, pending.request, pending.packet, reply); queue(found->second, std::move(reply));
             } catch (...) { ++rejected; close_session(found); }
+        }
+    }
+    void synchronize_data()
+    {
+        auto view = std::make_shared<GatewayDataView>(); view->local = local_directory->snapshot();
+        if (bridge_snapshot != view->local) {
+            auto bridges = std::make_shared<GatewayDataView::Bridges>();
+            for (const auto& [key, route] : view->local->routes) if (route->descriptor.role_flags & 2) {
+                auto binding = local_directory->binding(key); if (binding && binding->bridge) bridges->emplace(key, binding->bridge);
+            }
+            bridge_map = std::move(bridges); bridge_snapshot = view->local;
+        }
+        view->bridges = bridge_map;
+        for (const auto& peer : peer_directory->peers()) view->peers.emplace(peer.admission->hello.gateway_id, peer);
+        last_data_fence = data->synchronize(std::move(view));
+    }
+    void process_data()
+    {
+        if (!data->healthy()) throw std::runtime_error("数据 shard 失效");
+        for (unsigned n = 0; n < 64 && !pending_fences.empty(); ++n) {
+            auto& pending = pending_fences.front();
+            if (pending.fence.wait_for(std::chrono::seconds(0)) != std::future_status::ready) break;
+            pending.fence.get();
+            auto session = std::find_if(sessions.begin(), sessions.end(), [&](const auto& entry) { return entry.second.id == pending.session; });
+            if (session != sessions.end()) { remember(session->second, pending.request, pending.packet, pending.reply); queue(session->second, std::move(pending.reply)); }
+            pending_fences.pop_front();
+        }
+        for (unsigned n = 0; n < 64; ++n) {
+            GatewayDataEvent event; if (!data->pop(event)) break;
+            if (event.kind == GatewayDataEvent::Kind::Feedback) {
+                WireHeader h; ByteView payload;
+                if (decode_packet(ByteView(event.packet), h, payload) && allow_control(h.target_id, local::monotonic_ns())) endpoints[config.data_shards]->send(ByteView(event.packet), event.destination);
+                continue;
+            }
+            auto session = std::find_if(sessions.begin(), sessions.end(), [&](const auto& entry) { return entry.second.id == event.header.session_id; });
+            if (session == sessions.end()) continue;
+            if (event.header.delivery == Delivery::Reliable) { Bytes body; encode_send_result(event.result, body); queue(session->second, response(session->second, LocalKind::SendResult, event.header.request_id, body)); }
+            queue(session->second, response(session->second, LocalKind::CreditGrant, 0, encode_credit_grant(session->second.account->granted())));
         }
     }
     bool allow_control(const Identity& id, std::uint64_t now)
@@ -435,6 +497,7 @@ struct GatewayRuntime::Impl
         }
         if (own->version != last_local_version || peer_directory->revision() != last_peer_revision) {
             ++route_revision; last_local_version = own->version; last_peer_revision = peer_directory->revision();
+            synchronize_data();
         }
         const auto publishers = local_directory->publishers();
         for (std::size_t n = 0; n < std::min<std::size_t>(64, publishers.size()); ++n) {
@@ -490,8 +553,12 @@ struct GatewayRuntime::Impl
                 {
                     ++outbox_records;
                     const auto h = event.record.header;
+                    const auto publisher = local_directory->find(session.id, h.publisher_id);
+                    if (publisher && publisher->publisher && publisher->binding->descriptor.key == h.route &&
+                        (!publisher->binding->descriptor.schema_hash || h.encoding == Encoding::Tlv || publisher->binding->descriptor.schema_hash == h.schema_hash) &&
+                        data->submit(event.record, peer_directory->targets(publisher->binding->descriptor))) continue;
                     event.record.release();
-                    // 业务路由尚未接入时明确拒绝可靠发送，不能伪报 NoSubscribers/成功。
+                    // 未登记或无法接管的记录明确拒绝，不伪报 NoSubscribers/成功。
                     if (h.delivery == Delivery::Reliable)
                     {
                         SendResultBody result;
@@ -532,6 +599,7 @@ struct GatewayRuntime::Impl
             {
                 process_outboxes();
                 process_registrations();
+                process_data();
                 if (!local_directory->healthy()) throw std::runtime_error("路由撤销时目录资源耗尽");
                 process_network_control();
                 std::vector<pollfd> fds{{wake.get(), POLLIN, 0}, {listener->fd(), POLLIN, 0}};
@@ -654,6 +722,10 @@ GatewayRuntime::GatewayRuntime(GatewayConfig config) : impl_(new Impl)
     impl_->directory_budget = std::make_shared<DirectoryBudget>(impl_->config.limits);
     impl_->peer_directory = std::make_unique<PeerDirectory>(impl_->identity, impl_->epoch, impl_->directory_budget);
     impl_->local_directory = std::make_unique<LocalDirectory>(impl_->directory_budget, impl_->config.limits);
+    std::vector<std::unique_ptr<DatagramEndpoint>> data_endpoints;
+    for (unsigned i = 0; i < impl_->config.data_shards; ++i) data_endpoints.push_back(std::move(impl_->endpoints[i]));
+    impl_->data = std::make_unique<GatewayData>(impl_->config, impl_->identity, impl_->epoch, impl_->wake.get(), std::move(data_endpoints));
+    impl_->synchronize_data();
     impl_->thread = std::thread([p = impl_.get()] { p->run(); });
 }
 GatewayRuntime::~GatewayRuntime()
@@ -667,6 +739,7 @@ void GatewayRuntime::stop()
     local::notify(impl_->wake.get());
     if (impl_->thread.joinable())
         impl_->thread.join();
+    impl_->data->stop();
     impl_->outboxes.reset();
     impl_->endpoints.clear();
     impl_->listener.reset();

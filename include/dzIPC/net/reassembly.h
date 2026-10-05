@@ -19,6 +19,7 @@ struct RouteAdmission {
 struct ReceiveAdmission {
     std::shared_ptr<PeerAdmission> peer;
     std::shared_ptr<RouteAdmission> publisher, subscriber;
+    std::shared_ptr<const void> publisher_snapshot, subscriber_snapshot;
 };
 enum class RejectReason : std::uint32_t { UnknownRoute = 1, RouteEpochMismatch, QuotaExceeded, BadMetadata, ShmUnavailable, ShmCommitIndeterminate, UnsupportedEncoding };
 enum class ReceiveDisposition { Dropped, Accepted, CommitPending, Duplicate, Rejected, Committed };

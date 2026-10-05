@@ -29,6 +29,7 @@ class SendWaitTable
     SendTicket insert(std::uint64_t request_id, Identity publisher, std::uint64_t sequence);
     bool complete(std::uint64_t request_id, const SendResultBody &result);
     SendResultBody wait(const SendTicket &, std::uint64_t deadline_ns);
+    SendResultBody cancel(const SendTicket &, SendResultCode);
     void disconnect();
     std::size_t size() const;
 
@@ -62,6 +63,7 @@ class ClientRuntime : public std::enable_shared_from_this<ClientRuntime>
     RouteStateBody route_state(const Identity &publisher) const;
     SendTicket prepare_send(Identity publisher, std::uint64_t sequence);
     SendResultBody wait_send(const SendTicket &, std::uint64_t deadline_ns);
+    SendResultBody cancel_send(const SendTicket &, SendResultCode);
     std::string status();
     void attach_outbox();
     OutboxSubmit submit_outbox(const OutboxHeader &, ByteView blob);
