@@ -97,3 +97,5 @@ result: 30
 - 嗅探连接为只读，不会影响原始 topic/service 的通信。
 - 消息内容通过 `msg_to_string` 反射序列化，显示效果取决于消息类型的反射支持。
 - 按 Ctrl+C 可随时退出。
+
+共享网络后端的启用、安装、状态查询、单次读取和回滚，见 [shared_v1 使用说明](../../docs/shared_network_endpoint_usage.md)。该后端须显式启用，默认仍为 legacy。

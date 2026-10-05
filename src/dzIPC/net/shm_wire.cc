@@ -16,6 +16,7 @@ struct ShmWireWriter::Impl
     RouteDescriptor descriptor;
     mutable std::shared_mutex gate;
     std::unique_ptr<shm::shm_pub_ipc> publisher;
+    info_pool::ScopedRegistration registration;
     std::atomic<bool> poisoned{false};
     bool ready() const
     {
@@ -63,7 +64,7 @@ struct ShmWireWriter::Impl
         return publish(loan, bytes.size);
     }
 };
-ShmWireWriter::ShmWireWriter(RouteDescriptor descriptor, bool internal) : impl_(new Impl)
+ShmWireWriter::ShmWireWriter(RouteDescriptor descriptor, bool internal, std::uint64_t gateway_epoch) : impl_(new Impl)
 {
     if (!shm_mpmc_enabled())
         throw ConfigError({ConfigCode::MpmcRequired, "原始 SHM 写入需要 DZIPC_SHM_MPMC=1"});
@@ -76,7 +77,12 @@ ShmWireWriter::ShmWireWriter(RouteDescriptor descriptor, bool internal) : impl_(
     auto topic = std::make_shared<TopicData>(model, impl_->descriptor.key.msg_id);
     auto pub = std::make_unique<shm::shm_pub_ipc>(
         topic, impl_->descriptor.topic, codec::get(impl_->descriptor.key.scope.data() + 8, 8));
-    pub->set_internal(internal);
+    pub->set_internal(true);
+    if (!internal) {
+        impl_->registration.rebind({info_pool::EntryKind::SocketPub, impl_->descriptor.topic, "GenericMessage", "shared_v1",
+            codec::get(impl_->descriptor.key.scope.data() + 8, 8), "mode=shared_v1;epoch=" + std::to_string(gateway_epoch)});
+        if (!impl_->registration.valid()) throw std::runtime_error("RegistryFull: 共享发布诊断池已满");
+    }
     pub->InitChannel("shared_network_raw");
     if (!pub->channel_ready() || !pub->topic_pool_lifetime_ || !pub->pub_control_state_)
         throw std::runtime_error("原始 SHM 发布端初始化失败");

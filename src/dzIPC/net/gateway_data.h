@@ -22,6 +22,9 @@ struct GatewayDataStats {
     std::uint64_t sent_messages = 0, sent_packets = 0, committed_messages = 0,
                   rejected_records = 0, dropped_feedback = 0, target_states = 0;
     ReassemblyUsage receive_usage;
+    ReassemblyStats receive_stats;
+    std::uint64_t rx_packets = 0, rx_bytes = 0, tx_bytes = 0, send_eagain = 0, send_error = 0, truncated = 0, invalid_packets = 0, unverified_route = 0;
+    std::uint64_t queued_commands = 0, queued_bytes = 0;
     std::uint64_t retry_packets = 0, nacks = 0, ignored_controls = 0;
 };
 // 固定 K 个 shard，各自独占数据 socket、重组、发送队列和 SHM commit。

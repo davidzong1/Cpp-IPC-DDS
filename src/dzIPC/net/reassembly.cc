@@ -61,7 +61,7 @@ struct ReassemblyBudget::Impl : std::enable_shared_from_this<Impl> {
         bool enter_pending() {
             std::lock_guard<std::mutex> lock(pool->mutex);
             if (pending) return true;
-            if (bytes > pool->limits.commit_pending_bytes - pool->used.pending_bytes) return false;
+            if (bytes > pool->limits.commit_pending_bytes - pool->used.pending_bytes) { ++pool->used.quota_rejected; return false; }
             pending = true; pool->used.pending_bytes += bytes; return true;
         }
     };
@@ -70,7 +70,7 @@ struct ReassemblyBudget::Impl : std::enable_shared_from_this<Impl> {
     std::shared_ptr<Claim> stream_claim() {
         auto c = std::make_shared<Claim>(); c->pool = shared_from_this();
         std::lock_guard<std::mutex> lock(mutex);
-        if (used.streams >= limits.streams) return {};
+        if (used.streams >= limits.streams) { ++used.quota_rejected; return {}; }
         c->stream_bytes = 2 * ((limits.stream_window + 63) / 64) * 8; c->stream = true;
         ++used.streams; used.stream_bytes += c->stream_bytes; return c;
     }
@@ -84,11 +84,11 @@ struct ReassemblyBudget::Impl : std::enable_shared_from_this<Impl> {
         const auto route_bytes = r == routes.end() ? 0 : r->second;
         if (used.assemblies >= limits.assemblies || c->bytes > limits.reassembly_bytes - used.bytes ||
             c->bytes > limits.peer_reassembly_bytes - peer_bytes || c->bytes > limits.route_reassembly_bytes - route_bytes ||
-            (reliable && (used.receipts >= limits.receipts || peer_receipts >= limits.peer_receipts))) return {};
+            (reliable && (used.receipts >= limits.receipts || peer_receipts >= limits.peer_receipts))) { ++used.quota_rejected; return {}; }
         try { peers.try_emplace(h.source_id); routes.try_emplace(h.route); }
         catch (...) { auto pi = peers.find(h.source_id); if (pi != peers.end() && !pi->second.bytes && !pi->second.receipts) peers.erase(pi); throw; }
         c->buffer = true; c->receipt = reliable;
-        ++used.assemblies; used.bytes += c->bytes; used.bitmap_bytes += c->bitmap;
+        ++used.assemblies; used.bytes += c->bytes; used.peak_bytes = std::max(used.peak_bytes, used.bytes); used.bitmap_bytes += c->bitmap;
         peers.at(h.source_id).bytes += c->bytes; routes.at(h.route) += c->bytes;
         if (reliable) { ++used.receipts; ++peers.at(h.source_id).receipts; }
         return c;
@@ -227,7 +227,7 @@ struct ReassemblyShard::Impl {
         }
         std::memcpy(a.storage.get() + offset, payload.data, payload.size); a.bits[word] |= bit; ++a.count; a.progress = now;
         if (a.count != h.fragment_count) return {ReceiveDisposition::Accepted, h, {}};
-        if (crc32c({a.storage.get(), h.message_size}) != h.message_crc) return terminate(existing, Terminal::Rejected, RejectReason::BadMetadata, now);
+        if (crc32c({a.storage.get(), h.message_size}) != h.message_crc) { ++stats.message_crc_fail; return terminate(existing, Terminal::Rejected, RejectReason::BadMetadata, now); }
         if (!a.claim->enter_pending()) return terminate(existing, Terminal::Rejected, RejectReason::QuotaExceeded, now);
         try { if (!WireEncoder::adopt(std::move(a.storage), h.message_size, a.claim->bytes, h.encoding, h.route.msg_id, h.schema_hash, a.blob)) return terminate(existing, Terminal::Rejected, RejectReason::BadMetadata, now); }
         catch (...) { return terminate(existing, Terminal::Rejected, RejectReason::QuotaExceeded, now); }
@@ -238,11 +238,13 @@ struct ReassemblyShard::Impl {
         for (std::size_t n = 0; n < count && !assemblies.empty(); ++n) {
             auto i = assembly_cursor ? assemblies.upper_bound(*assembly_cursor) : assemblies.begin(); if (i == assemblies.end()) i = assemblies.begin(); assembly_cursor = i->first;
             auto& a = i->second;
-            if (now >= a.deadline || (a.header.delivery == Delivery::BestEffort && a.stage == Stage::Collecting && now >= after(a.progress, best_effort_idle_ns)) || !a.admission.peer->active.load() || !a.admission.subscriber->active.load() || !a.admission.publisher->active.load() || !a.admission.subscriber->subscriber_active.load() || !a.admission.publisher->publisher_active.load()) { output.push_back(terminate(i, Terminal::Rejected, RejectReason::ShmUnavailable, now)); continue; }
+            if (now >= a.deadline || (a.header.delivery == Delivery::BestEffort && a.stage == Stage::Collecting && now >= after(a.progress, best_effort_idle_ns)) || !a.admission.peer->active.load() || !a.admission.subscriber->active.load() || !a.admission.publisher->active.load() || !a.admission.subscriber->subscriber_active.load() || !a.admission.publisher->publisher_active.load()) { ++stats.expired; output.push_back(terminate(i, Terminal::Rejected, RejectReason::ShmUnavailable, now)); continue; }
             if (a.stage == Stage::Pending) {
                 if (now < a.next_commit) continue;
                 ++stats.commit_attempts; SubmitState result;
                 try { result = commit(a.header, a.blob); } catch (...) { result = SubmitState::Indeterminate; }
+                if (result == SubmitState::Indeterminate) ++stats.commit_indeterminate;
+                else if (result != SubmitState::Committed) ++stats.commit_not_submitted;
                 if (result == SubmitState::Committed) output.push_back(terminate(i, Terminal::Committed, RejectReason::ShmUnavailable, now));
                 else if (result == SubmitState::Indeterminate) output.push_back(terminate(i, Terminal::Rejected, RejectReason::ShmCommitIndeterminate, now));
                 else if (a.header.delivery == Delivery::BestEffort) output.push_back(terminate(i, Terminal::Rejected, RejectReason::ShmUnavailable, now));

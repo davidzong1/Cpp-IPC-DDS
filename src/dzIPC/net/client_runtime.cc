@@ -9,6 +9,7 @@
 #include <map>
 #include <mutex>
 #include <poll.h>
+#include <sstream>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
@@ -145,6 +146,8 @@ struct ClientRuntime::Impl
     std::mutex attach_mutex;
     std::shared_ptr<OutboxSender> outbox;
     std::uint64_t credit_request = 0, credit_retry_after = 0;
+    std::array<std::atomic<std::uint64_t>, 4> local_results{}, network_results{};
+    std::atomic<std::uint64_t> partial_submit{0}, credit_wait_count{0}, credit_wait_ns{0};
     std::condition_variable changed;
     std::map<std::uint64_t, std::shared_ptr<Waiter>> pending;
     std::deque<Outgoing> outgoing;
@@ -555,6 +558,36 @@ SendResultBody ClientRuntime::cancel_send(const SendTicket& ticket, SendResultCo
 {
     check_process(); return impl_->sends.cancel(ticket, code);
 }
+void ClientRuntime::record_publish(SubmitState local, SubmitState network) {
+    check_process(); ++impl_->local_results[static_cast<unsigned>(local)]; ++impl_->network_results[static_cast<unsigned>(network)];
+    if ((local == SubmitState::Committed && network == SubmitState::NotSubmitted) ||
+        (network == SubmitState::Committed && local == SubmitState::NotSubmitted)) ++impl_->partial_submit;
+}
+std::string ClientRuntime::diagnostics_json() const {
+    check_process(); std::shared_ptr<OutboxSender> sender;
+    { std::lock_guard<std::mutex> lock(impl_->mutex); sender = impl_->outbox; }
+    const auto usage = sender ? sender->usage() : OutboxUsage{};
+    std::ostringstream s;
+    s << "{\"gateway_epoch\":\"" << impl_->epoch << "\",\"session_id\":\"" << impl_->session
+      << "\",\"network_healthy\":" << (healthy() ? "true" : "false")
+      << ",\"local_committed\":" << impl_->local_results[2].load() << ",\"local_not_submitted\":" << impl_->local_results[1].load()
+      << ",\"local_indeterminate\":" << impl_->local_results[3].load() << ",\"network_accepted\":" << impl_->network_results[2].load()
+      << ",\"network_not_submitted\":" << impl_->network_results[1].load() << ",\"network_indeterminate\":" << impl_->network_results[3].load()
+      << ",\"partial_submit\":" << impl_->partial_submit.load() << ",\"credit_wait_count\":" << impl_->credit_wait_count.load()
+      << ",\"credit_wait_ns\":" << impl_->credit_wait_ns.load() << ",\"outbox_used_capacity\":" << usage.used.bytes
+      << ",\"outbox_used_records\":" << usage.used.records << ",\"outbox_reserved_capacity\":" << usage.reserved.bytes
+      << ",\"outbox_reserved_records\":" << usage.reserved.records << ",\"outbox_released_capacity\":" << usage.released.bytes
+      << ",\"outbox_released_records\":" << usage.released.records << '}';
+    return s.str();
+}
+std::string ClientRuntime::route_status(const RouteKey& key, Identity peer) {
+    Bytes body{static_cast<std::uint8_t>(nonzero(peer) ? 2 : 1)};
+    body.insert(body.end(), key.scope.begin(), key.scope.end()); codec::append(body, key.msg_id, 4);
+    if (nonzero(peer)) body.insert(body.end(), peer.begin(), peer.end());
+    const auto reply = request(LocalKind::QueryState, std::move(body));
+    if (reply.header.kind != LocalKind::State) throw std::runtime_error("路由状态响应类型错误");
+    return std::string(reply.body.begin() + 4, reply.body.end());
+}
 std::string ClientRuntime::status()
 {
     const auto reply = request(LocalKind::QueryState, Bytes{0});
@@ -641,8 +674,11 @@ OutboxSubmit ClientRuntime::submit_outbox(const OutboxHeader &header, ByteView b
                 }
             }
         }
-        if (header.delivery != Delivery::Reliable || !sender->wait(header.deadline_monotonic_ns))
-            return result;
+        if (header.delivery != Delivery::Reliable) return result;
+        const auto wait_start = local::monotonic_ns(); ++impl_->credit_wait_count;
+        const auto ready = sender->wait(header.deadline_monotonic_ns);
+        impl_->credit_wait_ns += local::monotonic_ns() - wait_start;
+        if (!ready) return result;
     }
 }
 } // namespace dzIPC::net

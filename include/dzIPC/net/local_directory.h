@@ -34,6 +34,8 @@ public:
     std::vector<std::shared_ptr<LocalRegistration>> publishers() const;
     std::shared_ptr<const DirectorySnapshot> snapshot() const;
     std::size_t handle_count() const;
+    std::size_t publisher_count() const;
+    std::size_t ready_count() const;
     bool healthy() const;
 private:
     struct Impl; std::unique_ptr<Impl> impl_;

@@ -53,6 +53,7 @@ class SendBudget
     SendBudget(CreditCounters global_limit, CreditCounters session_limit);
     std::shared_ptr<SendAccount> open(CreditCounters initial);
     CreditCounters occupied() const;
+    CreditCounters inflight() const;
 
   private:
     friend class SendAccount;

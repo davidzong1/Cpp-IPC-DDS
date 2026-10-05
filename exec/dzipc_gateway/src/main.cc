@@ -2,6 +2,9 @@
 #include "dzIPC/net/gateway_runtime.h"
 #include "dzIPC/net/shared_config.h"
 #include <csignal>
+#include <charconv>
+#include <set>
+#include "dzIPC/common/channel_scope.h"
 #include <cstdlib>
 #include <iostream>
 #include <pthread.h>
@@ -15,7 +18,7 @@ int main(int argc, char **argv)
     {
         std::cout << "用法：dzipc_gateway check-config|serve --listen-ip IPv4 --interface 网卡 "
                      "--control 绝对路径\n"
-                     "dzipc_gateway status --control 绝对路径 --json\n";
+                     "dzipc_gateway status --control 绝对路径 --json [--topic 话题 --domain 域 --msg-id ID --peer-id 实例ID]\n";
         return argc < 2 ? 2 : 0;
     }
     const std::string command = argv[1];
@@ -29,22 +32,36 @@ int main(int argc, char **argv)
         config.control_path = path;
     if (command == "status")
     {
-        bool control = false, json = false;
-        for (int i = 2; i < argc; ++i)
-        {
+        std::string topic, peer_text; std::uint64_t domain = 0, message_id = 0;
+        Identity peer{}; std::set<std::string> seen;
+        for (int i = 2; i < argc; ++i) {
             const std::string arg = argv[i];
-            if (arg == "--json" && !json)
-                json = true;
-            else if (arg == "--control" && !control && i + 1 < argc)
-            {
-                config.control_path = argv[++i];
-                control = true;
+            if (!seen.insert(arg).second) { std::cerr << "InvalidOption: 重复参数\n"; return 2; }
+            if (arg == "--json") continue;
+            if (i + 1 >= argc) { std::cerr << "InvalidOption: 缺少参数值\n"; return 2; }
+            const std::string value = argv[++i];
+            if (arg == "--control") config.control_path = value;
+            else if (arg == "--topic") topic = value;
+            else if (arg == "--peer-id") peer_text = value;
+            else if (arg == "--domain" || arg == "--msg-id") {
+                auto& number = arg == "--domain" ? domain : message_id;
+                const auto parsed = std::from_chars(value.data(), value.data() + value.size(), number);
+                if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || (arg == "--msg-id" && number > UINT32_MAX)) {
+                    std::cerr << "InvalidNumber: 无效域或消息 ID\n"; return 2;
+                }
+            } else { std::cerr << "InvalidOption: 无效状态参数\n"; return 2; }
+        }
+        if (topic.empty() && (seen.count("--topic") || seen.count("--peer-id") || seen.count("--domain") || seen.count("--msg-id"))) {
+            std::cerr << "InvalidOption: 明细查询需要 --topic\n"; return 2;
+        }
+        if (!peer_text.empty()) {
+            if (peer_text.size() != 32) { std::cerr << "InvalidOption: peer-id 需要 32 位十六进制\n"; return 2; }
+            for (unsigned i = 0; i < 16; ++i) {
+                unsigned value = 0; const auto parsed = std::from_chars(peer_text.data() + i * 2, peer_text.data() + i * 2 + 2, value, 16);
+                if (parsed.ec != std::errc{} || parsed.ptr != peer_text.data() + i * 2 + 2) { std::cerr << "InvalidOption: peer-id 无效\n"; return 2; }
+                peer[i] = value;
             }
-            else
-            {
-                std::cerr << "InvalidOption: 无效或重复的状态参数\n";
-                return 2;
-            }
+            if (!nonzero(peer)) { std::cerr << "InvalidOption: peer-id 不可全零\n"; return 2; }
         }
         const auto status = validate_control_path(config.control_path);
         if (!status)
@@ -54,7 +71,12 @@ int main(int argc, char **argv)
         }
         try
         {
-            std::cout << ClientRuntime::acquire(config.control_path)->status() << '\n';
+            auto runtime = ClientRuntime::acquire(config.control_path);
+            if (topic.empty()) std::cout << runtime->status() << '\n';
+            else {
+                RouteKey key; key.scope = dzIPC::common::channel_scope_token(topic, domain, dzIPC::common::ScopeKind::PubSub); key.msg_id = message_id;
+                std::cout << runtime->route_status(key, peer) << '\n';
+            }
             return 0;
         }
         catch (const std::exception &e)

@@ -31,7 +31,7 @@ struct ReceiveFeedback {
     Bytes control_packet; // 已反转方向；只发送到经目录确认的控制地址。
 };
 struct ReassemblyUsage {
-    std::uint64_t bytes = 0, bitmap_bytes = 0, pending_bytes = 0, assemblies = 0, streams = 0, stream_bytes = 0, receipts = 0;
+    std::uint64_t bytes = 0, bitmap_bytes = 0, pending_bytes = 0, assemblies = 0, streams = 0, stream_bytes = 0, receipts = 0, peak_bytes = 0, quota_rejected = 0;
 };
 class ReassemblyBudget {
 public:
@@ -42,7 +42,7 @@ private:
     friend class ReassemblyShard;
     struct Impl; std::shared_ptr<Impl> impl_;
 };
-struct ReassemblyStats { std::uint64_t malformed = 0, wrong_shard = 0, rejected = 0, duplicates = 0, completed = 0, committed = 0, commit_attempts = 0; };
+struct ReassemblyStats { std::uint64_t malformed = 0, wrong_shard = 0, rejected = 0, duplicates = 0, completed = 0, committed = 0, commit_attempts = 0, commit_not_submitted = 0, commit_indeterminate = 0, expired = 0, message_crc_fail = 0; };
 class ReassemblyShard {
 public:
     using Committer = std::function<SubmitState(const WireHeader&, const WireBlob&)>;

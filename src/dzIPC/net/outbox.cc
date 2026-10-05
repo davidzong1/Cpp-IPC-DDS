@@ -227,7 +227,7 @@ OutboxSubmit OutboxSender::submit(const OutboxHeader &h, ByteView blob)
 struct SendBudget::Impl
 {
     mutable std::mutex mutex;
-    CreditCounters limit, session_limit, occupied;
+    CreditCounters limit, session_limit, occupied, inflight;
 };
 SendBudget::SendBudget(CreditCounters global, CreditCounters session)
     : impl_(std::make_shared<Impl>())
@@ -251,6 +251,7 @@ CreditCounters SendBudget::occupied() const
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->occupied;
 }
+CreditCounters SendBudget::inflight() const { std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->inflight; }
 SendAccount::SendAccount(std::shared_ptr<SendBudget::Impl> pool) : pool_(std::move(pool))
 {
 }
@@ -276,7 +277,7 @@ bool SendAccount::take(CreditCounters cost)
     if (closed_ || !fits(cost, sub(granted_, used_)))
         return false;
     used_ = add(used_, cost);
-    inflight_ = add(inflight_, cost);
+    inflight_ = add(inflight_, cost); pool_->inflight = add(pool_->inflight, cost);
     return true;
 }
 void SendAccount::finish(CreditCounters cost)
@@ -293,7 +294,7 @@ void SendAccount::finish(CreditCounters cost)
         pool_->occupied = sub(pool_->occupied, cost);
     else
         granted_ = add(granted_, cost);
-    inflight_ = remaining;
+    inflight_ = remaining; pool_->inflight = sub(pool_->inflight, cost);
 }
 void SendAccount::close()
 {

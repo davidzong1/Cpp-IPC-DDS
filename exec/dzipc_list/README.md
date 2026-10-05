@@ -105,3 +105,5 @@ Total: 3 entries
 | TOPIC | topic 或 service 名称 |
 | TYPE | 消息类型名称（如 `RobotState`） |
 | EXTRA | 额外信息（`-v` 模式下显示更多详情） |
+
+共享网络后端的启用、安装、状态查询、单次读取和回滚，见 [shared_v1 使用说明](../../docs/shared_network_endpoint_usage.md)。该后端须显式启用，默认仍为 legacy。

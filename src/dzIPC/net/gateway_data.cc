@@ -50,6 +50,8 @@ struct GatewayData::Impl {
         local::Fd wake = local::event(); std::unique_ptr<DatagramEndpoint> endpoint;
         std::mutex mutex; std::deque<Command> commands;
         std::thread thread;
+        mutable std::mutex stats_mutex; ReassemblyStats snapshot;
+        void capture() { std::lock_guard<std::mutex> lock(stats_mutex); if (receive) snapshot = receive->stats(); }
         std::shared_ptr<const GatewayDataView> view;
         std::unique_ptr<ReassemblyShard> receive;
         std::deque<std::unique_ptr<Tx>> sends;
@@ -84,10 +86,12 @@ struct GatewayData::Impl {
         void incoming(const ReceivedDatagram& packet) {
             if (!view) return;
             WireHeader h; ByteView bytes;
-            if (packet.status != IoStatus::Data || !decode_packet(packet.view(), h, bytes, parent.config.limits.message_bytes)) return;
+            ++parent.rx_packets; parent.rx_bytes += packet.size;
+            if (packet.status == IoStatus::Truncated) ++parent.truncated;
+            if (packet.status != IoStatus::Data || !decode_packet(packet.view(), h, bytes, parent.config.limits.message_bytes)) { ++parent.invalid_packets; return; }
             const auto p = view->peers.find(h.source_id); const auto s = view->local->routes.find(h.route);
-            if (p == view->peers.end() || s == view->local->routes.end() || !p->second.snapshot) return;
-            const auto pub = p->second.snapshot->routes.find(h.route); if (pub == p->second.snapshot->routes.end()) return;
+            if (p == view->peers.end() || s == view->local->routes.end() || !p->second.snapshot) { ++parent.unverified_route; return; }
+            const auto pub = p->second.snapshot->routes.find(h.route); if (pub == p->second.snapshot->routes.end()) { ++parent.unverified_route; return; }
             ReceiveAdmission admission{p->second.admission, pub->second, s->second, p->second.snapshot, view->local};
             feedback(receive->ingest(packet, admission, local::monotonic_ns()));
         }
@@ -147,6 +151,9 @@ struct GatewayData::Impl {
                         outgoing[n] = {tx->reliable->destination(batch[n]), ByteView(storage[n])};
                     }
                     const auto result = endpoint->send_batch(outgoing.data(), outgoing.size());
+                    if (result.status == IoStatus::WouldBlock) ++parent.send_eagain;
+                    if (result.status == IoStatus::Fatal) ++parent.send_error;
+                    for (unsigned n = 0; n < result.count; ++n) parent.tx_bytes += storage[n].size();
                     tx->reliable->accepted(result.count, local::monotonic_ns()); tx->sent |= result.count != 0;
                     packets += result.count; parent.sent_packets += result.count;
                     send_progress |= result.count != 0;
@@ -175,6 +182,9 @@ struct GatewayData::Impl {
                     outgoing[n] = {{target.peer.admission->ipv4, data_port(h.route, target.peer.admission->hello.data_base_port, target.peer.admission->hello.data_shards)}, ByteView(storage[n])};
                 }
                 const auto result = endpoint->send_batch(outgoing.data(), outgoing.size());
+                    if (result.status == IoStatus::WouldBlock) ++parent.send_eagain;
+                    if (result.status == IoStatus::Fatal) ++parent.send_error;
+                    for (unsigned n = 0; n < result.count; ++n) parent.tx_bytes += storage[n].size();
                 if (!result.count && result.status == IoStatus::WouldBlock) send_blocked_until = local::monotonic_ns() + 1000000;
                 target.fragment += result.count; packets += result.count; parent.sent_packets += result.count;
                 send_progress |= result.count != 0;
@@ -225,11 +235,12 @@ struct GatewayData::Impl {
                         return bridge->second->try_commit(blob);
                     })) feedback(std::move(result));
                     if (local::monotonic_ns() >= send_blocked_until) sending();
+                    capture();
                 }
             } catch (...) { parent.stopped.store(true); local::notify(parent.control_wake); }
             while (!sends.empty()) { auto tx = std::move(sends.front()); sends.pop_front(); finish(std::move(tx), SendResultCode::GatewayLost); }
             { std::lock_guard<std::mutex> lock(mutex); for (auto& command : commands) { --parent.queued_commands; parent.queued_bytes -= command.charged_bytes; if (command.tx) finish(std::move(command.tx), SendResultCode::GatewayLost); } commands.clear(); }
-            active.clear(); receive.reset(); view.reset();
+            capture(); active.clear(); receive.reset(); view.reset();
         }
     };
     GatewayConfig config; Identity identity; std::uint64_t epoch; int control_wake;
@@ -238,6 +249,7 @@ struct GatewayData::Impl {
     std::atomic<bool> stopped{false};
     std::atomic<std::uint64_t> queued_commands{0}, target_states{0}, sent_messages{0}, sent_packets{0}, committed_messages{0}, rejected_records{0}, dropped_feedback{0};
     std::atomic<std::uint64_t> queued_bytes{0};
+    std::atomic<std::uint64_t> rx_packets{0}, rx_bytes{0}, tx_bytes{0}, send_eagain{0}, send_error{0}, truncated{0}, invalid_packets{0}, unverified_route{0};
     std::atomic<std::uint64_t> retry_packets{0}, nacks{0}, ignored_controls{0};
     std::mutex stop_mutex;
     std::mutex events_mutex; std::deque<GatewayDataEvent> events;
@@ -329,6 +341,16 @@ bool GatewayData::pop(GatewayDataEvent& event) { std::lock_guard<std::mutex> loc
 bool GatewayData::healthy() const { return !impl_->stopped.load(); }
 GatewayDataStats GatewayData::stats() const {
     GatewayDataStats result{impl_->sent_messages.load(), impl_->sent_packets.load(), impl_->committed_messages.load(), impl_->rejected_records.load(), impl_->dropped_feedback.load(), impl_->target_states.load(), impl_->receive_budget->usage()};
+    result.queued_commands = impl_->queued_commands.load(); result.queued_bytes = impl_->queued_bytes.load();
+    result.rx_packets = impl_->rx_packets.load(); result.rx_bytes = impl_->rx_bytes.load(); result.tx_bytes = impl_->tx_bytes.load();
+    result.send_eagain = impl_->send_eagain.load(); result.send_error = impl_->send_error.load(); result.truncated = impl_->truncated.load();
+    result.invalid_packets = impl_->invalid_packets.load(); result.unverified_route = impl_->unverified_route.load();
+    for (const auto& shard : impl_->shards) {
+        std::lock_guard<std::mutex> lock(shard->stats_mutex);
+#define SUM(field) result.receive_stats.field += shard->snapshot.field;
+        SUM(malformed) SUM(wrong_shard) SUM(rejected) SUM(duplicates) SUM(completed) SUM(committed) SUM(commit_attempts) SUM(commit_not_submitted) SUM(commit_indeterminate) SUM(expired) SUM(message_crc_fail)
+#undef SUM
+    }
     result.retry_packets = impl_->retry_packets.load(); result.nacks = impl_->nacks.load(); result.ignored_controls = impl_->ignored_controls.load(); return result;
 }
 } // namespace dzIPC::net

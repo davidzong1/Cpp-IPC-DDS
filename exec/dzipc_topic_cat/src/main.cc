@@ -13,6 +13,8 @@
 #include "msg_type_identify.h"
 #include "sniffer.h"
 #include "transport_select.h"
+#include "dzIPC/net/shared_config.h"
+#include "shared_cat.h"
 constexpr std::uint64_t RECV_FREQ = 20;   //Hz
 
 enum class StateMachine : int {
@@ -196,6 +198,9 @@ int main(int argc, char* argv[])
                         "Transport to sniff: auto (default) | shm | socket. auto scans every pool entry and prefers "
                         "the SHM leg, falling back to socket; shm/socket wait for that transport only",
                         ArgParser::Type::STRING, false, "auto");
+    parser.add_argument("--once", "", "读取一次后退出（shared_v1）", ArgParser::Type::FLAG);
+    parser.add_argument("--domain", "", "64 位域（shared_v1）", ArgParser::Type::STRING, false, "0");
+    parser.add_argument("--timeout-ms", "", "单次读取超时毫秒（shared_v1）", ArgParser::Type::INT, false, "5000");
     try
     {
         parser.parse(argc, argv);
@@ -234,6 +239,15 @@ int main(int argc, char* argv[])
                      "\033[33mnote: --watch_handshake attaches on the socket leg only; with --transport %s it is "
                      "unavailable once the session moves to SHM (use --transport socket to keep it)\033[0m\n",
                      dzipc_topic_cat::to_string(pref));
+    }
+    if (!ser_or_topic && dzIPC::net::process_config().backend == dzIPC::net::Backend::SharedV1 && pref != dzipc_topic_cat::TransportPreference::Shm) {
+#if DZIPC_SHARED_NET_BUILT
+        if (parser.get<int>("--msg_id") < 0) { std::cerr << "InvalidOption: 消息 ID 无效\n"; return 2; }
+        return shared_cat(topic_name, parser.get<std::string>("--domain"), static_cast<std::uint32_t>(parser.get<int>("--msg_id")),
+                          parser.get<bool>("--once"), parser.get<int>("--timeout-ms"), g_running);
+#else
+        std::cerr << "BackendNotBuilt: 当前构建不包含共享网关\n"; return 3;
+#endif
     }
     std::atomic<StateMachine> state{StateMachine::UNCONNECTED};
     std::unique_ptr<dzIPC::TopicData> MsgManager_topic;

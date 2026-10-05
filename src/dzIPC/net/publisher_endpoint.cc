@@ -64,7 +64,7 @@ PublisherEndpoint::PublisherEndpoint(std::shared_ptr<ClientRuntime> runtime, Rou
     if (!impl_->runtime || !impl_->runtime->healthy()) throw std::runtime_error("网关会话不可用");
     const auto reply = impl_->runtime->request(LocalKind::RegisterPub, registration_body(impl_->id, impl_->descriptor));
     if (reply.header.kind != LocalKind::PubRegistered) throw std::runtime_error("发布者登记失败");
-    try { impl_->writer = std::make_unique<ShmWireWriter>(impl_->descriptor); impl_->runtime->attach_outbox(); }
+    try { impl_->writer = std::make_unique<ShmWireWriter>(impl_->descriptor, false, impl_->runtime->gateway_epoch()); impl_->runtime->attach_outbox(); }
     catch (...) { try { Bytes b(impl_->id.begin(), impl_->id.end()); b.push_back(1); impl_->runtime->request(LocalKind::Unregister, b); } catch (...) {} throw; }
 }
 PublisherEndpoint::~PublisherEndpoint() { if (impl_->owner != getpid()) { impl_.release(); return; } close(); }

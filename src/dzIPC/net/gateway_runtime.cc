@@ -107,16 +107,21 @@ struct GatewayRuntime::Impl
     double receive_control_tokens = 0;
     std::uint64_t receive_token_time = 0;
     std::atomic<std::uint64_t> snapshot_version{1}, active_peers{0}, registered_handles{0};
+    std::atomic<std::uint64_t> logical_publishers{0}, ready_subscribers{0}, active_routes{0};
+    std::vector<std::pair<int, int>> socket_buffers;
     std::thread thread;
     std::mutex stop_mutex;
     std::atomic<bool> running{true};
     std::atomic<std::uint64_t> session_count{0}, rejected{0}, outbox_records{0}, credit_requests{0};
     std::size_t control_memory = 0;
+    mutable std::mutex error_mutex; std::uint32_t last_error_code = 0; std::string last_error;
     std::string status() const
     {
         std::ostringstream s;
         const auto occupied = send_budget->occupied();
+        const auto inflight = send_budget->inflight();
         const auto traffic = data ? data->stats() : GatewayDataStats{};
+        const auto directory = directory_budget->usage();
         s << "{\"protocol_version\":1,\"local_protocol_version\":2,\"gateway_id\":"
           << json_string(local::hex(identity)) << ",\"gateway_epoch\":\"" << epoch
           << "\",\"state\":\"" << (running.load() ? "Ready" : "Stopped")
@@ -124,7 +129,8 @@ struct GatewayRuntime::Impl
           << ",\"interface\":" << json_string(config.interface)
           << ",\"udp_sockets\":" << (running.load() ? config.data_shards + 2 : 0)
           << ",\"client_sessions\":" << session_count.load() << ",\"allocated_send_bytes\":\""
-          << occupied.bytes << "\",\"allocated_send_records\":\"" << occupied.records
+          << occupied.bytes << "\",\"send_inflight_bytes\":\"" << inflight.bytes << "\",\"send_inflight_records\":\"" << inflight.records
+          << "\",\"allocated_send_records\":\"" << occupied.records
           << "\",\"outbox_records\":\"" << outbox_records.load() << "\",\"credit_requests\":\""
           << credit_requests.load() << "\",\"rejected\":\"" << rejected.load()
           << "\",\"snapshot_version\":\"" << snapshot_version.load() << "\",\"active_peers\":" << active_peers.load()
@@ -133,6 +139,15 @@ struct GatewayRuntime::Impl
           << ",\"committed_messages\":" << traffic.committed_messages << ",\"source_injections\":0"
           << ",\"reassembly_bytes\":" << traffic.receive_usage.bytes << ",\"target_states\":" << traffic.target_states
           << ",\"retry_packets\":" << traffic.retry_packets << ",\"nacks\":" << traffic.nacks << ",\"ignored_controls\":" << traffic.ignored_controls
+          << ",\"data_datagrams_rx\":" << traffic.rx_packets << ",\"data_bytes_rx\":" << traffic.rx_bytes << ",\"data_bytes_tx\":" << traffic.tx_bytes
+          << ",\"send_eagain\":" << traffic.send_eagain << ",\"send_error\":" << traffic.send_error << ",\"truncated\":" << traffic.truncated
+          << ",\"invalid_packets\":" << traffic.invalid_packets << ",\"source_route_unverified\":" << traffic.unverified_route
+          << ",\"message_crc_fail\":" << traffic.receive_stats.message_crc_fail
+          << ",\"wrong_shard\":" << traffic.receive_stats.wrong_shard << ",\"duplicate_suppressed\":" << traffic.receive_stats.duplicates
+          << ",\"shm_commit_attempts\":" << traffic.receive_stats.commit_attempts << ",\"shm_commit_not_submitted\":" << traffic.receive_stats.commit_not_submitted
+          << ",\"shm_commit_indeterminate\":" << traffic.receive_stats.commit_indeterminate << ",\"assembly_expired_or_revoked\":" << traffic.receive_stats.expired
+          << ",\"reassembly_peak_bytes\":" << traffic.receive_usage.peak_bytes << ",\"receive_quota_rejected\":" << traffic.receive_usage.quota_rejected
+          << ",\"queued_commands\":" << traffic.queued_commands << ",\"queued_command_bytes\":" << traffic.queued_bytes
           << ",\"data_ports\":[";
         for (std::uint64_t i = 0; i < config.data_shards; ++i)
         {
@@ -140,10 +155,63 @@ struct GatewayRuntime::Impl
                 s << ',';
             s << config.data_base_port + i;
         }
-        s << "],\"control_port\":" << config.control_port
+        s << "],\"socket_buffers\":[";
+        for (std::size_t n = 0; n < socket_buffers.size(); ++n) {
+            if (n) s << ',';
+            s << "{\"receive_bytes\":" << socket_buffers[n].first << ",\"send_bytes\":" << socket_buffers[n].second << '}';
+        }
+        s << "],\"logical_publishers\":" << logical_publishers.load()
+          << ",\"ready_subscribers\":" << ready_subscribers.load() << ",\"active_routes\":" << active_routes.load()
+          << ",\"directory_bytes\":" << directory.installed << ",\"old_directory_bytes\":" << directory.old
+          << ",\"candidate_bytes\":" << directory.candidates << ",\"peer_history\":" << directory.histories
+          << ",\"assemblies_active\":" << traffic.receive_usage.assemblies
+          << ",\"bitmap_bytes\":" << traffic.receive_usage.bitmap_bytes << ",\"commit_pending_bytes\":" << traffic.receive_usage.pending_bytes
+          << ",\"dedup_streams\":" << traffic.receive_usage.streams << ",\"dedup_bytes\":" << traffic.receive_usage.stream_bytes
+          << ",\"receipts\":" << traffic.receive_usage.receipts
+          << ",\"local_path\":\"由应用持有\",\"network_path\":\"" << (running.load() ? "Ready" : "Stopped") << "\""
+          << ",\"io_batch_max\":" << config.io_batch_max << ",\"io_round_packets\":" << config.io_round_packets
+          << ",\"io_round_bytes\":" << config.io_round_bytes << ",\"io_round_us\":" << config.io_round_us
+          << ",\"nack_delay_ms\":" << config.nack_delay_ms << ",\"nack_interval_ms\":" << config.nack_interval_ms
+          << ",\"retry_initial_ms\":" << config.retry_initial_ms << ",\"retry_max_ms\":" << config.retry_max_ms
+          << ",\"control_rate\":" << config.control_rate << ",\"peer_control_rate\":" << config.peer_control_rate
+          << ",\"control_burst\":" << config.control_burst
+          << ",\"gateway_threads\":" << (running.load() ? config.data_shards + 3 : 0)
+          << ",\"thread_scope\":\"控制、drain、初始化和 K 个 shard；SHM 公共调度线程另由 /proc 采样\""
+          << ",\"limits\":{";
+        bool first_limit = true;
+#define SHOW_LIMIT(field) if (!first_limit) s << ','; first_limit = false; s << "\"" #field "\":" << config.limits.field;
+        SHOW_LIMIT(topics) SHOW_LIMIT(sessions) SHOW_LIMIT(peers) SHOW_LIMIT(handles) SHOW_LIMIT(session_handles) SHOW_LIMIT(message_bytes) SHOW_LIMIT(reassembly_bytes) SHOW_LIMIT(peer_reassembly_bytes) SHOW_LIMIT(route_reassembly_bytes) SHOW_LIMIT(assemblies) SHOW_LIMIT(send_bytes) SHOW_LIMIT(send_records) SHOW_LIMIT(publisher_reliable) SHOW_LIMIT(target_states) SHOW_LIMIT(commit_pending_bytes) SHOW_LIMIT(streams) SHOW_LIMIT(stream_window) SHOW_LIMIT(receipts) SHOW_LIMIT(peer_receipts) SHOW_LIMIT(outbox_bytes) SHOW_LIMIT(outbox_records) SHOW_LIMIT(session_send_bytes) SHOW_LIMIT(session_send_records) SHOW_LIMIT(initial_send_bytes) SHOW_LIMIT(initial_send_records) SHOW_LIMIT(result_history) SHOW_LIMIT(pending_credit_requests) SHOW_LIMIT(init_tasks) SHOW_LIMIT(candidate_bytes) SHOW_LIMIT(peer_candidate_bytes) SHOW_LIMIT(directory_bytes) SHOW_LIMIT(old_directory_bytes) SHOW_LIMIT(peer_history) SHOW_LIMIT(gateway_history) SHOW_LIMIT(session_control_bytes) SHOW_LIMIT(local_control_bytes) SHOW_LIMIT(network_control_bytes) SHOW_LIMIT(command_records) SHOW_LIMIT(command_bytes)
+#undef SHOW_LIMIT
+        { std::lock_guard<std::mutex> lock(error_mutex); s << "},\"last_error_code\":" << last_error_code << ",\"last_error\":" << json_string(last_error); }
+        s << ",\"control_port\":" << config.control_port
           << ",\"discovery_port\":" << config.discovery_port
           << ",\"discovery_group\":" << json_string(config.discovery_group) << '}';
         return s.str();
+    }
+    std::string query(ByteView body) const {
+        if (!body.data[0]) return status();
+        RouteKey key; codec::copy(key.scope, body.data + 1); key.msg_id = codec::get(body.data + 33, 4);
+        auto snapshot = local_directory->snapshot(); bool verified = true, reachable = true;
+        Identity peer_id = identity; std::uint64_t peer_epoch = epoch;
+        if (body.data[0] == 2) {
+            codec::copy(peer_id, body.data + 37); const auto peer = peer_directory->peer(peer_id);
+            snapshot = peer.snapshot; verified = bool(peer.admission && snapshot);
+            reachable = peer.admission && peer.admission->active.load();
+            peer_epoch = peer.admission ? peer.admission->hello.gateway_epoch : 0;
+        }
+        std::shared_ptr<RouteAdmission> route;
+        if (snapshot) { const auto found = snapshot->routes.find(key); if (found != snapshot->routes.end()) route = found->second; }
+        std::ostringstream s;
+        s << "{\"gateway_id\":" << json_string(local::hex(peer_id)) << ",\"gateway_epoch\":\"" << peer_epoch
+          << "\",\"snapshot_version\":\"" << (snapshot ? snapshot->version : 0) << "\",\"source_verified\":" << (verified ? "true" : "false")
+          << ",\"reachable\":" << (reachable ? "true" : "false") << ",\"ready\":" << (route && route->active.load() && reachable ? "true" : "false")
+          << ",\"domain\":\"" << codec::get(key.scope.data() + 8, 8) << "\",\"msg_id\":" << key.msg_id;
+        if (route) {
+            const auto& d = route->descriptor;
+            s << ",\"topic\":" << json_string(d.topic) << ",\"schema_hash\":" << d.schema_hash << ",\"roles\":" << d.role_flags
+              << ",\"receiver_route_epoch\":\"" << d.receiver_route_epoch << "\"";
+        }
+        s << '}'; return s.str();
     }
     void queue(Session &session, Bytes packet)
     {
@@ -172,6 +240,7 @@ struct GatewayRuntime::Impl
         codec::append(body, text.size(), 2);
         body.insert(body.end(), text.begin(), text.end());
         ++rejected;
+        { std::lock_guard<std::mutex> lock(error_mutex); last_error_code = code; last_error = text.substr(0, 160); }
         return response(session, LocalKind::Error, request_id, body);
     }
     void close_session(std::map<int, Session>::iterator i)
@@ -268,7 +337,7 @@ struct GatewayRuntime::Impl
         }
         else if (h.kind == LocalKind::QueryState)
         {
-            const auto text = status();
+            const auto text = query(body);
             Bytes encoded;
             codec::append(encoded, text.size(), 4);
             encoded.insert(encoded.end(), text.begin(), text.end());
@@ -408,6 +477,8 @@ struct GatewayRuntime::Impl
         }
         view->bridges = bridge_map;
         for (const auto& peer : peer_directory->peers()) view->peers.emplace(peer.admission->hello.gateway_id, peer);
+        logical_publishers.store(local_directory->publisher_count()); ready_subscribers.store(local_directory->ready_count());
+        active_routes.store(view->local->routes.size());
         last_data_fence = data->synchronize(std::move(view));
     }
     void process_data()
@@ -763,6 +834,7 @@ GatewayRuntime::GatewayRuntime(GatewayConfig config) : impl_(new Impl)
     impl_->directory_budget = std::make_shared<DirectoryBudget>(impl_->config.limits);
     impl_->peer_directory = std::make_unique<PeerDirectory>(impl_->identity, impl_->epoch, impl_->directory_budget);
     impl_->local_directory = std::make_unique<LocalDirectory>(impl_->directory_budget, impl_->config.limits);
+    for (const auto& endpoint : impl_->endpoints) impl_->socket_buffers.emplace_back(endpoint->receive_buffer_bytes(), endpoint->send_buffer_bytes());
     std::vector<std::unique_ptr<DatagramEndpoint>> data_endpoints;
     for (unsigned i = 0; i < impl_->config.data_shards; ++i) data_endpoints.push_back(std::move(impl_->endpoints[i]));
     impl_->data = std::make_unique<GatewayData>(impl_->config, impl_->identity, impl_->epoch, impl_->wake.get(), std::move(data_endpoints));
@@ -789,6 +861,7 @@ void GatewayRuntime::stop()
     impl_->bridge_map.reset(); impl_->bridge_snapshot.reset();
     impl_->local_directory.reset(); impl_->peer_directory.reset();
     impl_->registered_handles.store(0); impl_->active_peers.store(0);
+    impl_->logical_publishers.store(0); impl_->ready_subscribers.store(0); impl_->active_routes.store(0);
     impl_->endpoints.clear();
     impl_->listener.reset();
 }

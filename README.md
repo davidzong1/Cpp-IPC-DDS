@@ -168,3 +168,5 @@ C++ 侧 gtest 目前**无 CTest 注册**(`test/CMakeLists.txt` 无 `enable_testi
 # Reference
 
 🌟[Cpp-IPC](https://github.com/mutouyun/cpp-ipc)
+
+共享网络后端的启用、安装、状态查询、单次读取和回滚，见 [shared_v1 使用说明](docs/shared_network_endpoint_usage.md)。该后端须显式启用，默认仍为 legacy。

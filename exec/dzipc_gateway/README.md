@@ -40,3 +40,5 @@ build-shared-net/bin/dzipc_gateway check-config \
 共享后端构建开关仅在 64 位 Linux 默认开启。关闭构建时，网络模式解析和失败分支仍可链接。
 显式选择 `shared_v1` 时，缺少构建支持报告 `BackendNotBuilt`，缺少 MPMC 报告
 `MpmcRequired`；当前数据面未完成时报告 `NotImplemented`。
+
+共享网络后端的启用、安装、状态查询、单次读取和回滚，见 [shared_v1 使用说明](../../docs/shared_network_endpoint_usage.md)。该后端须显式启用，默认仍为 legacy。

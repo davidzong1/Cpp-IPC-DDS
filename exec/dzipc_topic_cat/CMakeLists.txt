@@ -28,3 +28,8 @@ if (WIN32 AND LIBIPC_BUILD_SHARED_LIBS)
             $<TARGET_FILE_DIR:dzipc_topic_cat>
     )
 endif()
+target_compile_definitions(dzipc_topic_cat PRIVATE DZIPC_SHARED_NET_BUILT=$<BOOL:${DZIPC_BUILD_SHARED_NET}>)
+
+if(UNIX AND NOT APPLE)
+    set_target_properties(dzipc_topic_cat PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+endif()

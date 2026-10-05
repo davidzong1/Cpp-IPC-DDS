@@ -27,3 +27,7 @@ if (WIN32 AND LIBIPC_BUILD_SHARED_LIBS)
             $<TARGET_FILE_DIR:dzipc_list>
     )
 endif()
+
+if(UNIX AND NOT APPLE)
+    set_target_properties(dzipc_list PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+endif()

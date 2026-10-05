@@ -132,6 +132,8 @@ std::vector<std::shared_ptr<LocalRegistration>> LocalDirectory::publishers() con
     std::vector<std::shared_ptr<LocalRegistration>> out; for (const auto& [id, entry] : impl_->handles) if (entry->publisher) out.push_back(entry); return out;
 }
 std::shared_ptr<const DirectorySnapshot> LocalDirectory::snapshot() const { return impl_->current; }
+std::size_t LocalDirectory::publisher_count() const { std::size_t count = 0; for (const auto& [key, t] : impl_->topics) count += t.pubs; return count; }
+std::size_t LocalDirectory::ready_count() const { std::size_t count = 0; for (const auto& [key, t] : impl_->topics) count += t.ready; return count; }
 std::size_t LocalDirectory::handle_count() const { return impl_->handles.size(); }
 bool LocalDirectory::healthy() const { return impl_->healthy; }
 } // namespace dzIPC::net

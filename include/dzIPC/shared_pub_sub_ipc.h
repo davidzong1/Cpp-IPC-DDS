@@ -1,11 +1,12 @@
 #pragma once
 #include "dzIPC/pub_sub_base.h"
+#include "dzIPC/type.h"
 
 namespace dzIPC::shared_net {
 class IPC_EXPORT Publisher final : public pub_ipc_base {
 public:
     Publisher(const std::shared_ptr<TopicData>&, const std::string&, std::size_t domain,
-              bool verbose = false, bool qos = false, int cpu = -1, int priority = 20);
+              bool verbose = false, bool qos = false, int cpu = -1, int priority = DispatchPriority::LowPriority);
     ~Publisher() override;
     void InitChannel(std::string extra = "") override;
     void reset_message(const std::shared_ptr<TopicData>&) override;
@@ -21,7 +22,7 @@ private:
 class IPC_EXPORT Subscriber final : public sub_ipc_base {
 public:
     Subscriber(const std::shared_ptr<TopicData>&, const std::string&, std::size_t domain,
-               std::size_t queue_size, bool verbose = false, bool qos = false, int cpu = -1, int priority = 20);
+               std::size_t queue_size, bool verbose = false, bool qos = false, int cpu = -1, int priority = DispatchPriority::LowPriority);
     ~Subscriber() override;
     void InitChannel(std::string extra = "") override;
     void reset_message(const std::shared_ptr<TopicData>&) override;

@@ -65,6 +65,9 @@ class ClientRuntime : public std::enable_shared_from_this<ClientRuntime>
     SendResultBody wait_send(const SendTicket &, std::uint64_t deadline_ns);
     SendResultBody cancel_send(const SendTicket &, SendResultCode);
     std::string status();
+    void record_publish(SubmitState local, SubmitState network);
+    std::string diagnostics_json() const;
+    std::string route_status(const RouteKey&, Identity peer = {});
     void attach_outbox();
     OutboxSubmit submit_outbox(const OutboxHeader &, ByteView blob);
 

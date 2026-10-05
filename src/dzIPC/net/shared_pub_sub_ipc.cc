@@ -35,8 +35,9 @@ struct Publisher::Impl {
         endpoint = std::make_unique<net::PublisherEndpoint>(client, descriptor(model, topic, domain)); initialized = true;
     }
 };
-Publisher::Publisher(const std::shared_ptr<TopicData>& msg, const std::string& topic, std::size_t domain, bool verbose, bool, int, int)
+Publisher::Publisher(const std::shared_ptr<TopicData>& msg, const std::string& topic, std::size_t domain, bool verbose, bool qos, int cpu, int priority)
     : pub_ipc_base(msg, topic, domain, verbose), impl_(new Impl) {
+    if (qos || cpu != -1 || priority != DispatchPriority::LowPriority) throw std::invalid_argument("共享后端不支持每个对象独立 QoS/绑核参数");
     descriptor(msg, topic, domain); impl_->model = msg; impl_->topic = topic; impl_->domain = domain; impl_->client = runtime();
 }
 Publisher::~Publisher() { if (impl_->owner != getpid()) { impl_.release(); return; } exit_flag.store(true); std::unique_lock<std::shared_mutex> lock(impl_->gate); impl_->endpoint.reset(); }
@@ -56,20 +57,23 @@ bool Publisher::publish_best_effort(std::shared_ptr<IpcMsgBase> message) {
     if (impl_->owner != getpid() || !message) return false;
     std::shared_lock<std::shared_mutex> lock(impl_->gate, std::try_to_lock);
     if (!lock.owns_lock() || exit_flag.load()) return false;
-    return impl_->endpoint && impl_->endpoint->publish(*message).success;
+    if (!impl_->endpoint) return false;
+    const auto result = impl_->endpoint->publish(*message); impl_->client->record_publish(result.local, result.network); return result.success;
 }
 bool Publisher::publish_blocking(std::shared_ptr<IpcMsgBase> message, std::uint64_t timeout) {
     if (impl_->owner != getpid() || !message) return false;
     std::shared_lock<std::shared_mutex> lock(impl_->gate, std::try_to_lock);
     if (!lock.owns_lock() || exit_flag.load()) return false;
-    return impl_->endpoint && impl_->endpoint->publish(*message, net::Delivery::Reliable, timeout).success;
+    if (!impl_->endpoint) return false;
+    const auto result = impl_->endpoint->publish(*message, net::Delivery::Reliable, timeout); impl_->client->record_publish(result.local, result.network); return result.success;
 }
 bool Publisher::publish_for_sniffer(std::shared_ptr<IpcMsgBase> message) { return publish_best_effort(std::move(message)); }
 bool Publisher::publish_prebuilt_segment(const void* bytes, std::size_t size) {
     if (impl_->owner != getpid() || !IsDzFlatEnabled()) return false;
     std::shared_lock<std::shared_mutex> lock(impl_->gate, std::try_to_lock);
     if (!lock.owns_lock() || exit_flag.load()) return false;
-    return impl_->endpoint && impl_->endpoint->prebuilt({bytes, size}).success;
+    if (!impl_->endpoint) return false;
+    const auto result = impl_->endpoint->prebuilt({bytes, size}); impl_->client->record_publish(result.local, result.network); return result.success;
 }
 bool Publisher::has_subscribed() const {
     if (impl_->owner != getpid()) return false;
@@ -79,6 +83,7 @@ struct Subscriber::Impl {
     struct Generation {
         std::shared_ptr<net::ClientRuntime> client; net::Identity id{};
         std::shared_ptr<Wake> wake = std::make_shared<Wake>();
+        info_pool::ScopedRegistration registration;
         std::unique_ptr<shm::shm_sub_ipc> reader;
         std::atomic<bool> active{false};
         ~Generation() {
@@ -104,10 +109,13 @@ struct Subscriber::Impl {
     }
     void initialize(const std::string& extra) {
         retire(); auto next = std::make_shared<Generation>(); next->client = runtime(); initial_client.reset(); next->id = net::local::random_identity();
+        next->registration.rebind({info_pool::EntryKind::SocketSub, topic, info_pool::demangle(typeid(*model->topic()).name()), "shared_v1", domain, "mode=shared_v1;epoch=" + std::to_string(next->client->gateway_epoch())});
+        if (!next->registration.valid()) throw std::runtime_error("RegistryFull: 共享订阅诊断池已满");
         auto reply = next->client->request(net::LocalKind::RegisterSub, net::registration_body(next->id, descriptor(model, topic, domain)));
         if (reply.header.kind != net::LocalKind::SubRegistered) throw std::runtime_error("共享订阅登记失败");
         const auto generation = net::codec::get(reply.body.data() + 16, 4);
         next->reader = std::make_unique<shm::shm_sub_ipc>(model, topic, domain, queue_size, verbose, qos, cpu, priority);
+        next->reader->set_internal(true);
         const std::weak_ptr<Wake> wake = next->wake;
         next->reader->set_receive_notifier([wake] { if (auto w = wake.lock()) w->notify(); }); next->reader->InitChannel(extra);
         const auto deadline = net::local::monotonic_ns() + 2000000000ull;
@@ -144,6 +152,7 @@ struct Subscriber::Impl {
 };
 Subscriber::Subscriber(const std::shared_ptr<TopicData>& msg, const std::string& topic, std::size_t domain, std::size_t queue, bool verbose, bool qos, int cpu, int priority)
     : sub_ipc_base(msg, topic, domain, queue, verbose), impl_(new Impl) {
+    if (qos || cpu != -1 || priority != DispatchPriority::LowPriority) throw std::invalid_argument("共享后端不支持每个对象独立 QoS/绑核参数");
     descriptor(msg, topic, domain); impl_->model = msg; impl_->topic = topic; impl_->domain = domain; impl_->queue_size = queue;
     impl_->verbose = verbose; impl_->qos = qos; impl_->cpu = cpu; impl_->priority = priority; impl_->initial_client = runtime();
 }

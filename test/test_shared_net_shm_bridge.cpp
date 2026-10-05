@@ -39,7 +39,7 @@ TEST(SharedNetBridge, ThreePublishersTwoProcessesAndInternalRegistration)
     std::size_t visible = 0;
     for (const auto &entry : dzIPC::info_pool::IpcInfoPool::instance().snapshot(false))
         if (entry.topic_name == topic.descriptor.topic &&
-            entry.kind == dzIPC::info_pool::EntryKind::ShmPub)
+            (entry.kind == dzIPC::info_pool::EntryKind::ShmPub || entry.kind == dzIPC::info_pool::EntryKind::SocketPub))
             ++visible;
     EXPECT_EQ(visible, 2u);
     int ready[2];

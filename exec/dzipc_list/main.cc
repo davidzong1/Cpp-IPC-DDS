@@ -127,7 +127,7 @@ void print_snapshot(const std::vector<dzIPC::info_pool::EntrySnapshot>& entries,
                       return a->topic_name < b->topic_name;
                   return a->pid < b->pid;
               });
-    printf("%-4s%-15s%-8s%-8s%-32s%-32s%-50s\n", "ID", "KIND", "PID", "AGE", "TOPIC", "TYPE", "EXTRA");
+    printf("%-4s%-15s%-8s%-8s%-32s%-32s%-50s\n", "ID", "KIND", "PID", "AGE", "TOPIC", "TYPE", "MODE / DOMAIN / EXTRA");
     printf("%s\n", std::string(100, '-').c_str());
 
     for (const auto* e : view)
@@ -136,7 +136,7 @@ void print_snapshot(const std::vector<dzIPC::info_pool::EntrySnapshot>& entries,
         {
             printf("%-4d%-15s%-8d%-8s%-32s%-32s%-50s\n", e->slot, dzIPC::info_pool::to_string(e->kind), e->pid,
                    format_age(e->register_ts_ns).c_str(), e->topic_name.c_str(),
-                   (e->type_name.empty() ? "-" : e->type_name.c_str()), (e->extra.empty() ? "-" : e->extra.c_str()));
+                   (e->type_name.empty() ? "-" : e->type_name.c_str()), ("domain=" + std::to_string(e->domain_id) + ";" + e->extra + (e->topic_name.size() == dzIPC::info_pool::kMaxTopicName - 1 ? ";名称可能截断，请用网关原名查询" : "")).c_str());
         }
     }
 
