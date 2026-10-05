@@ -578,8 +578,8 @@ const char* sub_recv_reason_text(int code) noexcept
  *     `release_receive` —— 漏一次 `wait_quiescent` 永不返回（静默挂死，I4）。
  *   · I5：⛔ 不得因 `lease.generation` 落后于当前 generation 就丢已弹出的 buffer。
  *   · 分流只在 `process_received_buffer`（阶段 3 原语）；⛔ 用户回调不在这里。
- *   · 两个 seam 点的位置与语义逐句不变（kAfterRecv 在 release 之前、kAfterRecvRelease
- *     在其之后），worker/兼容两路共用 ⇒ 观测面不因换消费者而丢。 */
+ *   · kAfterRecv 在 release 之前、kAfterRecvRelease 在其之后；协作空读保留
+ *     等待lease，不触发允许阻塞的kAfterRecvRelease。非空接收仍在分流前释放。 */
 enum class SubRecvStep
 {
     no_lease,   ///< stopping / rebuilding / 尚无 route：本次无数据（兼容路径按既有语义睡 50ms）
@@ -593,10 +593,26 @@ struct SubRecvOutcome
     std::size_t bytes{0};
 };
 
+// 一次接收或等待共用一个计数；释放后保留route对象供测试缝记录代次，不能再访问token。
+struct ScopedSubReceive
+{
+    ShmRouteSession& session;
+    std::optional<ShmRouteSession::ReceiveLease> lease;
+    bool held;
+    explicit ScopedSubReceive(ShmRouteSession& value, bool acquire = true)
+        : session(value), lease(acquire ? value.acquire_receive() : std::nullopt), held(bool(lease)) {}
+    ScopedSubReceive(const ScopedSubReceive&) = delete;
+    ScopedSubReceive& operator=(const ScopedSubReceive&) = delete;
+    ~ScopedSubReceive() { release(); }
+    void release() noexcept {
+        if (held) { held = false; session.release_receive(); }
+    }
+};
+
 SubRecvOutcome sub_recv_attempt(dzIPC::shm::ShmRouteSession& session,
                                 const std::shared_ptr<SubState>& state,
                                 std::uint64_t wait_ms, SubRecvState* arbitration = nullptr,
-                                bool caller = false)
+                                bool caller = false, ScopedSubReceive* waiting = nullptr)
 {
     SubRecvOutcome out;
     std::unique_lock<std::mutex> consume;
@@ -611,8 +627,10 @@ SubRecvOutcome sub_recv_attempt(dzIPC::shm::ShmRouteSession& session,
             consume = std::unique_lock<std::mutex>(arbitration->consume_mutex);
         }
     }
-    auto lease = session.acquire_receive();
-    if (!lease.has_value())
+    ScopedSubReceive local(session, !waiting);
+    auto& receive = waiting ? *waiting : local;
+    const auto& lease = receive.lease;
+    if (!receive.held)
     {
         out.step = SubRecvStep::no_lease;
         return out;
@@ -628,14 +646,18 @@ SubRecvOutcome sub_recv_attempt(dzIPC::shm::ShmRouteSession& session,
     {
         /* 每个成功 lease 必须配对释放，包括 recv 抛异常的出口（I4）。单次 route
          * 错误不该让消费者因未配对 lease 卡死后续重建。 */
-        session.release_receive();
+        receive.release();
         out.step = SubRecvStep::no_lease;
         return out;
     }
-    /* 测试缝(§4.2)：此刻 inflight 仍为 1 ⇒ 钩子**不得阻塞**。 */
+    /* 测试缝(§4.2)：此刻仍持lease ⇒ 钩子**不得阻塞**。 */
     detail::FireSeam({detail::SeamPoint::kAfterRecv, lease->generation, lease->route->legacy_route(), raw_data.data(),
                       raw_data.size()});
-    session.release_receive();
+    if (raw_data.empty() && waiting) {
+        out.step = SubRecvStep::empty;
+        return out; // 保活等待token；由assisted_pop的作用域释放。
+    }
+    receive.release();
     /* 测试缝(§4.1 的 I5 暂停点)：已 release ⇒ 重建方可推进到第 5 步 release 旧 route。
      * ⚠️ 必须留在**分流之前**（I5 就是靠这个窗口守住的）。 */
     detail::FireSeam({detail::SeamPoint::kAfterRecvRelease, lease->generation,
@@ -678,16 +700,18 @@ bool assisted_pop(ShmRouteSession& session, const std::shared_ptr<SubState>& sta
         const auto signal = arbitration->signal.snapshot();
         if (queue.try_pop(out)) return true;
         // lease在等待期间保活token映射；不持消费锁跨wait或控制面操作。
-        auto lease = session.acquire_receive();
-        struct Release { ShmRouteSession& session; bool held; ~Release() { if (held) session.release_receive(); } } release{session, bool(lease)};
+        ScopedSubReceive receive(session);
+        const auto& lease = receive.lease;
         const auto token = lease ? lease->route->read_wait_token() : ipc::recv_wait_token{};
         const auto sequence = token.valid() ? token.sequence()->load(std::memory_order_acquire) : 0;
-        const auto received = lease ? sub_recv_attempt(session, state, 0, arbitration.get(), true) : SubRecvOutcome{};
+        const auto received = lease ? sub_recv_attempt(session, state, 0, arbitration.get(), true, &receive) : SubRecvOutcome{};
         if (arbitration->cancelled.load()) return false;
         if (queue.try_pop(out)) return true;
         if (!timeout || !remaining()) return false;
         // 已取到另一类消息或被其他getter取走仍是进展；暂停worker时须排空现有SHM积压。
         if (received.step == SubRecvStep::received) continue;
+        // recv异常已释放lease；旧token可能随重建失效，必须重新取得映射。
+        if (lease && !receive.held) continue;
         // stop可能发生在序号快照之前；此时必须释放旧lease，不能等待下一次通知。
         if (lease && !session.receive_current(*lease)) continue;
         if (arbitration->assist_disabled.load()) break;

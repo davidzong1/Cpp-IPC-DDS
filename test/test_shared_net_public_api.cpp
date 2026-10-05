@@ -7,6 +7,7 @@ struct AssistGate {
     static AssistGate* current;
     static thread_local int slot;
     std::atomic<bool> armed{false}, blocked{false}, release{false};
+    std::atomic<bool> pause_dispatch{false}, at_dispatch{false}, continue_dispatch{false};
     std::atomic<unsigned> assisted{0}, enqueued{0};
     std::array<std::atomic<bool>, 4> waiting{};
     AssistGate() {
@@ -16,6 +17,13 @@ struct AssistGate {
             if (event.point == dzIPC::detail::SeamPoint::kCallerAssistedReceive) ++gate->assisted;
             if (event.point == dzIPC::detail::SeamPoint::kBeforeViewEnqueue) ++gate->enqueued;
             if (event.point == dzIPC::detail::SeamPoint::kBeforeCallerWait && slot >= 0) gate->waiting[slot].store(true);
+            if (event.point == dzIPC::detail::SeamPoint::kAfterRecvRelease && slot >= 0 &&
+                event.size != 0 && gate->pause_dispatch.load()) {
+                gate->at_dispatch.store(true);
+                const auto end = std::chrono::steady_clock::now() + 2s;
+                while (!gate->continue_dispatch.load() && std::chrono::steady_clock::now() < end)
+                    std::this_thread::sleep_for(1ms);
+            }
             if (event.point == dzIPC::detail::SeamPoint::kBeforeWorkerReceive && gate->armed.load()) {
                 gate->blocked.store(true);
                 const auto end = std::chrono::steady_clock::now() + 2s;
@@ -23,7 +31,7 @@ struct AssistGate {
             }
         });
     }
-    ~AssistGate() { release.store(true); dzIPC::detail::SetSeamHook(nullptr); }
+    ~AssistGate() { release.store(true); continue_dispatch.store(true); dzIPC::detail::SetSeamHook(nullptr); }
 };
 AssistGate* AssistGate::current = nullptr;
 thread_local int AssistGate::slot = -1;
@@ -142,6 +150,42 @@ TEST(SharedNetPublicApi, WaitingLeaseReleasesAcrossUnderlyingShmGenerationRebuil
     EXPECT_EQ(reading.wait_for(1000ms), std::future_status::ready);
     sub.cancel_waits();
     EXPECT_TRUE(reading.get());
+}
+
+TEST(SharedNetPublicApi, CallerReleasesReceiveLeaseBeforeDispatchAcrossRebuild) {
+    PublicFixture f; AssistGate gate;
+    dzIPC::shm::shm_sub_ipc sub(f.model(), f.topic.descriptor.topic, 0, 8);
+    sub.enable_cancellable_wait(); ASSERT_TRUE(sub.enable_receive_assist()); sub.InitChannel();
+    dzIPC::shm::shm_pub_ipc pub(f.model(), f.topic.descriptor.topic, 0); pub.InitChannel();
+    ASSERT_TRUE(until([&] { return sub.connected_generation() != 0; }));
+    dzIPC::control_plane_shm::TopicControlPlane control;
+    ASSERT_TRUE(control.open(shm_topic_mpmc_control_name(f.topic.descriptor.topic, 0)));
+    gate.pause_dispatch.store(true);
+    auto reading = std::async(std::launch::async, [&] {
+        AssistGate::slot = 0;
+        dzIPC::Sample sample;
+        sub.get_cancellable(sample, 3000);
+        return sample;
+    });
+    EXPECT_TRUE(until([&] { return gate.waiting[0].load(); }));
+    EXPECT_TRUE(pub.publish(f.message()));
+    const bool paused = until([&] { return gate.at_dispatch.load(); });
+    EXPECT_TRUE(paused);
+    if (paused) {
+        const auto next_generation = control.begin_rebuild(); control.set_ready();
+        // getter仍停在入队前；旧映射的接收计数必须已经归零，否则重建不能前进。
+        EXPECT_TRUE(until([&] { return sub.connected_generation() == next_generation; }, 500ms));
+        EXPECT_EQ(reading.wait_for(0ms), std::future_status::timeout);
+    }
+    gate.continue_dispatch.store(true);
+    EXPECT_EQ(reading.wait_for(1000ms), std::future_status::ready);
+    sub.cancel_waits();
+    auto sample = reading.get();
+    ASSERT_TRUE(sample.valid());
+    const auto view = sample.view<dzIPC::Msg::StdImageFlat>();
+    ASSERT_TRUE(view.valid());
+    ASSERT_EQ(view.data().size(), 64u);
+    for (auto byte : view.data()) EXPECT_EQ(byte, 0x7b);
 }
 TEST(SharedNetPublicApi, FactoryCoversPublishVariantsSampleCloneAndWait) {
     PublicFixture f; auto model = f.model();

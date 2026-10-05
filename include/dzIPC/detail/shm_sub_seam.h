@@ -62,10 +62,11 @@ enum class SeamPoint : int
      *   · compat：由 compat_recv_loop() 调用。
      * 两条路径的 recv 等待时长不同（worker = recv(0) 非阻塞；compat = recv(50)），
      * 但打点位置与 generation 语义完全相同。 */
-    kAfterRecv        = 0,   /* recv() 已返回、尚未 release_receive。此时 inflight 仍为 1
+    kAfterRecv        = 0,   /* recv() 已返回、尚未 release_receive。此时仍持有lease
                               * ⇒ 钩子**不得阻塞**(会拖住并发 begin_rebuild 的第 4 步)。 */
     kAfterRecvRelease = 1,   /* release_receive() 已执行、尚未分流。**I5 的暂停点**:
-                              * 此刻 inflight == 0, 重建方可推进到第 5 步 release 旧 route。
+                              * 本次接收不再占用inflight；其他接收/等待也退出后即可重建。
+                              * 协作空读保留等待lease，不触发此点。
                               * 这是唯一允许钩子阻塞的收包点。 */
 
     /* 接收分段诊断。默认关闭，开启的钩子不得阻塞或分配。
