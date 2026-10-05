@@ -1,5 +1,6 @@
 #include "dzIPC/topic_ipc.h"
 #include "dzIPC/hybrid_pub_sub_ipc.h"
+#include "dzIPC/net/shared_config.h"
 #include <memory>
 #include <typeinfo>
 #include <utility>
@@ -64,6 +65,12 @@ namespace {
 /* 枚举里那个空洞(值 2)。用具名常量而不是裸字面量: 让 grep 能追到所有引用点。 */
 constexpr IPCType kReservedAutoSlot = static_cast<IPCType>(2);
 
+void validate_network_backend(IPCType type)
+{
+    if (type == IPCType::Socket || type == IPCType::SocketOnly)
+        net::require_network_backend(type == IPCType::SocketOnly);
+}
+
 /* pub/sub 收到"既不是 Shm 也不是 Socket/SocketOnly"的 IPCType 时拒绝。
  *
  * 值 2(曾经是 Auto)现在是**空洞**。它被删的理由: 自动选路的语义已由 IPC_SOCKET 承担,
@@ -101,7 +108,7 @@ public:
 pimpl::publisher_ipc_impl::publisher_ipc_impl(const std::shared_ptr<TopicData>& msg, const std::string& topic_name,
                                               size_t domain_id, IPCType ipc_type, bool verbose,
                                               bool enable_thread_qos, int cpu_id, int thread_priority)
-    : p_(publisher_ipc_impl_::make())
+    : p_((validate_network_backend(ipc_type), publisher_ipc_impl_::make()))
 {
     impl(p_)->topic_name = topic_name;
     impl(p_)->domain_id = domain_id;
@@ -204,7 +211,7 @@ public:
 pimpl::subscriber_ipc_impl::subscriber_ipc_impl(const std::shared_ptr<TopicData>& msg, const std::string& topic_name,
                                                 size_t domain_id, const size_t queue_size, IPCType ipc_type,
                                                 bool verbose, bool enable_thread_qos, int cpu_id, int thread_priority)
-    : p_(subscriber_ipc_impl_::make())
+    : p_((validate_network_backend(ipc_type), subscriber_ipc_impl_::make()))
 {
     impl(p_)->topic_name = topic_name;
     impl(p_)->domain_id = domain_id;

@@ -1,9 +1,9 @@
 # 共享网络端点与按话题分发：详细执行方案
 
 编制日期：2026-10-04  
-复核日期：2026-10-05（补齐来源目录、去重保留边界与容量核算）\
-源码观察基线：e887d5e 及当时工作区；SHM 多发布者改造仍在另一个任务中进行。  
-文档状态：**待执行的设计与任务说明；不是已经实现或验证的能力。**  
+复核日期：2026-10-05（本机直达与共享网络低延迟架构修订）\
+源码基线：f066a82，已包含 MPMC 交付与上一版共享网络方案。\
+文档状态：**完整方案修订；共享网络代码尚未实施，不代表性能已经验证。**\
 建议文件名：docs/shared_network_endpoint_execution_plan.md  
 前置方案：[SHM 多发布者执行方案](shm_multi_publisher_execution_plan.md)
 
@@ -21,13 +21,16 @@
 |---|---|
 | T00～T01 | 2、3、5、12、13、16 |
 | T02～T03 | 6、7、8.1～8.2、8.5、9.2、9.4、11 |
-| T04～T05 | 4.5、5.1～5.3、9、12.2～12.3 |
+| T04～T05 | 4.5、5、9（含两类信用）、12 |
 | T06～T07 | 5、6、7、10、12 |
 | T08～T10 | 7.5～7.7、8、9.4、11、12.4、17.2～17.3 |
 | T11～T13 | 3.5、5、9、10、12、14、18 |
 | T14～T15 | 16～20 |
 
 本文件中所有端口、协议和返回语义都是**新模式的设计契约**，默认旧模式不随文档改变。
+本次修订替代 f066a82 中“所有本机消息先经网关”的方案，不与旧草案混合实施。
+网络 DZMX/DZGD/DZGC 仍为 v1；本机 DZLC/DZTX 升为 v2，DZTX 前缀为 112B。
+用户已批准按完整方案开始执行；T01～T03 已完成，T00 基线补证部分完成，当前状态见第 20 节。
 
 ## 1. 要解决的问题与最终交付
 
@@ -45,7 +48,8 @@
 4. 完整消息只向对应本机 SHM 话题提交一次，由现有 SHM 路径分发。
 5. 可靠确认与重传不争抢数据接收 socket。
 6. 增加话题、发布者、订阅者时，UDP socket 数量保持受配置上限约束。
-7. 老模式仍可构建和运行，显式配置新模式后不在运行中偷偷切回老模式。
+7. 本机交付直接使用 MPMC，不依赖网关逐消息转发；可靠发送热路径不强制进行本机 BEGIN 往返。
+8. 老模式仍可构建和运行，显式配置新模式后不在运行中偷偷切回老模式。
 
 ### 1.2 最终产品
 
@@ -69,7 +73,11 @@
 - 至少两台主机，或两个隔离网络与 IPC 环境；最终发布仍须真实跨机数据；
 - 乱序、重复、丢片、ACK 丢失、端点析构、网关退出和重启。
 
-资源目标是减少网络端点与本机重复收包。**不预先承诺吞吐或延迟一定优于旧模式。**
+资源目标是减少网络端点与本机重复收包；延迟目标是移除本机网关转发、逐消息 BEGIN 往返
+和全局统一 SHM 提交队列。**优化目标须由第 17.4 节的同机对照证明，不预先承诺倍数提升。**
+
+MPMC 已交付可作为前置基线。本轮重新构建成功、MPMC/info 专项 8/8 通过；交付记录中的
+完整回归 8 项旧基线失败、尚缺的压力/性能证据仍单列，不将专项通过扩大成全部验收通过。
 
 ## 2. 已确认的源码事实
 
@@ -86,7 +94,7 @@
 | src/libipc/socket/udp.cpp：UDPNode_::accept | 一个 UDPNode 只接受一个 scope，并剥掉外层来源头 | 不能让多个 topic 共用现有对象后轮流 set_scope |
 | src/dzIPC/common/data_rev.cc：chunk_rev_topic / chunk_send_ex | 以单次完整消息收发为主要处理单元，有阻塞等待和旧页尾协议 | 不得直接拿来实现共享 socket 的多消息并发重组 |
 | src/dzIPC/common/hybrid_discovery.cc：Discovery | 每进程共享旧发现通道 239.255.250.250:11245 | 新模式需要按网关汇总订阅；旧发现协议不直接改版 |
-| include/dzIPC/common/shm_channel.h | 在进行中的工作区有 route / mpmc_channel 类型封装 | 前置任务完成后复核实际接口 |
+| include/dzIPC/common/shm_channel.h | f066a82 已包含 route / mpmc_channel 类型封装 | 本机发布者和网关注入端复用已交付 MPMC 生命周期 |
 | src/dzIPC/shm_pub_sub_ipc.cc | SHM 已有 DZFlat、TLV、生命周期、借样和接收 worker | 网关注入必须复用这些生命周期，不私自清段 |
 | include/dzIPC/threepools/socket_recv_worker.h | 旧 recv_once 以完整消息边界让出 | 新收包引擎使用独立状态机，不能改变旧 worker 契约 |
 | include/dzIPC/pub_sub_base.h：publish_prebuilt_segment | false 允许调用者回退并再次 publish | 必须保证 false 之前没有发生可见提交 |
@@ -150,25 +158,26 @@ UID 和 IpcInfoPool locality identity。
 - 发现 socket 可按组播要求使用 SO_REUSEADDR；不依赖其提供应用级去重。
 - 源端按目标公布的 K 计算目标分片，不假设两端配置相同。
 
-### 3.4 应用出站经过网关，本机入站继续使用业务 SHM
+### 3.4 本机 MPMC 直达，网关只处理跨机数据
 
-首版 SharedPublisher 不再同时直写业务 SHM 和发网络。它先提交网关出站队列，
-由网关决定向本机业务 SHM 和哪些远端发送。
+SharedPublisher 在应用内持有自己的 MPMC 发布端，本机消息由它直接提交。
+需要网络输出时，再经每进程出站 SHM 交给网关；网关对这些记录只向远端发送，
+绝不再次写入源主机业务 SHM。远端入站才由目标网关注入其业务 MPMC。
 
-这么做是为了使一次提交只有一个接管点，明确预构造段回退和故障边界。
-**这比旧 hybrid 本机直达路径多一跳 SHM 与网关调度，必须实测本机延迟。**
-旧 hybrid 保留，首版不自动替换所有纯本机业务。
+- SharedSubscriber 仍通过 shm_sub_ipc 消费业务 SHM，没有第二条网络消费腿。
+- 显式 IPC_SHM 发布者保持仅本机语义；网关不订阅业务 SHM 并无差别向外转发。
+- 同一话题可有多个应用发布者和一个网关注入端，复用 MPMC 普通 join/leave。
+- 本机路径与网络路径的所有权固定，不根据发现状态把本机投递在应用和网关之间来回切换。
+- 一条消息可能本机成功、网络失败，或反过来；不实现跨两条队列的原子广播。
+  第 5 节定义部分提交、公开 bool 与预构造段回退边界。
+- 已初始化的本机 MPMC 路径不因网关运行中退出而关闭；网络腿明确失效。
+  新建 shared_v1 对象仍要求完成网关握手，避免把初次网络配置失败隐去。
+- 无远端需求的 best-effort 可使用原有 DZFlat 直接写 loan 的本机路径；
+  有网络输出时允许先生成一个不可变 WireBlob，向两腿提交，不能重复序列化业务对象。
+  首版不跨进程共享该 WireBlob 的裸指针；共享载荷加描述符另列后续优化。
 
-SharedSubscriber 只通过现有 shm_sub_ipc 消费业务 SHM；不持有网络数据 socket。
-显式 IPC_SHM 的发布者仍仅向本机发布，网关不监听业务 SHM 再把所有消息转发出去。
-
-因此：
-
-- 网关是每个接入话题的一个 SHM 发布者；
-- 本机显式 IPC_SHM 发布者可与它并存，依赖前置 MPMC；
-- 远端入站消息永远不会再次进入网关出站队列；
-- 不需要修改业务 SHM 载荷格式来添加来源标记；
-- 首版不实现发布者直接 SHM 快路与网关路径之间的动态切换。
+本机直达消除了网关调度依赖，不等于消除了编码、SHM 复制或订阅者调度。
+必须分别测仅本机路径和本机/网络同时活跃路径的端到端延迟。
 
 ### 3.5 模式选择与兼容范围
 
@@ -195,18 +204,20 @@ SharedSubscriber 只通过现有 shm_sub_ipc 消费业务 SHM；不持有网络�
 
 ~~~mermaid
 flowchart LR
-  P["应用发布者"] --> TX["每应用进程一条出站 SHM"]
-  TX --> G["本机网关"]
-  G --> LS["本机各话题业务 SHM"]
+  P["应用 SharedPublisher"] --> LS["本机业务 MPMC SHM"]
   LS --> S["本机订阅者"]
+  P --> TX["每进程网络出站 SHM"]
+  TX --> G["本机网关：仅发送远端副本"]
   G --> N["少量 UDP 单播端点"]
-  N --> RG["远端网关"]
-  RG --> RS["远端各话题业务 SHM"]
+  N --> RG["远端网关：重组与注入"]
+  RG --> RS["远端业务 MPMC SHM"]
   LP["显式 IPC_SHM 发布者"] --> LS
+  IN["其他主机的网络入站"] --> GI["本机网关入站分片线程"]
+  GI --> LS
 ~~~
 
-控制流单独使用每应用进程一个 Unix SOCK_SEQPACKET 连接：
-注册、注销、状态、可靠发送完成事件和一次性 eventfd 传递。**业务载荷不通过此连接。**
+每应用进程一个 Unix SOCK_SEQPACKET 控制连接负责注册、额度补充、路由提示、状态和
+可靠结果。业务载荷不走控制连接；已有额度时，单条 reliable 无须先发控制请求再等许可。
 
 ### 4.2 资源计算口径
 
@@ -225,7 +236,8 @@ flowchart LR
 | 网关 UDP socket | K + 2，与 T / P / S 无关 |
 | shared_v1 应用 UDP socket | 0，不含应用自身其他业务 |
 | 网关本机控制连接与出站唤醒 FD | O(A) |
-| 应用控制连接 / 出站通道 | 每进程 1 个 / 1 条，不是每个话题一个 |
+| 应用控制连接 / 网络出站通道 | 每进程 1 个 / 1 条，不是每个话题一个 |
+| 应用本机 MPMC 发布端 | 每 SharedPublisher 一个发布者登记；段与池按业务话题共享 |
 | 业务 SHM 通道 | O(T)，仍按话题隔离 |
 | 发布者登记和订阅登记 | O(P + S)，无法因端口复用消失 |
 | 重组状态 | 与并发在途消息相关，必须有硬配额 |
@@ -236,14 +248,20 @@ flowchart LR
 
 ### 4.3 本机发布
 
-1. 应用构造后端，连接网关，协商版本和容量。
-2. 发布者注册，得到逻辑发布身份；创建/复用每进程出站通道。
-3. 应用将消息编码成完整 DZFlat 段或完整旧 TLV blob。
-4. 给该消息分配唯一发布者序号，构造本机出站信封。
-5. 原子提交一条 SHM 记录，敲响该会话的 eventfd。
-6. 网关读取并验证记录，冻结本次目标订阅快照。
-7. 有本机接收者时，向业务 SHM 提交；有远端接收网关时，投递网络发送队列。
-8. reliable 请求等待本机提交结果及冻结目标的 ACK；best-effort 不等待远端确认。
+1. 初始化应用 MPMC 发布端与网关 PUB 登记；本机发布对象的生命周期由应用拥有。
+2. 公开调用入口校验消息、句柄和 tm；分配 publisher_id + sequence，冻结本机接收面。
+3. runtime 读取已同步的网络需求提示；reliable 总是请求网关给出本次远端结果，
+   best-effort 仅在已知无远端需求时可以省略网络腿，未知状态仍尝试提交网络。
+4. 可靠等待者在任何可见提交前登记。共用 WireBlob 时先完成编码；仅本机时可直接写 loan。
+5. 在调用线程向本机业务 MPMC 做一次有界提交，不等待网络额度、网关调度或远端 ACK。
+6. 网络腿在已授予信用内提交一条 DZTX v2 记录。best-effort 信用不足即记该腿未提交；
+   reliable 可在本机提交之后等待异步补充信用，但不超过原 deadline。
+7. 网关读取网络记录，冻结远端目标并发送；从不为该记录重新提交源主机业务 SHM。
+8. best-effort 返回本次接管汇总；reliable 在应用内合并本机提交结果与远端 SEND_RESULT。
+
+冻结本机接收面和冻结远端目标发生在两个明确时点，不声称它们构成跨主机原子快照。
+本机提交明确失败时可继续尝试网络腿；本机结果不确定时也不得自动重投本机。
+所有分支都必须服从第 5 节的一次调用所有权规则。
 
 ### 4.4 远端入站
 
@@ -259,17 +277,19 @@ flowchart LR
 
 ### 4.5 本地控制会话
 
-应用进程第一次使用 shared_v1 时创建 SharedClientRuntime，之后所有对象复用它。
+同一进程、同一控制路径复用一个 SharedClientRuntime，管理网络会话、出站通道、
+信用账本与可靠等待表。各 SharedPublisher 的本机 MPMC 发布端不由 runtime 统一转发。
 
-- 每进程至多一个该运行实例的会话；可使用按控制路径索引的运行时表。
-- 库初始化与 fork 不能共享继承来的锁和 FD。检测到 PID 变化后，在取旧锁前拒绝旧句柄；
-  支持 fork 后 exec，首版不承诺多线程进程 fork 后直接继续使用继承对象。
-- 一个控制读循环负责接收应答并按 request_id 唤醒等待者。
-- 多个调用线程禁止竞争 recv 同一控制连接。
-- 发送大载荷、等待 ACK 时不持有运行时表锁或注册表锁。
-- 连接断开后所有可靠等待立即结束为 GatewayLost，不永久等待。
-- 已失效 runtime 不恢复旧句柄。相同进程后来新建后端对象时，工厂可为该控制路径创建新会话；
-  旧对象继续明确失效，不把它们的 publisher_id、等待者或旧出站记录移到新会话。
+- 一个控制读循环负责接收应答、ROUTE_STATE、CREDIT_GRANT、TX_PROGRESS 和 SEND_RESULT。
+- 多个发布线程禁止竞争 recv 同一控制连接；不持注册表锁等待额度或 ACK。
+- PID 改变在获取继承 mutex 前判定；旧句柄拒绝使用，支持 fork 后 exec。
+- 网关断连使网络等待者返回 GatewayLost，并立即使缓存网络需求/信用失效。
+  已存活本机发布端和订阅端继续按 MPMC 运行；新一次 best-effort 可仅本机接管并报告网络离线。
+- publish_blocking 要求网络查询完成；网络离线时即使本机已投递仍返回失败并标明可能部分交付。
+- 旧网络会话不自动迁移到新网关；新建对象可使用新 runtime，旧网络句柄保持失效。
+  本机端仍存活不代表旧 publisher_id、旧出站段或信用可在新会话重放。
+- 对象整体析构、reset_message 或 InitChannel 才按第 12 节停止自己的本机端。
+  网络会话关闭与应用对象关闭须是两种独立状态。
 
 ## 5. 不变量与协议语义
 
@@ -285,7 +305,7 @@ flowchart LR
 | I06 | 只有确定业务 SHM 接纳后才发 ACK |
 | I07 | ACK/NACK 通过控制 socket，不能让发送线程读取共享接收 FD |
 | I08 | 接收回调不执行用户业务回调，不等待缺片或本机消费者 |
-| I09 | publish_prebuilt_segment 返回 false 前没有可见出站提交 |
+| I09 | publish_prebuilt_segment 返回 false 前，本机与网络两腿都明确没有可见提交 |
 | I10 | 旧模式的入口、协议和默认配置保持原行为 |
 | I11 | 注销先撤销路由、等待在途工作，再释放 FD / route / pool |
 | I12 | 所有重组表、发送表、去重表和队列都有字节数与条目数上限 |
@@ -295,26 +315,35 @@ flowchart LR
 | I16 | 不通过清空共享 socket 接收队列清理某个话题或消息 |
 | I17 | 来源 ID 不使用 IP:port、PID、msg_id 或单独 sequence 代替 |
 | I18 | 达到资源上限显式失败/丢弃并计数，不无界分配或反复创建线程 |
+| I19 | 应用本机直达与网关网络出站各司其职；出站记录不再次注入源主机 SHM |
+| I20 | 已有发送信用时，单条消息无前置 BEGIN 控制往返 |
+| I21 | 每个入站 RouteKey 由一个 shard 负责重组和提交，不经过全局统一提交线程 |
 
 ### 5.1 返回语义
 
-新模式是显式选择的排队式传输，必须把以下契约写进用户说明。
+新模式将“本机接管”“网络出站接管”和“远端网关确认”分开报告：
 
 | 接口 | shared_v1 中 true 的含义 | false / 失败边界 |
 |---|---|---|
-| publish / publish_best_effort | 完整消息已交给本机网关出站通道接管 | 提交前失败；后续 best-effort 丢弃通过指标可见 |
-| publish_blocking(msg, tm) | 本机目标提交成功，且本次冻结的全部远端网关均确认；至少有一个目标 | 无目标、超时、配额、网关退出等；可能已有部分目标收到 |
-| publish_prebuilt_segment | 合法完整 DZFlat 段已被出站通道接管，不允许再回退重发 | 仅在尚未提交时返回 false |
-| has_subscribed | 网关已确认本机业务 SHM 可达订阅者，或未过期远端匹配订阅者 | 发现尚未完成、会话断开、没有匹配订阅 |
+| publish / publish_best_effort | 至少一腿确定接管，或存在不可安全重试的不确定提交 | 两腿均明确未提交；可能是无目标、资源不足或编码失败 |
+| publish_prebuilt_segment | 至少一腿已经或可能接管该合法完整段，调用者不得回退重发 | 仅两腿都明确未提交时返回 false |
+| publish_blocking(msg, tm) | 本机冻结目标若存在则提交成功；网络查询完成且冻结远端全部确认；至少有一个实际目标 | 任一必需腿失败、未知或超时；可能已有部分目标收到 |
+| has_subscribed | 本机有效 SHM 接收者存在，或健康网络会话有已同步的远端匹配需求 | 两者均无或网络状态未知；不作为后续投递保证 |
 
-best-effort 的 true 不表示网关已发出 UDP，也不表示任何应用已经消费。
-这是新模式的显式语义，不得把该返回边界反向修改到 legacy。
-出站接管不是持久化。T05 须证明正常信用窗口内不会覆盖未读记录；若底层异常导致覆盖，
-按第 9.5 节计数并使会话失效，可靠调用失败，不能补发为新 sequence 或伪造成功。
+best-effort 的 true 表示调用者不得把相同调用当作未发生而自动重试，不表示两腿都成功，
+也不表示已发 UDP 或所有应用已消费。保守的 true/Indeterminate 必须有具体诊断，不能计入
+成功吞吐。预构造段在本机成功、网络失败时返回 true；其网络失败通过结果记录和指标暴露。
 
-可靠发送的 true 仅确认目标网关已将消息提交到其业务 SHM。
-它不保证各个应用回调完成，不保证慢订阅者不被 SHM 的既有策略丢弃。
-不承诺跨网关崩溃的 exactly-once；不持久化历史；不会自动重放失败调用。
+应用内结果记录按 publisher_id + sequence 保存：local_required、local_result、
+network_result、remote_target_count、remote_acked_count、possible_partial_delivery。
+不新增公共虚函数；采用有界诊断接口/记录，不把所有历史结果永久保留。
+
+可靠网络 SEND_RESULT 只描述远端。远端返回 NoSubscribers 但本机冻结目标已成功时，
+整体可以成功；本机无目标且远端也无目标则整体 NoSubscribers。GatewayLost 不等同于
+“远端无目标”，即使本机成功，整体仍失败。源应用被杀后不持久化或重放该调用。
+
+可靠 ACK 仅确认目标网关将完整消息提交业务 SHM，不保证每个应用回调完成，
+不保证慢订阅者免于既有 SHM 覆盖策略，不承诺跨网关崩溃的 exactly-once。
 
 ### 5.2 顺序语义
 
@@ -329,18 +358,30 @@ best-effort 的 true 不表示网关已发出 UDP，也不表示任何应用已�
 需要严格网络 FIFO 的部署应继续使用已满足其要求的模式；
 增加重排窗口、缺失序号跳过协议属于后续独立任务。
 
-### 5.3 不能把部分提交伪装成可安全重试
+### 5.3 两腿提交与回退边界
 
-内部结果至少分为：
+每腿结果至少区分：NotRequired、NotSubmitted、Accepted/Committed、Indeterminate。
+本机接收面不存在时 local=NotRequired；已同步无远端需求的 best-effort 可使 network=NotRequired。
+NotRequired 不是某个已选目标提交失败，不允许用它掩盖断连或配额失败。
 
-- NotSubmitted：明确没有任何可见提交，可安全由调用者选择回退。
-- Accepted：所有权已转交，不再由调用者重投。
-- Indeterminate：底层可能提交，但当前无法确认。
-- Completed / Failed / TimedOut：可靠事务完成结果，不表示历史投递可以撤销。
+| 本机结果 | 网络出站结果 | best-effort / prebuilt | reliable 的处理 |
+|---|---|---|---|
+| 两腿均明确未提交或不需要 | 同左 | false，可由调用者决定回退 | 失败或无目标 |
+| Committed | NotRequired（best-effort 已知无远端） | true，仅本机接管 | 不适用；可靠仍查询远端结果 |
+| Committed | NotSubmitted / 离线 | true，记录本机成功、网络失败 | false，可能部分交付 |
+| NotSubmitted（本机目标已选） | Accepted | true，记录本机失败 | false，网络可能仍交付 |
+| NotRequired | Accepted | true，记录仅网络接管 | 等待远端结果 |
+| Committed | Accepted | true | 等远端结果后合并 |
+| 任一腿 Indeterminate | 任意 | true，暴露未知结果，不重投 | false，可能部分交付 |
 
-Indeterminate 必须中止该事务并计数。预构造段接口在所有权可能转交后不得返回 false；
-返回已接管并暴露异步错误，或在进入公开路径前证明底层从不出现该状态。
-第 T05 任务必须以真实跨进程故障用例证明该边界，不能靠布尔变量命名假设原子性。
+两腿的预留只减少部分失败概率，不提供原子提交。顺序固定先本机后网络；本机提交后
+网络失败不能调用普通 publish 重做本机，也不能由网关补注入同一源消息。
+本机一次 try_commit 返回 NotSubmitted 后，首版不在本次调用中自动重试本机；远端入站
+NotSubmitted 的有限重试仍由接收 shard 管理。业务重试须使用自己的业务 ID 处理可能重复。
+
+两腿资源分别用 RAII 归还。网络出站的异常覆盖或 Indeterminate 使该网络会话失效，
+不能猜测信用恢复值；本机是否已投递仍保留在调用结果中。T05/T06/T11 必须用真实故障
+证明这些边界，不能仅凭底层 bool 推断“没有发生任何可见提交”。
 
 ## 6. 网络与本机身份
 
@@ -503,7 +544,8 @@ NACK：
 - payload 是递增且不重复的 uint32 缺失片号列表，最多 256 个。
 - payload_size 必须是 4 的倍数且大于 0。
 - 缺片更多时逐次分组请求，不分配超大控制包。
-- 首次缺片等待 20 ms 后请求；有进展可继续等待，重发间隔至少 20 ms。
+- 首次缺片等待和请求间隔使用第 11.4 节参数，默认 2 ms；首次计时从首片建立 assembly 起。
+  只有新片增加时才更新进展，不因重复片无限推迟；有进展可延后一次请求但不延长绝对期限。
 - 丢了所有分片时接收侧无法 NACK，发送侧必须有整体探测重发定时器。
 
 REJECT：
@@ -679,18 +721,22 @@ SUB_READY 只控制网络需求公告，不提供“只收构造时刻之后发�
 本机由 SharedPublisher 提交的消息，则还应检查业务 SHM 的有效 receiver 状态，
 允许已经接入相同 MPMC 话题的显式 IPC_SHM 订阅者接收；这些接收者不被自动公告为远端需求。
 工具必须通过 REGISTER_SUB + SUB_READY 表达需求，不能只偷偷打开 SHM 段。
-网络订阅代次与 bridge 的生命周期分别计数：只有本机 PUB、待完成的 SUB 登记、Ready SUB
-和在途 lease 都已归零，才释放内部 SHM 发布端。不能在最后一个 SharedSubscriber 离开时
-关闭仍供 SharedPublisher 向显式 IPC_SHM 订阅者投递的 bridge。
+网关 bridge 只为远端入站服务，保活条件是待完成 SUB、Ready SUB 或在途 lease。
+本机仅有 SharedPublisher 时，网关只登记 PUB 来源，不创建供本机出站回注的 bridge。
+应用本机发布端独立持有 MPMC 租约；最后一个网络订阅者离开，不会关闭应用发布端。
 
-### 8.4 发送目标选择
+### 8.4 发送目标与需求提示
 
-- 每条出站记录被网关接纳处理时冻结目标：本机有效业务 SHM 接收面 + 匹配的远端快照。
-- 不包括自己，不按远端应用订阅者数重复发。
-- reliable 不在发送中途增加新目标，不因某目标退出就把“全部成功”改为剩余目标成功。
-- 远端路由 epoch 变化使旧事务明确失败，新 publish 才使用新 epoch。
-- 首版无订阅时 best-effort 可接管后丢弃，计 no_route_drop；blocking 返回 NoSubscribers。
-- has_subscribed 反映已同步控制状态，是瞬时快照，不能充当后续投递保证。
+- 本机目标由应用在调用内冻结为有效 MPMC 接收面；提交失败不能事后改为“本机无目标”。
+- 远端目标由网关接纳网络出站记录时冻结，只选已安装目录的 SUB 位，不包含自己。
+- reliable 不根据应用缓存提前跳过网络查询；即使没有远端，网关也返回明确 NoSubscribers。
+- 已有目标在发送中途退出或换 epoch，原事务失败；不能删掉失败目标后声称全部成功。
+- best-effort 可根据 ROUTE_STATE 中健康、版本匹配的 remote_ready_count=0 跳过网络腿。
+  缓存未知则尝试网络；缓存滞后造成的新订阅启动丢包按既定 best-effort 边界计数。
+- ROUTE_STATE 在 PUB_REGISTERED 后及对应路由需求变化时推送，携带 session/epoch、
+  publisher_id 和单调 state_version。只接受本会话更新；网络失联后所有缓存都变 Unknown。
+- has_subscribed 合并应用自己的 SHM 接收面和网络需求提示，不能同步调用 QUERY_STATE
+  作为每次 publish 的前置步骤。跨机零启动丢包测试仍使用第 16.3 节双向发现屏障。
 
 ### 8.5 发布来源核验与 peer 代次保留
 
@@ -730,13 +776,13 @@ SUB_READY 只控制网络需求公告，不提供“只收构造时刻之后发�
 - 每个控制包上限 8192B；结构化解码，禁止传递原生指针或 STL 对象。
 - 运行时路径、SHM 名称和 session_id 由握手确认，应用不接受外部任意段名。
 
-### 9.2 控制消息
+### 9.2 DZLC v2 控制消息
 
-本机控制头也显式编码，固定 40B：
+本机控制头显式编码，固定 40B，整数为网络字节序：
 
 ~~~text
 magic[4] = DZLC
-u16 version = 1
+u16 version = 2
 u16 kind
 u32 total_size
 u32 flags = 0
@@ -745,78 +791,86 @@ u64 session_id
 u64 gateway_epoch
 ~~~
 
-必需消息：
+版本 1 的旧草案不兼容；收到旧版本明确失败，不能按新 body 长度猜测解析。
+HELLO 的 session_id/gateway_epoch 为 0，之后所有包必须匹配会话。
+普通请求使用非零且递增的 request_id；主动通知为 0，SEND_RESULT 复用出站记录的请求 ID。
 
-| 消息 | 请求内容 | 应答 / 效果 |
-|---|---|---|
-| HELLO / WELCOME | locality_id、支持版本、进程 start token、能力 | session_id、epoch、容量、出站段名 |
-| ATTACH_TX / TX_READY | 出站 SHM 已打开；通过 SCM_RIGHTS 传 eventfd | 网关 receiver 已连接，允许发布 |
-| REGISTER_PUB | 完整 RouteDescriptor、publisher_id | 成功或具体冲突原因 |
-| REGISTER_SUB | 完整 RouteDescriptor、订阅句柄 ID | 注册成功及当前 SHM generation |
-| SUB_READY | 订阅句柄 ID、确认 generation | 开始网络公告 |
-| UNREGISTER | 句柄 ID、角色 | 撤销并等待相应在途使用结束 |
-| QUERY_STATE | 可选 RouteKey | Ready 数、peer 数、配额和健康状态 |
-| SEND_BEGIN / BEGIN_READY | publisher_id、sequence、payload_size、encoding、schema、绝对单调时钟 deadline | 为可靠记录登记等待与预留配额 |
-| SEND_RESULT | publisher_id、sequence、request_id、结果码 | 完成可靠等待 |
-| TX_PROGRESS | 累计已释放记录数与 loan 容量字节 | 向应用归还出站信用，不表示业务投递成功 |
-| PING / PONG | 时间戳、会话状态 | 控制连接健康检查 |
-| ERROR | 明确错误码与有界诊断字符串 | 不能只回 false 或空报文 |
+| 编号 | 消息 | body 字段顺序 / 效果 |
+|---:|---|---|
+| 1 | HELLO | locality[16]、u64 process_start_token、u64 clock_domain_id、u32 capabilities |
+| 2 | WELCOME | locality[16]、u32 max_message_bytes、u32 outbox_limit_bytes、u32 outbox_record_limit、u64 granted_bytes、u64 granted_records、u16 tx_name_len、tx_name |
+| 3 | ATTACH_TX | 空 body，SCM_RIGHTS 恰好一个非阻塞 eventfd |
+| 4 | TX_READY | 空 body，网关出站 receiver 已连接 |
+| 5 | REGISTER_PUB | publisher_id[16]、RouteDescriptor；登记来源，应用拥有本机发布端 |
+| 6 | PUB_REGISTERED | publisher_id[16]；随后推送初始 ROUTE_STATE |
+| 7 | REGISTER_SUB | handle_id[16]、RouteDescriptor |
+| 8 | SUB_REGISTERED | handle_id[16]、u32 shm_generation、u64 receiver_route_epoch（未 Ready 可为 0） |
+| 9 | SUB_READY | handle_id[16]、u32 shm_generation |
+| 10 | SUB_READY_ACK | handle_id[16]、u64 receiver_route_epoch（非零） |
+| 11 | UNREGISTER | handle_id[16]、u8 role（1=PUB，2=SUB） |
+| 12 | UNREGISTERED | handle_id[16] |
+| 13 | QUERY_STATE | u8 kind（0=汇总，1=单话题，2=话题与 peer）；kind=1/2 后跟 scope[32]、u32 msg_id；kind=2 再跟 peer_id[16] |
+| 14 | STATE | u32 json_bytes、UTF-8 JSON；含头总长不超过 8192B |
+| 15、16 | 保留 | 旧草案 SEND_BEGIN/BEGIN_READY，不允许发送或接纳 |
+| 17 | SEND_RESULT | publisher_id[16]、u64 sequence、u32 result_code、u32 flags、u32 target_count、u32 acked_count |
+| 18、19 | PING / PONG | u64 nonce；PONG 原样返回 |
+| 20 | ERROR | u32 error_code、u16 text_bytes、UTF-8 有界说明 |
+| 21 | TX_PROGRESS | u64 released_records、u64 released_capacity_bytes；累计归还出站 SHM 信用 |
+| 22 | ROUTE_STATE | publisher_id[16]、u64 state_version、u32 remote_ready_count、u32 flags（bit0=状态已同步） |
+| 23 | CREDIT_REQUEST | u32 min_bytes、u32 min_records；请求补充发送信用，不绑定某条业务消息 |
+| 24 | CREDIT_GRANT | u64 granted_bytes、u64 granted_records；累计授予量，回应请求时回填其 request_id，主动补充时为 0 |
 
-RouteDescriptor 编码重用第 8.2 节条目，注册时 receiver_route_epoch 和 role_flags 均填 0；
-角色由 REGISTER_PUB / REGISTER_SUB 的消息编号决定，目录角色由网关汇总生成。
-所有变长字符串前置 u16/u32 长度；实施 T02 时为每个消息固定 golden bytes。
-消息缺字段、尾部多余字节、无效角色、重复 request_id 必须有确定处理规则。
+RouteDescriptor 重用第 8.2 节条目，登记时 receiver_route_epoch/role_flags 均为 0；
+HELLO.capabilities 首版固定 bit0=支持 MPMC V2，必须为 1，未知位拒绝。
+角色由消息编号决定。类型不匹配、长度不足、多余尾部、未知标志均拒绝。
+重复 SUB_READY/UNREGISTER 按句柄与代次幂等；重复 request_id 内容冲突返回 RequestConflict。
+SEND_RESULT.request_id 必须匹配 DZTX 的 reliable 请求；它不是控制连接上曾发出的 BEGIN ID。
 
-固定消息编号：HELLO=1、WELCOME=2、ATTACH_TX=3、TX_READY=4、REGISTER_PUB=5、
-PUB_REGISTERED=6、REGISTER_SUB=7、SUB_REGISTERED=8、SUB_READY=9、SUB_READY_ACK=10、
-UNREGISTER=11、UNREGISTERED=12、QUERY_STATE=13、STATE=14、SEND_BEGIN=15、BEGIN_READY=16、
-SEND_RESULT=17、PING=18、PONG=19、ERROR=20、TX_PROGRESS=21。
-编号不可在实现中按 enum 声明顺序隐式变化。
-
-成功应答使用对应编号；失败统一 ERROR，并携带原 request_id。
-SUB_READY、UNREGISTER 等请求的重复必须按句柄和代次幂等处理；重复不会增加引用计数。
-已有对象 InitChannel 重复调用应先结束旧注册再建立新注册，不能留下两份登记。
-
-最低 body 契约：
-
-| 消息 | body 字段顺序 |
-|---|---|
-| HELLO | locality[16]、u64 process_start_token、u64 clock_domain_id、u32 capabilities |
-| WELCOME | locality[16]、u32 max_message_bytes、u32 outbox_limit_bytes、u32 outbox_record_limit、u16 tx_name_len、tx_name |
-| ATTACH_TX | 空 body，附带恰好一个 eventfd；重复 ATTACH 必须关闭多收到的 FD |
-| REGISTER_PUB / REGISTER_SUB | handle_id[16]、RouteDescriptor；PUB 的 handle_id 等于 publisher_id |
-| PUB_REGISTERED / SUB_REGISTERED | handle_id[16]、u32 shm_generation、u64 receiver_route_epoch |
-| SUB_READY | handle_id[16]、u32 shm_generation |
-| SUB_READY_ACK / UNREGISTERED | handle_id[16] |
-| UNREGISTER | handle_id[16]、u8 role（1=PUB，2=SUB） |
-| SEND_BEGIN | publisher_id[16]、u64 sequence、u32 payload_size、u32 schema_hash、u8 encoding、u8 reserved=0、u16 reserved=0、u64 deadline_monotonic_ns |
-| BEGIN_READY | publisher_id[16]、u64 sequence |
-| SEND_RESULT | publisher_id[16]、u64 sequence、u32 result_code、u32 flags、u32 target_count、u32 acked_count |
-| TX_PROGRESS | u64 released_records、u64 released_capacity_bytes；会话内累计值，request_id=0 |
-| QUERY_STATE | u8 kind（0=汇总，1=单话题，2=话题与 peer）；kind=1/2 后跟 scope[32]、u32 msg_id；kind=2 再跟 peer_id[16] |
-| STATE | u32 json_bytes、UTF-8 JSON；含头总长度不得超过 8192B |
-| PING / PONG | u64 nonce，PONG 原样返回 |
-| ERROR | u32 error_code、u16 text_bytes、UTF-8 有界诊断字符串 |
-
-WELCOME / TX_READY 中实际 session_id 和 gateway_epoch 使用控制公共头。
-TX_READY body 为空；HELLO 发出时头中的 session_id / gateway_epoch 为 0，之后必须匹配会话。
-clock_domain_id 来源于可验证的本机时钟 namespace 身份；没有 time namespace 功能的内核使用
-明确的共同标记。网关结合 SO_PEERCRED 验证，不能只信任客户端声明。
-
-SEND_RESULT.flags 的 bit0 表示 local_commit_success，bit1 表示 possible_partial_delivery；
-其余位为 0。target_count / acked_count 仅统计远端网关，本机结果单列。
+SEND_RESULT 只描述远端投递：flags.bit0 保留为 0，bit1 表示 possible_remote_delivery；
+任意 DATA 已交给 sendto 后失败都要保守置 bit1，零 ACK 不证明零交付。
 result_code：0=Completed、1=NoSubscribers、2=Busy、3=TimedOut、4=PeerGone、5=PeerRestarted、
 6=Rejected、7=GatewayLost、8=Cancelled、9=Indeterminate、10=UnsupportedTimeout。
-ERROR 的错误码由 T02 编码头定义并与第 14 节错误字典同步，不混用 errno 数值。
+网关不伪造本机提交结果；应用按第 5.1 节合并自己的 local_result。
+连接断开时 GatewayLost 由应用 runtime 本地生成，不要求失联网关发回结果。
 
-possible_partial_delivery 必须保守计算：已发送任何 DATA、已有本机提交成功，或本机 ticket
-已进入 Committing/Indeterminate 后失败，即使 acked_count=0，也不能向调用者宣称没有投递。
-共享 pub/sub 公共 bool 接口仍返回 false；具体结果通过本机会话诊断保留 publisher/sequence
-和 request_id，不能因缺少扩展返回类型便把不确定性隐藏掉。失败不触发库自动重发。
+clock_domain_id 使用可验证的本机时钟 namespace 身份，并结合 SO_PEERCRED 验证；
+不一致则拒绝会话。Unix recvmsg 检查 MSG_TRUNC/MSG_CTRUNC，异常附带 FD 全部关闭。
+只有 ATTACH_TX 接受 SCM_RIGHTS；重复 ATTACH 关闭额外 FD。控制、eventfd 和锁 FD 均设 CLOEXEC。
 
-Unix recvmsg 同时检查 MSG_TRUNC 和 MSG_CTRUNC；异常消息附带的 FD 必须全部关闭。
-仅 ATTACH_TX 接受恰好一个 SCM_RIGHTS FD，其余消息携带 FD 一律拒绝。
-控制 FD、传入 eventfd 和锁 FD 均设置 CLOEXEC；eventfd 为非阻塞，不能阻塞发布线程。
+### 9.2.1 发送信用：预授予、异步补充、分别结算
+
+需要两个独立账本，不能把“出站 loan 已消费”当成“网络发送缓存已释放”：
+
+| 账本 | 计费 | 可再次使用的时机 |
+|---|---|---|
+| 出站 SHM 信用 | 实际 loan 容量 C(112+payload_size) 与 1 个记录槽 | 网关释放该 loan 后的 TX_PROGRESS |
+| 网络发送信用 | W(payload_size) 字节与 1 个发送状态槽，best-effort/reliable 都计费 | 网关结束发送/丢弃并释放缓存后重新 CREDIT_GRANT |
+
+WELCOME 包含初始发送信用；默认请求初始 1 MiB/16 条，实际授予受全局剩余配额限制，可为 0。
+每会话发送窗口最大 32 MiB/512 条；大于初始信用的消息可由后台 CREDIT_REQUEST 补充。
+每会话至多一个未完成补充请求，控制循环按会话轮转授予，拒绝不能满足的请求并报告 Busy。
+初始信用和补充信用都是真实预留，不允许向 128 个客户端各承诺全部 256 MiB 总预算。
+网络计费函数 W(n)=align_up(n,64)，先验证溢出；网关 WireBlob 的可用容量固定为 W(n)，
+分配器/控制块额外开销计入有界元数据预算。不能复用更大容量的 buffer 却只按小消息扣费。
+后台在信用不足以容纳待发消息或低于本会话窗口的 1/4 时合并补充；无需求时不反复申请。
+Busy 后至少退避 1 ms 再请求，且不越过调用 deadline；这不是每条消息固定执行的握手。
+
+对每个会话，granted 是累计单调值；客户端保存 used 与本地 reserved，
+可用量等于 granted-used-reserved。重复/旧 GRANT 只按增加量应用，不能重复获得信用。
+任一计数即将溢出时结束网络会话；所有计数仅在当前 session/epoch 内有效。
+
+1. 编码前可先预估大小；准确大小确定后同时预留两类信用和等待表项。
+   额度不足不得影响已具备条件的本机提交；reliable 的后续信用等待受原 deadline 限制。
+2. 出站提交前明确失败，撤销本地预留。所有权转交或不确定时计入 used，不能自行退信用。
+3. 网关验证记录费用与会话余额，再把预授予预算转为该发送状态的实际占用；不重复扣费。
+4. TX_PROGRESS 只回收出站容量/槽，发送状态继续占用网络信用直到其终结。
+5. 终结后的信用可按公平策略再授予原会话或其他等待会话；客户端未用的授予仍占预算。
+   首版不强制撤销客户端手中信用；每会话上限限制长期占用，关闭会话后再安全收回。
+6. 网关断连先封住网络提交、使信用失效，待出站读者和发送状态收敛后释放该会话预算。
+
+已有足够信用时，publish 的网络腿没有前置控制往返。信用不足、冷启动和首次大消息
+仍可能等待补充或失败，应单独测量，不能把这类停顿从 p99 报告中删除。
+目标列表/位图在网关冻结目标时另受配额限制；信用不是“全部目标必能接纳”的承诺。
 
 ### 9.3 每进程一条出站 SHM
 
@@ -830,7 +884,7 @@ Unix recvmsg 同时检查 MSG_TRUNC 和 MSG_CTRUNC；异常消息附带的 FD �
 段名：
 
 ~~~text
-dzgw_tx_v1_<locality_hex>_<gateway_epoch_hex>_<session_id_hex>
+dzgw_tx_v2_<locality_hex>_<gateway_epoch_hex>_<session_id_hex>
 ~~~
 
 段名包括所有权代次，不复用旧 session 的段。
@@ -846,84 +900,69 @@ dzgw_tx_v1_<locality_hex>_<gateway_epoch_hex>_<session_id_hex>
 
 退出顺序：
 
-1. 停止接收新 publish；
+1. 停止接收本会话的新网络提交；整体对象析构另行封住其本机入口；
 2. 完成或取消本进程可靠等待；
 3. 注销逻辑句柄；
 4. 网关摘除 eventfd 并等待相应处理结束；
 5. 双方释放出站通道和 eventfd；
 6. 仅按本会话所有权回收独占段，不清理业务 SHM。
 
-### 9.4 出站记录
+### 9.4 DZTX v2 出站记录
 
-固定前缀 96B，显式使用网络字节序；不发送原生 C++ 结构体。
+固定前缀 112B，网络字节序；仅描述网络发送，本机提交结果不写入此头。
 
-~~~text
-0   magic[4] = DZTX
-4   u16 version = 1
-6   u16 header_size = 96
-8   u64 gateway_epoch
-16  u64 session_id
-24  publisher_id[16]
-40  u64 sequence
-48  scope[32]
-80  u32 msg_id
-84  u32 payload_size
-88  u32 schema_hash
-92  u8 encoding
-93  u8 delivery
-94  u16 reserved = 0
-96  完整业务 blob
-~~~
+| 偏移 | 长度 | 字段 | 规则 |
+|---:|---:|---|---|
+| 0 | 4 | magic | DZTX |
+| 4 | 2 | version | 2 |
+| 6 | 2 | header_size | 112 |
+| 8 | 8 | gateway_epoch | 当前网络会话代次 |
+| 16 | 8 | session_id | 当前会话 |
+| 24 | 16 | publisher_id | 已登记发布者 |
+| 40 | 8 | sequence | 非零消息序号 |
+| 48 | 32 | scope | DZS2 规范编码 |
+| 80 | 4 | msg_id | 具体业务 ID |
+| 84 | 4 | payload_size | 不含信封与档位填充 |
+| 88 | 4 | schema_hash | 与业务段匹配 |
+| 92 | 1 | encoding | 1=TLV，2=DZFlat |
+| 93 | 1 | delivery | 0=best-effort，1=reliable |
+| 94 | 2 | reserved | 0 |
+| 96 | 8 | request_id | reliable 非零；best-effort 为 0 |
+| 104 | 8 | deadline_monotonic_ns | reliable 原始调用 deadline；best-effort 为 0 |
+| 112 | payload_size | blob | 完整业务载荷 |
 
-可靠 timeout 和 request_id 不放在固定前缀里：增加本机 SEND_BEGIN 控制请求，
-按 publisher_id + sequence 登记 request_id、目标超时时刻，然后回 BEGIN_READY。
-仅 BEGIN_READY 后才提交 reliable 出站记录。超时从公开调用开始计算，包含编码和排队。
-deadline 使用 Linux CLOCK_MONOTONIC 的 uint64 纳秒时间，同机跨进程可比较；
-不发送 std::chrono::time_point 的内存表示，不把其传给远端。网关重新检查 deadline 未过期。
-若平台启用了不同 time namespace，应用与网关必须验证时钟域一致；不能一致时拒绝
-shared_v1 会话并报告 UnsupportedClockDomain，不直接比较两个时钟域的绝对时间。
+应用在出站提交前登记等待者，再发布记录；极快的 SEND_RESULT 也能匹配，不需要 BEGIN。
+网络等待表与控制请求表共享非零 request_id 分配器，不能发生两种请求的 ID 冲突。
+同一个 publisher_id/sequence 只允许提交一次；重复记录是协议错误，不重复扣费或重新投递。
 
-- best-effort 不需要 SEND_BEGIN。
-- reliable 先登记等待再发布，避免极快 SEND_RESULT 早于等待者注册。
-- BEGIN_READY 后应用未提交而退出/超时，网关回收事务占位。
-- 每 publisher/session 同时进行的 BEGIN 数受 reliable in-flight 上限约束。
-- SEND_BEGIN 只传元数据，不传业务载荷。
-- payload_size 等字段在 BEGIN_READY 前就必须明确，网关据此预留发送缓存；
-  后来的出站记录必须与已登记值逐字段一致。
-- 相同 request_id 和完整相同内容的 SEND_BEGIN 重试是幂等的，不重复扣配额；
-  同 request_id 内容不同，或 publisher_id + sequence 被另一个请求占用，返回 RequestConflict。
-- 明确编码失败可以在 SEND_BEGIN 前结束；不能占着 BEGIN 配额无限等待编码完成。
+deadline 使用 Linux CLOCK_MONOTONIC 的 uint64 纳秒时间；只在已验证相同时钟域的本机
+进程间比较，不传给远端。网关接纳记录时重新检查期限；到期返回 TimedOut 并结算信用。
+tm 从公开调用入口算起，包含编码、本机提交、信用等待、排队及远端确认。
+reliable 的 request_id/deadline 都必须非零；剩余期限大于 5000 ms 的记录拒绝。
+best-effort 两字段必须为零；不能借它们绕过排队超时规则。
 
-网关收到 ipc::buff_t 时，其 size 可能是尺寸档位容量，不能要求它恰好等于 96+payload_size。
-先用 64 位运算验证 `96 + payload_size <= buffer_capacity`，再只取这个范围；容量尾部不是
-第二条记录，也不能进入网络 blob 或 CRC。若 buffer 小于信封声明长度则拒绝，不能补零。
+ipc::buff_t.size 可能是尺寸档位容量。先以 64 位运算检查
+112+payload_size <= buffer_capacity，再只提取实际载荷；尾部填充不能进入 UDP 或 CRC。
+记录的 session、epoch、PUB 身份、scope、msg_id、schema、编码和信用必须逐项验证。
+不接受旧版 96B 头，也不尝试推测新旧混合布局。
 
-### 9.5 提交与唤醒
+### 9.5 提交、唤醒与信用回收
 
-- loan 一块可容纳 96B 头和 blob 的出站 chunk，填完后 publish_loan。
-- 网关接管后拥有 buffer 的生命周期；应用不得修改或立即回收已发布 chunk。
-- 底层 loan / publish_loan 的真实失败可见性必须先在 T05 验证。
-- 不能用可部分发送多段的大记录 try_send 直接假装是一次原子提交。
-- 如果现有 loan 无法满足记录大小和失败边界，T05 停在该阻塞点，补原子描述符提交适配；
-  不用“暂时经 Unix socket 传载荷”冒充实现完成。
-- 成功提交后 eventfd_write(1)，失败不产生业务唤醒。
-- 网关读 eventfd 后 drain SHM 到预算；预算未耗尽且队列空才等待。
-- 预算耗尽但还有记录时加入本地 deferred 队列，不能依赖将来的下一次 eventfd 通知。
-- eventfd 计数不是消息数；合并通知、重复通知和 EAGAIN 都不改变队列事实。
-- 网关还要验证记录中的 session、epoch、publisher_id、scope、msg_id 与控制登记一致。
-  一个会话不能通过伪造 DZTX 头向未注册的话题发送。
-- 出站按 loan 实际容量和记录数同时预留信用，提交前失败归还；不能在 publish 返回时就
-  当作队列已被消费。WELCOME 的 outbox_record_limit 不得大于 T05 验证的底层可用槽位。
-  所有本会话发布线程共用账本，计入尚未完成提交的预留，避免并发穿透额度。
-- 网关复制或丢弃记录并释放 loan 后累计 TX_PROGRESS，可合并到每轮 drain 结束发送，
-  最迟 20 ms 发出且最后一批也必须发送。应用只应用累计值的增量，重复/旧通知不重复归还。
-  值不能超过本会话已预留提交的总量；计数溢出前关闭会话，不回绕。
-- T05 必须证明信用窗口内不会因 force_push 覆盖未读记录；若仍检测到覆盖/进度缺口，
-  会话明确失效并结束可靠等待，不能猜测被覆盖记录的容量来恢复信用。进程或网关退出后
-  通过独占会话清理结算剩余 loan，旧信用不迁移到新会话。
-- 首版网关将出站记录复制到受配额管理的 WireBlob 后立即释放出站 loan，避免重传长时间
-  阻塞应用出站池。复制期间两份内存都是真实占用，必须纳入相应配额。
-  将来若改成直接持有出站 loan，需要另测背压与崩溃生命周期，不能直接删除这次复制。
+- loan 容纳 112B 信封和 blob，填完后 publish_loan；真实失败可见性先由 T05 验证。
+- 应用所有发布线程共用本会话的短提交锁与账本；编码、信用等待、ACK 等待在锁外。
+- 不使用可能部分提交多段的大记录 try_send 伪装原子接管；原子性不满足时停在 T05 修适配。
+- 成功提交后 eventfd_write；通知是提示，不是消息计数。合并、重复和 EAGAIN 不改变队列事实。
+- 一个出站 drain 循环读取各会话并按预算轮转，转发给 RouteKey 所属源 shard；
+  它不提交业务 SHM，不在一个应用或大话题上等完整网络发送。
+- 预算耗尽且仍有记录时加入 deferred 队列，不依赖下一次应用通知。
+- WireBlob 首版仍复制到网关私有缓存后释放出站 loan；复制期间两份内存分别计费。
+  这保留明确的跨进程所有权，避免重传长期钉住应用出站池。
+- loan 释放后的 TX_PROGRESS 每轮 drain 结束合并发送，不人为积攒 20 ms；最后一批也须发送。
+  网络缓存释放后的 CREDIT_GRANT 同样及时排入控制队列，两者不能互相代替。
+- 信用窗口不得超过底层实际可用槽位。T05 验证正常窗口内无 force_push 覆盖未读记录；
+  检测到覆盖/不确定进度则关闭故障网络会话，不能猜测容量或重放记录。
+- best-effort 因无远端目标被丢弃，也要完成两类信用结算；控制连接堵塞受有界队列限制，
+  不能为等待信用的消息新增通道或线程。
 
 ## 10. 原始载荷与业务 SHM 注入
 
@@ -942,40 +981,47 @@ TLV：
 - 新 UDP 按 1024B 切片仅作外层传输；
 - 网络重组后得到与编码时完全相同的 blob；
 - 不调用旧 chunk_send_ex 去“修正页号”，不在网关重复反序列化/序列化。
+- 现有 serialize 跨页时先递增 now_page；该历史字段按原字节保留，不验证为新外层分片下标。
 - 在本机订阅者使用现有 AcceptWire / deserialize_ok 做最终类型与结构校验。
 
 编码函数建议统一成 WireEncoder::encode / encode_prebuilt，返回拥有生命周期的 WireBlob。
 最大尺寸、空指针、无效 schema 的失败发生在出站提交前。
 
-### 10.2 新增内部注入接口
+### 10.2 应用本机写入与网关原始注入接口
 
-建议新建 ShmWireBridge，并通过明确的内部访问接口复用 shm_pub_ipc：
+新增非虚内部适配 ShmWireWriter/ShmWireBridge，复用 shm_pub_ipc 的 MPMC 生命周期：
 
 ~~~text
 open(RouteDescriptor) -> Ready / MpmcRequired / TypeConflict / Failed
 try_commit(WireBlob)  -> NotSubmitted / Committed / Indeterminate
+try_commit_local(message_or_prebuilt) -> 同样三态，仅本机时可直接编码到 loan
 close_after_quiescent()
 ~~~
 
-落实要求：
+应用 writer 按发布对象持有；网关 bridge 按入站 RouteKey 持有一个，不能共用跨进程 C++ 对象。
+应用与网关都是普通 MPMC 发布者，均复用注册、心跳、generation、借样池和租约。
 
-1. 通过 GenericMessage 模板和注册的 msg_id 创建内部 shm_pub_ipc，标记 internal。
-2. 生命周期、MPMC 发布者注册、心跳、借样池、generation 都使用现有实现。
-3. DZFlat 原样复制到业务 SHM loan，提交后由订阅者借样。
-4. TLV 原样写入同一业务 SHM 通道，不经过 GenericMessage 解析后再序列化。
-5. 注入访问使用新增非虚内部方法或 friend 适配器，不修改公共虚表。
-6. 不将业务 payload 包在 DZMX / DZTX 头里写入原业务通道。
-7. 不走 nodelet 本地注册表扇出；网关必须让其他进程可见。
-8. 不在失败时自动切换编码或换另一条投递路径。
-9. 严格确认借样提交失败是否仍需 discard，复用前置已验证的所有权契约。
-10. 网关对同一 RouteKey 只维护一个内部 SHM 发布者，不按远端来源创建发布者。
+1. 网关注入使用 GenericMessage 模板及登记的 msg_id，不要求编译用户消息头。
+2. 两种原始 blob 直接提交，不把 DZMX/DZTX 头写入业务 SHM，不重复反序列化/序列化。
+3. 有网络腿时先编码一次不可变 WireBlob；应用先本机提交，再向出站 loan 复制网络副本。
+4. best-effort 已知只有本机需求时允许 DZFlat 直接写业务 loan，省掉中间 WireBlob。
+   不改变本机提交者，不因此引入网关回注或双路切换。TLV 仍保持完整历史页尾。
+5. 原始注入不走进程内对象注册表扇出；本机路径复用 nodelet 时须另证无重复和借样配额，
+   首版可固定走 MPMC，并记录相对已有 nodelet 的性能差异。
+6. 不修改公共虚表；借样失败、discard 和已发布所有权复用前置已验证契约。
+7. 本机与网络的部分提交由上层合并；适配器不在可能提交后回退另一种编码再发。
+8. 网关中一个话题多个远端来源只占一个 publisher slot；应用本机发布者各自占一个 slot。
+9. 本机慢消费者的覆盖策略不因网络 reliable 而变成逐应用确认。
+
+初次 open 可使用有界初始化流程；消息热路径不调用等待 Ready 的 InitChannel。
+单次非阻塞提交仍可能消耗编码/复制时间，必须计入第 17.4 节延迟测量。
 
 ### 10.3 ACK 与注入结果
 
 - Committed：记录去重成功，发送 ACK。
 - NotSubmitted：可在保留的有界 CommitPending 队列中重试，或明确 REJECT。
 - Indeterminate：标记本消息拒绝/未知，发送 REJECT(ShmCommitIndeterminate)，禁止再次提交。
-- 源网关的本机 reliable 注入受公开调用 deadline 限制；远端接收网关仅使用自己的
+- 应用本机提交前检查公开调用 deadline；目标网关的远端入站仅使用自己的
   first_seen + 5000 ms 重组/注入期限，不能读取或推算发送端绝对 deadline。
 - best-effort 注入失败直接计数并丢弃。
 - 在可靠等待期间，不长期占用业务 SHM 的读端 loan；发送重传缓存使用独立 WireBlob。
@@ -983,14 +1029,13 @@ close_after_quiescent()
 
 DZMX v1 不携带远端取消或调用剩余时间。发送者超时会停止后续发送并返回失败，
 已经发出的报文仍可能随后重组并提交；超时返回不是撤销投递，也不是“此后不会再收到”。
-两端时钟无需同步；不能把本机 SEND_BEGIN 的单调时钟纳秒值拿到另一主机比较。
+两端时钟无需同步；不能把本机 DZTX 的单调时钟纳秒值拿到另一主机比较。
 
-### 10.4 提交线程与超时的交接协议
+### 10.4 shard 内提交状态与关闭边界
 
-每次完整消息投递创建一个有所有权的 DeliveryTicket，包含 AssemblyKey、WireBlob、
-route lease、配额令牌和原子提交状态。禁止仅把 payload 指针压入队列。
-
-状态只允许：
+每条完整远端消息保留 DeliveryTicket：AssemblyKey、WireBlob、route lease、配额令牌
+和提交状态。收包、去重、try_commit 与结果处理均由同一 RouteKey 所属 shard 负责。
+没有“每条消息先交给全局提交线程，再等待回传”的必经步骤。
 
 ~~~text
 Ready -> Committing -> Committed
@@ -999,64 +1044,52 @@ Ready -> Committing -> Committed
 Ready -> Cancelled
 ~~~
 
-1. 接收 shard 创建 Ready 并将同一个 ticket 交给提交队列。
-2. 提交循环执行 CAS(Ready, Committing)，失败则不访问业务 SHM。
-3. 该 CAS 成功后只调用一次非阻塞 try_commit，并产生唯一 CommitResult。
-4. shard 超时/注销时可以 CAS(Ready, Cancelled)，成功才保证此次没有发生提交。
-5. 若已经 Committing，不能宣称“尚未提交”，也不能删除原状态再接受相同消息。
-   保留 ticket / 去重位置，待提交结果回来；上游发送者仍可按自己的 deadline 返回超时。
-6. Committed 先保留成功回执，再通知网络控制循环发 ACK；发送者已超时可忽略此晚 ACK。
-7. NotSubmitted 的重试需要由所属 shard 将原 ticket 纳入新的明确尝试，
-   同一时间最多一个 Committing，不能由提交循环自行重新排队并发重试。
-8. Indeterminate 保留拒绝/不确定墓碑，永不自动再次提交相同消息。
-9. 所有终结路径最后释放配额和 blob；还有在途 ticket 时 route / buffer 必须存活。
+1. 完整校验后进入 Ready；所属 shard 转 Committing，再执行一次有界 try_commit。
+2. NotSubmitted 可进入该 shard 的有界延期重试队列；同一消息同时只有一次尝试。
+3. Committed 先记录回执/去重，再向控制线程排 ACK；Indeterminate 保留墓碑，不再提交。
+4. 控制线程只发送 Closing/Cancel 命令并使路由不可再公告，不跨线程释放 ticket 或修改去重。
+   已进入 Committing 的消息不能被声明“未提交”；必须等所属 shard 返回明确结果。
+5. 路由注销 barrier 等待已有提交结果与 lease 收敛，随后才能释放或重建 bridge。
+   新订阅代次不能接收旧代次尚在执行的提交。
+6. 正常 stop 先停止接纳并排关闭命令；各 shard 处理取消、清理和确认后才 join，
+   控制线程不能持路由锁同步等待它们。
 
-必须新增确定性竞态测试：让提交线程停在 CAS 前、CAS 后、SHM 提交后、结果回传前，
-分别触发 timeout / unregister / 重复 DATA，检查实际业务 SHM 投递次数不超过一次。
-测试暂停点只存在于测试适配层，生产路径不能睡眠等待测试信号。
+测试在进入提交前、进入后、SHM 可见后、记录回执前暂停，注入超时、注销和重复 DATA，
+检查最多一次业务提交。生产路径不插入测试等待；应用直达提交另测发布与析构/reset 并发。
+如果将来增加异步复制线程，必须重新提供所有权交接协议，不能沿用单线程假设。
 
 ## 11. 共享 IO、调度与可靠发送
 
 ### 11.1 固定有界线程模型
 
-首版固定采用：
+- 1 个控制循环：Unix 会话、发现、可靠控制报文、信用和路由管理。
+- K 个数据 shard：独占各自 UDP FD，发送、收包、重组、去重及本 shard 的业务 SHM 注入。
+- 1 个出站 drain 循环：从每应用一条网络出站 SHM 读取并向源 shard 分发。
+- 1 个有界初始化工作线程：执行可能等待的 SHM open，Ready 后移交给指定 shard。
+- 应用本机 MPMC 提交在调用线程执行，不经上述网关线程。
 
-- 1 个控制循环：Unix 会话、发现、网络控制、定时器和快照；
-- K 个数据 shard 循环：每循环独占一条数据 UDP socket，发送、收包和重组；
-- 1 个本机提交循环：出站 SHM drain 与业务 SHM CommitPending；
-- 1 个有界初始化工作线程：执行可能等待的 SHM open / InitChannel，完成后移交 Ready 对象；
-- 线程间使用有界队列 + eventfd 唤醒；
-- 不执行用户回调，不创建每 topic / publisher / message 线程。
-
-现有 SHM 发布者生命周期可能使用共享调度器，应报告其线程，
-不能把这些额外线程漏掉来声称只有 K+3 条线程。K+2 仅是 UDP socket 数。
-初始化任务队列默认 64 项，单次注册等待默认 2 秒；满时返回 Busy，超时取消该注册请求。
-初始化工作线程只能使用已经有界的前置 SHM 初始化 API；无法取消的无限等待是 T00/T06 阻塞项。
-初始化超时/注销后，迟到的成功结果必须撤销内部发布者并释放资源，不能重新发布 Ready 或恢复公告。
-
-所有业务 SHM 注入只在本机提交循环执行，避免某话题多次提交竞争。
-网络 shard 只向提交循环投递完整消息和稳定身份。
+网关主体为 K+3 个线程，UDP 为 K+2 个 socket；MPMC 控制调度器等额外线程仍要如实计数。
+初始化队列默认 64 项，注册默认等待 2 秒；超时后迟到的初始化结果必须撤销。
+跨线程使用有界队列及 eventfd，按报文/字节/时间预算让出，不建立每话题线程。
 
 ### 11.1.1 状态归属表
 
 | 状态 | 唯一写入者 | 其他线程如何访问 |
 |---|---|---|
-| session、peer、已公告路由、快照版本 | 控制循环 | 不可变快照或控制命令 |
-| 某数据 FD 的收包与 AssemblyState | 对应数据 shard | 单包输入及完成事件队列 |
-| 某出站消息的 reliable TxState | 按本机 RouteKey 选出的源 shard | 控制循环转发 ACK/NACK 和 BEGIN 请求 |
-| 业务 SHM bridge 的提交操作 | 本机提交循环 | 其他线程提交 CommitRequest |
-| bridge 初始化 | 初始化工作线程，尚未 Ready | 完成后一次性移交，不与提交并发 |
-| 整体状态计数与配额 | RAII 配额令牌及原子计数 | 查询快照，不持全局锁执行 IO |
-| 应用 reliable 等待表 | 应用 runtime，内部短锁 | 唯一控制读循环终结并唤醒 |
+| session、peer、已公告路由、版本 | 控制循环 | 不可变快照或有界命令 |
+| 发送信用授予、会话总预算 | 控制循环 | drain/shard 返回结算事件，不自行重复授予 |
+| 出站 SHM receiver 与消费进度 | 出站 drain 循环 | 控制线程处理累计 TX_PROGRESS |
+| AssemblyState、去重、入站 bridge 提交 | 对应数据 shard | 控制线程发送关闭/代次命令 |
+| reliable TxState、目标位图、重传 | 按本机 RouteKey 选出的源 shard | 控制循环转发 ACK/NACK |
+| bridge 初始化 | 初始化工作线程，尚未 Ready | 一次性移交目标 shard |
+| 应用本机提交状态 | 各发布对象的串行提交入口 | 析构/reset 等待在途调用收敛 |
+| 应用等待表、信用、网络提示 | client runtime 的短锁保护 | 唯一控制读循环更新并唤醒 |
 
-- 使用 shared_ptr<RouteState> 或等价 lease 保活路由；队列中禁止只存可能已释放的裸指针。
-- 每条跨线程命令包含 gateway_epoch、route_epoch 和 command_id，晚到旧命令必须失效。
-- 路由注销先标记 Closing 并从公告移除，再排 barrier，等待对应 shard / 提交队列的引用退出。
-- 回写成功的 CommitResult 必须携带原始 AssemblyKey，不能“回给当前同名 topic”。
-- C++17 发布不可变 shared_ptr 快照可用 std::atomic_load / std::atomic_store 的 shared_ptr 重载；
-  不能直接采用仅较新标准支持的 std::atomic<shared_ptr<T>>。
-- 不同时持 route 表锁与等待 SHM / ACK 的锁，不在控制循环里同步等待数据 shard 回答。
-- 先注册事务，再通过队列投递工作；结果到达早于调用者 wait 时也必须保留并可读取。
+队列消息携带 session/epoch、RouteKey/route epoch 和稳定 lease，不传可能悬空的裸指针。
+初始化结果只能移交一次；同一 bridge 不同时由两个 shard 提交。改变 K 必须重启网关。
+控制循环发布 Closing 后通过 barrier 收敛，不能跨线程直接销毁仍在提交的 bridge。
+C++17 不可变 shared_ptr 快照使用 atomic_load/atomic_store 重载，不要求 C++20。
+网关和 runtime 的全局注册表锁不能覆盖编码、网络 IO、SHM 等待或可靠等待。
 
 ### 11.2 数据分片选择
 
@@ -1106,55 +1139,77 @@ target_port  = target.data_base_port + target_shard
   处理本地 deferred 工作
 ~~~
 
-### 11.4 可靠发送状态机
+### 11.4 可靠发送状态机与重传
+
+应用状态与网关状态分别管理：
 
 ~~~text
-SEND_BEGIN -> AwaitingRecord -> Queued -> Sending -> WaitingAcks
-                                     -> Failed
-WaitingAcks -> Completed / TimedOut / PeerGone / PeerRestarted / Rejected
+应用：Validate -> WaiterRegistered -> LocalAttempt -> CreditReady/WaitingCredit
+     -> NetworkEnqueued -> MergeRemoteResult -> Completed / Failed / TimedOut
+网关：RecordAccepted -> FreezeRemoteTargets -> Sending -> WaitingAcks
+     -> Completed / NoSubscribers / TimedOut / PeerGone / PeerRestarted / Rejected
 ~~~
 
-规则：
+- 应用在任何提交前登记等待者，先本机尝试，再进入可能需要等待的网络步骤。
+- 网关状态从实际出站记录开始；没有 SEND_BEGIN，也没有逐消息 AwaitingRecord 占位。
+- 网络目标只在网关接纳记录时冻结；本机结果由应用合并，网关不代替本机提交。
+- 每远端目标分别记录首发片、缺片、确认和重试时刻；NACK 与待发片任务合并，
+  尚未首发的片保留正常任务，不额外复制。一个消息/目标/片只允许一个待发任务。
+- 所有首轮分片交给 sendto 后才启动无确认探测，不能在大消息尚未首发完时复制整包。
+- 首次缺片等待与发送探测初始值均默认 2 ms，允许配置 1～20 ms；探测指数退避到
+  默认 100 ms 上限。实际参数必须写入性能报告，1 ms 配置不代表能保证 1 ms 恢复。
+- NACK 请求默认至少间隔 2 ms；ACK/NACK 与重传有每 peer 和全局速率预算。
+  跟踪误重传与带宽，不能仅靠缩短计时器提高“看上去”的恢复速度。
+- 全部 DATA 丢失依靠发送探测；ACK 丢失重传同一身份，目标去重后补 ACK。
+- tm 单位为毫秒，公开上限 5000 ms；tm=0 在编码、本机提交和网络提交前直接 TimedOut。
+  超上限或无限值返回 UnsupportedTimeout，不悄悄缩短。deadline 运算检查溢出。
+- 编码结束、本机提交前、信用获得后、出站提交前及每次 sendto 前检查同一 deadline。
+  不可抢占的用户编码耗时单列，不能在慢编码之后重新计算完整的 tm。
+- ACK 与超时由所属状态机单次终结；调用超时使应用 waiter 终结，但已入网关的缓存仍
+  由网关按原 deadline 安全回收，应用不能提前退发送信用。
+- socket EAGAIN 使用可写事件或有界延期队列，不 busy loop；超时后不再补发。
+- best-effort 首发排队上限 1000 ms，开始发送后最长 5000 ms，超期丢弃并结算信用。
+- 使用 sendmmsg/recvmmsg 批量处理已经就绪的报文，每批最多 32 包且受本轮预算限制；
+  不为了凑批睡眠。部分发送只推进已成功的前缀，剩余报文保留原身份和 deadline。
+- CRC 和包头可复用已验证的不可变计算结果，但不得跳过校验、改变分片语义或提前 ACK。
 
-- 目标在网关从出站 SHM 接纳记录时冻结。
-- 本机目标只提交一次；本机成功不能代替远端 ACK。
-- 每个远端目标分别记录确认、缺片和重试时刻。
-- 对每个目标，首轮所有分片已交给 sendto 后才启动 20 ms 无确认探测；
-  指数退避到最多 200 ms。不能从大消息入队时就开始重发仍未首发完的整包。
-- NACK 可触发缺片定向重发，同一轮合并请求。
-- 每目标维护“已首发片”位图；NACK 请求尚未首发的片时不另发副本，保留正常首发任务。
-  重传中的同一片也只保留一个待发任务，避免重复 NACK 使发送队列无界增长。
-- 全丢片时整体重发；ACK 丢失时相同消息身份重发，接收端去重后再 ACK。
-- reliable 公开等待最长 5000 ms；tm 的单位为毫秒，tm=0 在编码、SEND_BEGIN 和出站提交前
-  直接返回 TimedOut，不启动后台可靠事务；
-  超过 5000 ms 或无限等待值按 UnsupportedTimeout 明确失败，不能悄悄缩短调用者的超时。
-  新模式文档必须告知此上限；不改变 legacy 的等待规则。
-- 重传在 deadline 到达后停止，释放缓存并只发一次 SEND_RESULT。
-- 超时与 ACK 同时发生，以事务状态机的单次终结操作决定结果。
-- 可靠失败不自动重新生成 sequence 再发。
-- 不向控制通道发送完整业务载荷。
-- 发送端口已显式 bind，网络发送不分配每话题临时源端口。
-- socket 发送 EAGAIN 使用可写事件或有界重试队列，不 busy loop。
-- 实际 sendto 前再次检查事务 deadline / 目标 epoch，不能因队列排队在超时后继续补发。
-- best-effort 等待首次发送的排队期限为 1000 ms；开始发送后整条发送最长 5000 ms。
-  超期停止发送剩余片并计数，不无界等待可写，也不因普通大消息首发超过 20 ms 就复制整包。
-- 发送缓存总配额覆盖 reliable 与 best-effort 尚未发送完的 WireBlob；
-  不能只限制 reliable，留下无限增长的 best-effort 发送队列。
-- deadline 从公开调用入口采样，计算毫秒转纳秒及相加时检查溢出；编码结束、BEGIN_READY
-  到达、出站提交前均重新检查。不能在慢编码之后重新给一次完整的 tm。
-  本机时钟可比较不代表任意用户自定义 serialize 可被抢占；若编码本身阻塞，返回时限只能
-  在编码返回后检查，必须单独报告编码耗时，不能把网络状态机的界限写成任意用户代码的硬实时保证。
+首版不实现 RTT 自适应或忙轮询；先测可配置短定时器与批量 IO，后续优化另立证据。
+跨主机可靠完成还包括网络往返和远端 SHM 提交，不能与 best-effort 的本机接管时间混比。
 
 ### 11.5 发送公平与控制优先级
 
 - 每 topic 设置有界发送队列，调度使用按字节计费的轮转。
 - 一个大消息不能一次连续发送全部分片后才轮到小消息。
-- 本机提交循环按 RouteKey 轮转，失败的热门话题不能阻塞其他通道。
+- 同一 peer 存在首发积压时，重传最多占本轮数据发送预算的 50%；没有首发时可借用余额。
+- 各 shard 内的发送与注入重试按 RouteKey 轮转，失败热话题不得阻塞其他通道。
+  非阻塞不等于零 CPU 时间；大 blob 的一次复制若超出时间预算，需在报告中显示。
+  单话题固定一个 shard，因此增加 K 不会自动提高一个热话题的吞吐。
 - ACK/NACK 优先于订阅快照分页；二者均有总速率限制。
 - 控制线程必须能在大流量下及时处理 stop / unregister / deadline。
 - QoS / CPU 参数首版只影响明确的网关配置，不能把每个应用对象的绑核参数直接修改共享线程。
 - 若公共构造传入与网关冲突的专用绑核要求，报告该要求不适用于共享后端；
   不静默承诺它已经生效。
+
+### 11.6 调度与重传参数
+
+以下参数由 T01 暴露为网关命令行选项，check-config 验证边界，status 输出实际值。
+
+| 参数 | 默认值 | 有效范围 / 约束 |
+|---|---:|---|
+| --io-batch-max | 32 包 | 1～64，仍受单轮字节/时间预算限制 |
+| --io-round-packets / --io-round-bytes / --io-round-us | 64 / 65536 / 200 | 分别为 1～4096 / 1～16777216 / 1～1000000；单包处理不可抢占 |
+| --nack-delay-ms | 2 ms | 1～20 ms |
+| --nack-interval-ms | 2 ms | 1～20 ms |
+| --retry-initial-ms | 2 ms | 1～20 ms |
+| --retry-max-ms | 100 ms | 不小于 initial，不大于 5000 ms |
+| --control-rate | 10000 包/秒 | 正数，受总预算上限校验 |
+| --peer-control-rate | 1000 包/秒 | 正数，不大于 control-rate |
+| --control-burst | 64 包 | 正数；每 peer 突发最多 16 包且不超过全局突发 |
+
+控制速率限制计入 ACK、NACK、REJECT 与目录分页，发送队列仍有独立内存上限。
+ACK/NACK 高优先级，但为等待中的目录分页保留至少 10% 的发送机会；没有分页时可借用。
+限速只延后或丢弃可重试报文，不伪造 ACK；重复缺片请求合并，不建立逐次重传任务。
+本机 Unix 信用通知不占 UDP 包速率，但受控制循环预算及其有界输出队列限制。
 
 ## 12. 配额、故障与生命周期
 
@@ -1171,15 +1226,19 @@ WaitingAcks -> Completed / TimedOut / PeerGone / PeerRestarted / Rejected
 | 每 peer 重组字节 | 64 MiB | 该 peer 新 assembly 拒绝 |
 | 每 RouteKey 重组字节 | 32 MiB | 该 topic 新 assembly 拒绝 |
 | 重组条目数 | 4096 | 拒绝新 assembly |
-| 全部发送缓存总字节 | 256 MiB | SEND_BEGIN / best-effort 接纳失败 |
+| 全部发送缓存及未使用发送授予 | 合计 256 MiB | CREDIT_REQUEST 无额度；记录不能超额接纳 |
 | 每 publisher reliable 在途 | 64 | Busy |
-| reliable 事务（含 AwaitingRecord） | 总 4096 / 每会话 512 | BEGIN_READY 前 Busy |
+| 发送状态及未使用记录授予 | 合计 4096 / 每会话 512 | 无信用则等待原 deadline 或 Busy |
 | 发送目标状态（含 best-effort） | 总 32768 | 冻结目标前 Busy / 丢弃并计数 |
 | 本机 CommitPending 总字节 | 64 MiB | 拒绝或留在原重组配额内，禁止重复不记账 |
 | 去重 stream 数 | 16384 | 新 stream 拒绝 |
 | 每 stream 去重窗口 | 4096 个序号 | 依第 7.6 节处理 |
 | 可靠去重回执数 | 总 65536 / 每 peer 8192 | 接纳前拒绝新 reliable |
-| 单进程出站占用字节 | 32 MiB | 提交前 Busy / allocation failure |
+| 单进程出站占用字节 | 32 MiB | 仅网络腿 Busy，不撤销已发生本机提交 |
+| 每会话发送信用窗口 | 32 MiB / 512 条 | 异步补充，受全局总预算限制 |
+| 初始发送授予请求 | 1 MiB / 16 条 | 按剩余预算实际授予，允许为 0 |
+| 应用结果诊断记录 | 每 runtime 256 条 | 覆盖最旧诊断；活动 waiter 不得随之删除 |
+| 未完成信用补充请求 | 每会话 1 项 | 合并请求，不按每条消息建请求 |
 | SHM 初始化等待任务 | 64 | 注册返回 Busy |
 | 候选目录 body | 每 peer 8 MiB，总 64 MiB | 拒绝候选快照 |
 | 已安装远端目录（含解析索引） | 总 64 MiB | 拒绝替换并计数，旧目录只保留到租约结束 |
@@ -1205,9 +1264,9 @@ MPMC 发布者槽位、目录空间和路由对象；任何一项不足都在 Re
 | 网关 bind 失败 | 初始化失败，无半工作状态；释放已创建端点 |
 | 应用在 REGISTER 后、SUB_READY 前退出 | 回收登记，不对外公告 |
 | 应用持有出站 loan 后退出 | 由会话所有权清理独占段；不清业务 SHM |
-| 网关 SIGKILL | 应用会话失效；在途可靠返回 GatewayLost；不自动切 legacy |
-| 网关 SIGSTOP | 不发生锁接管；健康超时后应用停止新提交，明确不可用 |
-| 网关重启 | 新 epoch，新会话、新出站段；重新注册；不重放旧出站记录 |
+| 网关 SIGKILL | 网络会话失效；可靠返回 GatewayLost/可能部分投递；已初始化本机 MPMC 继续运行 |
+| 网关 SIGSTOP | 不发生锁接管；健康超时停止网络提交，本机直达仍可运行 |
+| 网关重启 | 新网络会话与出站段；旧网络句柄失效但本机端仍存活；新建对象重新注册，不重放 |
 | 远端重启 | 旧目标事务 PeerRestarted；新调用等待新快照 |
 | 最后 Ready 订阅者注销 | 先撤销网络 route epoch，再处理在途状态；bridge 按 8.3 的独立引用归零后释放 |
 | 注入端退出但还有其他 SHM 发布者 | 普通 MPMC leave，不能 clear_storage |
@@ -1220,10 +1279,11 @@ MPMC 发布者槽位、目录空间和路由对象；任何一项不足都在 Re
 
 ### 12.3 正常关闭顺序
 
-1. 设置 Stopping，拒绝新注册和新发送。
+1. 网关设置 Stopping，拒绝新网络注册/记录；不擅自销毁应用拥有的本机 MPMC 发布端。
 2. 对外停止公告新订阅，通知本机会话。
 3. 取消可靠事务，发出可发送的终结结果，唤醒所有等待。
-4. 停止 IO 等待，摘除 FD，join 所有网关循环。
+4. 各 shard 处理停止命令，取消尚未提交的 ticket，收敛已开始的 SHM 提交并返回关闭确认。
+   drain 停止读新记录；信用与 buffer 按会话清算。然后摘除 FD、退出等待并 join 网关循环。
 5. 清理 assembly / retry / commit 队列，使 buffer 和 loan 按 RAII 归还。
 6. 注销内部业务 SHM 发布端，等待已有在途引用归零。
 7. 关闭出站会话与独占段，关闭 Unix socket。
@@ -1234,41 +1294,43 @@ MPMC 发布者槽位、目录空间和路由对象；任何一项不足都在 Re
 
 ### 12.4 配额账本与容量计算
 
-条目上限和 payload 字节上限要同时满足。跨线程队列节点、位图、每目标状态、定时器、
-解析索引和历史记录都要有可核验的上界；“有 256 MiB blob 上限”不能代替这些元数据限额。
-T01 固定所有有界队列的条目/字节配置，T07/T10 验证预留失败时不会留下半个事务。
+条目与字节同时设限。跨线程节点、片位图、每目标状态、定时器、解析索引和历史记录均有上界。
+T01 固定有界队列配置，T05/T07/T10 验证预留失败会全部归还，不能留下半个事务。
 
 | 阶段 | 必须预留 | 归还/转移时机 |
 |---|---|---|
-| REGISTER | 句柄、路由/SHM 槽位、登记槽位、目录增量 | 注册失败全部撤销；注销等待引用收敛 |
-| SEND_BEGIN | 事务项、发送 blob 字节、等待结果项 | 未提交过期也归还；不重复预留同一 request |
-| 冻结发送目标 | 本次目标状态及首发/重传位图 | 完成/失败一次归还；目标退出不悄悄缩小集合 |
-| 首片接纳 | assembly 条目、完整消息容量、位图、stream；reliable 还需回执位置 | 提交后转去重/回执；超时释放 blob，按第 7.6 节保留必要历史 |
-| CommitPending | 队列项和 route lease | 同一 buffer 仅转移归属；复制才增加字节占用 |
-| 目录替换 | 候选、解析后的新目录及尚被引用的旧目录 | 原子替换后旧引用归零才归还 |
+| REGISTER | 句柄、登记、目录及实际需要的 MPMC 槽位 | PUB 应用端与 SUB 网关 bridge 分别持有，失败按所有权撤销 |
+| CREDIT_GRANT | 全局发送缓存预算及发送状态槽 | 转为实际记录占用或保持未使用授予；会话关闭才可撤销未消费授予 |
+| 应用出站准备 | 出站实际容量/槽、发送信用、可靠 waiter | 明确未提交撤预留；可能提交不自行退信用 |
+| 冻结远端目标 | 每目标位图和状态 | 失败一次归还，不因目标退出悄悄缩小成功集合 |
+| 远端首片接纳 | assembly、完整容量、位图、stream、可靠回执位置 | blob 按状态释放，去重历史按 7.6 保留 |
+| shard 内提交等待 | 队列项、route lease | 同一 buffer 转移不重复计费，复制才增加占用 |
+| 目录替换 | 候选、新解析目录及仍被引用的旧目录 | 旧引用归零才释放旧版本 |
 
-多目标可共享一个不可变 WireBlob，payload 不必复制 R 份，但每目标的片位图、确认状态和
-重试任务仍为 O(R)。目标冻结前预留这些状态；不能先给部分目标发送，再发现装不下其余目标。
-重传任务合并到原事务，不按 NACK 次数另建无界任务。best-effort 同样计算目标状态。
+发送预算必须满足：所有会话未使用授予 + 已提交未终结记录 <= 全局上限。
+出站 loan 消费完但 WireBlob 仍在发送时，只返 TX_PROGRESS，不把发送预算也释放。
+多个目标可共享一个不可变 blob，但目标状态/重传位图仍为 O(R)，在首发前预留。
 
-令 M 为最大业务 blob、C(n) 为实际 loan 档位容量，出站能力至少满足：
+令 M 为最大 blob，C(n) 为底层真实 loan 档位：
 
 ~~~text
-outbox_record_bytes = 96 + M
+outbox_record_bytes = 112 + M
 session_outbox_limit >= C(outbox_record_bytes)
+session_tx_window_bytes >= W(M)          # 要允许本会话发送配置的最大消息
 business_loan_capacity >= M
-fragment_count = (M + 1023) / 1024        # 使用足够宽的整数
+fragment_count = (M + 1023) / 1024        # 宽整数计算
 ~~~
 
-当前大 loan 按 2 的幂分档，16 MiB blob 加 96B 信封可能进入 32 MiB 档位。
-因此不能用“底层支持 16 MiB 消息”推断出站已可支持 16 MiB blob，也不能按 M 少记一半 loan。
-每尺寸档位底层还可能映射多个 chunk：在途 loan 配额、池映射容量、tmpfs 实占与 RSS 是
-不同口径。必须分别报告，不能把 32 MiB 出站占用上限当作整个会话 SHM 映射上限。
-纯字节转移的 blob 账本也不能代替业务 SHM 池自身的槽位与租约约束。
+16 MiB blob 加 112B 信封可能进入 32 MiB loan 档位。出站按实际 C(n) 计费，
+发送缓存按第 9.2.1 节 W(M) 容量计费，分配器额外开销计入元数据上限。
+池映射通常包含同档多个 chunk，映射容量、tmpfs 实占、RSS 与在途 loan 是不同口径，分别报告。
+不能把 32 MiB 出站占用上限称为整个应用或网关的 SHM 内存上限。
 
-目录极端容量必须分别测“已安装且活跃”“更新中候选”“旧版本仍被事务引用”。
-仅验证 128×8 MiB 候选分配被限制，不能证明 128 份已安装目录和旧版本也有界。
-同理，4096 话题是配置最大数，不表示所有上限的笛卡尔积可以同时接纳；触顶原因必须可查询。
+目录分别测已安装、候选和旧版本被事务引用三种占用。4096 话题、128 peer 等是各自上限，
+不表示其所有组合都能同时接纳。发布者 churn 留下的必要去重/身份历史也必须单独计数。
+
+应用直达仍受每话题 MPMC 发布者、接收者和 chunk 槽位限制；网关只为有入站需求的话题
+占一个发布者槽。两个腿的真实复制内存不得以“同一业务消息”为由只算一份。
 
 ## 13. 文件与接口落点
 
@@ -1282,6 +1344,7 @@ fragment_count = (M + 1023) / 1024        # 使用足够宽的整数
 | src/dzIPC/net/shared_config.cc | 参数校验、进程级配置读取 |
 | include/dzIPC/net/wire_protocol.h | WireHeader、编解码结果、错误枚举；不含 socket 平台头 |
 | src/dzIPC/net/wire_protocol.cc | 160B 网络头编解码、CRC、分片校验 |
+| src/dzIPC/net/byte_codec.h | 已检查长度后的内部端序与 UTF-8 辅助，不作为公共 API |
 | include/dzIPC/net/wire_blob.h | 有所有权的业务 blob 与 RouteDescriptor |
 | src/dzIPC/net/wire_blob.cc | TLV / DZFlat 编码与结构校验 |
 | include/dzIPC/net/datagram_endpoint.h | 裸数据报接口、源地址、截断、错误状态 |
@@ -1292,14 +1355,14 @@ fragment_count = (M + 1023) / 1024        # 使用足够宽的整数
 | src/dzIPC/net/reliable_session.cc | 定时重发与单次完成 |
 | include/dzIPC/net/peer_directory.h | 网关发现、发布/订阅目录、代次历史和租约 |
 | src/dzIPC/net/peer_directory.cc | HELLO / DZGC 编解码与快照事务 |
-| include/dzIPC/net/local_protocol.h | Unix 控制消息、DZTX 编码与错误码 |
+| include/dzIPC/net/local_protocol.h | DZLC v2 控制消息、112B DZTX v2 与错误码 |
 | src/dzIPC/net/local_protocol.cc | 控制消息验证、golden bytes 支撑 |
-| include/dzIPC/net/client_runtime.h | 进程级会话、出站通道、可靠等待 |
+| include/dzIPC/net/client_runtime.h | 网络会话、两类信用、路由提示、可靠等待与本机结果合并 |
 | src/dzIPC/net/client_runtime.cc | 注册/注销、fork 闸、连接关闭处理 |
-| include/dzIPC/net/shm_wire_bridge.h | 原始 blob 到业务 SHM 的内部适配 |
+| include/dzIPC/net/shm_wire_bridge.h | 应用 ShmWireWriter 与网关 ShmWireBridge 的内部适配 |
 | src/dzIPC/net/shm_wire_bridge.cc | MPMC 生命周期与原始注入 |
 | include/dzIPC/net/gateway_runtime.h | 网关公开启动/停止/状态接口 |
-| src/dzIPC/net/gateway_runtime.cc | 路由所有权、线程调度、配额汇总 |
+| src/dzIPC/net/gateway_runtime.cc | 路由归属、出站 drain、分 shard 注入与信用汇总 |
 | include/dzIPC/shared_pub_sub_ipc.h | 新 SharedPublisher / SharedSubscriber |
 | src/dzIPC/shared_pub_sub_ipc.cc | pub/sub 抽象适配与返回契约 |
 | exec/dzipc_gateway/src/main.cc | 命令行：serve / status / check-config |
@@ -1360,6 +1423,8 @@ status JSON 至少包含：
 - 各配额及触顶计数；
 - 逻辑线程数与实际线程采样口径；
 - 最后一次错误码与有界说明；
+- local_path / network_path 独立健康状态；客户端本机结果由客户端诊断提供，不由网关推断；
+- 出站可用容量/槽、未用发送授予、实际在途发送预算、信用等待次数/时长；
 - 单话题查询时返回其 domain、原始 topic、msg_id、schema、epoch 和流量摘要。
 - 话题与 peer 查询返回已安装目录版本、完整来源是否已核验、PUB/SUB 角色及目标 route epoch，
   供部署与测试确认双向发现就绪；不存在时明确返回未就绪，不虚构远端状态。
@@ -1376,7 +1441,7 @@ JSON 使用字符串表示 64 位 ID、epoch、domain、sequence，避免 JavaSc
 
 | 类别 | 最少指标 |
 |---|---|
-| 提交 | tx_accepted、tx_not_submitted、tx_indeterminate、tx_no_route |
+| 提交 | local_committed、local_not_submitted、local_indeterminate、network_accepted、network_not_submitted、partial_submit |
 | 网络 | datagrams_rx / tx、bytes_rx / tx、send_eagain、send_error、truncated |
 | 验证 | bad_magic、bad_version、bad_header、packet_crc_fail、message_crc_fail、foreign_route、wrong_shard、source_route_unverified |
 | 分片 | assemblies_active、assembly_bytes、assembly_timeout、duplicate_fragment、conflicting_fragment |
@@ -1388,8 +1453,11 @@ JSON 使用字符串表示 64 位 ID、epoch、domain、sequence，避免 JavaSc
 | 配额 | 每类 quota_rejected 和峰值 |
 | 业务差异 | 本机提交次数、远端目标份数、零目标丢弃数 |
 | 出站 | outbox_reserved_records / capacity、outbox_released_records / capacity、outbox_progress_lag、outbox_overwrite |
+| 发送信用 | tx_credit_unused / inflight、credit_wait_count / time、credit_grant_rejected |
+| 延迟分段 | encode、local_commit、credit_wait、outbox_wait、network_first_send、remote_commit、ack_wait、api_return |
 
 热路径只更新有界计数，不对每个分片同步写文本日志。
+网关指标只证明远端入站注入，应用本机投递次数须由应用计数；不能把两者重复汇总为同一消息。
 日志节流键不能无界地按任意外来 publisher_id 建表。
 
 ### 14.3 topic_cat / dzipc_list
@@ -1420,35 +1488,23 @@ JSON 使用字符串表示 64 位 ID、epoch、domain、sequence，避免 JavaSc
 任何阶段都不能以“编译通过”代替其要求的行为测试。
 不需要为了文档列出路径而提前创建空实现；只在对应任务开始时创建文件。
 
-### T00：前置 SHM 和现状基线
+### T00：确认已交付 MPMC 与性能基线
 
-**依赖：** SHM 多发布者任务完成，负责人提供提交号与验收结果。
+**前置事实：** MPMC 已随 f066a82 保存；本轮重编成功、专项 8/8 通过，完整回归历史问题见前置文档。
+这些事实不替代本卡尚需补充的规模、原子性和性能证据。
 
-**必须读取：**
+**必须读取：** MPMC 交付记录、ShmChannel/PublisherRegistry、SHM loan/提交/析构与相关专项测试。
 
-- docs/shm_multi_publisher_execution_plan.md；
-- include/dzIPC/common/shm_channel.h；
-- include/dzIPC/common/publisher_registry.h；
-- shm_pub_sub_ipc 中 InitChannel、MPMC join/leave、loan 和析构；
-- test_shm_multi_publisher、test_shm_mpmc_*；
-- 本文第 2～5 节。
+1. 记录实际源码提交、构建指纹、64 位平台和 MPMC layout V2；不把历史阶段的“未接入”当成现状。
+2. 核对应用发布者及网关注入端的 slot 数、接收者上限、诊断池容量和完整话题名。
+3. 核对 loan 失败、持有 loan/Sample 时退出、同话题发布者加入/退出不清段的证据。
+4. 测 112B 信封加最大 blob 的真实 loan 档位与映射；准备 T05 两类信用边界数据。
+5. 采集已有 legacy hybrid 和直接 MPMC 的 1/100/1000 话题资源，以及本机小包/大包延迟。
+6. 记录跨机单目标/多目标基线；无真实跨机环境时标明未完成，不用模拟结果替代最终发布验收。
+7. 旧基线已知失败单列，关键 MPMC 生命周期若出现新失败则先定位；独立协议纯函数工作可继续。
 
-**步骤：**
-
-1. 记录最终基线 commit 和工作区 diff，不能仅照抄 e887d5e。
-2. 确认 MPMC 段名、控制面版本、发布者 slot 数、订阅者上限。
-3. 确认同话题两个普通发布者同时存活，加入/退出不清旧段。
-4. 确认 gateway 额外占一个 SHM publisher slot；配置容量需给它留位置。
-5. 验证借样提交失败、持有 loan 时退出、持有 Sample 时发布端退出。
-6. 以旧模式采集 1 / 100 / 1000 话题的 socket / FD / 线程 / SHM / RSS。
-7. 记录旧模式纯本机延迟、跨机单收端和多收端吞吐作为比较基线。
-8. 若关键前置失败，停止接入公开后端；可以继续独立协议纯函数工作，
-   但不能把整体前置标为通过。
-9. 核对 size_t 位宽、完整话题名与诊断池槽位；按第 12.4 节测最大 blob 加 96B 信封后的
-   实际 loan 档位和池映射，不能只测试恰好 16 MiB 的裸载荷。
-
-**产物：** baseline.md、命令日志、资源 CSV、MPMC 能力表。  
-**退出条件：** 前置生命周期和多发布者关键测试通过；历史失败明确列出且与本次无关。
+**产物：** baseline.md、MPMC 能力表、原始性能/资源数据与已知问题列表。
+**退出条件：** 行为依赖明确、源码可复现；本机延迟对照可用于第 17.4 节，不把专项交付写成性能通过。
 
 ### T01：配置、模式和构建骨架
 
@@ -1476,8 +1532,8 @@ JSON 使用字符串表示 64 位 ID、epoch、domain、sequence，避免 JavaSc
 1. 先写第 7 节 160B 头每个偏移的字节向量测试。
 2. 固定 RouteKey 编码、64 位 domain、publisher_id 和 sequence。
 3. 实现 DATA / ACK / NACK / REJECT 编解码与 CRC。
-4. 实现 DZGD 64B、DZGC 84B、DZLC 40B、DZTX 96B 头。
-5. 为本机每种消息增加显式枚举值；把 SEND_BEGIN / BEGIN_READY 纳入消息表。
+4. 实现 DZGD v1 64B、DZGC v1 84B、DZLC v2 40B、DZTX v2 112B 头。
+5. 固定 DZLC v2 编号及两类信用、ROUTE_STATE 编码；15/16 保留且拒绝旧 BEGIN。
 6. 为每种变长 body 固定编码顺序、长度检查和未知字段策略。
 7. WireEncoder 保留完整 TLV blob；DZFlat 使用完整段。
 8. 生成 C++/Python 都能读取的 golden_vectors.json，包含字段与十六进制结果。
@@ -1521,7 +1577,9 @@ JSON 使用字符串表示 64 位 ID、epoch、domain、sequence，避免 JavaSc
 5. 模拟 1000 个逻辑句柄，控制连接数仍按进程计。
 6. 错误请求、重复 request_id、断连、慢读者和写满都必须有界。
 7. PID 变化在获取旧运行时 mutex 前判定并失败。
-8. 可靠等待表先使用假完成事件验证唤醒逻辑。
+8. 可靠等待表先使用假完成事件验证先登记、早到结果和本机/网络结果合并。
+9. 用假发送状态验证 WELCOME 初始信用、CREDIT_REQUEST/GRANT、ROUTE_STATE 和会话断连；
+   控制循环只管理网络状态，不能关闭应用本机端。
 
 **测试：** test_shared_net_gateway_lock、test_shared_net_client_lifecycle。  
 **退出条件：** 两个网关不能同时接管；SIGSTOP 不触发接管；断连唤醒所有等待；遗留路径可安全重启。
@@ -1541,32 +1599,32 @@ JSON 使用字符串表示 64 位 ID、epoch、domain、sequence，避免 JavaSc
 7. 实现进程多发布线程并发，短锁只包提交，可靠等待在锁外。
 8. 证明 eventfd 合并通知、队列预算耗尽、最后一条记录均不会丢唤醒。
 9. 限制在途占用，超限时不另建通道或无界申请内存。
-10. 信用同时限制记录数和实际 loan 容量；测 TX_PROGRESS 合并/重复/最后一批、
-    消费早于 publish 返回、控制连接写满及会话关闭，不能漏记或超额归还。
-11. 在每个档位边界验证 DZTX 长度裁剪，填充尾部不得上网；信用窗口内不得覆盖未读记录。
+10. 分别验证出站容量信用与发送缓存信用；TX_PROGRESS 不能提前释放网络在途预算。
+11. 测初始零信用、大消息补充、重复 GRANT、消费早于 publish 返回、最后一批进度与关闭结算。
+12. 信用充足的单条 reliable 直接提交 DZTX，不发送逐消息 BEGIN；信用不足等待有原 deadline。
+13. 在每个档位边界验证 DZTX 长度裁剪，填充尾部不得上网；信用窗口内不得覆盖未读记录。
 
 **测试：** test_shared_net_outbox、test_shared_net_outbox_failure。  
 **退出条件：** 真实跨进程原子接管证据齐全；可安全说明预构造段 false 的边界。
 **禁止：** 以“通常不会失败”跳过原子性；以 Unix 载荷传输临时代替并宣布完成。
 
-### T06：业务 SHM 原始注入
+本卡仅证明网络腿的边界，整个 prebuilt 的 false 还要在 T06/T11 合并本机提交结果后验收。
 
-**依赖：** T00、T02；可使用测试 blob，不依赖网络。  
-**改动：** shm_wire_bridge、shm_pub_ipc 的内部访问适配。  
-**步骤：**
+### T06：应用本机直达与远端原始注入
 
-1. 一个 RouteKey 对应一个内部 MPMC 发布对象。
-2. 利用注册的 msg_id 和 GenericMessage 模板建立无需用户头文件的注入端。
-3. DZFlat / TLV 两种 blob 都直接注入，不在网关反序列化业务对象。
-4. 用一个普通 IPC_SHM 发布者 + 网关注入端同时向两个进程的订阅者发送。
-5. 注入端退出，普通发布者继续发送；反向退出也要测试。
-6. 验证有借样 Sample 时网关关闭不提前回收。
-7. 实现 NotSubmitted / Committed / Indeterminate，不以单一 bool 掩盖不确定结果。
-8. 确认一个话题多个远端来源仍只占一个网关 publisher slot。
-9. 检查内部端点不会重复登记为逻辑业务端点。
+**依赖：** T00、T02；使用测试 blob 即可验证，不依赖真实网络。
+**改动：** ShmWireWriter、ShmWireBridge 与 shm_pub_ipc 非虚内部适配。
 
-**测试：** test_shared_net_shm_bridge。  
-**退出条件：** 多进程接收、两种编码、双发布者并存、析构与 lease 均通过。
+1. 应用每发布对象持有自己的 MPMC 端；网关仅为入站话题持有一个 bridge。
+2. DZFlat/TLV 原始注入不重复解析；仅本机 DZFlat 路径可直接编码到 loan。
+3. 普通 IPC_SHM 发布者、SharedPublisher 本机适配、网关注入端共同向多个进程发布，验证无重复和清段。
+4. 验证 NotSubmitted/Committed/Indeterminate，特别是本机成功后网络失败不能再次本机提交。
+5. 持有 Sample 时退出任意发布者，其他发布者继续工作，lease 释放合法。
+6. shard 独占网关 bridge 的提交；应用 writer 不被网关停机或 drain 操作销毁。
+7. 核对逻辑与内部登记，不把一个网关 bridge 计成额外业务发布者。
+
+**测试：** test_shared_net_shm_bridge、test_shared_net_local_direct。
+**退出条件：** 两类编码、多发布者并存、本机三态提交及析构租约通过。
 
 ### T07：分片、重组与去重
 
@@ -1579,8 +1637,8 @@ JSON 使用字符串表示 64 位 ID、epoch、domain、sequence，避免 JavaSc
 3. 乱序和重复分片仍得到同一完整 blob。
 4. interleave 两个发布者、相同 msg_id / sequence / 大小但不同 payload，验证不会混包。
 5. 再 interleave 两个话题，刻意使用相同数据 socket。
-6. 完整 CRC 后进入 CommitPending，且该状态只能生成一次本机提交请求。
-7. 提交完成事件回到所属状态机后再写 Committed。
+6. 完整 CRC 后在所属 shard 进入 CommitPending，一次只允许一个提交尝试。
+7. 同 shard 完成提交后记录 Committed/回执，不经全局提交线程；NotSubmitted 进入有界重试。
 8. 去重状态与路由 epoch、peer epoch 一起测试，包括窗口滑动和晚到旧包。
 9. 实现绝对超时、内存配额和坏包回收。
 10. 测试 1023 / 1024 / 1025B、1MiB、配置最大值、最大值+1。
@@ -1613,47 +1671,41 @@ JSON 使用字符串表示 64 位 ID、epoch、domain、sequence，避免 JavaSc
 **测试：** test_shared_net_discovery、test_shared_net_subscription_snapshot。  
 **退出条件：** 迟到订阅可收新消息，退出订阅被撤销，gateway epoch / route epoch 不串代。
 
-### T09：best-effort 端到端
+### T09：本机直达与 best-effort 网络端到端
 
-**依赖：** T05～T08。  
-**改动：** 网关完整数据路径，测试用发布/订阅程序。  
-**步骤：**
+**依赖：** T05～T08。
+**改动：** 双路径编排、完整网关数据路径、shared_net_probe 与测试驱动。
 
-1. 一个应用发布者 -> 本机网关 -> 本机业务 SHM -> 两个订阅进程。
-2. 加入远端网关和两个远端订阅进程。
-3. 一个远端主机多个订阅者，发送侧仅产生一份目标载荷。
-4. 两边都有同话题发布者，相互收取；本机与远端副本各一次。
-5. 构造 A->B 入站，检查 B 不将它再次出站发回 A。
-6. 测无订阅、晚订阅、普通 IPC_SHM 本机发布者、不同 domain。
-7. 同一 UDP socket 同时传多个 topic / msg_id=0。
-8. gateway status 证明 application_udp_sockets=0，网关=K+2。
-9. 不接入默认公共工厂，避免可靠功能未完成时暴露半成品。
+1. 应用直接 MPMC 提交给两个本机订阅进程；暂停网关后，既有本机端仍能收取新消息。
+2. 加入远端网关/订阅者；源网关处理出站记录时本机 SHM 提交计数必须为 0。
+3. 两台主机同时发布同一话题，本机直达与远端入站各按原始来源只交付一次，无回流。
+4. 单远端主机多个订阅者，源端仍只发一份目标载荷，目标网关仅重组/注入一次。
+5. 验证网络提示为零、未知、滞后和失效时的行为；无远端 best-effort 可省去出站。
+6. 穷举本机成功/失败/未知与网络接管/失败组合，公开返回与计数服从第 5 节。
+7. shared_net_probe 输出两腿结果、publisher/sequence/内容校验和，驱动使用双向发现屏障。
+8. 核验应用 shared_v1 UDP=0、网关=K+2；尚不切换默认公共工厂。
 
-**测试：** test_shared_net_end_to_end，跨进程驱动。  
-**退出条件：** 按 publisher + sequence + 内容检查每个接收者，不重复、不串话。
+**测试：** test_shared_net_end_to_end、test_shared_net_partial_submit。
+**退出条件：** 多进程、本机独立运行、跨机单份传输及部分提交语义均验证。
 
-### T10：可靠发送与公平性
+### T10：无逐消息 BEGIN 的可靠发送与公平性
 
-**依赖：** T09。  
-**改动：** reliable_session、SEND_BEGIN / SEND_RESULT、定时器、ACK/NACK。  
-**步骤：**
+**依赖：** T09。
+**改动：** reliable_session、信用结算、SEND_RESULT、短定时器与批量 IO。
 
-1. SEND_BEGIN 记录调用开始时间与 deadline，校验 5 秒上限。
-2. 数据被接纳时冻结目标集合。
-3. 收 ACK 通过统一控制路由匹配事务；发送调用不得 recv UDP。
-4. 接收端只在 SHM Committed 后发 ACK。
-5. 全部数据丢失时发送端超时探测重发。
-6. 缺部分片时 NACK 只补缺片；ACK 丢失时去重后重发 ACK。
-7. 测一个目标成功、另一个超时，整个调用返回失败且报告部分交付。
-8. 测 ACK 与 deadline / unregister / gateway stop 并发，终结结果恰好一次。
-9. 测失败提交重试不重复，Indeterminate 不自动再提交。
-10. 热话题 1MiB 连发同时冷话题短消息，冷话题和控制报文能持续推进。
-11. 释放所有发送缓存、等待者和计时器。
-12. tm=0 无提交；慢编码不重置 deadline。发送端超时后再放行已发 DATA，允许远端晚交付
-    但不得重复；零 ACK 不等于零投递，失败结果须正确标记 possible_partial_delivery。
+1. 应用先登记等待者，直接 DZTX 提交请求 ID/deadline；信用充足时抓控制流证明不存在 BEGIN。
+2. 本机提交由应用记录，远端目标由网关冻结；NoSubscribers/GatewayLost 的合并含义不同。
+3. ACK 通过统一控制循环转所属 shard，发送调用不 recv UDP；ACK 只在目标 SHM 提交成功后发。
+4. 全丢、缺片、ACK 丢失、重复 NACK、超时与 ACK 并发均只终结一次，不重复提交。
+5. 验证默认 2 ms 定时、配置边界、退避和速率预算；比较恢复延迟与误重传成本。
+6. sendmmsg 部分成功/EAGAIN 保留未发送后缀；recvmmsg 逐包检查截断，不等待凑批。
+7. 本机成功/远端失败、无本机/有远端、两边无目标、网络离线均按第 5 节聚合结果。
+8. 发送缓存未终结时不能因 TX_PROGRESS 重新授予相同预算；所有失败路径最终结算。
+9. 热话题与冷话题、同 shard 与不同 shard 混合，信用等待和控制处理不被饥饿。
+10. tm=0 无任何提交，慢编码不重置期限，发送超时后的晚交付与部分交付标记正确。
 
-**测试：** test_shared_net_reliable、test_shared_net_fairness、test_shared_net_control_pressure。  
-**退出条件：** 所有目标策略、重传、去重、失败边界与配额通过；无永久等待。
+**测试：** test_shared_net_reliable、test_shared_net_credit、test_shared_net_fairness、test_shared_net_control_pressure。
+**退出条件：** 成功/失败语义、配额和生命周期通过，无永久等待，有低延迟路径的结构证据。
 
 ### T11：公共 API 接入与兼容
 
@@ -1666,9 +1718,9 @@ JSON 使用字符串表示 64 位 ID、epoch、domain、sequence，避免 JavaSc
 3. 只在 DZIPC_NET_BACKEND=shared_v1 且前置满足时选择新后端。
 4. 缺网关、错误 locality、无 MPMC、协议不匹配都应明确失败。
 5. 测 publish_prebuilt_segment 编码失败返回 false，回退 publish 后接收一次。
-6. 测出站已接管后不会再返回可回退的 false。
-7. reset_message 必须等待该句柄在途事务终结，注销旧 descriptor，重新注册新 descriptor；
-   不能原地修改共享路由键。失败后句柄保持明确不可用或旧状态，二选一并固定。
+6. 分别测本机已提交、仅出站已接管、任一腿未知时，prebuilt 不返回可回退的 false。
+7. reset_message/InitChannel 先封住两腿新调用，等待/取消旧事务并注销旧登记，再建立新描述；
+   不原地修改共享路由键。失败后整个句柄保持不可用，不能留下本机新类型、网络旧类型的混合状态。
 8. 覆盖 GenericMessage、生成 C++ 消息和 Python 预构造段。
 9. 验证 IPC_SOCKET_ONLY、IPC_SHM、服务请求响应仍选择旧路径。
 10. 未完成的新配置不能被默认开启。
@@ -1682,10 +1734,10 @@ JSON 使用字符串表示 64 位 ID、epoch、domain、sequence，避免 JavaSc
 **步骤：**
 
 1. 每个有向生命周期边界放测试注入点：收到最后一片前、SHM commit 前后、ACK 前后。
-2. SIGKILL 网关，验证应用返回 GatewayLost 和旧 Sample 生命周期。
+2. SIGKILL 网关，验证可靠返回 GatewayLost/部分交付，已初始化本机 MPMC 继续收发、旧 Sample 仍合法。
 3. SIGSTOP 网关，验证不出现第二网关接管。
 4. 重启网关，新 epoch 使旧记录/旧网络包无效。
-5. 应用重新创建后端并重新注册；不假装旧句柄自动可用。
+5. 新建后端恢复网络；旧对象仅本机端可用，旧网络身份/信用不能迁移或重放。
 6. 最后订阅者注销后立即重建，旧数据不能进入新 route epoch。
 7. 循环创建/销毁 100 次，检查 FD、线程、SHM 和配额回到基线。
 8. 并发 publish / reset / unregister / stop，以竞态检测或可重复故障测试验收。
@@ -1707,7 +1759,7 @@ JSON 使用字符串表示 64 位 ID、epoch、domain、sequence，避免 JavaSc
 2. dzipc_list 展示逻辑端点与共享模式；内部端点不重复计业务实例。
 3. topic_cat 通过网关注册并读一次，本机/远端消息各验证。
 4. 安装网关二进制和必要库文件，提供前台部署示例。
-5. 文档显式写出单播扇出、网关额外一跳、可靠 ACK 边界和跨模式不互通。
+5. 用户说明覆盖本机直达、网络源端额外一跳、部分提交、信用等待、ACK 边界和跨模式不互通。
 6. 编写回滚步骤，确保不清理其他业务 SHM。
 7. 测命令参数错误、未知命令、端口冲突、不可写目录、网关离线的退出码。
 
@@ -1738,15 +1790,15 @@ JSON 使用字符串表示 64 位 ID、epoch、domain、sequence，避免 JavaSc
 **依赖：** T14。  
 **步骤：**
 
-1. 对照第 5 节 I01～I18 和第 19 节逐项给证据。
+1. 对照第 5 节 I01～I21 和第 19 节逐项给证据。
 2. 检查最终 diff，只包含本任务范围。
 3. 检查默认配置未变、实验模式未提前升级为默认。
 4. 检查文档示例能在安装目录执行，所有路径、目标、选项真实存在。
 5. 审查还有没有每话题 UDPNode / send socket / recv thread 泄漏到 shared_v1。
 6. 验证旧模式下不意外连接网关或初始化新网络线程。
-7. 提交交付摘要：改动、验证、性能、明确限制、回滚。
-8. 按当前 AGENTS.md 使用团队 MCP 回报；若工具不可用，明确记录无法执行，不伪造回报。
-9. 按团队约定处理上下文压缩；没有可调用能力时不宣称已经执行 /compact。
+7. 先准备好交付摘要：改动、验证、性能、明确限制、回滚，待测试与审查完成后回报。
+8. 全部工作完成后的第一个动作按 AGENTS.md 调用 member_report_result；不可用则说明事实，不伪造回报。
+9. 回报后按团队约定处理上下文压缩；没有可调用能力时不宣称已执行 /compact。
 
 **退出条件：** 所有必要项有结果，未通过项不被写成完成。
 
@@ -1916,6 +1968,8 @@ build-shared-net/bin/dzipc_gateway status \
 | V15 | 错误源 IP/端口、错误确认元数据 | 不建重组、不终结真实事务、不向第三方回包 |
 | V16 | 仅 PUB、仅 SUB、PUB+SUB、空目录 | 来源能核验，只有 SUB 可作为发送目标，空目录原子撤销 |
 | V17 | 同前 127B、不同后缀的话题名 | 内部路由和目录不截断、不合并；工具标明展示截断 |
+| V18 | DZLC v2 / DZTX v2 golden bytes | 40B/112B 布局、请求 ID/deadline、信用字段端序正确 |
+| V19 | 旧 DZLC/DZTX、保留的 15/16 消息 | 明确版本/类型错误，不误接纳旧 BEGIN 或 96B 记录 |
 
 ### 17.2 资源与功能
 
@@ -1934,6 +1988,11 @@ build-shared-net/bin/dzipc_gateway status \
 | R11 | 已安装目录、候选与旧版本并存 | 分别受总内存配额限制，替换失败不发布半张表 |
 | R12 | 最大 blob 与各 loan 档位边界 | 按容量记账；DZTX 填充不上网，出站信用未超额 |
 | R13 | 反复重建发布者直至 stream/历史触顶 | 拒绝新身份，旧消息重放不再次提交，诊断指出容量原因 |
+| R14 | 本机与网络同时发布 | 应用本机提交一次；源网关对出站记录的本机注入次数为 0 |
+| R15 | 已初始化后 SIGSTOP/SIGKILL 网关 | 本机 best-effort 仍可收发；网络失败可见，不回退 legacy |
+| R16 | 信用充足时单条 reliable | 无 SEND_BEGIN/BEGIN_READY 控制往返，等待者先于记录可见 |
+| R17 | 多 shard 并发入站 | 各 RouteKey 在其 shard 提交，无全局串行提交队列 |
+| R18 | 多会话未用授予加网络在途缓存 | 总预算不超限；不能重复借用已授予而未消费的信用 |
 
 “恰好一次”只在本次测试的网关/路由代次存活条件下断言，不扩展成跨崩溃 exactly-once 保证。
 
@@ -1963,34 +2022,62 @@ build-shared-net/bin/dzipc_gateway status \
 | F20 | tm=0、慢编码、发送超时后网络延迟包 | 零超时无提交；期限不重置；晚交付符合文档而非撤销保证 |
 | F21 | DATA 已发送但 ACK 全丢 | 即使 acked_count=0，失败仍标记可能部分交付 |
 | F22 | 出站通知合并/重复、控制写满、记录覆盖 | 信用不提前/重复归还；异常会话明确失效，可靠调用不假成功 |
+| F23 | 本机成功而网络 loan/信用/会话失败 | prebuilt 返回 true，不回退重发；blocking 失败并标明部分交付 |
+| F24 | 本机目标提交失败、网络提交成功 | 本机不重试；网络可交付；blocking 不伪装全部成功 |
+| F25 | 任一腿 Indeterminate | prebuilt 不允许回退，诊断未知；同一腿不再次提交 |
+| F26 | 重复 GRANT、TX_PROGRESS 早于网络完成 | 两类信用分别守恒，不能超额授予或提前复用缓存预算 |
+| F27 | 零初始信用、首次大消息、等待中断连 | 有界等待/失败；本机提交不被撤销；旧信用不用于新会话 |
+| F28 | sendmmsg 部分发送、批次 EAGAIN | 只推进成功前缀，未发后缀身份不变，不等凑批、不忙转 |
+| F29 | 重传/NACK 风暴、目录同时更新 | 控制限速有界，目录仍推进；恢复延迟与误重传均记录 |
+| F30 | 网络离线后 reset/重新 InitChannel 失败 | 整个重置句柄不可用，不留下本机新类型/网络旧类型混合状态 |
 
 故障测试随机种子必须固定并保留。
 正确性用例在合理负载下以“零串话、零错误载荷、零不期望重复”为硬门槛。
 best-effort 的故障丢包可以发生，但必须与计数和序号缺口一致。
 
-### 17.4 性能报告
+### 17.4 低延迟验收与性能报告
 
-统一在相同 CPU、网卡、MTU、编译优化、payload 和订阅拓扑下比较：
+比较对象必须实际存在：f066a82 的直接 MPMC/legacy hybrid 与本次 shared_v1 实现。
+旧“全部经网关”只有文档，不要求为了制造对照而先实现一整套旧网关，也不能给它编造数字。
+相同 CPU、网卡、MTU、编译优化、编码、订阅数量和 offered load 下比较；饱和吞吐另列。
 
-| 场景 | 主要看什么 |
+| 场景 | 主要判断 |
 |---|---|
-| 纯本机 1 pub -> 1 sub | 网关额外一跳的 p50/p99 与 CPU 成本 |
-| 纯本机 1 pub -> 8/32 sub | 分发成本、SHM 消费能力 |
-| 跨机 1 pub -> 1 host / 多进程 sub | 避免重复网络重组的收益 |
-| 跨机 1 pub -> 2/8 host | 单播发送带宽放大 |
-| 1000 个低频话题 | socket、FD、RSS、发现快照、空闲 CPU |
-| 少量高频大话题 | shard 饱和、发送公平、可靠重传 |
-| 同话题 8 个发布者 | 重组并发、锁竞争、配额分布 |
+| 仅本机，1 pub -> 1/8/32 sub | 是否保留直接 MPMC 的短路径，网络提示为零时是否没有出站载荷 |
+| 本机+跨机同时活跃 | 本机可读时间是否受网络额度、网关暂停或远端 ACK 阻塞 |
+| 跨机 1 pub -> 1 host / 多订阅进程 | 单份网络重组/注入，批量 IO 的系统调用成本 |
+| 跨机 1 pub -> 2/8 host | 单播放大、发送预算和尾延迟 |
+| 1000 个低频话题 | socket、FD、RSS、SHM、线程和空闲 CPU |
+| 大热话题与小冷话题，同 shard / 不同 shard | 注入/重传是否形成新的排队瓶颈 |
+| 同话题 8 发布者 | MPMC 竞争、本机提交和网络排队分别计时 |
+| 冷启动、零信用、首次大消息 | 信用补充和发现等待的成本，不能只报预热后的最优路径 |
+| 丢片与 ACK 丢失 | 默认短定时器的恢复 p99、误重传次数及额外带宽 |
 
-每个性能场景至少 3 次独立运行，包含预热和明确的测量窗口，报告中位数与范围。
-不能删去不利轮次，只能标明机器异常并完整保留原始数据。
+每组至少覆盖 64B、4KiB、1MiB 的目标消息档位，报告实际 wire blob 字节数；
+至少 3 次独立运行，预热后测量窗口不短于 30 秒，冷启动单独采样。
+有界编码器下同时记录以下时间，不能只测 publish 返回：
 
-若目标部署尚未提供性能预算：
+1. 调用开始到本机订阅者可读取完整消息。
+2. 调用开始到 best-effort 返回，以及到 reliable 返回。
+3. 编码、本机提交、信用等待、出站排队、首发、远端重组/提交及 ACK 等待。
+4. 实际交付数、丢失/重复、超时与晚交付、CPU、上下文切换、复制字节、FD/RSS/SHM 和网络流量。
 
-- 功能和固定 socket 门槛仍必须通过；
-- 报告完整数据；
-- 模式维持显式启用；
-- 不宣称“性能验收已满足所有部署”。
+本机跨进程时间戳需处于相同时钟域。跨机单向时延只有在 PTP/等价同步及误差界有证据时
+才报告；否则报告同一源时钟测得的往返/可靠完成时间，以及各主机内部阶段耗时。
+不同主机 CLOCK_MONOTONIC 不能相减。丢失和失败调用必须进入统计，避免只统计幸存快消息。
+
+工程初始门槛：
+
+- I19～I21 和 R14～R18 必须通过，证明短路径真实存在。
+- 仅本机同等配置下，对 p50、p99 分别要求：新值-直接 MPMC 基线 <= max(基线×10%, 5 微秒)。
+  这是初始回归门槛，5 微秒用于容纳很短路径的绝对测量波动，不是用户实时性 SLA。
+- 若没有达到本机回归门槛，保留全部数据并定位编码/复制/线程成本，不能声称低延迟优化完成。
+- 本机+网络同时活跃时，网关暂停或网络信用耗尽不得让本机交付等待网络恢复；
+  public reliable 返回仍可能等待 deadline，两种时间必须分别呈现。
+- 跨机以实测报告收益和退化；无用户部署预算时维持显式启用，不宣称所有部署性能已通过。
+
+nodelet 配置必须一致；已存在的纯进程内 nodelet 路径另作参考，不能关闭它后声称全面超越。
+不删除不利轮次；机器异常注明并保留原始结果。若后续目标预算更严格，新增门槛而非改图表掩盖。
 
 ### 17.5 公平性基准
 
@@ -1998,7 +2085,7 @@ best-effort 的故障丢包可以发生，但必须与计数和序号缺口一�
 
 - 热话题：1 MiB，发送速率限制在本机/网络测得可持续吞吐的 70%；
 - 冷话题：64B，100 Hz；
-- 同时进行 HELLO、订阅变更和可靠 ACK；
+- 同时进行 HELLO、订阅变更、信用补充和可靠 ACK；分别把冷热话题放在同 shard 与不同 shard；
 - 冷话题 30 秒窗口内无超过 1 秒的停滞；
 - 所有 reliable 调用在配置 deadline 加 250 ms 测试调度余量内返回；
 - 无队列或重组内存持续增长。
@@ -2015,9 +2102,9 @@ best-effort 的故障丢包可以发生，但必须与计数和序号缺口一�
 1. 完成前置 MPMC 和本方案全部必要验收。
 2. 选择一组独立测试 topic/domain；确认应用/网关处于同一可达本机运行实例。
 3. 选择实际空闲的端口组，前台启动网关并查看 Ready。
-4. 两端确认 shared_v1 协议和限额兼容。
+4. 确认两端网络 v1、本机控制/出站 v2 兼容；应用与网关 MPMC layout/时钟域一致。
 5. 先启动订阅端并等待 SUB_READY；创建发布对象后先不发送，按第 16.3 节确认两端
-   话题与 peer 状态均已同步，再放行需要避免启动丢包的业务流量。
+   话题与 peer 状态均已同步；为首个大消息准备足够发送信用，再放行需要避免启动丢包的流量。
 6. 检查 gateway status、UDP socket 数和错误计数。
 7. 低流量运行，确认数据正确后再逐步提高流量。
 8. 为目标部署验证延迟与单播带宽预算。
@@ -2032,10 +2119,13 @@ best-effort 的故障丢包可以发生，但必须与计数和序号缺口一�
   不把桥接放入本方案的隐藏兼容分支。
 - 旧端口可能与新默认端口重叠，部署者必须按真实 bind 结果配置。
 - 更新 gateway_epoch 或协议版本后，旧在途事务不迁移到新实例。
+- DZLC/DZTX v1 仅为旧草案格式，新实现拒绝它；不能混用旧 96B 与新 112B 出站头。
+- 网关运行中故障后，本机 MPMC 继续工作是明确的新模式语义，不代表网络已自动恢复。
+  需要恢复网络时新建后端会话，并避免业务对不确定旧调用无条件重试。
 
 ### 18.3 回滚步骤
 
-1. 停止新模式应用继续提交。
+1. 停止新模式应用的本机和网络两腿继续提交；仅停网关不足以让本机发布停止。
 2. 让可靠调用在原 deadline 内结束，记录未完成/部分投递。
 3. 停止新模式应用对象和网关。
 4. 对要回滚的应用设置 DZIPC_NET_BACKEND=legacy，或取消该变量。
@@ -2063,7 +2153,7 @@ best-effort 的故障丢包可以发生，但必须与计数和序号缺口一�
 - [ ] 预构造段 false 不产生可见提交。
 - [ ] 重组、重传、快照、去重和本机队列有硬配额。
 - [ ] 活跃/候选/旧目录、发送目标状态和 peer 历史均有配额，去重不因 TTL/LRU 丢失。
-- [ ] DZTX 按实际 loan 容量计费，信用与记录长度边界验证通过。
+- [ ] DZLC v2 / DZTX v2 的版本、112B 布局、实际 loan 计费与信用边界验证通过。
 - [ ] tm=0、晚交付、零 ACK 的不确定结果与订阅加入边界已写入用户说明并验证。
 - [ ] 重启、析构、最后订阅者退出和旧 Sample 均验证。
 - [ ] 远端入站不会再次出站。
@@ -2073,7 +2163,11 @@ best-effort 的故障丢包可以发生，但必须与计数和序号缺口一�
 - [ ] topic_cat 和 Python 相关路径有验证。
 - [ ] 所有新测试实际执行，测试数非零，skip 明确。
 - [ ] 至少两台真实主机的正确性和性能证据齐全。
-- [ ] 本机额外延迟与单播带宽放大已量化。
+- [ ] 本机直达与直接 MPMC 的 p50/p99 对照达到约定门槛，单播放大已量化。
+- [ ] 源网关不回注应用出站消息，网关故障不关闭既有本机端。
+- [ ] 两类信用独立守恒，可靠热路径没有逐消息 BEGIN 往返。
+- [ ] 分 shard 注入、批量 IO 部分成功、短定时器与控制预算均有证据。
+- [ ] 冷启动/信用不足、两腿部分提交与错误回退都已验证。
 - [ ] 回滚演练完成，没有误清其他 Agent / 业务资源。
 - [ ] 最终 diff 仅包含本任务改动。
 - [ ] 团队回报已完成，或工具不可用事实已说明。
@@ -2084,10 +2178,10 @@ best-effort 的故障丢包可以发生，但必须与计数和序号缺口一�
 
 | 任务 | 状态 | 提交/源码指纹 | 构建目录 | 测试数/失败/跳过 | 证据 | 未解决事项 |
 |---|---|---|---|---|---|---|
-| T00 | 未开始 | | | | | |
-| T01 | 未开始 | | | | | |
-| T02 | 未开始 | | | | | |
-| T03 | 未开始 | | | | | |
+| T00 | 部分完成 | f066a82 + 工作区 | build-shared-net | 新增 3/0/0 | [基线与能力表](shared_network_endpoint_evidence/20261005-foundation/baseline.md) | 规模、延迟、长期压力及真实跨机数据待采集 |
+| T01 | 已完成 | f066a82 + 工作区 | build-shared-net / build-shared-net-off | 配置各 10/0/0；旧路径 22/0/0 | [构建与配置记录](shared_network_endpoint_evidence/20261005-foundation/baseline.md) | 非 Linux 仅纯函数分支验证；实际平台构建待验收 |
+| T02 | 已完成 | f066a82 + 工作区 | build-shared-net | GTest 16/0/0；Python 向量 1/0/0 | [协议记录](shared_network_endpoint_evidence/20261005-foundation/implementation.md) | 具体类型解码仍由订阅者承担；未验证异端序 DZFlat 平台 |
+| T03 | 已完成 | f066a82 + 工作区 | build-shared-net | GTest 12/0/0 | [端点与 IO 记录](shared_network_endpoint_evidence/20261005-foundation/implementation.md) | 路由生命周期与重组接入仍属后续卡；尚无跨机性能结论 |
 | T04 | 未开始 | | | | | |
 | T05 | 未开始 | | | | | |
 | T06 | 未开始 | | | | | |
@@ -2120,13 +2214,33 @@ best-effort 的故障丢包可以发生，但必须与计数和序号缺口一�
 下一卡可开始的证据：
 ~~~
 
-### 20.1 本次文档复核记录（不是实施完成记录）
+### 20.1 本次完整方案修订记录（不是实现完成记录）
 
-2026-10-05 对照 e887d5e 与共享工作区复核，补充来源目录角色、36B RouteKey、收包校验顺序、
-peer 代次历史、去重保留条件、订阅加入边界、远端晚交付、出站信用和 loan 档位容量。
-同步任务卡、构建开关约束及 V13～V17、R11～R13、F17～F22 的验收要求。
-前置 MPMC 文档仍有后续压力/故障/兼容验收未完成项；本次未执行 T00～T15，任务状态不变。
-新增协议字段是待实现的 DZMX v1 设计修订，不能声称与尚未冻结的旧草案编码互通。
+用户要求先提交现状，再完整修订方案，本轮暂不实现共享网关代码。
+
+| 项目 | 本次事实 |
+|---|---|
+| 优化前提交 | f066a82：MPMC 代码、配套工具/测试、前置交付记录及上一版网络方案，共 31 个文件 |
+| 提交前构建 | cmake --build /tmp/cpp_ipc_dds_mpmc_build --parallel 2，退出码 0 |
+| 提交前专项 | ctest --test-dir /tmp/cpp_ipc_dds_mpmc_build --output-on-failure --tests-regex 'test_(shm_mpmc\|shm_multi_publisher\|ipc_info_pool)'，8/8，退出码 0 |
+| 本轮修改范围 | 仅本文件；未创建或修改共享网关实现 |
+| 文档检查 | 22 主章节、16 任务卡、21 不变量、67 验收项的编号、表格、链接与章节引用检查通过；160B/84B/40B/112B 协议布局检查通过 |
+| 前置遗留 | MPMC 专项已交付；原完整回归的 8 个旧基线失败及未完成的压力/性能证据保留，不重分类为通过 |
+| 团队工具 | 当前会话没有 member_report_result 或 /compact 可调用能力，不能宣称已回报/压缩 |
+
+本次固定的替代决策：
+
+| 旧草案 | 本次方案 |
+|---|---|
+| 应用消息先到网关，再注入本机 | 应用本机直达；网关对出站记录只发远端 |
+| 单接管点 | 两腿独立接管，公开 bool 与 prebuilt 按第 5 节合并 |
+| 每条 reliable 先 BEGIN 往返 | 预授予信用，DZTX v2 携带 request/deadline |
+| DZLC/DZTX v1、96B 出站头 | DZLC/DZTX v2、112B 出站头；网络协议仍为 v1 |
+| 全局本机提交循环 | 每 RouteKey 在所属 shard 完成入站提交 |
+| 固定 20 ms 缺片/探测初值 | 默认 2 ms、可配置的短定时器与控制速率预算 |
+
+上述修订结束时 T00～T15 均未开始。后续执行从本修订的契约和任务卡开始，不执行旧草案的网关回注、
+逐消息 BEGIN 或全局串行提交方案。本机直达收益、跨机延迟和新故障用例尚无运行结果。
 
 ## 21. 执行者遇到问题时的处理规则
 
@@ -2135,7 +2249,7 @@ peer 代次历史、去重保留条件、订阅加入边界、远端晚交付、
 3. 文档与当前实现冲突：当前实现决定基线事实，本方案决定新模式目标；记录实际差异。
 4. 底层原子提交不能满足：停在 T05 的边界做专项验证；不通过重试隐藏重复风险。
 5. 旧测试失败：在基线上复跑一次分类，已有问题记录；本次引入的问题修复后再推进。
-6. 性能没有提升：先核对是否消除了重复工作、是否遇到单播放大或网关一跳；报告数据。
+6. 性能没有提升：按阶段定位编码/复制、信用等待、网络排队和单播放大，保留完整对照数据。
 7. 没有跨机环境：完成本机和模拟环境测试，并明确真实跨机验收仍未完成。
 8. 缺用户部署参数：采用本文默认值制作可评审实现，不改用户实际网卡或全局系统配置。
 9. 不确定网络/SHM 可靠语义：按第 5 节做失败处理，不声称端到端应用消费成功。
@@ -2147,7 +2261,9 @@ peer 代次历史、去重保留条件、订阅加入边界、远端晚交付、
 
 以下不属于首版执行范围，禁止为了追求功能齐全在主线中顺手加入：
 
-- 本机发布直接 SHM 与网关之间的动态快路切换；
+- 本机交付者在应用与网关之间动态切换（首版固定应用直达）；
+- 共享业务 payload 的跨进程描述符/额外租约、一次提交同时供本机与网关读取；
+- 每进程直接持有网络发送端点、DPDK/AF_XDP、忙轮询与 RTT 自适应；
 - 数据组播、自适应单播/组播和跨网关路由转发；
 - 网络严格 FIFO、持久化历史和跨崩溃 exactly-once；
 - 零拷贝网卡收包、直接重组到业务 SHM loan；

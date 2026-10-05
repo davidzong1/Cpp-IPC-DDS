@@ -18,6 +18,14 @@ aux_source_directory(${LIBIPC_PROJECT_DIR}/src/dzIPC/logger SRC_FILES)
 # ⚠️ aux_source_directory 是**配置期**展开: 新增 .cc 后必须重跑 `cmake -S . -B build`,
 #    否则新源文件静默不进 libipc.so (不报错, 只是不参与链接)。
 aux_source_directory(${LIBIPC_PROJECT_DIR}/src/dzIPC/threepools SRC_FILES)
+list(APPEND SRC_FILES ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/shared_config.cc)
+if(DZIPC_BUILD_SHARED_NET)
+  list(APPEND SRC_FILES
+    ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/wire_protocol.cc
+    ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/local_protocol.cc
+    ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/wire_blob.cc
+    ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/datagram_endpoint_linux.cc)
+endif()
 
 file(GLOB HEAD_FILES
   ${LIBIPC_PROJECT_DIR}/include/libipc/*.h
@@ -42,6 +50,8 @@ else()
 endif()
 
 # 如果强制开启，直接为目标添加调试选项；否则按配置添加（Debug 配置时生效）
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+  DZIPC_SHARED_NET_BUILT=$<BOOL:${DZIPC_BUILD_SHARED_NET}>)
 if(ENABLE_DEBUG_INFO)
   if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(${PROJECT_NAME} PRIVATE -g -O0)

@@ -47,6 +47,15 @@ option(OPEN_DEBUG_MODE          "Enable debug mode in PROJECT."                 
 option(LIBIPC_BUILD_PYTHON      "Build pybind11 Python module dzipc_cpp."               ON)
 option(UPDATA_MSG_SRV_GENERATOR    "Update msg/srv generator scripts."                  ON)
 
+set(DZIPC_SHARED_NET_SUPPORTED OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(DZIPC_SHARED_NET_SUPPORTED ON)
+endif()
+option(DZIPC_BUILD_SHARED_NET "构建共享网络后端（64 位 Linux）" ${DZIPC_SHARED_NET_SUPPORTED})
+if(DZIPC_BUILD_SHARED_NET AND NOT DZIPC_SHARED_NET_SUPPORTED)
+    message(FATAL_ERROR "共享网络后端只支持 64 位 Linux，请关闭 DZIPC_BUILD_SHARED_NET")
+endif()
+
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_CXX_STANDARD 17)
@@ -58,7 +67,7 @@ endif()
 
 if (OPEN_DEBUG_MODE)
     set(CMAKE_BUILD_TYPE Debug)
-else()
+elseif(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 if(NOT MSVC)
@@ -119,6 +128,9 @@ endif()
 add_subdirectory(exec/dzipc_list)
 add_subdirectory(exec/dzipc_topic_cat)
 add_subdirectory(exec/dzipc_pub)
+if(DZIPC_BUILD_SHARED_NET)
+    add_subdirectory(exec/dzipc_gateway)
+endif()
 
 if (LIBIPC_BUILD_TESTS)
     # CTest 必须在**构建根目录**启用: ctest 从构建根找 CTestTestfile.cmake, 只有在顶层

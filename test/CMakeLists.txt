@@ -1,5 +1,7 @@
 project(test-ipc)
 
+# 配置解析及明确失败分支在后端 OFF 时仍须可链接、可测试。
+
 if(NOT MSVC)
   add_compile_options(
     -Wno-attributes 
@@ -37,6 +39,11 @@ list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/xproc_benchmark.cpp")
 # 所以同样从 GLOB 里剔除，避免重复定义 target。
 list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/test_w02_xproc_benchmark.cpp")
 file(GLOB HEAD_FILES ${LIBIPC_PROJECT_DIR}/test/*.h)
+if(NOT DZIPC_BUILD_SHARED_NET)
+    foreach(name test_shared_net_wire test_shared_net_blob test_shared_net_local_protocol test_shared_net_endpoint test_shared_net_io_lifecycle)
+        list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/${name}.cpp")
+    endforeach()
+endif()
 
 # 查找 pthread 库
 find_package(Threads REQUIRED)
@@ -888,3 +895,23 @@ set_target_properties(force_backend_unavailable PROPERTIES
                       PREFIX "lib"
                       LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 message(STATUS "Created W10 fault injector shared library: libforce_backend.so (t42)")
+
+target_compile_definitions(test_shared_net_config PRIVATE
+    DZIPC_TEST_SHARED_NET_BUILT=$<BOOL:${DZIPC_BUILD_SHARED_NET}>)
+add_test(NAME test_shared_net_config COMMAND test_shared_net_config)
+set_tests_properties(test_shared_net_config PROPERTIES LABELS shared_net TIMEOUT 30)
+if(DZIPC_BUILD_SHARED_NET)
+    foreach(name test_shared_net_wire test_shared_net_blob test_shared_net_local_protocol test_shared_net_endpoint test_shared_net_io_lifecycle)
+        target_compile_definitions(${name} PRIVATE
+            DZIPC_GOLDEN_VECTORS="${LIBIPC_PROJECT_DIR}/test/shared_net/golden_vectors.json")
+        add_test(NAME ${name} COMMAND ${name})
+        set_tests_properties(${name} PROPERTIES LABELS shared_net TIMEOUT 30)
+    endforeach()
+    add_test(NAME test_shared_net_golden_vectors
+        COMMAND ${Python3_EXECUTABLE} ${LIBIPC_PROJECT_DIR}/test/shared_net/generate_vectors.py --check)
+    set_tests_properties(test_shared_net_golden_vectors PROPERTIES LABELS shared_net TIMEOUT 30)
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+    add_test(NAME test_shared_net_shm_capacity COMMAND test_shared_net_shm_capacity)
+    set_tests_properties(test_shared_net_shm_capacity PROPERTIES LABELS shared_net TIMEOUT 30)
+endif()
