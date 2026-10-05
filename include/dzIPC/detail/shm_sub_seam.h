@@ -25,7 +25,7 @@
  *
  * ── 设计约束 ────────────────────────────────────────────────────────────
  *   · **默认关闭**: 钩子为空指针时, 每个调用点只有一次 relaxed atomic load + 分支。
- *     收包循环每迭代(一次 recv(50))两次, 量级 ns, 相对一次 recv 可忽略。
+ *     接收尝试与视图入/出队分别打点；未安装钩子时不读取时钟。
  *   · **行为逐位不变**: 未设置钩子时产品行为与没有本头文件时完全一致。不新增公共
  *     生产 API、不改任何对外签名、不改控制面协议。
  *   · **钩子在不持锁时调用**: 所有调用点都在 RouteSession 锁外(收包循环本就不持锁;
@@ -121,8 +121,9 @@ enum class RecvPathReason : int
     kInvalidRoute       = 11,  ///< route == nullptr
 };
 
-/* 打点携带的信息。`route` 在 kAfterRecv 上是刚返回的那条 route(可读 connected_id()
- * 判定 disconnect 是否已生效); 其余点位为 nullptr。data/size 只在收包点非空。 */
+/* 打点携带的信息。`route` 在recv前/返回/释放lease后为对应的legacy route，MPMC可为
+ * nullptr；视图入/出队点为nullptr。data/size在recv返回与视图入/出队点提供借用字节，
+ * 钩子不得在返回后继续引用这些字节。 */
 struct SeamEvent
 {
     SeamPoint point{SeamPoint::kAfterRecv};

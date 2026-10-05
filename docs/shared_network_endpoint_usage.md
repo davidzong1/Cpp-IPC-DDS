@@ -83,6 +83,8 @@ export DZIPC_GATEWAY_CONTROL=/tmp/dzipc-gateway-$UID/control.sock
 
 当前没有 DZTX enqueue 时间字段；完整应用出站排队、网络单程时间和跨主机时钟误差仍不可从这些直方图推算。协议头未挪用保留字段。
 
+接收侧排查可在`test/shared_net/benchmark.py`或`performance_matrix.py`中显式加`--receive-trace`，导出每条DZFlat消息的`recv_begin_ns/recv_return_ns/enqueue_before_ns/dequeue_after_ns`。这些是默认关闭的内部测试缝，不属于网关常开直方图，也不增加Sample或协议字段。发布→recv返回包含提交、等待、worker调度和取包；入队前→出队后包含入队、排队、唤醒与出队。`summarize_receive.py`核对分段和，并用同一批端到端最慢1%消息做归因。打点有观测成本，诊断结果单独保存；旧基线没有的新打点明确标为未采样。
+
 ## 错误与退出码
 
 网关 CLI：0 成功；2 参数/配置错误；3 运行时不可用（目录、绑定、独占锁、会话或协议失败）。topic_cat 共享分支额外使用 4 表示单次读取超时。
@@ -109,4 +111,4 @@ export DZIPC_GATEWAY_CONTROL=/tmp/dzipc-gateway-$UID/control.sock
 
 正确性和性能验收参见 [执行计划](shared_network_endpoint_execution_plan.md) 与其证据表；单机命名空间验证不能替代两台物理主机的最终验收。
 
-当前验收结论见[等待/指标修复实测](shared_network_endpoint_evidence/20261005-optimization/results.md)和[CRC固定负载实测](shared_network_endpoint_evidence/20261005-crc/results.md)。同shard冷消息可靠完成p99中位数从4.988ms降至1.057ms；已测纯本机版本仍有13/27逐轮配对未达到门槛，CRC版本没有重复该本机矩阵。物理跨机、完整阶段指标与若干负载矩阵仍缺项，维持实验性显式启用。旧[T14](shared_network_endpoint_evidence/20261005-t14/results.md)和[T15](shared_network_endpoint_evidence/20261005-t15/results.md)记录保留。legacy 的 blocking 固定采用 TLV，应使用对象读取接口；shared_v1 的 ACK 则在目标 SHM 确定提交后发送，不将两种返回语义等同。
+当前验收结论见[等待/指标修复实测](shared_network_endpoint_evidence/20261005-optimization/results.md)、[CRC固定负载实测](shared_network_endpoint_evidence/20261005-crc/results.md)与[接收分段诊断](shared_network_endpoint_evidence/20261005-receive/results.md)。同shard冷消息可靠完成p99中位数从4.988ms降至1.057ms；已测纯本机完整矩阵仍有13/27逐轮配对未达到门槛，最新版本没有重复该完整矩阵。新增18个接收诊断窗口无丢失/错误/重复，但仍有2/9逐轮门槛失败，不能替代完整验收。物理跨机、完整阶段指标与若干负载矩阵仍缺项，维持实验性显式启用。旧[T14](shared_network_endpoint_evidence/20261005-t14/results.md)和[T15](shared_network_endpoint_evidence/20261005-t15/results.md)记录保留。legacy 的 blocking 固定采用 TLV，应使用对象读取接口；shared_v1 的 ACK 则在目标 SHM 确定提交后发送，不将两种返回语义等同。
