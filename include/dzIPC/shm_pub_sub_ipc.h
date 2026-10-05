@@ -262,6 +262,7 @@ public:
                          int cpu_id = -1, int thread_priority = 0);
     ~shm_sub_ipc();
     void set_receive_notifier(std::function<void()> notify);
+    std::uint32_t connected_generation() const { return recv_generation_.load(std::memory_order_acquire); }
     void set_internal(bool value) { internal_ = value; }
     void InitChannel(std::string extra_info = "");
     void reset_message(const std::shared_ptr<TopicData>& msg);

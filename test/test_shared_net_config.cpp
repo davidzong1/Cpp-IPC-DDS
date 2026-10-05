@@ -188,11 +188,11 @@ TEST(SharedNetConfig, SharedNeverSilentlyFallsBack)
             try
             {
                 require_network_backend(false);
+                _exit(shared_net_built() ? 0 : 3);
             }
             catch (const ConfigError &e)
             {
-                const auto expected =
-                    shared_net_built() ? ConfigCode::NotImplemented : ConfigCode::BackendNotBuilt;
+                const auto expected = ConfigCode::BackendNotBuilt;
                 _exit(e.code() == expected ? 0 : 2);
             }
             _exit(1);

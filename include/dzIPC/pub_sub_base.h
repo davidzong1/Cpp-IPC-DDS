@@ -8,7 +8,7 @@
 #include <vector>
 #include "dzIPC/common/topic_data.h"
 
-class Sample;
+namespace dzIPC { class Sample; }
 
 namespace dzIPC {
 class IPC_EXPORT pub_ipc_base

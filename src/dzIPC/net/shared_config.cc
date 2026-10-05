@@ -212,7 +212,6 @@ void require_network_backend(bool socket_only)
     s = validate_control_path(c.control_path);
     if (!s)
         throw ConfigError(s);
-    throw ConfigError(fail(ConfigCode::NotImplemented, "共享网络数据面尚未交付"));
 }
 ConfigStatus validate_control_path(const std::string &s)
 {

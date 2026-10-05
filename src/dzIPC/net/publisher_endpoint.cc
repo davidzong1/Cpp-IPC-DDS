@@ -1,4 +1,5 @@
 #include "dzIPC/net/publisher_endpoint.h"
+#include "dzIPC/common/nodelet_config.h"
 #include "local_control_linux.h"
 #include <atomic>
 #include <shared_mutex>
@@ -75,12 +76,12 @@ PublishOutcome PublisherEndpoint::publish(IpcMsgBase& message, Delivery delivery
     if (!impl_->runtime->healthy() || !impl_->network_required(delivery)) {
         failure.sequence = impl_->next(); failure.network = impl_->runtime->healthy() ? SubmitState::NotRequired : SubmitState::NotSubmitted;
         failure.remote.result = failure.network == SubmitState::NotRequired ? SendResultCode::NoSubscribers : SendResultCode::GatewayLost;
-        failure.local = local_required ? impl_->writer->try_commit_local(message, true, deadline) : SubmitState::NotRequired;
+        failure.local = local_required ? impl_->writer->try_commit_local(message, IsDzFlatEnabled(), deadline) : SubmitState::NotRequired;
         if (local_required && failure.local == SubmitState::NotRequired) failure.local = SubmitState::NotSubmitted;
         failure.success = delivery == Delivery::Reliable ? reliable_result(failure.local, failure.remote) : best_effort_result(failure.local, failure.network); return failure;
     }
     WireBlob blob;
-    try { if (!WireEncoder::encode(message, true, blob)) return failure; } catch (...) { return failure; }
+    try { if (!WireEncoder::encode(message, IsDzFlatEnabled(), blob)) return failure; } catch (...) { return failure; }
     return impl_->deliver(blob, delivery, deadline, local_required);
 }
 PublishOutcome PublisherEndpoint::prebuilt(ByteView bytes, Delivery delivery, std::uint64_t ms) {

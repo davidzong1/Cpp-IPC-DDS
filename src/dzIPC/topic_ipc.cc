@@ -1,6 +1,9 @@
 #include "dzIPC/topic_ipc.h"
 #include "dzIPC/hybrid_pub_sub_ipc.h"
 #include "dzIPC/net/shared_config.h"
+#if DZIPC_SHARED_NET_BUILT
+#include "dzIPC/shared_pub_sub_ipc.h"
+#endif
 #include <memory>
 #include <typeinfo>
 #include <utility>
@@ -110,6 +113,7 @@ pimpl::publisher_ipc_impl::publisher_ipc_impl(const std::shared_ptr<TopicData>& 
                                               bool enable_thread_qos, int cpu_id, int thread_priority)
     : p_((validate_network_backend(ipc_type), publisher_ipc_impl_::make()))
 {
+    try {
     impl(p_)->topic_name = topic_name;
     impl(p_)->domain_id = domain_id;
     impl(p_)->ipc_type = ipc_type;
@@ -120,6 +124,11 @@ pimpl::publisher_ipc_impl::publisher_ipc_impl(const std::shared_ptr<TopicData>& 
     }
     else if (ipc_type == IPCType::Socket)
     {
+#if DZIPC_SHARED_NET_BUILT
+        if (net::process_config().backend == net::Backend::SharedV1)
+            impl(p_)->ipc = std::make_unique<shared_net::Publisher>(msg, topic_name, domain_id, verbose, enable_thread_qos, cpu_id, thread_priority);
+        else
+#endif
         impl(p_)->ipc = std::make_unique<hybrid::Publisher>(msg, topic_name, domain_id, verbose,
                                                          enable_thread_qos, cpu_id, thread_priority);
     }
@@ -136,6 +145,7 @@ pimpl::publisher_ipc_impl::publisher_ipc_impl(const std::shared_ptr<TopicData>& 
     {
         throw std::invalid_argument("Unsupported IPC type");
     }
+    } catch (...) { ipc::clear_impl(p_); throw; }
 }
 
 pimpl::publisher_ipc_impl::~publisher_ipc_impl()
@@ -213,6 +223,7 @@ pimpl::subscriber_ipc_impl::subscriber_ipc_impl(const std::shared_ptr<TopicData>
                                                 bool verbose, bool enable_thread_qos, int cpu_id, int thread_priority)
     : p_((validate_network_backend(ipc_type), subscriber_ipc_impl_::make()))
 {
+    try {
     impl(p_)->topic_name = topic_name;
     impl(p_)->domain_id = domain_id;
     impl(p_)->ipc_type = ipc_type;
@@ -223,6 +234,11 @@ pimpl::subscriber_ipc_impl::subscriber_ipc_impl(const std::shared_ptr<TopicData>
     }
     else if (ipc_type == IPCType::Socket)
     {
+#if DZIPC_SHARED_NET_BUILT
+        if (net::process_config().backend == net::Backend::SharedV1)
+            impl(p_)->ipc = std::make_unique<shared_net::Subscriber>(msg, topic_name, domain_id, queue_size, verbose, enable_thread_qos, cpu_id, thread_priority);
+        else
+#endif
         impl(p_)->ipc = std::make_unique<hybrid::Subscriber>(msg, topic_name, domain_id, queue_size, verbose,
                                                           enable_thread_qos, cpu_id, thread_priority);
     }
@@ -239,6 +255,7 @@ pimpl::subscriber_ipc_impl::subscriber_ipc_impl(const std::shared_ptr<TopicData>
     {
         throw std::invalid_argument("Unsupported IPC type");
     }
+    } catch (...) { ipc::clear_impl(p_); throw; }
 }
 
 pimpl::subscriber_ipc_impl::~subscriber_ipc_impl()
