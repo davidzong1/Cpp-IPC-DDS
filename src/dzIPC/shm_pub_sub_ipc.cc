@@ -2643,6 +2643,26 @@ void shm_sub_ipc::get(Sample& out)
     }
 }
 
+void shm_sub_ipc::enable_cancellable_wait() {
+    sub_state_->view_queue->enable_cancellable_wait();
+    sub_state_->msg_queue->enable_cancellable_wait();
+}
+void shm_sub_ipc::cancel_waits() {
+    sub_state_->view_queue->cancel_waits();
+    sub_state_->msg_queue->cancel_waits();
+}
+bool shm_sub_ipc::get_cancellable(Sample& out, std::uint64_t timeout) {
+    std::shared_ptr<Sample> sample;
+    if (!sub_state_->view_queue->pop_cancellable(sample, timeout) || !sample) return false;
+    out = std::move(*sample); return true;
+}
+bool shm_sub_ipc::get_clone_cancellable(std::shared_ptr<TopicData>& out, std::uint64_t timeout) {
+    std::shared_ptr<IpcMsgBase> message;
+    if (!sub_state_->msg_queue->pop_cancellable(message, timeout) || !message) return false;
+    if (message->dzflat_is_borrowed()) sub_state_->adopt_borrowed.fetch_sub(1, std::memory_order_relaxed);
+    out->update(message); return true;
+}
+
 bool shm_sub_ipc::get(Sample& out, std::uint64_t tm_ms)
 {
     /* CircularQueue::pop 本来就支持超时(见其 tm 参数), 之前只是没接线 —— 于是只发 TLV 的

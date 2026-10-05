@@ -53,6 +53,26 @@ public:
   void set_evict_cb(EvictCb cb) { evict_cb_ = std::move(cb); }
   void set_notify_cb(std::function<void()> cb) { notify_cb_ = std::move(cb); }
 
+  // 在首次生产/消费前启用。共享 reader 直接使用队列的等待点，取消后不再复用。
+  void enable_cancellable_wait() { cancellable_ = true; }
+  void cancel_waits() {
+    { std::lock_guard<std::mutex> lock(wait_mtx_); cancelled_ = true; }
+    cv_.notify_all();
+  }
+  bool pop_cancellable(MsgPtr& out, std::uint64_t timeout) {
+    const auto now = std::chrono::steady_clock::now();
+    const auto maximum = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::time_point::max() - now).count();
+    const auto end = timeout >= static_cast<std::uint64_t>(maximum) ? std::chrono::steady_clock::time_point::max() : now + std::chrono::milliseconds(timeout);
+    std::unique_lock<std::mutex> lock(wait_mtx_);
+    for (;;) {
+      if (cancelled_) return false;
+      if (try_pop(out)) return true;
+      if (!timeout || cv_.wait_until(lock, end) == std::cv_status::timeout) {
+        return !cancelled_ && try_pop(out);
+      }
+    }
+  }
+
   bool pop(MsgPtr &out, uint64_t tm = std::numeric_limits<uint64_t>::max())
   {
     if (tm == std::numeric_limits<uint64_t>::max())
@@ -142,7 +162,11 @@ private:
         std::this_thread::yield();
       }
     }
-    cv_.notify_one();
+    if (cancellable_) {
+      // 与消费者的“空队列→等待”及取消共用同一把锁，不能在该窗口丢失通知。
+      std::lock_guard<std::mutex> lock(wait_mtx_);
+      cv_.notify_one();
+    } else cv_.notify_one();
     if (notify_cb_) notify_cb_();
   }
 
@@ -216,4 +240,5 @@ private:
   EvictCb evict_cb_;   /* 见 set_evict_cb; 构造后只读 */
   mutable std::mutex wait_mtx_;
   std::condition_variable cv_;
+  bool cancellable_ = false, cancelled_ = false;
 };

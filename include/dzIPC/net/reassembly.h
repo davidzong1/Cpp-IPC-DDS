@@ -57,6 +57,8 @@ public:
     void retire_route(const std::shared_ptr<RouteAdmission>&);
     void retire_peer_epoch(const std::shared_ptr<PeerAdmission>&);
     ReassemblyStats stats() const;
+    // 无重组时不需要毫秒轮询；回执仅需有界维护，入站时仍精确检查其 TTL。
+    int idle_wait_ms() const;
 private:
     struct Impl; std::unique_ptr<Impl> impl_;
 };

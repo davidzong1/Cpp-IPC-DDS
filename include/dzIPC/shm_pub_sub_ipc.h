@@ -262,6 +262,10 @@ public:
                          int cpu_id = -1, int thread_priority = 0);
     ~shm_sub_ipc();
     void set_receive_notifier(std::function<void()> notify);
+    void enable_cancellable_wait();
+    void cancel_waits();
+    bool get_cancellable(Sample&, std::uint64_t timeout_ms);
+    bool get_clone_cancellable(std::shared_ptr<TopicData>&, std::uint64_t timeout_ms);
     std::uint32_t connected_generation() const { return recv_generation_.load(std::memory_order_acquire); }
     void set_internal(bool value) { internal_ = value; }
     void InitChannel(std::string extra_info = "");

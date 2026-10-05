@@ -19,10 +19,6 @@ net::RouteDescriptor descriptor(const std::shared_ptr<TopicData>& msg, const std
     d.key.scope = common::channel_scope_token(name, domain, common::ScopeKind::PubSub); return d;
 }
 std::shared_ptr<net::ClientRuntime> runtime() { net::require_network_backend(false); return net::ClientRuntime::acquire(net::process_config().control_path); }
-struct Wake {
-    std::mutex mutex; std::condition_variable changed; std::uint64_t version = 0;
-    void notify() { std::lock_guard<std::mutex> lock(mutex); ++version; changed.notify_all(); }
-};
 }
 struct Publisher::Impl {
     const pid_t owner = getpid(); mutable std::shared_mutex gate;
@@ -82,12 +78,11 @@ bool Publisher::has_subscribed() const {
 struct Subscriber::Impl {
     struct Generation {
         std::shared_ptr<net::ClientRuntime> client; net::Identity id{};
-        std::shared_ptr<Wake> wake = std::make_shared<Wake>();
         info_pool::ScopedRegistration registration;
         std::unique_ptr<shm::shm_sub_ipc> reader;
         std::atomic<bool> active{false};
         ~Generation() {
-            active.store(false); wake->notify();
+            active.store(false); if (reader) reader->cancel_waits();
             try { if (client && client->healthy() && net::nonzero(id)) { net::Bytes body(id.begin(), id.end()); body.push_back(2); client->request(net::LocalKind::Unregister, body); } } catch (...) {}
         }
     };
@@ -102,7 +97,7 @@ struct Subscriber::Impl {
         std::shared_ptr<Generation> old;
         { std::lock_guard<std::mutex> lock(state); old = std::move(current); }
         if (!old) return;
-        old->active.store(false); old->wake->notify();
+        old->active.store(false); old->reader->cancel_waits();
         // 先撤销网络代次，再关闭旧 reader；借出的 Sample 自己持有池租约。
         if (old->client->healthy()) { net::Bytes body(old->id.begin(), old->id.end()); body.push_back(2); old->client->request(net::LocalKind::Unregister, body); }
         old->id = {};
@@ -116,8 +111,7 @@ struct Subscriber::Impl {
         const auto generation = net::codec::get(reply.body.data() + 16, 4);
         next->reader = std::make_unique<shm::shm_sub_ipc>(model, topic, domain, queue_size, verbose, qos, cpu, priority);
         next->reader->set_internal(true);
-        const std::weak_ptr<Wake> wake = next->wake;
-        next->reader->set_receive_notifier([wake] { if (auto w = wake.lock()) w->notify(); }); next->reader->InitChannel(extra);
+        next->reader->enable_cancellable_wait(); next->reader->InitChannel(extra);
         const auto deadline = net::local::monotonic_ns() + 2000000000ull;
         while (next->reader->connected_generation() != generation) {
             if (!next->client->healthy() || net::local::monotonic_ns() >= deadline) throw std::runtime_error("共享订阅 SHM generation 未连接");
@@ -137,17 +131,8 @@ struct Subscriber::Impl {
         { std::lock_guard<std::mutex> lock(state); if (closing || !current) return false; selected = current; ++readers; }
         Reading reading{*this};
         auto generation = std::move(selected);
-        const auto now = std::chrono::steady_clock::now();
-        const auto maximum = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::time_point::max() - now).count();
-        const auto end = timeout >= static_cast<std::uint64_t>(maximum) ? std::chrono::steady_clock::time_point::max() : now + std::chrono::milliseconds(timeout);
-        for (;;) {
-            std::uint64_t observed; { std::lock_guard<std::mutex> lock(generation->wake->mutex); observed = generation->wake->version; }
-            if (!generation->active.load()) return false;
-            if (attempt(*generation->reader)) return generation->active.load();
-            if (!timeout) return false;
-            std::unique_lock<std::mutex> lock(generation->wake->mutex);
-            if (!generation->wake->changed.wait_until(lock, end, [&] { return !generation->active.load() || generation->wake->version != observed; })) return false;
-        }
+        if (!generation->active.load()) return false;
+        return attempt(*generation->reader, timeout) && generation->active.load();
     }
 };
 Subscriber::Subscriber(const std::shared_ptr<TopicData>& msg, const std::string& topic, std::size_t domain, std::size_t queue, bool verbose, bool qos, int cpu, int priority)
@@ -177,19 +162,19 @@ void Subscriber::get(Sample& sample) { (void)get(sample, UINT64_MAX); }
 bool Subscriber::get(Sample& sample, std::uint64_t timeout) {
     if (impl_->owner != getpid()) return false;
     Sample candidate;
-    if (!impl_->read(timeout, [&](auto& reader) { return reader.try_get(candidate); })) return false;
+    if (!impl_->read(timeout, [&](auto& reader, auto timeout) { return reader.get_cancellable(candidate, timeout); })) return false;
     sample = std::move(candidate); return true;
 }
 bool Subscriber::try_get(Sample& sample) { return get(sample, 0); }
 void Subscriber::get_clone(std::shared_ptr<TopicData>& out) {
     if (impl_->owner != getpid()) return;
     auto candidate = out;
-    if (impl_->read(UINT64_MAX, [&](auto& reader) { return reader.try_get_clone(candidate); })) out = std::move(candidate);
+    if (impl_->read(UINT64_MAX, [&](auto& reader, auto timeout) { return reader.get_clone_cancellable(candidate, timeout); })) out = std::move(candidate);
 }
 bool Subscriber::try_get_clone(std::shared_ptr<TopicData>& out) {
     if (impl_->owner != getpid()) return false;
     auto candidate = out;
-    if (!impl_->read(0, [&](auto& reader) { return reader.try_get_clone(candidate); })) return false;
+    if (!impl_->read(0, [&](auto& reader, auto timeout) { return reader.get_clone_cancellable(candidate, timeout); })) return false;
     out = std::move(candidate); return true;
 }
 } // namespace dzIPC::shared_net

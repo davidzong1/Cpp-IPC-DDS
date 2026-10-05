@@ -286,4 +286,5 @@ void ReassemblyShard::retire_peer_epoch(const std::shared_ptr<PeerAdmission>& pe
     peer->active.store(false); impl_->retire([&](const StreamKey& key) { return key.source == peer->hello.gateway_id && key.epoch == peer->hello.gateway_epoch; });
 }
 ReassemblyStats ReassemblyShard::stats() const { return impl_->stats; }
+int ReassemblyShard::idle_wait_ms() const { return impl_->assemblies.empty() ? (impl_->receipts.empty() ? -1 : 100) : 1; }
 } // namespace dzIPC::net

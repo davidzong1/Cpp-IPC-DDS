@@ -39,3 +39,28 @@ TEST(SharedNetFailure, ClosingSubscriberWakesAndJoinsEnteredGetter) {
     entered.get_future().wait(); std::this_thread::sleep_for(10ms);
     sub.reset(); ASSERT_EQ(getter.wait_for(500ms), std::future_status::ready); EXPECT_FALSE(getter.get());
 }
+TEST(SharedNetFailure, CancellableQueueNeverMissesPublicationAndWakesAllOnCancel) {
+    CircularQueue<int> queue(8); queue.enable_cancellable_wait();
+    std::atomic<unsigned> consumed{0};
+    auto reader = std::async(std::launch::async, [&] {
+        for (unsigned i = 0; i < 1000; ++i) {
+            std::shared_ptr<int> item;
+            if (!queue.pop_cancellable(item, 1000) || !item || *item != static_cast<int>(i)) return false;
+            ++consumed;
+        }
+        return true;
+    });
+    for (unsigned i = 0; i < 1000; ++i) {
+        queue.push(std::make_shared<int>(i));
+        ASSERT_TRUE(until([&] { return consumed.load() == i + 1; }));
+    }
+    ASSERT_TRUE(reader.get());
+    std::atomic<unsigned> entered{0}; std::vector<std::future<bool>> waiters;
+    for (unsigned i = 0; i < 8; ++i) waiters.push_back(std::async(std::launch::async, [&] {
+        ++entered; std::shared_ptr<int> item; return queue.pop_cancellable(item, UINT64_MAX);
+    }));
+    ASSERT_TRUE(until([&] { return entered.load() == 8; })); queue.cancel_waits();
+    for (auto& waiter : waiters) { ASSERT_EQ(waiter.wait_for(500ms), std::future_status::ready); EXPECT_FALSE(waiter.get()); }
+    queue.push(std::make_shared<int>(7)); std::shared_ptr<int> item;
+    EXPECT_FALSE(queue.pop_cancellable(item, 0));
+}

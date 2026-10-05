@@ -250,13 +250,14 @@ struct GatewayData::Impl {
         void run() noexcept {
             try {
                 while (!parent.stopped.load()) {
+                    bool new_send = false;
                     for (unsigned count = 0; count < 64; ++count) {
                         Command command;
                         { std::lock_guard<std::mutex> lock(mutex); if (commands.empty()) break; command = std::move(commands.front()); commands.pop_front(); }
                         --parent.queued_commands;
                         parent.queued_bytes -= command.charged_bytes;
                         if (command.view) { update(std::move(command.view)); command.fence->arrive(); }
-                        else if (command.tx) prepare(std::move(command.tx));
+                        else if (command.tx) { prepare(std::move(command.tx)); new_send = true; }
                         else if (command.control) {
                             WireHeader h; ByteView body;
                             if (decode_packet(command.control->view(), h, body)) {
@@ -267,8 +268,11 @@ struct GatewayData::Impl {
                     }
                     pollfd fds[]{{wake.get(), POLLIN, 0}, {endpoint->native_handle(), POLLIN, 0}};
                     // 不可因 EAGAIN 忙转；定时轮次保持短上界，不等待凑批。
-                    const bool deferred = send_progress && !ready_routes.empty() && local::monotonic_ns() >= send_blocked_until;
-                    if (::poll(fds, 2, deferred ? 0 : 1) < 0 && errno != EINTR) throw std::runtime_error("数据 shard 轮询失败");
+                    const bool deferred = (send_progress || new_send) && !ready_routes.empty() && local::monotonic_ns() >= send_blocked_until;
+                    bool pending_commands;
+                    { std::lock_guard<std::mutex> lock(mutex); pending_commands = !commands.empty(); }
+                    const int timeout = (deferred || pending_commands) ? 0 : (!ready_routes.empty() ? 1 : receive->idle_wait_ms());
+                    if (::poll(fds, 2, timeout) < 0 && errno != EINTR) throw std::runtime_error("数据 shard 轮询失败");
                     if (fds[0].revents) local::drain_event(wake.get());
                     if (fds[1].revents & POLLIN) {
                         std::array<ReceivedDatagram, 32> input; const auto until = local::monotonic_ns() + parent.config.io_round_us * 1000;
