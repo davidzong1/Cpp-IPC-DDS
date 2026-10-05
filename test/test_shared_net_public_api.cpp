@@ -64,6 +64,24 @@ TEST(SharedNetPublicApi, BackgroundBufferAndEvictionRemainActiveWithoutGetters) 
     dzIPC::Sample sample; EXPECT_FALSE(sub.try_get(sample));
 }
 
+TEST(SharedNetPublicApi, AssistedViewGetterDrainsTlvBeforeQueuedViewWithoutNewPublish) {
+    PublicFixture f; AssistGate gate;
+    dzIPC::shared_net::Subscriber sub(f.model(), f.topic.descriptor.topic, 0, 8); sub.InitChannel();
+    dzIPC::shared_net::Publisher pub(f.model(), f.topic.descriptor.topic, 0); pub.InitChannel();
+    gate.armed.store(true);
+    dzIPC::EnableDzFlat(false);
+    const bool tlv_sent = pub.publish(f.message());
+    dzIPC::EnableDzFlat(true);
+    ASSERT_TRUE(tlv_sent);
+    ASSERT_TRUE(until([&] { return gate.blocked.load(); }));
+    ASSERT_TRUE(pub.publish(f.message()));
+    dzIPC::Sample sample; EXPECT_TRUE(sub.get(sample, 100));
+    auto clone = f.model(); EXPECT_TRUE(sub.try_get_clone(clone));
+    EXPECT_EQ(clone->topic()->msgcast<dzIPC::Msg::StdImage>()->data.size(), 64u);
+    EXPECT_GE(gate.assisted.load(), 2u);
+    gate.release.store(true);
+}
+
 TEST(SharedNetPublicApi, ConcurrentGettersDeliverEachSequenceOnceAndCancelInfiniteWait) {
     PublicFixture f; AssistGate gate;
     dzIPC::shared_net::Subscriber sub(f.model(), f.topic.descriptor.topic, 0, 8); sub.InitChannel();

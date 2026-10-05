@@ -78,7 +78,7 @@ void report_unavailable_once() noexcept
 
 struct recv_wait_set::impl
 {
-    struct entry { recv_wait_token token; std::uint32_t last{0}; };
+    struct entry { recv_wait_token token; std::uint32_t last{0}; bool enabled{true}; };
     std::mutex mutex;
     std::vector<entry> entries;
     std::vector<recv_wait_token> ready;
@@ -182,6 +182,7 @@ bool recv_wait_set::wait(std::chrono::milliseconds timeout)
     auto scan = [&] {
         impl_->ready.clear();
         for (auto& entry : impl_->entries) {
+            if (!entry.enabled) continue;
             const auto now = entry.token.sequence()->load(std::memory_order_acquire);
             if (now != entry.last) { entry.last = now; impl_->ready.push_back(entry.token); }
         }
@@ -192,7 +193,7 @@ bool recv_wait_set::wait(std::chrono::milliseconds timeout)
     std::vector<futex_waitv_abi> waiters;
     waiters.reserve(impl_->entries.size() + 1);
     for (const auto& entry : impl_->entries)
-        waiters.push_back({entry.last, reinterpret_cast<std::uint64_t>(entry.token.sequence()), kFutex32, 0});
+        if (entry.enabled) waiters.push_back({entry.last, reinterpret_cast<std::uint64_t>(entry.token.sequence()), kFutex32, 0});
     const auto interrupt_value = impl_->interrupt.load(std::memory_order_acquire);
     waiters.push_back({interrupt_value, reinterpret_cast<std::uint64_t>(&impl_->interrupt), kFutex32, 0});
     timespec ts{}; timespec* tsp = nullptr;
@@ -220,7 +221,7 @@ bool recv_wait_set::wait(std::chrono::milliseconds timeout)
     handles.reserve(impl_->entries.size() + 1);
     handles.push_back(impl_->stop_event);
     for (const auto& entry : impl_->entries)
-        handles.push_back(static_cast<HANDLE>(entry.token.wake_handle_));
+        if (entry.enabled) handles.push_back(static_cast<HANDLE>(entry.token.wake_handle_));
     const DWORD ms = timeout.count() < 0 ? INFINITE :
         static_cast<DWORD>(std::min<std::int64_t>(timeout.count(), MAXDWORD - 1));
     lock.unlock();
@@ -235,6 +236,7 @@ bool recv_wait_set::wait(std::chrono::milliseconds timeout)
     scan();
     // Reset only after sequence accounting, then recheck to close the SetEvent/reset race.
     for (const auto& entry : impl_->entries) {
+        if (!entry.enabled) continue;
         auto event = static_cast<HANDLE>(entry.token.wake_handle_);
         if (::ResetEvent(event) && entry.token.sequence()->load(std::memory_order_acquire) != entry.last)
             ::SetEvent(event);
@@ -246,6 +248,24 @@ bool recv_wait_set::wait(std::chrono::milliseconds timeout)
 #endif
 }
 
+bool recv_wait_set::set_enabled(const recv_wait_token& token, bool enabled)
+{
+    if (!impl_) return false;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto entry = std::find_if(impl_->entries.begin(), impl_->entries.end(),
+                                   [&](const auto& e) { return e.token == token; });
+    if (entry == impl_->entries.end()) return false;
+    if (entry->enabled == enabled) return true;
+    entry->enabled = enabled;
+#if defined(__linux__)
+    impl_->interrupt.fetch_add(1, std::memory_order_release);
+    futex_wake(reinterpret_cast<const std::uint32_t*>(&impl_->interrupt));
+#elif defined(_WIN32)
+    if (impl_->stop_event != nullptr) ::SetEvent(impl_->stop_event);
+#endif
+    return true;
+}
+
 std::vector<recv_wait_token> recv_wait_set::consume_ready()
 {
     if (!impl_) return {};
@@ -253,6 +273,17 @@ std::vector<recv_wait_token> recv_wait_set::consume_ready()
     auto result = std::move(impl_->ready);
     impl_->ready.clear();
     return result;
+}
+
+void recv_wait_set::interrupt() noexcept
+{
+    if (!impl_) return;
+#if defined(__linux__)
+    impl_->interrupt.fetch_add(1, std::memory_order_release);
+    futex_wake(reinterpret_cast<const std::uint32_t*>(&impl_->interrupt));
+#elif defined(_WIN32)
+    if (impl_->stop_event != nullptr) ::SetEvent(impl_->stop_event);
+#endif
 }
 
 void recv_wait_set::stop() noexcept

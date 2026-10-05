@@ -388,6 +388,24 @@ enum class RecvRegisterStatus
 class IPC_EXPORT RecvWorker
 {
 public:
+    // 绑定具体注册Entry；作用域不得活得比所属worker更久。
+    // 只暂停后续预算轮/SHM等待，在途recv仍由宿主消费锁仲裁。
+    class IPC_EXPORT AssistLease {
+    public:
+        AssistLease() = default;
+        ~AssistLease();
+        void reset() noexcept;
+        AssistLease(AssistLease&&) noexcept;
+        AssistLease(const AssistLease&) = delete;
+        AssistLease& operator=(const AssistLease&) = delete;
+        explicit operator bool() const noexcept { return bool(entry_); }
+    private:
+        friend class RecvWorker;
+        AssistLease(RecvWorker* worker, std::shared_ptr<void> entry) : worker_(worker), entry_(std::move(entry)) {}
+        RecvWorker* worker_{nullptr};
+        std::shared_ptr<void> entry_;
+    };
+    AssistLease assist_route(const RecvRouteSource* route);
     /* worker_id 仅用于诊断与归属计算（worker_for 的结果）。 */
     RecvWorker(std::size_t worker_id, RecvBudget budget = RecvBudget{});
     ~RecvWorker();   ///< 等价 stop()
@@ -425,9 +443,8 @@ public:
     void remove_route(const RecvRouteSource* route) noexcept;
 
     /* 唤醒阻塞中的 wait 立即重评估（不改路由表）。用于"外部条件变了，希望马上
-     * 重新检查"。实现走 wait-set 的 remove+add（remove 会敲唤醒通道），
-     * 因此**不会**丢失就绪提示：worker 自己维护 last_seq 做 level-triggered
-     * 全扫，wait-set 内部的 last 被重置不影响判定。 */
+     * 重新检查"。只敲独立中断通道，保留条目的注册、暂停与序号状态。
+     * worker 自己维护 last_seq 做 level-triggered 全扫。 */
     void wakeup() noexcept;
 
     RecvWorkerStats stats() const;
@@ -447,6 +464,7 @@ public:
     struct Impl;
 
 private:
+    void release_assist(const std::shared_ptr<void>& entry) noexcept;
     Impl* impl_{nullptr};
 };
 
@@ -483,6 +501,7 @@ public:
     /* 按 worker_for 计算归属并委托给对应 worker。池未 start ⇒ stopped。 */
     RecvRegisterStatus add_route(const std::shared_ptr<RecvRouteSource>& route);
     void remove_route(const RecvRouteSource* route) noexcept;
+    RecvWorker::AssistLease assist_route(const RecvRouteSource* route);
 
     static bool backend_available() noexcept;
     static const char* backend_name() noexcept;

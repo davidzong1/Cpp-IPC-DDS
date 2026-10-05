@@ -110,6 +110,8 @@ struct RecvWorker::Impl
         std::atomic<std::size_t> in_flight{0};
         std::atomic<bool> removed{false};
         std::atomic<bool> queued{false};   ///< 已在 deferred 队列中（去重）
+        std::atomic<std::size_t> assisting{0}; // 在mtx内更新，worker在完整recv边界读取
+        bool force_recheck{false}; // 受mtx保护，恢复时不在getter析构路径分配deferred节点
     };
 
     Impl(std::size_t id, RecvBudget b)
@@ -252,13 +254,14 @@ void RecvWorker::Impl::collect_pending()
 
     for (const auto& entry : routes)
     {
-        if (entry->removed.load(std::memory_order_acquire)) continue;
+        if (entry->removed.load(std::memory_order_acquire) || entry->assisting.load(std::memory_order_acquire)) continue;
         const auto seq = entry->token.sequence()->load(std::memory_order_acquire);
-        if (seq == entry->last_seq.load(std::memory_order_acquire)) continue;
+        if (seq == entry->last_seq.load(std::memory_order_acquire) && !entry->force_recheck) continue;
         bool expected = false;
         if (entry->queued.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         {
             deferred.push_back(entry);
+            entry->force_recheck = false;
             ++queued;
         }
     }
@@ -318,7 +321,7 @@ bool RecvWorker::Impl::requeue(const std::shared_ptr<Entry>& entry)
     if (!entry->queued.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return false;
     std::lock_guard<std::mutex> lock(mtx);
-    if (entry->removed.load(std::memory_order_acquire))
+    if (entry->removed.load(std::memory_order_acquire) || entry->assisting.load(std::memory_order_acquire))
     {
         entry->queued.store(false, std::memory_order_release);
         return false;
@@ -384,7 +387,7 @@ void RecvWorker::Impl::run_budget(const std::shared_ptr<Entry>& entry)
          * 契约 §4.4 第 1 步要求"禁止新的 recv_once"：一旦标记就必须立刻停手，
          * 不再对这条 route 发起下一次调用。在途的那一次仍要等它返回 —— 那是
          * remove_route 第 4 步（等 in_flight 归零）的职责。 */
-        if (entry->removed.load(std::memory_order_acquire)) break;
+        if (entry->removed.load(std::memory_order_acquire) || entry->assisting.load(std::memory_order_acquire)) break;
 
         const auto seq_before = entry->token.sequence()->load(std::memory_order_acquire);
         std::size_t n = 0;
@@ -468,7 +471,8 @@ void RecvWorker::Impl::run_budget(const std::shared_ptr<Entry>& entry)
     // 稳定空读后的新发布仍与 last_seq 不同，由下一次就绪检查发现。
     if (!confirmed_empty)
         more = !stopping.load(std::memory_order_acquire)
-            && !entry->removed.load(std::memory_order_acquire);
+            && !entry->removed.load(std::memory_order_acquire)
+            && !entry->assisting.load(std::memory_order_acquire);
 
     if (messages > 0)
     {
@@ -946,21 +950,38 @@ void RecvWorker::remove_route(const RecvRouteSource* route) noexcept
 void RecvWorker::wakeup() noexcept
 {
     if (impl_ == nullptr) return;
-    /* wait-set 没有独立的 wakeup 接口，但 remove 会敲唤醒通道、add 会重新登记。
-     * 对**任意一条**在册 token 做一次 remove+add 就等于唤醒 —— 唤醒通道是集合级
-     * 的，与具体 token 无关。
-     *
-     * 这样做**不会**丢失就绪提示：wait-set 内部的 last_seq 被重置只是丢掉一次
-     * 内核提示，而 worker 的 collect_pending 用自己的 last_seq 做全扫（事实来源
-     * 是共享内存里的 seq，不是内核对象）。 */
-    std::shared_ptr<Impl::Entry> entry;
-    {
-        std::lock_guard<std::mutex> lock(impl_->mtx);
-        if (impl_->routes.empty()) return;
-        entry = impl_->routes.front();
+    // 独立中断不改变条目注册、暂停状态或序号观察进度。
+    impl_->wait_set.interrupt();
+}
+
+RecvWorker::AssistLease::AssistLease(AssistLease&& other) noexcept
+    : worker_(other.worker_), entry_(std::move(other.entry_)) {}
+RecvWorker::AssistLease::~AssistLease() {
+    reset();
+}
+void RecvWorker::AssistLease::reset() noexcept {
+    auto entry = std::move(entry_);
+    if (entry) worker_->release_assist(entry);
+}
+RecvWorker::AssistLease RecvWorker::assist_route(const RecvRouteSource* route) {
+    if (!impl_ || !route) return {};
+    std::lock_guard<std::mutex> lock(impl_->mtx);
+    if (impl_->stopping.load()) return {};
+    for (const auto& entry : impl_->routes) {
+        if (entry->key != route || entry->removed.load()) continue;
+        if (!entry->assisting.load() && !impl_->wait_set.set_enabled(entry->token, false)) return {};
+        entry->assisting.fetch_add(1, std::memory_order_release);
+        return AssistLease(this, entry);
     }
-    impl_->wait_set.remove(entry->token);
-    impl_->wait_set.add(entry->token);
+    return {};
+}
+void RecvWorker::release_assist(const std::shared_ptr<void>& opaque) noexcept {
+    const auto entry = std::static_pointer_cast<Impl::Entry>(opaque);
+    std::lock_guard<std::mutex> lock(impl_->mtx);
+    if (entry->assisting.fetch_sub(1, std::memory_order_acq_rel) != 1 || entry->removed.load() || impl_->stopping.load()) return;
+    // 必须显式重查：暂停不是空读，不能等下一次发布才恢复后台缓冲。
+    entry->force_recheck = true;
+    impl_->wait_set.set_enabled(entry->token, true);
 }
 
 RecvWorkerStats RecvWorker::stats() const
@@ -1149,6 +1170,17 @@ void RecvWorkerPool::remove_route(const RecvRouteSource* route) noexcept
      * 多余的风险。归属表在每个 worker 内部，线性查找的代价在话题生命周期上
      * 可以忽略。 */
     for (auto* worker : workers) worker->remove_route(route);
+}
+
+RecvWorker::AssistLease RecvWorkerPool::assist_route(const RecvRouteSource* route) {
+    if (!impl_ || !route) return {};
+    RecvWorker* worker;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mtx);
+        if (!impl_->started || impl_->workers.empty()) return {};
+        worker = impl_->workers[worker_for(route->route_name(), route->domain_id(), impl_->workers.size())].get();
+    }
+    return worker->assist_route(route);
 }
 
 bool RecvWorkerPool::backend_available() noexcept

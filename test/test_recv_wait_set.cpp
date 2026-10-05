@@ -76,6 +76,23 @@ TEST(RecvWaitChange, BothSharedDataAndLocalCancellationWakeBlockedCaller)
     }
 }
 
+TEST(RecvWaitSet, DisabledEntryRetainsChangesUntilReenabled)
+{
+    RoutePair pair{"paused"}; ipc::recv_wait_set set;
+    const auto token = pair.sub->read_wait_token();
+    if (!require_backend(set, token)) GTEST_SKIP();
+    ASSERT_TRUE(set.set_enabled(token, false));
+    ASSERT_TRUE(pair.pub->try_send("paused", sizeof("paused"), 100));
+    EXPECT_FALSE(set.wait(20ms));
+    EXPECT_TRUE(set.consume_ready().empty());
+    ASSERT_TRUE(set.set_enabled(token, true));
+    ASSERT_TRUE(set.wait(1000ms));
+    EXPECT_EQ(set.consume_ready().size(), 1u);
+    EXPECT_FALSE(pair.sub->recv(0).empty());
+    EXPECT_TRUE(set.remove(token));
+    EXPECT_FALSE(set.set_enabled(token, true));
+}
+
 TEST(RecvWaitSet, OneRouteMessageProducesOneReadyToken)
 {
     RoutePair pair{"one"};
@@ -175,8 +192,10 @@ TEST(RecvWaitSet, CapacityIsBounded)
         if (i == 0 && !added)
             GTEST_SKIP() << "recv_wait_set backend unavailable on this platform/kernel";
         EXPECT_EQ(added, i < capacity);
+        if (i == 0) ASSERT_TRUE(set.set_enabled(routes.front()->sub->read_wait_token(), false));
     }
     ASSERT_TRUE(routes.back() != nullptr);
+    ASSERT_TRUE(set.set_enabled(routes.front()->sub->read_wait_token(), true));
     ASSERT_TRUE(routes.front()->pub->try_send("at-capacity", sizeof("at-capacity"), 100));
     ASSERT_TRUE(set.wait(1000ms));
     const auto ready = set.consume_ready();

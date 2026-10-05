@@ -41,6 +41,7 @@ struct SubRecvState
     bool assist_requested{false};
     std::atomic<bool> assist_disabled{false}, cancelled{false};
     std::mutex consume_mutex;
+    std::atomic<const dzIPC::threepools::RecvRouteSource*> assist_route{nullptr};
     alignas(4) std::atomic<std::uint32_t> signal{0};
     void notify() noexcept {
         signal.fetch_add(1, std::memory_order_release);
@@ -669,6 +670,11 @@ bool assisted_pop(ShmRouteSession& session, const std::shared_ptr<SubState>& sta
         const auto now = Clock::now();
         return now >= end ? 0 : std::chrono::duration_cast<std::chrono::nanoseconds>(end - now).count();
     };
+    if (arbitration->cancelled.load()) return false;
+    if (queue.try_pop(out)) return true;
+    // 已入队或纯try_get不需要暂停；有限等待的截止时间包含交接开销。
+    auto cooperation = timeout ? dzIPC::threepools::RecvWorkerPool::instance().assist_route(
+        arbitration->assist_route.load(std::memory_order_acquire)) : dzIPC::threepools::RecvWorker::AssistLease{};
     for (;;) {
         if (arbitration->cancelled.load()) return false;
         const auto signal = arbitration->signal.load(std::memory_order_acquire);
@@ -678,10 +684,12 @@ bool assisted_pop(ShmRouteSession& session, const std::shared_ptr<SubState>& sta
         struct Release { ShmRouteSession& session; bool held; ~Release() { if (held) session.release_receive(); } } release{session, bool(lease)};
         const auto token = lease ? lease->route->read_wait_token() : ipc::recv_wait_token{};
         const auto sequence = token.valid() ? token.sequence()->load(std::memory_order_acquire) : 0;
-        if (lease) sub_recv_attempt(session, state, 0, arbitration.get(), true);
+        const auto received = lease ? sub_recv_attempt(session, state, 0, arbitration.get(), true) : SubRecvOutcome{};
         if (arbitration->cancelled.load()) return false;
         if (queue.try_pop(out)) return true;
         if (!timeout || !remaining()) return false;
+        // 已取到另一类消息或被其他getter取走仍是进展；暂停worker时须排空现有SHM积压。
+        if (received.step == SubRecvStep::received) continue;
         // stop可能发生在序号快照之前；此时必须释放旧lease，不能等待下一次通知。
         if (lease && !session.receive_current(*lease)) continue;
         if (arbitration->assist_disabled.load()) break;
@@ -695,6 +703,7 @@ bool assisted_pop(ShmRouteSession& session, const std::shared_ptr<SubState>& sta
         }
     }
     // 后端错误显式停用协作；仍沿用原截止时间与可取消条件变量。
+    cooperation.reset(); // 条件变量回退必须先恢复后台接收，否则没人生产。
     const auto left = remaining();
     return queue.pop_cancellable(out, left == UINT64_MAX ? UINT64_MAX : (left + 999999) / 1000000);
 }
@@ -2185,6 +2194,7 @@ bool shm_sub_ipc::start_recv_path()
             recv_route_ = std::make_shared<SubRecvRoute>(recv_state_, sub_state_, std::move(alias));
         }
         recv_generation_.store(route_session_.generation(), std::memory_order_release);
+        recv_state_->assist_route.store(recv_route_.get(), std::memory_order_release);
 
         /* ---------- 首次（且仅此一次）路径决策 ----------
          * 冻结契约禁止运行中切换接收后端（§4.5/§8.4）：首次决策之后只按同一臂重注册。

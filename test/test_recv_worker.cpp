@@ -357,6 +357,48 @@ TEST(RecvWorker, AddRouteReceivesPublishedMessages)
     EXPECT_EQ(worker.route_count(), 0u) << "remove_route 返回后该 route 必须已摘除";
 }
 
+TEST(RecvWorker, LastAssistReleaseDrainsWithoutAnotherPublish)
+{
+    RouteName rn{"assist"}; auto pub = make_sender(rn);
+    auto src = std::make_shared<TestRouteSource>(rn);
+    RecvWorker worker(0); ASSERT_TRUE(worker.start());
+    if (!require_backend(worker, src)) GTEST_SKIP();
+    auto first = worker.assist_route(src.get()); ASSERT_TRUE(first);
+    auto second = worker.assist_route(src.get()); ASSERT_TRUE(second);
+    // 让之前已在途的一次空读退出；暂停本身不等待它。
+    std::this_thread::sleep_for(20ms);
+    const auto calls = src->recv_calls();
+    ASSERT_TRUE(send_messages(pub, {"held-1", "held-2"}));
+    std::this_thread::sleep_for(20ms);
+    EXPECT_EQ(src->received_count(), 0u); EXPECT_EQ(src->recv_calls(), calls);
+    first.reset(); std::this_thread::sleep_for(20ms);
+    EXPECT_EQ(src->received_count(), 0u);
+    second.reset();
+    ASSERT_TRUE(wait_for([&] { return src->received_count() == 2; }, 1000));
+    EXPECT_EQ(src->received(), (std::vector<std::string>{"held-1", "held-2"}));
+    worker.remove_route(src.get());
+}
+
+TEST(RecvWorker, OldAssistCannotResumeNewRegistration)
+{
+    RouteName rn{"assist_readd"}; auto pub = make_sender(rn);
+    auto src = std::make_shared<TestRouteSource>(rn);
+    RecvWorker worker(0); ASSERT_TRUE(worker.start());
+    if (!require_backend(worker, src)) GTEST_SKIP();
+    auto old = worker.assist_route(src.get()); ASSERT_TRUE(old);
+    worker.remove_route(src.get()); src->rebuild();
+    ASSERT_EQ(worker.add_route(src), RecvRegisterStatus::ok);
+    auto current = worker.assist_route(src.get()); ASSERT_TRUE(current);
+    std::this_thread::sleep_for(20ms);
+    old.reset();
+    ASSERT_TRUE(send_messages(pub, {"new-generation"}));
+    std::this_thread::sleep_for(20ms);
+    EXPECT_EQ(src->received_count(), 0u);
+    current.reset();
+    ASSERT_TRUE(wait_for([&] { return src->received_count() == 1; }, 1000));
+    worker.remove_route(src.get());
+}
+
 /* 预算耗尽**不是丢弃**：max_messages_per_route=2 下连发 5 条，必须一条不少地
  * 收到。deferred FIFO 让让出的 route 在下一轮被重新选中 —— 若把预算当丢弃处理，
  * 这里会静默少收（症状是"热话题偶尔丢一条"）。 */

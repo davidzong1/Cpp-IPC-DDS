@@ -53,6 +53,9 @@ public:
     recv_wait_set& operator=(const recv_wait_set&) = delete;
     bool add(const recv_wait_token& token);
     bool remove(const recv_wait_token& token);
+    // 保留注册槽位和观察序号；中断旧快照后再按启用状态构造等待集合。
+    bool set_enabled(const recv_wait_token& token, bool enabled);
+    void interrupt() noexcept;
     bool wait(std::chrono::milliseconds timeout);
     std::vector<recv_wait_token> consume_ready();
     void stop() noexcept;
