@@ -64,6 +64,18 @@ ProtocolStatus WireEncoder::copy(ByteView b, Encoding encoding, std::uint32_t id
     out = std::move(result);
     return {};
 }
+ProtocolStatus WireEncoder::adopt(std::unique_ptr<std::uint8_t[]> storage, std::size_t size,
+                                  std::size_t capacity, Encoding encoding, std::uint32_t id,
+                                  std::uint32_t schema, WireBlob &out)
+{
+    if (!size || size > kMaxMessageBytes || capacity != ((size + 63) / 64) * 64)
+        return error(ProtocolCode::BadLength);
+    auto status = validate_blob({storage.get(), size}, encoding, id, schema);
+    if (!status) return status;
+    WireBlob result; result.storage_ = std::move(storage); result.size_ = size;
+    result.capacity_ = capacity; result.encoding_ = encoding; result.msg_id_ = id;
+    result.schema_hash_ = schema; out = std::move(result); return {};
+}
 ProtocolStatus WireEncoder::encode_prebuilt(ByteView b, std::uint32_t id, std::uint32_t schema,
                                             WireBlob &out)
 {

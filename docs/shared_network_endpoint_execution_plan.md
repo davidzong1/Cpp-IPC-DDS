@@ -2185,7 +2185,7 @@ nodelet 配置必须一致；已存在的纯进程内 nodelet 路径另作参考
 | T04 | 已完成 | dae9ca0 + 本卡提交 | build-shared-net / build-shared-net-sanitize | 新增 GTest 14/0/0；共享 CTest 10/0/0；sanitizer 2/0/0 | [会话与独占启动](shared_network_endpoint_evidence/20261005-t04/results.md) | 数据面尚未接入，status 明确报告未就绪 |
 | T05 | 已完成 | 90b53b7 + 本卡提交 | build-shared-net / build-shared-net-sanitize / build-shared-net-off | 新增 GTest 18/0/0；共享 CTest 12/0/0；sanitizer 2/0/0；旧回归 6/0/0 | [原子出站与两类信用](shared_network_endpoint_evidence/20261005-t05/results.md) | 路由与网络数据面待后续接入；可靠测试明确返回 Rejected |
 | T06 | 已完成 | f7b5c6a + 本卡提交 | build-shared-net / build-shared-net-sanitize / build-shared-net-off | 新增 GTest 8/0/0；共享 CTest 14/0/0；sanitizer 2/0/0；旧回归 2/0/0 | [本机直达与原始注入](shared_network_endpoint_evidence/20261005-t06/results.md) | 跨进程路由类型注册与 Ready 事务由 T08 统一处理 |
-| T07 | 未开始 | | | | | |
+| T07 | 已完成 | 8a04ebe + 本卡提交 | build-shared-net / build-shared-net-sanitize / build-shared-net-off | 新增 GTest 17/0/0；共享 CTest 17/0/0；sanitizer 3/0/0；OFF 2/0/0 | [重组、去重与配额](shared_network_endpoint_evidence/20261005-t07/results.md) | 路由关闭与实际提交的 shard 排序由 T08/T09 接入；尚无跨机性能结论 |
 | T08 | 未开始 | | | | | |
 | T09 | 未开始 | | | | | |
 | T10 | 未开始 | | | | | |

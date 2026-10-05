@@ -48,6 +48,9 @@ class WireBlob
 class WireEncoder
 {
   public:
+    static ProtocolStatus adopt(std::unique_ptr<std::uint8_t[]> storage, std::size_t size,
+                                std::size_t capacity, Encoding, std::uint32_t msg_id,
+                                std::uint32_t schema_hash, WireBlob &out);
     static ProtocolStatus copy(ByteView, Encoding, std::uint32_t msg_id, std::uint32_t schema_hash,
                                WireBlob &out);
     static ProtocolStatus encode(IpcMsgBase &, bool prefer_dzflat, WireBlob &out);
