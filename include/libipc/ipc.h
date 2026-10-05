@@ -175,6 +175,7 @@ namespace ipc
 
     /// 非覆盖提交：队列满时失败并归还 loan，不执行 force_push。
     static bool try_publish_loan(ipc::handle_t h, ipc::loan_t const &lo, bool verbose, bool wake_readers);
+    static bool publish_loan_size(ipc::handle_t h, ipc::loan_t const &lo, std::size_t used, bool verbose);
 
     /// \brief 放弃一块未投递的 chunk, 立刻归还池子。幂等于无效 loan。
     static void discard_loan(ipc::handle_t h, ipc::loan_t const &lo);
@@ -400,6 +401,9 @@ namespace ipc
     buff_t try_recv_loan(bool &consumed) { return detail_t::try_recv_loan(h_, consumed, verbose_); }
 
     bool try_publish_loan(loan_t const &lo, bool wake_readers = true) { return detail_t::try_publish_loan(h_, lo, verbose_, wake_readers); }
+
+    // 精确逻辑长度；长度必须落在此 loan 的原尺寸档。
+    bool publish_loan_size(loan_t const &lo, std::size_t used) { return detail_t::publish_loan_size(h_, lo, used, verbose_); }
 
     void discard_loan(loan_t const &lo) { detail_t::discard_loan(h_, lo); }
   };

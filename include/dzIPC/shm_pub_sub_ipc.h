@@ -28,6 +28,7 @@
 #include "libipc/ipc.h"
 
 namespace dzIPC {
+namespace net { class ShmWireWriter; }
 namespace threepools {
 /* 阶段 5 共享层：SHM 固定 route 收包 worker 的 route 抽象
  * （include/dzIPC/threepools/recv_worker.h）。公开头只做**前置声明**，真正的
@@ -65,6 +66,7 @@ IPC_EXPORT void process_received_buffer(const std::shared_ptr<SubState>& state, 
 
 class IPC_EXPORT shm_pub_ipc : public pub_ipc_base
 {
+    friend class dzIPC::net::ShmWireWriter;
 public:
     explicit shm_pub_ipc(const std::shared_ptr<TopicData>& msg, const std::string& topic_name, size_t domain_id,
                          bool verbose = false, bool enable_thread_qos = false, int cpu_id = -1,

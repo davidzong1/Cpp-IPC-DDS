@@ -88,6 +88,10 @@ public:
     {
         return std::visit([&](auto& channel) { return channel.publish_loan(loan, timeout); }, channel_);
     }
+    bool publish_loan_size(const ipc::loan_t& loan, std::size_t used)
+    {
+        return std::visit([&](auto& channel) { return channel.publish_loan_size(loan, used); }, channel_);
+    }
     void discard_loan(const ipc::loan_t& loan)
     {
         std::visit([&](auto& channel) { channel.discard_loan(loan); }, channel_);

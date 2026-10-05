@@ -1846,7 +1846,7 @@ namespace
     }
 
     static bool publish_loan_impl(ipc::handle_t h, ipc::loan_t const &lo,
-                             std::uint64_t tm, bool verbose, bool allow_overwrite, bool wake_readers)
+                             std::uint64_t tm, bool verbose, bool allow_overwrite, bool wake_readers, std::size_t used_size)
     {
       if (!lo.valid() || !ipc::detail::valid_storage(lo.id))
         return false;
@@ -1868,10 +1868,10 @@ namespace
       auto msg_id = acc->fetch_add(1, std::memory_order_relaxed);
       /* 与 send() 的大消息分支同构: 槽位里写的是 chunk id(整数), 不是数据。
        * 传 size = 0 让 msg_t 置 storage_ = true 并拷贝 id;
-       * remain 编码的是**借到的容量**, 因为接收侧要用它反推 chunk_size 才能定位
-       * 共享段(见 recv 的 find_storage(buf_id, inf, msg_size))。真实负载长度由负载
-       * 自身的头部承载, 不走这里。 */
-      const std::int32_t remain = static_cast<std::int32_t>(lo.size) -
+       * 默认 remain 编码借到的容量；publish_loan_size 可携带同档的真实长度。
+       * 接收侧按尺寸档反推 chunk_size 定位共享段，因此已验证 used_size 与
+       * lo.size 属于同一档。TLV 的历史页尾由此保持位于逻辑载荷末尾。 */
+      const std::int32_t remain = static_cast<std::int32_t>(used_size ? used_size : lo.size) -
                                   static_cast<std::int32_t>(ipc::data_length);
       auto id = ipc::detail::storage_to_wire(lo.id);
       bool pushed = wait_for(
@@ -1917,13 +1917,14 @@ namespace
     }
 
     static bool publish_loan(ipc::handle_t h, ipc::loan_t const& lo,
-                             std::uint64_t tm, bool verbose, bool allow_overwrite = true, bool wake_readers = true) {
+                             std::uint64_t tm, bool verbose, bool allow_overwrite = true, bool wake_readers = true, std::size_t used_size = 0) {
       if (!lo.valid() || !lo.lifetime) return false;
+      if (used_size && (used_size > lo.size || loan_size_class(std::max<std::size_t>(used_size, ipc::large_msg_limit + 1)) != lo.size)) return false;
       auto* inf = info_of(h);
       std::lock_guard<std::mutex> guard(lo.lifetime->mutex);
       if (lo.lifetime->finished || !inf || inf->topic_pool_ != lo.lifetime->pool) return false;
       bool okay;
-      try { okay = publish_loan_impl(h, lo, tm, verbose, allow_overwrite, wake_readers); }
+      try { okay = publish_loan_impl(h, lo, tm, verbose, allow_overwrite, wake_readers, used_size); }
       catch (...) {
         // 可见性未知时封住本地归还；由独占会话关闭/接收所有者完成清理，不能归还仍可见 chunk。
         lo.lifetime->finished = true; lo.lifetime->give_back = {}; lo.lifetime->pool.reset(); throw;
@@ -2125,6 +2126,13 @@ namespace ipc
   bool chan_impl<Flag>::try_publish_loan(ipc::handle_t h, ipc::loan_t const &lo, bool verbose, bool wake_readers)
   {
     return detail_impl<policy_t<Flag>>::publish_loan(h, lo, 0, verbose, false, wake_readers);
+  }
+
+  template <typename Flag>
+  bool chan_impl<Flag>::publish_loan_size(ipc::handle_t h, ipc::loan_t const &lo, std::size_t used, bool verbose)
+  {
+    if (!used) return false;
+    return detail_impl<policy_t<Flag>>::publish_loan(h, lo, 0, verbose, true, true, used);
   }
 
   template <typename Flag>
