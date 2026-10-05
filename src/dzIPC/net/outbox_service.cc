@@ -23,6 +23,7 @@ struct OutboxService::Impl
     std::mutex mutex;
     std::condition_variable changed;
     std::deque<std::shared_ptr<OutboxAttachment>> init_tasks;
+    std::deque<std::function<void()>> other_tasks;
     std::deque<Reader> initialized;
     std::deque<OutboxEvent> events;
     std::thread initializer, drainer;
@@ -51,16 +52,23 @@ struct OutboxService::Impl
     }
     void initialize() noexcept
     {
+        bool prefer_other = true;
         for (;;)
         {
             std::shared_ptr<OutboxAttachment> task;
+            std::function<void()> other;
             {
                 std::unique_lock<std::mutex> lock(mutex);
-                changed.wait(lock, [&] { return stopped.load() || !init_tasks.empty(); });
+                changed.wait(lock, [&] { return stopped.load() || !init_tasks.empty() || !other_tasks.empty(); });
                 if (stopped.load())
                     return;
-                task = std::move(init_tasks.front());
-                init_tasks.pop_front();
+                if (!other_tasks.empty() && (init_tasks.empty() || prefer_other)) { other = std::move(other_tasks.front()); other_tasks.pop_front(); prefer_other = false; }
+                else { task = std::move(init_tasks.front()); init_tasks.pop_front(); prefer_other = true; }
+            }
+            if (other) {
+                try { other(); }
+                catch (...) { stopped.store(true); local::notify(wake.get()); }
+                local::notify(control_wake); continue;
             }
             if (task->cancelled.load())
                 continue;
@@ -226,7 +234,7 @@ OutboxService::~OutboxService()
 bool OutboxService::attach(std::shared_ptr<OutboxAttachment> attachment)
 {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (impl_->stopped.load() || impl_->init_tasks.size() >= impl_->init_limit)
+    if (impl_->stopped.load() || impl_->init_tasks.size() + impl_->other_tasks.size() >= impl_->init_limit)
         return false;
     impl_->init_tasks.push_back(std::move(attachment));
     impl_->changed.notify_one();
@@ -239,6 +247,12 @@ void OutboxService::cancel(const std::shared_ptr<OutboxAttachment> &a)
         a->cancelled.store(true);
         local::notify(impl_->wake.get());
     }
+}
+bool OutboxService::initialize(std::function<void()> task)
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->stopped.load() || impl_->init_tasks.size() + impl_->other_tasks.size() >= impl_->init_limit) return false;
+    impl_->other_tasks.push_back(std::move(task)); impl_->changed.notify_one(); return true;
 }
 bool OutboxService::pop(OutboxEvent &event)
 {

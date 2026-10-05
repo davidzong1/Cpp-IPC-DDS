@@ -16,6 +16,7 @@ class ShmWireWriter
                                  std::uint64_t deadline_ns = 0);
     SubmitState try_commit_prebuilt(ByteView, std::uint64_t deadline_ns = 0);
     bool has_subscribers() const;
+    std::uint32_t generation() const;
     void close_after_quiescent();
     const RouteDescriptor &descriptor() const;
 
@@ -41,6 +42,7 @@ class ShmWireBridge
     {
         writer_.close_after_quiescent();
     }
+    std::uint32_t generation() const { return writer_.generation(); }
 
   private:
     ShmWireWriter writer_;

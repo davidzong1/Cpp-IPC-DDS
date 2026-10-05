@@ -26,6 +26,8 @@ if(DZIPC_BUILD_SHARED_NET)
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/wire_blob.cc
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/local_control_linux.cc
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/reassembly.cc
+    ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/peer_directory.cc
+    ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/local_directory.cc
         dzIPC/net/shm_wire.cc
         dzIPC/net/outbox.cc
         dzIPC/net/outbox_service.cc

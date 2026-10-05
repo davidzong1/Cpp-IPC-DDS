@@ -676,7 +676,10 @@ u32 route_count
 - 版本不同的页面不能拼在一起；相同 page_index 重复内容冲突则丢弃候选快照。
 - 收齐所有页面并校验后，原子替换该 peer 的路由表。
 - 未收齐不发布半张路由表；旧快照在 peer 租约内可保留。
-- 候选快照默认 2 秒过期；请求重试间隔从 100 ms 退避到 1 秒。
+- 候选快照连续 2 秒无新页面则过期，重复页面不续期；单份候选绝对存活上限 30 秒。
+  T08 校核发现：4096 个最长名称约需 4305 页，在默认每 peer 1000 包/秒的控制限速下，
+  2 秒绝对期限会让合法大目录始终无法安装，因此将 2 秒明确为无进展期限，并另设绝对上限。
+  请求重试间隔从 100 ms 退避到 1 秒。
 - 发送端按控制预算分批发页，不一次淹没控制队列。
 - 每 peer 最多一份候选快照，body 上限 8 MiB；总候选内存上限 64 MiB。
 - 注册前计算新快照大小；超过公告能力上限则拒绝该注册，不能创建无法公告的 Ready 话题。
@@ -2186,7 +2189,7 @@ nodelet 配置必须一致；已存在的纯进程内 nodelet 路径另作参考
 | T05 | 已完成 | 90b53b7 + 本卡提交 | build-shared-net / build-shared-net-sanitize / build-shared-net-off | 新增 GTest 18/0/0；共享 CTest 12/0/0；sanitizer 2/0/0；旧回归 6/0/0 | [原子出站与两类信用](shared_network_endpoint_evidence/20261005-t05/results.md) | 路由与网络数据面待后续接入；可靠测试明确返回 Rejected |
 | T06 | 已完成 | f7b5c6a + 本卡提交 | build-shared-net / build-shared-net-sanitize / build-shared-net-off | 新增 GTest 8/0/0；共享 CTest 14/0/0；sanitizer 2/0/0；旧回归 2/0/0 | [本机直达与原始注入](shared_network_endpoint_evidence/20261005-t06/results.md) | 跨进程路由类型注册与 Ready 事务由 T08 统一处理 |
 | T07 | 已完成 | 8a04ebe + 本卡提交 | build-shared-net / build-shared-net-sanitize / build-shared-net-off | 新增 GTest 17/0/0；共享 CTest 17/0/0；sanitizer 3/0/0；OFF 2/0/0 | [重组、去重与配额](shared_network_endpoint_evidence/20261005-t07/results.md) | 路由关闭与实际提交的 shard 排序由 T08/T09 接入；尚无跨机性能结论 |
-| T08 | 未开始 | | | | | |
+| T08 | 已完成 | 2837522 + 本卡提交 | build-shared-net / build-shared-net-sanitize / build-shared-net-off | 新增 GTest 15/0/0；共享 CTest 19/0/0；sanitizer 3/0/0；OFF 2/0/0 | [发现与目录快照](shared_network_endpoint_evidence/20261005-t08/results.md) | T09 接入数据 shard 和撤销屏障；真实跨机留待验收 |
 | T09 | 未开始 | | | | | |
 | T10 | 未开始 | | | | | |
 | T11 | 未开始 | | | | | |

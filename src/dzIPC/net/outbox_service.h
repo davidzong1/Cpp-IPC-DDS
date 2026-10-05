@@ -2,6 +2,7 @@
 #include "dzIPC/net/outbox.h"
 #include "local_control_linux.h"
 #include <atomic>
+#include <functional>
 
 namespace dzIPC::net
 {
@@ -33,6 +34,7 @@ class OutboxService
     OutboxService(int control_wake, std::size_t init_limit, std::size_t event_limit);
     ~OutboxService();
     bool attach(std::shared_ptr<OutboxAttachment>);
+    bool initialize(std::function<void()> task);
     void cancel(const std::shared_ptr<OutboxAttachment> &);
     bool pop(OutboxEvent &);
     bool healthy() const noexcept;

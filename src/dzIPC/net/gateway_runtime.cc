@@ -1,6 +1,7 @@
 #include "dzIPC/net/gateway_runtime.h"
 #include "byte_codec.h"
 #include "dzIPC/net/datagram_endpoint.h"
+#include "dzIPC/net/local_directory.h"
 #include "local_control_linux.h"
 #include "outbox_service.h"
 #include <algorithm>
@@ -12,6 +13,8 @@
 #include <sstream>
 #include <sys/socket.h>
 #include <thread>
+#include <future>
+#include <optional>
 #include <unistd.h>
 
 namespace dzIPC::net
@@ -59,7 +62,14 @@ struct GatewayRuntime::Impl
         std::map<std::uint64_t, Cached> cache;
         std::size_t cache_bytes = 0, output_bytes = 0;
         std::deque<Bytes> output;
+        std::map<Identity, std::uint64_t> route_versions;
     };
+    struct Initializing {
+        std::shared_ptr<LocalBinding> binding;
+        std::shared_future<std::shared_ptr<ShmWireBridge>> result;
+    };
+    struct PendingSub { std::uint64_t session, request; Identity id; Bytes packet; };
+    struct PageSend { PeerView peer; std::shared_ptr<const DirectorySnapshot> snapshot; std::uint32_t page = 0; };
     GatewayConfig config;
     Identity identity;
     std::uint64_t epoch = 0, clock = 0, next_session = 1;
@@ -69,6 +79,21 @@ struct GatewayRuntime::Impl
     std::map<int, Session> sessions;
     std::unique_ptr<SendBudget> send_budget;
     std::unique_ptr<OutboxService> outboxes;
+    std::shared_ptr<DirectoryBudget> directory_budget;
+    std::unique_ptr<PeerDirectory> peer_directory;
+    std::unique_ptr<LocalDirectory> local_directory;
+    std::vector<Initializing> initializing;
+    std::deque<PendingSub> pending_subs;
+    std::uint64_t pending_sub_bytes = 0;
+    std::map<Identity, PageSend> page_sends;
+    std::optional<Identity> page_cursor;
+    std::deque<CatalogRequest> catalog_requests;
+    std::uint64_t catalog_bytes = 0, next_hello = 0, last_local_version = 0, last_peer_revision = 0, route_revision = 1;
+    std::size_t hint_cursor = 0;
+    double control_tokens = 0;
+    std::uint64_t token_time = 0;
+    std::map<Identity, std::pair<double, std::uint64_t>> peer_tokens;
+    std::atomic<std::uint64_t> snapshot_version{1}, active_peers{0}, registered_handles{0};
     std::thread thread;
     std::mutex stop_mutex;
     std::atomic<bool> running{true};
@@ -88,7 +113,9 @@ struct GatewayRuntime::Impl
           << occupied.bytes << "\",\"allocated_send_records\":\"" << occupied.records
           << "\",\"outbox_records\":\"" << outbox_records.load() << "\",\"credit_requests\":\""
           << credit_requests.load() << "\",\"rejected\":\"" << rejected.load()
-          << "\",\"data_ports\":[";
+          << "\",\"snapshot_version\":\"" << snapshot_version.load() << "\",\"active_peers\":" << active_peers.load()
+          << ",\"registered_handles\":" << registered_handles.load()
+          << ",\"data_ports\":[";
         for (std::uint64_t i = 0; i < config.data_shards; ++i)
         {
             if (i)
@@ -131,6 +158,7 @@ struct GatewayRuntime::Impl
     }
     void close_session(std::map<int, Session>::iterator i)
     {
+        local_directory->close_session(i->second.id);
         outboxes->cancel(i->second.outbox);
         if (i->second.account)
             i->second.account->close();
@@ -261,11 +289,166 @@ struct GatewayRuntime::Impl
                 }
             }
         }
+        else if (h.kind == LocalKind::RegisterPub || h.kind == LocalKind::RegisterSub)
+        {
+            Identity id; codec::copy(id, body.data); RouteDescriptor descriptor;
+            decode_descriptor({body.data + 16, body.size - 16}, true, descriptor);
+            try {
+                const bool publisher = h.kind == LocalKind::RegisterPub;
+                if (!publisher && (pending_subs.size() >= config.limits.command_records || pending_sub_bytes + packet.bytes.size() > config.limits.command_bytes)) throw std::runtime_error("登记等待队列已满");
+                auto registration = local_directory->add(session.id, id, descriptor, publisher);
+                if (publisher) reply = response(session, LocalKind::PubRegistered, h.request_id, Bytes(id.begin(), id.end()));
+                else {
+                    try {
+                        const auto binding = registration->binding;
+                        if (!binding->bridge && std::none_of(initializing.begin(), initializing.end(), [&](const auto& task) { return task.binding == binding; })) {
+                            if (initializing.size() >= config.limits.init_tasks) throw std::runtime_error("bridge 初始化队列已满");
+                            auto task = std::make_shared<std::packaged_task<std::shared_ptr<ShmWireBridge>()>>([descriptor] { return std::make_shared<ShmWireBridge>(descriptor); });
+                            auto future = task->get_future().share();
+                            if (!outboxes->initialize([task] { (*task)(); })) throw std::runtime_error("初始化队列已满");
+                            initializing.push_back({binding, std::move(future)});
+                        }
+                        pending_subs.push_back({session.id, h.request_id, id, packet.bytes}); pending_sub_bytes += packet.bytes.size();
+                        session.last_request = h.request_id; remember(session, h.request_id, packet.bytes, {}); return;
+                    } catch (...) { local_directory->remove(session.id, id, false); throw; }
+                }
+            } catch (const std::exception& e) { reply = error(session, h.request_id, 3, e.what()); }
+        }
+        else if (h.kind == LocalKind::SubReady || h.kind == LocalKind::Unregister)
+        {
+            Identity id; codec::copy(id, body.data);
+            try {
+                Bytes encoded(id.begin(), id.end());
+                if (h.kind == LocalKind::SubReady) {
+                    const auto route_epoch = local_directory->ready(session.id, id, codec::get(body.data + 16, 4));
+                    codec::append(encoded, route_epoch, 8); reply = response(session, LocalKind::SubReadyAck, h.request_id, encoded);
+                } else {
+                    if (!local_directory->remove(session.id, id, body.data[16] == 1)) throw std::runtime_error("句柄角色不匹配");
+                    session.route_versions.erase(id); reply = response(session, LocalKind::Unregistered, h.request_id, encoded);
+                }
+            } catch (const std::exception& e) { reply = error(session, h.request_id, 3, e.what()); }
+        }
         else
             reply = error(session, h.request_id, 1, "NotImplemented");
         session.last_request = h.request_id;
         remember(session, h.request_id, packet.bytes, reply);
         queue(session, std::move(reply));
+    }
+    void process_registrations()
+    {
+        for (auto it = initializing.begin(); it != initializing.end();) {
+            if (it->result.wait_for(std::chrono::seconds(0)) != std::future_status::ready) { ++it; continue; }
+            try { local_directory->set_bridge(it->binding, it->result.get()); } catch (...) { ++rejected; }
+            it = initializing.erase(it);
+        }
+        const auto count = std::min<std::size_t>(64, pending_subs.size());
+        for (std::size_t n = 0; n < count; ++n) {
+            auto pending = std::move(pending_subs.front()); pending_subs.pop_front(); pending_sub_bytes -= pending.packet.size();
+            auto found = std::find_if(sessions.begin(), sessions.end(), [&](const auto& entry) { return entry.second.id == pending.session; });
+            if (found == sessions.end()) continue;
+            auto registration = local_directory->find(pending.session, pending.id);
+            if (registration && !registration->binding->bridge && std::any_of(initializing.begin(), initializing.end(), [&](const auto& task) { return task.binding == registration->binding; })) {
+                pending_sub_bytes += pending.packet.size(); pending_subs.push_back(std::move(pending)); continue;
+            }
+            try {
+                Bytes reply;
+                if (!registration || !registration->binding->bridge) {
+                    local_directory->remove(pending.session, pending.id, false);
+                    reply = error(found->second, pending.request, 3, "BridgeUnavailable");
+                } else {
+                    Bytes body(pending.id.begin(), pending.id.end()); codec::append(body, registration->binding->generation, 4);
+                    const auto snapshot = local_directory->snapshot(); const auto route = snapshot->routes.find(registration->binding->descriptor.key);
+                    codec::append(body, route == snapshot->routes.end() ? 0 : route->second->descriptor.receiver_route_epoch, 8);
+                    reply = response(found->second, LocalKind::SubRegistered, pending.request, body);
+                }
+                remember(found->second, pending.request, pending.packet, reply); queue(found->second, std::move(reply));
+            } catch (...) { ++rejected; close_session(found); }
+        }
+    }
+    bool allow_control(const Identity& id, std::uint64_t now)
+    {
+        if (!token_time) { token_time = now; control_tokens = config.control_burst; }
+        control_tokens = std::min<double>(config.control_burst, control_tokens + (now - token_time) * 1e-9 * config.control_rate); token_time = now;
+        auto& token = peer_tokens[id];
+        if (!token.second) { token.first = config.control_burst; token.second = now; }
+        token.first = std::min<double>(config.control_burst, token.first + (now - token.second) * 1e-9 * config.peer_control_rate); token.second = now;
+        if (control_tokens < 1 || token.first < 1) return false;
+        --control_tokens; --token.first; return true;
+    }
+    void process_network_control()
+    {
+        const auto now = local::monotonic_ns(); const auto own = local_directory->snapshot();
+        if (now >= next_hello || own->version != last_local_version) {
+            DiscoveryHello hello; hello.gateway_id = identity; hello.gateway_epoch = epoch; hello.snapshot_version = own->version;
+            hello.data_base_port = config.data_base_port; hello.data_shards = config.data_shards; hello.control_port = config.control_port; hello.max_message_bytes = config.limits.message_bytes;
+            Bytes packet; encode_hello(hello, packet); endpoints.back()->send(ByteView(packet), Ipv4Address::parse(config.discovery_group, config.discovery_port));
+            next_hello = now + 1000000000ull;
+        }
+        for (unsigned which = 0; which < 2; ++which) {
+            const auto end = local::monotonic_ns() + config.io_round_us * 1000;
+            auto& endpoint = endpoints[config.data_shards + which];
+            for (std::uint64_t n = 0; n < config.io_round_packets && local::monotonic_ns() < end; ++n) {
+                ReceivedDatagram packet; const auto result = endpoint->receive(packet);
+                if (result.status == IoStatus::WouldBlock) break;
+                if (result.status != IoStatus::Data) { ++rejected; continue; }
+                if (which) {
+                    DiscoveryHello h;
+                    if (!decode_hello(packet.view(), h)) { ++rejected; continue; }
+                    const auto code = peer_directory->hello(h, packet.source, now);
+                    if (code != DirectoryCode::Ok && code != DirectoryCode::Ignored) ++rejected;
+                } else {
+                    CatalogHeader h; ByteView payload;
+                    if (!decode_catalog(packet.view(), h, payload)) { ++rejected; continue; }
+                    if (h.kind == CatalogKind::Page) { peer_directory->page(packet, now); continue; }
+                    auto peer = peer_directory->peer(h.source_id);
+                    if (!peer.admission || !peer_directory->reachable(h.source_id, now) || peer.admission->hello.gateway_epoch != h.source_epoch || h.target_id != identity || h.target_epoch != epoch ||
+                        packet.source.host != peer.admission->ipv4 || packet.source.port != peer.admission->hello.control_port) { ++rejected; continue; }
+                    if (!page_sends.count(h.source_id) && page_sends.size() < config.limits.peers) page_sends.emplace(h.source_id, PageSend{peer, own, 0});
+                }
+            }
+        }
+        for (auto& request : peer_directory->tick(now)) {
+            if (catalog_requests.size() >= config.limits.peers || catalog_bytes + request.packet.size() > config.limits.network_control_bytes) break;
+            catalog_bytes += request.packet.size(); catalog_requests.push_back(std::move(request));
+        }
+        auto& control = endpoints[config.data_shards];
+        for (unsigned n = 0, count = std::min<std::size_t>(32, catalog_requests.size()); n < count; ++n) {
+            auto request = std::move(catalog_requests.front()); catalog_requests.pop_front();
+            CatalogHeader h; ByteView body; decode_catalog(ByteView(request.packet), h, body);
+            if (!peer_directory->reachable(h.target_id, now)) { catalog_bytes -= request.packet.size(); continue; }
+            if (!allow_control(h.target_id, now)) { catalog_requests.push_back(std::move(request)); continue; }
+            const auto result = control->send(ByteView(request.packet), request.destination);
+            if (result.status == IoStatus::WouldBlock) { catalog_requests.push_back(std::move(request)); continue; }
+            catalog_bytes -= request.packet.size();
+        }
+        for (unsigned sent = 0; sent < 32 && !page_sends.empty(); ++sent) {
+            auto it = page_cursor ? page_sends.upper_bound(*page_cursor) : page_sends.begin();
+            if (it == page_sends.end()) it = page_sends.begin(); page_cursor = it->first;
+            auto& work = it->second; const auto peer = peer_directory->peer(it->first);
+            if (peer.admission != work.peer.admission || !peer_directory->reachable(it->first, now)) { page_sends.erase(it); continue; }
+            if (!allow_control(it->first, now)) continue;
+            CatalogHeader h; h.source_id = identity; h.source_epoch = epoch; h.target_id = it->first; h.target_epoch = work.peer.admission->hello.gateway_epoch;
+            auto packet = catalog_page(*work.snapshot, h, work.page);
+            const auto result = control->send(ByteView(packet), {work.peer.admission->ipv4, work.peer.admission->hello.control_port});
+            if (result.status == IoStatus::WouldBlock) continue;
+            if (++work.page == (work.snapshot->body.size() + 1023) / 1024) page_sends.erase(it);
+        }
+        if (own->version != last_local_version || peer_directory->revision() != last_peer_revision) {
+            ++route_revision; last_local_version = own->version; last_peer_revision = peer_directory->revision();
+        }
+        const auto publishers = local_directory->publishers();
+        for (std::size_t n = 0; n < std::min<std::size_t>(64, publishers.size()); ++n) {
+            const auto& pub = publishers[hint_cursor++ % publishers.size()];
+            auto found = std::find_if(sessions.begin(), sessions.end(), [&](const auto& entry) { return entry.second.id == pub->session; });
+            if (found == sessions.end()) continue; auto& session = found->second;
+            if (session.route_versions[pub->id] == route_revision || session.output.size() >= 128) continue;
+            RouteStateBody hint; hint.publisher_id = pub->id; hint.state_version = route_revision;
+            hint.synchronized = peer_directory->synchronized(); hint.remote_ready_count = peer_directory->targets(pub->binding->descriptor).size();
+            Bytes body; encode_route_state(hint, body);
+            queue(session, response(session, LocalKind::RouteState, 0, body)); session.route_versions[pub->id] = route_revision;
+        }
+        std::uint64_t active = 0; for (const auto& peer : peer_directory->peers()) active += peer.admission->active.load();
+        active_peers.store(active); snapshot_version.store(own->version); registered_handles.store(local_directory->handle_count());
     }
     void process_outboxes()
     {
@@ -348,6 +531,9 @@ struct GatewayRuntime::Impl
             while (running.load())
             {
                 process_outboxes();
+                process_registrations();
+                if (!local_directory->healthy()) throw std::runtime_error("路由撤销时目录资源耗尽");
+                process_network_control();
                 std::vector<pollfd> fds{{wake.get(), POLLIN, 0}, {listener->fd(), POLLIN, 0}};
                 std::vector<std::uint64_t> generations{0, 0};
                 for (const auto &entry : sessions)
@@ -358,7 +544,10 @@ struct GatewayRuntime::Impl
                          0});
                     generations.push_back(entry.second.id);
                 }
-                if (::poll(fds.data(), fds.size(), 100) < 0)
+                const auto session_end = fds.size();
+                fds.push_back({endpoints[config.data_shards]->native_handle(), POLLIN, 0});
+                fds.push_back({endpoints.back()->native_handle(), POLLIN, 0});
+                if (::poll(fds.data(), fds.size(), 10) < 0)
                 {
                     if (errno == EINTR)
                         continue;
@@ -394,7 +583,7 @@ struct GatewayRuntime::Impl
                         session.connected_at = local::monotonic_ns();
                         sessions.emplace(raw, std::move(session));
                     }
-                for (std::size_t index = 2; index < fds.size(); ++index)
+                for (std::size_t index = 2; index < session_end; ++index)
                 {
                     auto found = sessions.find(fds[index].fd);
                     if (found == sessions.end() || found->second.id != generations[index])
@@ -462,6 +651,9 @@ GatewayRuntime::GatewayRuntime(GatewayConfig config) : impl_(new Impl)
                        impl_->config.limits.session_send_records});
     impl_->outboxes = std::make_unique<OutboxService>(
         impl_->wake.get(), impl_->config.limits.init_tasks, impl_->config.limits.command_records);
+    impl_->directory_budget = std::make_shared<DirectoryBudget>(impl_->config.limits);
+    impl_->peer_directory = std::make_unique<PeerDirectory>(impl_->identity, impl_->epoch, impl_->directory_budget);
+    impl_->local_directory = std::make_unique<LocalDirectory>(impl_->directory_budget, impl_->config.limits);
     impl_->thread = std::thread([p = impl_.get()] { p->run(); });
 }
 GatewayRuntime::~GatewayRuntime()

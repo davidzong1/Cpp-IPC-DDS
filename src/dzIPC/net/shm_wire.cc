@@ -91,6 +91,12 @@ ShmWireWriter::~ShmWireWriter()
     }
     close_after_quiescent();
 }
+std::uint32_t ShmWireWriter::generation() const
+{
+    if (impl_->owner != getpid()) return 0;
+    std::shared_lock<std::shared_mutex> lock(impl_->gate);
+    return impl_->ready() ? impl_->publisher->control_plane_.generation() : 0;
+}
 SubmitState ShmWireWriter::try_commit(const WireBlob &blob)
 try
 {
