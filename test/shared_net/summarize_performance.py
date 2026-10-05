@@ -9,6 +9,23 @@ import statistics
 from benchmark import quantiles
 
 
+def content_errors(case, samples, file_count):
+    """性能门槛须同时具有成功窗口和完整交付证据。"""
+    errors = []
+    expected = case['seconds'] * case['rate']
+    if case['returncode'] != 0:
+        errors.append('窗口进程失败')
+    if case['publish']['accepted'] != expected or case['publish']['rejected']:
+        errors.append('发布未全部接受')
+    if file_count != case['subscribers'] or len(case['receivers']) != case['subscribers']:
+        errors.append('接收进程或原始CSV缺失')
+    if len(samples) != expected * case['subscribers']:
+        errors.append('原始样本数量不符')
+    if any(r['count'] != expected or r['lost'] or r['invalid'] or r['duplicates'] for r in case['receivers']):
+        errors.append('存在丢失、错误、重复或接收数不符')
+    return errors
+
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('directory',type=Path)
@@ -19,10 +36,12 @@ def main():
         if 'receivers' not in case:
             continue
         samples=[]
-        for path in (args.directory/case['case']).glob('sub*.csv.gz'):
+        files=list((args.directory/case['case']).glob('sub*.csv.gz'))
+        for path in files:
             with gzip.open(path,'rt') as file:
                 samples.extend(int(row['elapsed_ns']) for row in csv.DictReader(file))
         case['aggregate_latency']=quantiles(samples)
+        case['content_errors']=content_errors(case,samples,len(files))
         case['cpu_total_seconds']=sum(case['cpu_seconds'])
         case['rss_sum_kib']=sum(x['rss_kib'] for x in case['after'])
         indexed[(case['mode'],case['subscribers'],case['bytes'],case['repeat'])]=case
@@ -32,8 +51,8 @@ def main():
             groups=[[indexed[(mode,subscribers,size,repeat)] for repeat in (1,2,3)] for mode in ('baseline','shared_v1')]
             medians=[{key:statistics.median(c['aggregate_latency'][key] for c in group) for key in ('p50_us','p95_us','p99_us')} for group in groups]
             gate=lambda baseline,current:current-baseline<=max(baseline*.1,5)
-            paired=[all(gate(groups[0][i]['aggregate_latency'][key],groups[1][i]['aggregate_latency'][key]) for key in ('p50_us','p99_us')) for i in range(3)]
-            median_gate=all(gate(medians[0][key],medians[1][key]) for key in ('p50_us','p99_us'))
+            paired=[not groups[0][i]['content_errors'] and not groups[1][i]['content_errors'] and all(gate(groups[0][i]['aggregate_latency'][key],groups[1][i]['aggregate_latency'][key]) for key in ('p50_us','p99_us')) for i in range(3)]
+            median_gate=not any(c['content_errors'] for group in groups for c in group) and all(gate(medians[0][key],medians[1][key]) for key in ('p50_us','p99_us'))
             rows.append({'subscribers':subscribers,'payload_bytes':size,'wire_bytes':groups[0][0]['wire_bytes'],
                 'baseline':medians[0],'shared_v1':medians[1],'median_gate':median_gate,'paired_round_gates':paired,
                 'cpu_total_seconds':[statistics.median(c['cpu_total_seconds'] for c in group) for group in groups],
@@ -42,6 +61,7 @@ def main():
                 'lost':[sum(r['lost'] for c in group for r in c['receivers']) for group in groups]})
     result={'completed_windows':len(cases),'rows':rows,'all_median_gates':all(row['median_gate'] for row in rows),
             'all_paired_round_gates':all(all(row['paired_round_gates']) for row in rows),
+            'window_errors':{case['case']:case['content_errors'] for case in indexed.values() if case['content_errors']},
             'invalid':sum(r['invalid'] for case in cases for r in case.get('receivers',[])),
             'duplicates':sum(r['duplicates'] for case in cases for r in case.get('receivers',[])),
             'received':sum(r['count'] for case in cases for r in case.get('receivers',[]))}

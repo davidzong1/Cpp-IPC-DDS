@@ -33,6 +33,8 @@ export DZIPC_GATEWAY_CONTROL=/tmp/dzipc-gateway-$UID/control.sock
 
 既有 C++ / Python `IPC_SOCKET` 公共工厂将选择共享后端。配置在进程中首次使用时固定；改变环境后须启动新应用进程。`IPC_SHM`、`IPC_SOCKET_ONLY`、服务请求响应仍按原路径工作。shared_v1 与 legacy 网络协议不互通。每对象独立 QoS/绑核要求暂不支持，传入非默认值明确失败；网关参数统一配置。
 
+shared_v1 的共享内存订阅默认允许调用线程协作取包，以减少串行唤醒。后台接收 worker 仍在无 getter 时负责缓冲和淘汰；并发 getter 共用原消费队列，取消和代次重建保留原屏障。Linux 的 futex_waitv 不可用时自动使用原可取消队列等待。排障回退可在启动应用前设置 `DZIPC_SHARED_RECV_ASSIST=0`（仅接受 0/1，默认 1）；不需要改变网关或网络协议。
+
 ## 返回值与生命周期
 
 - 发布先尝试本机，再接管网络；源网关不回注源主机。网络离线或额度不足不会撤销本机已提交的消息。
@@ -83,7 +85,7 @@ export DZIPC_GATEWAY_CONTROL=/tmp/dzipc-gateway-$UID/control.sock
 
 当前没有 DZTX enqueue 时间字段；完整应用出站排队、网络单程时间和跨主机时钟误差仍不可从这些直方图推算。协议头未挪用保留字段。
 
-接收侧排查可在`test/shared_net/benchmark.py`或`performance_matrix.py`中显式加`--receive-trace`，导出每条DZFlat消息的`recv_begin_ns/recv_return_ns/enqueue_before_ns/dequeue_after_ns`。这些是默认关闭的内部测试缝，不属于网关常开直方图，也不增加Sample或协议字段。发布→recv返回包含提交、等待、worker调度和取包；入队前→出队后包含入队、排队、唤醒与出队。`summarize_receive.py`核对分段和，并用同一批端到端最慢1%消息做归因。打点有观测成本，诊断结果单独保存；旧基线没有的新打点明确标为未采样。
+接收侧排查可在`test/shared_net/benchmark.py`或`performance_matrix.py`中显式加`--receive-trace`，导出每条DZFlat消息的`recv_begin_ns/recv_return_ns/enqueue_before_ns/dequeue_after_ns`，并用`assisted`标记是否由getter协作接收。这些是默认关闭的内部测试缝，不属于网关常开直方图，也不增加Sample或协议字段。发布→recv返回包含提交、等待、worker调度和取包；入队前→出队后包含入队、排队、唤醒与出队。`summarize_receive.py`核对分段和，并用同一批端到端最慢1%消息做归因。打点有观测成本，诊断结果单独保存；旧基线没有的新打点明确标为未采样。
 
 ## 错误与退出码
 
@@ -111,4 +113,4 @@ export DZIPC_GATEWAY_CONTROL=/tmp/dzipc-gateway-$UID/control.sock
 
 正确性和性能验收参见 [执行计划](shared_network_endpoint_execution_plan.md) 与其证据表；单机命名空间验证不能替代两台物理主机的最终验收。
 
-当前验收结论见[等待/指标修复实测](shared_network_endpoint_evidence/20261005-optimization/results.md)、[CRC固定负载实测](shared_network_endpoint_evidence/20261005-crc/results.md)与[接收分段诊断](shared_network_endpoint_evidence/20261005-receive/results.md)。同shard冷消息可靠完成p99中位数从4.988ms降至1.057ms；已测纯本机完整矩阵仍有13/27逐轮配对未达到门槛，最新版本没有重复该完整矩阵。新增18个接收诊断窗口无丢失/错误/重复，但仍有2/9逐轮门槛失败，不能替代完整验收。物理跨机、完整阶段指标与若干负载矩阵仍缺项，维持实验性显式启用。旧[T14](shared_network_endpoint_evidence/20261005-t14/results.md)和[T15](shared_network_endpoint_evidence/20261005-t15/results.md)记录保留。legacy 的 blocking 固定采用 TLV，应使用对象读取接口；shared_v1 的 ACK 则在目标 SHM 确定提交后发送，不将两种返回语义等同。
+当前验收结论见[等待/指标修复实测](shared_network_endpoint_evidence/20261005-optimization/results.md)、[CRC固定负载实测](shared_network_endpoint_evidence/20261005-crc/results.md)与[接收分段诊断](shared_network_endpoint_evidence/20261005-receive/results.md)。同shard冷消息可靠完成p99中位数从4.988ms降至1.057ms；协作接收f6f4b88已完成新54窗口，逐轮失败从13/27降到5/27，仍未全部达到门槛，见[协作接收实测](shared_network_endpoint_evidence/20261005-assist/results.md)。新增18个接收诊断窗口无丢失/错误/重复，但仍有2/9逐轮门槛失败，不能替代完整验收。物理跨机、完整阶段指标与若干负载矩阵仍缺项，维持实验性显式启用。旧[T14](shared_network_endpoint_evidence/20261005-t14/results.md)和[T15](shared_network_endpoint_evidence/20261005-t15/results.md)记录保留。legacy 的 blocking 固定采用 TLV，应使用对象读取接口；shared_v1 的 ACK 则在目标 SHM 确定提交后发送，不将两种返回语义等同。
