@@ -39,6 +39,8 @@ export DZIPC_GATEWAY_CONTROL=/tmp/dzipc-gateway-$UID/control.sock
 - best-effort/prebuilt 任一腿已提交或提交未知，返回 true，禁止据此回退重发。只有两腿都明确未提交，prebuilt 才能安全返回 false 后回退。
 - blocking 的 ACK 表示远端网关已提交业务 SHM，不保证订阅回调执行或处理完成。任一要求的目标失败则返回 false，即使另一腿已经交付；不要无条件重试整个业务事件。
 - blocking 超时单位毫秒，范围 1～5000；0 无提交，超范围明确失败。信用等待、编码与发送沿用同一截止时间。超时不能撤销已发 DATA，允许晚交付。
+- 没有收到 ACK（acked_count=0）也不代表远端没有交付；DATA 已发送后失败仍可能标记 possible_remote_delivery。发布者注销会在屏障确认前取消其未完成网络事务，已发包仍不承诺撤回。
+- 新订阅者在 SUB_READY 后开始参与本机分发，可能收到该路由代次下已经在途但尚未提交的消息；最后一个 Ready 订阅者退出后重建会产生新 route epoch，旧代次分片不能进入新订阅。
 - 出站 loan 容量和网络缓存信用分别记账。TX_PROGRESS 只归还出站容量，可靠终结后才释放网络缓存额度。
 - SIGSTOP 不允许第二网关接管。SIGKILL/重启后，已初始化旧对象可继续本机收发，旧网络身份失效；新建对象才能获得新网络会话。失败的 reset/InitChannel 会封闭整个重置句柄。
 - Sample 在其持有期间保持借样合法。公开对象析构前调用方必须停止发起新的成员调用；已进入的 getter 会被唤醒并收敛。
@@ -78,6 +80,7 @@ export DZIPC_GATEWAY_CONTROL=/tmp/dzipc-gateway-$UID/control.sock
 | Completed / NoSubscribers | 全部冻结网络目标确认 / 没有远端订阅（须结合本机结果） |
 | Busy / TimedOut / UnsupportedTimeout | 配额或队列不足 / 原期限已过 / 不支持该超时值 |
 | PeerGone / PeerRestarted / GatewayLost / Rejected | 对端失联 / 对端换代 / 本机会话丢失 / 验证或提交拒绝 |
+| Cancelled | 发布者注销取消尚未完成的网络事务；仍需检查可能部分交付 |
 
 ## 回滚
 
@@ -87,3 +90,5 @@ export DZIPC_GATEWAY_CONTROL=/tmp/dzipc-gateway-$UID/control.sock
 4. 仅在确认本实例已经退出后处理其控制目录和已确认不再使用的独占出站段。无需全局清理 SHM，不使用 `rm /dev/shm/*`、`killall` 或 dzipc_list 全局 reset。
 
 正确性和性能验收参见 [执行计划](shared_network_endpoint_execution_plan.md) 与其证据表；单机命名空间验证不能替代两台物理主机的最终验收。
+
+当前验收结论见 [T14 实测](shared_network_endpoint_evidence/20261005-t14/results.md) 和 [T15 交付审计](shared_network_endpoint_evidence/20261005-t15/results.md)。本机九组三轮分位数中位数达到初始门槛，5/27 个逐轮配对未达到；物理跨机、完整阶段指标与若干负载矩阵仍缺项，维持实验性显式启用。legacy 的 blocking 固定采用 TLV，应使用对象读取接口；shared_v1 的 ACK 则在目标 SHM 确定提交后发送，不将两种返回语义等同。
