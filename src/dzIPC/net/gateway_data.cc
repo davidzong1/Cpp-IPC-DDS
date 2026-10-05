@@ -16,6 +16,20 @@ struct GatewayData::Impl {
     };
     struct Target { PeerView peer; std::shared_ptr<RouteAdmission> route; std::uint32_t fragment = 0; };
     struct Tx {
+        Impl* quota_owner = nullptr;
+        Identity charged_publisher{};
+        bool publisher_charged = false;
+        std::uint64_t target_charge = 0;
+        ~Tx() {
+            if (!quota_owner) return;
+            quota_owner->target_states.fetch_sub(target_charge);
+            if (publisher_charged) {
+                std::lock_guard<std::mutex> lock(quota_owner->quota_mutex);
+                auto found = quota_owner->publisher_reliable.find(charged_publisher);
+                if (found != quota_owner->publisher_reliable.end() && !--found->second)
+                    quota_owner->publisher_reliable.erase(found);
+            }
+        }
         OutboxRecord record;
         std::vector<Target> targets;
         std::size_t cursor = 0;
@@ -37,23 +51,23 @@ struct GatewayData::Impl {
         std::mutex mutex; std::deque<Command> commands;
         std::thread thread;
         std::shared_ptr<const GatewayDataView> view;
-        ReassemblyShard receive;
+        std::unique_ptr<ReassemblyShard> receive;
         std::deque<std::unique_ptr<Tx>> sends;
         std::map<std::pair<Identity, std::uint64_t>, Tx*> active;
         std::uint64_t send_blocked_until = 0;
         bool send_progress = false;
         Shard(Impl& p, unsigned i, std::unique_ptr<DatagramEndpoint> e) : parent(p), index(i), endpoint(std::move(e)),
-            receive(p.identity, p.epoch, i, p.config.data_shards, p.receive_budget, p.config.nack_delay_ms * 1000000, p.config.nack_interval_ms * 1000000) {}
+            receive(std::make_unique<ReassemblyShard>(p.identity, p.epoch, i, p.config.data_shards, p.receive_budget, p.config.nack_delay_ms * 1000000, p.config.nack_interval_ms * 1000000)) {}
         void update(std::shared_ptr<const GatewayDataView> next) {
             if (view) {
                 for (const auto& [id, peer] : view->peers) {
                     auto now = next->peers.find(id);
-                    if (now == next->peers.end() || now->second.admission != peer.admission) receive.retire_peer_epoch(peer.admission);
+                    if (now == next->peers.end() || now->second.admission != peer.admission) receive->retire_peer_epoch(peer.admission);
                 }
                 for (const auto& [key, route] : view->local->routes) if (route->descriptor.role_flags & 2) {
                     auto now = next->local->routes.find(key);
                     if (now == next->local->routes.end() || now->second->descriptor.receiver_route_epoch != route->descriptor.receiver_route_epoch)
-                        receive.retire_route(route);
+                        receive->retire_route(route);
                 }
             }
             view = std::move(next); // 旧 bridge 的最后引用必须先释放，再确认屏障。
@@ -75,7 +89,7 @@ struct GatewayData::Impl {
             if (p == view->peers.end() || s == view->local->routes.end() || !p->second.snapshot) return;
             const auto pub = p->second.snapshot->routes.find(h.route); if (pub == p->second.snapshot->routes.end()) return;
             ReceiveAdmission admission{p->second.admission, pub->second, s->second, p->second.snapshot, view->local};
-            feedback(receive.ingest(packet, admission, local::monotonic_ns()));
+            feedback(receive->ingest(packet, admission, local::monotonic_ns()));
         }
         void finish(std::unique_ptr<Tx> tx, SendResultCode result) {
             GatewayDataEvent event; event.header = tx->record.header; event.result.publisher_id = event.header.publisher_id;
@@ -86,12 +100,7 @@ struct GatewayData::Impl {
             result = event.result.result;
             const auto key = std::make_pair(event.header.publisher_id, event.header.sequence);
             const auto found = active.find(key); if (found != active.end() && found->second == tx.get()) active.erase(found);
-            if (event.header.delivery == Delivery::Reliable) {
-                std::lock_guard<std::mutex> lock(parent.quota_mutex);
-                auto p = parent.publisher_reliable.find(event.header.publisher_id);
-                if (p != parent.publisher_reliable.end() && !--p->second) parent.publisher_reliable.erase(p);
-            }
-            const auto targets = tx->targets.size(); tx.reset(); parent.target_states.fetch_sub(targets);
+            tx.reset();
             if (result == SendResultCode::Completed) ++parent.sent_messages; else ++parent.rejected_records;
             parent.emit(std::move(event));
         }
@@ -209,7 +218,7 @@ struct GatewayData::Impl {
                             packets += result.count;
                         }
                     }
-                    for (auto& result : receive.tick(local::monotonic_ns(), [&](const WireHeader& h, const WireBlob& blob) {
+                    for (auto& result : receive->tick(local::monotonic_ns(), [&](const WireHeader& h, const WireBlob& blob) {
                         if (!view) return SubmitState::NotSubmitted;
                         const auto bridge = view->bridges->find(h.route); const auto route = view->local->routes.find(h.route);
                         if (bridge == view->bridges->end() || route == view->local->routes.end() || !route->second->active.load() || route->second->descriptor.receiver_route_epoch != h.receiver_route_epoch) return SubmitState::NotSubmitted;
@@ -220,7 +229,7 @@ struct GatewayData::Impl {
             } catch (...) { parent.stopped.store(true); local::notify(parent.control_wake); }
             while (!sends.empty()) { auto tx = std::move(sends.front()); sends.pop_front(); finish(std::move(tx), SendResultCode::GatewayLost); }
             { std::lock_guard<std::mutex> lock(mutex); for (auto& command : commands) { --parent.queued_commands; parent.queued_bytes -= command.charged_bytes; if (command.tx) finish(std::move(command.tx), SendResultCode::GatewayLost); } commands.clear(); }
-            view.reset();
+            active.clear(); receive.reset(); view.reset();
         }
     };
     GatewayConfig config; Identity identity; std::uint64_t epoch; int control_wake;
@@ -230,6 +239,7 @@ struct GatewayData::Impl {
     std::atomic<std::uint64_t> queued_commands{0}, target_states{0}, sent_messages{0}, sent_packets{0}, committed_messages{0}, rejected_records{0}, dropped_feedback{0};
     std::atomic<std::uint64_t> queued_bytes{0};
     std::atomic<std::uint64_t> retry_packets{0}, nacks{0}, ignored_controls{0};
+    std::mutex stop_mutex;
     std::mutex events_mutex; std::deque<GatewayDataEvent> events;
     std::uint64_t event_bytes = 0;
     std::mutex quota_mutex; std::map<Identity, std::uint64_t> publisher_reliable;
@@ -253,7 +263,11 @@ struct GatewayData::Impl {
         do { if (bytes > config.limits.command_bytes - used) { --queued_commands; return false; } } while (!queued_bytes.compare_exchange_weak(used, used + bytes));
         command.charged_bytes = bytes;
         auto& shard = shards[index];
-        try { std::lock_guard<std::mutex> lock(shard->mutex); shard->commands.push_back(std::move(command)); }
+        try {
+            std::lock_guard<std::mutex> lock(shard->mutex);
+            if (stopped.load()) { --queued_commands; queued_bytes -= bytes; return false; }
+            shard->commands.push_back(std::move(command));
+        }
         catch (...) { --queued_commands; queued_bytes -= bytes; throw; }
         local::notify(shard->wake.get()); return true;
     }
@@ -268,10 +282,12 @@ GatewayData::GatewayData(const GatewayConfig& c, Identity id, std::uint64_t epoc
 }
 GatewayData::~GatewayData() { stop(); }
 void GatewayData::stop() {
+    std::lock_guard<std::mutex> lock(impl_->stop_mutex);
     impl_->stopped.store(true);
     for (auto& shard : impl_->shards) local::notify(shard->wake.get());
     for (auto& shard : impl_->shards) if (shard->thread.joinable()) shard->thread.join();
-    for (auto& shard : impl_->shards) shard->endpoint.reset();
+    for (auto& shard : impl_->shards) { shard->endpoint.reset(); }
+    std::lock_guard<std::mutex> events(impl_->events_mutex); impl_->events.clear(); impl_->event_bytes = 0;
 }
 std::shared_future<void> GatewayData::synchronize(std::shared_ptr<const GatewayDataView> view) {
     auto fence = std::make_shared<Impl::Fence>(impl_->shards.size()); auto future = fence->promise.get_future().share();
@@ -282,20 +298,26 @@ std::shared_future<void> GatewayData::synchronize(std::shared_ptr<const GatewayD
     return future;
 }
 bool GatewayData::submit(OutboxRecord& record, std::vector<PeerView> peers) {
-    const auto publisher = record.header.publisher_id; const bool reliable = record.header.delivery == Delivery::Reliable;
-    if (reliable) { std::lock_guard<std::mutex> lock(impl_->quota_mutex); auto& count = impl_->publisher_reliable[publisher]; if (count >= impl_->config.limits.publisher_reliable) return false; ++count; }
-    const auto undo_publisher = [&] { if (reliable) { std::lock_guard<std::mutex> lock(impl_->quota_mutex); auto found = impl_->publisher_reliable.find(publisher); if (found != impl_->publisher_reliable.end() && !--found->second) impl_->publisher_reliable.erase(found); } };
+    auto tx = std::make_unique<Impl::Tx>();
+    tx->quota_owner = impl_.get(); tx->charged_publisher = record.header.publisher_id;
+    if (record.header.delivery == Delivery::Reliable) {
+        std::lock_guard<std::mutex> lock(impl_->quota_mutex);
+        auto& count = impl_->publisher_reliable[tx->charged_publisher];
+        if (count >= impl_->config.limits.publisher_reliable) return false;
+        ++count; tx->publisher_charged = true;
+    }
     const auto size = peers.size(); auto used = impl_->target_states.load();
-    do { if (size > impl_->config.limits.target_states - used) { undo_publisher(); return false; } } while (!impl_->target_states.compare_exchange_weak(used, used + size));
+    do { if (size > impl_->config.limits.target_states - used) return false; }
+    while (!impl_->target_states.compare_exchange_weak(used, used + size));
+    tx->target_charge = size; tx->targets.reserve(size);
+    for (auto& peer : peers) { auto route = peer.snapshot->routes.at(record.header.route); tx->targets.push_back({std::move(peer), std::move(route), 0}); }
+    tx->expires = local::monotonic_ns() + 500000000ull;
+    tx->record = std::move(record); Impl::Command command; command.tx = std::move(tx);
+    const auto index = route_hash(command.tx->record.header.route) % impl_->config.data_shards;
     try {
-        auto tx = std::make_unique<Impl::Tx>(); tx->targets.reserve(size);
-        for (auto& peer : peers) { auto route = peer.snapshot->routes.at(record.header.route); tx->targets.push_back({std::move(peer), std::move(route), 0}); }
-        tx->expires = local::monotonic_ns() + 500000000ull;
-        tx->record = std::move(record); Impl::Command command; command.tx = std::move(tx);
-        const auto index = route_hash(command.tx->record.header.route) % impl_->config.data_shards;
-        if (!impl_->enqueue(index, command)) { record = std::move(command.tx->record); impl_->target_states -= size; undo_publisher(); return false; }
-        return true;
-    } catch (...) { impl_->target_states -= size; undo_publisher(); throw; }
+        if (impl_->enqueue(index, command)) return true;
+    } catch (...) { record = std::move(command.tx->record); throw; }
+    record = std::move(command.tx->record); return false;
 }
 bool GatewayData::control(const ReceivedDatagram& packet) {
     WireHeader h; ByteView body;

@@ -313,6 +313,7 @@ struct GatewayRuntime::Impl
             Identity id; codec::copy(id, body.data); RouteDescriptor descriptor;
             decode_descriptor({body.data + 16, body.size - 16}, true, descriptor);
             try {
+                if (pending_fences.size() >= config.limits.command_records) throw std::runtime_error("撤销屏障队列已满");
                 const bool publisher = h.kind == LocalKind::RegisterPub;
                 if (!publisher && (pending_subs.size() >= config.limits.command_records || pending_sub_bytes + packet.bytes.size() > config.limits.command_bytes)) throw std::runtime_error("登记等待队列已满");
                 auto registration = local_directory->add(session.id, id, descriptor, publisher);
@@ -335,7 +336,6 @@ struct GatewayRuntime::Impl
                         session.last_request = h.request_id; remember(session, h.request_id, packet.bytes, {}); return;
                     } catch (...) { local_directory->remove(session.id, id, false); throw; }
                 }
-                if (pending_fences.size() >= config.limits.command_records) throw std::runtime_error("撤销屏障队列已满");
                 synchronize_data();
                 pending_fences.push_back({session.id, h.request_id, packet.bytes, reply, last_data_fence});
                 session.last_request = h.request_id; remember(session, h.request_id, packet.bytes, {}); return;
@@ -345,6 +345,7 @@ struct GatewayRuntime::Impl
         {
             Identity id; codec::copy(id, body.data);
             try {
+                if (pending_fences.size() >= config.limits.command_records) throw std::runtime_error("撤销屏障队列已满");
                 Bytes encoded(id.begin(), id.end());
                 if (h.kind == LocalKind::SubReady) {
                     const auto route_epoch = local_directory->ready(session.id, id, codec::get(body.data + 16, 4));
@@ -353,7 +354,6 @@ struct GatewayRuntime::Impl
                     if (!local_directory->remove(session.id, id, body.data[16] == 1)) throw std::runtime_error("句柄角色不匹配");
                     session.route_versions.erase(id); reply = response(session, LocalKind::Unregistered, h.request_id, encoded);
                 }
-                if (pending_fences.size() >= config.limits.command_records) throw std::runtime_error("撤销屏障队列已满");
                 synchronize_data();
                 pending_fences.push_back({session.id, h.request_id, packet.bytes, reply, last_data_fence});
                 session.last_request = h.request_id; remember(session, h.request_id, packet.bytes, {}); return;
@@ -782,6 +782,13 @@ void GatewayRuntime::stop()
         impl_->thread.join();
     impl_->data->stop();
     impl_->outboxes.reset();
+    impl_->pending_subs.clear(); impl_->pending_sub_bytes = 0;
+    impl_->initializing.clear(); impl_->pending_fences.clear();
+    impl_->page_sends.clear(); impl_->catalog_requests.clear(); impl_->catalog_bytes = 0;
+    impl_->peer_tokens.clear(); impl_->receive_tokens.clear();
+    impl_->bridge_map.reset(); impl_->bridge_snapshot.reset();
+    impl_->local_directory.reset(); impl_->peer_directory.reset();
+    impl_->registered_handles.store(0); impl_->active_peers.store(0);
     impl_->endpoints.clear();
     impl_->listener.reset();
 }

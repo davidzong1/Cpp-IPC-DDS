@@ -87,6 +87,7 @@ struct Subscriber::Impl {
         }
     };
     const pid_t owner = getpid(); std::mutex operation, state;
+    std::condition_variable drained; std::size_t readers = 0; bool closing = false;
     std::shared_ptr<TopicData> model; std::string topic; std::size_t domain, queue_size;
     bool verbose, qos, initialized = false; int cpu, priority;
     std::shared_ptr<Generation> current;
@@ -120,7 +121,14 @@ struct Subscriber::Impl {
         next->active.store(true); { std::lock_guard<std::mutex> lock(state); current = std::move(next); } initialized = true;
     }
     template<class Try> bool read(std::uint64_t timeout, Try attempt) {
-        auto generation = snapshot(); if (!generation) return false;
+        struct Reading {
+            Impl& impl;
+            ~Reading() { std::lock_guard<std::mutex> lock(impl.state); if (!--impl.readers) impl.drained.notify_all(); }
+        };
+        std::shared_ptr<Generation> selected;
+        { std::lock_guard<std::mutex> lock(state); if (closing || !current) return false; selected = current; ++readers; }
+        Reading reading{*this};
+        auto generation = std::move(selected);
         const auto now = std::chrono::steady_clock::now();
         const auto maximum = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::time_point::max() - now).count();
         const auto end = timeout >= static_cast<std::uint64_t>(maximum) ? std::chrono::steady_clock::time_point::max() : now + std::chrono::milliseconds(timeout);
@@ -141,7 +149,10 @@ Subscriber::Subscriber(const std::shared_ptr<TopicData>& msg, const std::string&
 }
 Subscriber::~Subscriber() {
     if (impl_->owner != getpid()) { impl_.release(); return; }
-    exit_flag.store(true); std::lock_guard<std::mutex> lock(impl_->operation); try { impl_->retire(); } catch (...) {}
+    exit_flag.store(true); std::lock_guard<std::mutex> lock(impl_->operation);
+    { std::lock_guard<std::mutex> state(impl_->state); impl_->closing = true; }
+    try { impl_->retire(); } catch (...) {}
+    std::unique_lock<std::mutex> state(impl_->state); impl_->drained.wait(state, [&] { return !impl_->readers; });
 }
 void Subscriber::InitChannel(std::string extra) {
     if (impl_->owner != getpid()) throw std::runtime_error("fork 后不能使用旧订阅句柄");
@@ -156,15 +167,20 @@ void Subscriber::reset_message(const std::shared_ptr<TopicData>& msg) {
 void Subscriber::get(Sample& sample) { (void)get(sample, UINT64_MAX); }
 bool Subscriber::get(Sample& sample, std::uint64_t timeout) {
     if (impl_->owner != getpid()) return false;
-    return impl_->read(timeout, [&](auto& reader) { return reader.try_get(sample); });
+    Sample candidate;
+    if (!impl_->read(timeout, [&](auto& reader) { return reader.try_get(candidate); })) return false;
+    sample = std::move(candidate); return true;
 }
 bool Subscriber::try_get(Sample& sample) { return get(sample, 0); }
 void Subscriber::get_clone(std::shared_ptr<TopicData>& out) {
     if (impl_->owner != getpid()) return;
-    impl_->read(UINT64_MAX, [&](auto& reader) { return reader.try_get_clone(out); });
+    auto candidate = out;
+    if (impl_->read(UINT64_MAX, [&](auto& reader) { return reader.try_get_clone(candidate); })) out = std::move(candidate);
 }
 bool Subscriber::try_get_clone(std::shared_ptr<TopicData>& out) {
     if (impl_->owner != getpid()) return false;
-    return impl_->read(0, [&](auto& reader) { return reader.try_get_clone(out); });
+    auto candidate = out;
+    if (!impl_->read(0, [&](auto& reader) { return reader.try_get_clone(candidate); })) return false;
+    out = std::move(candidate); return true;
 }
 } // namespace dzIPC::shared_net

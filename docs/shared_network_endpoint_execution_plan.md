@@ -2193,7 +2193,7 @@ nodelet 配置必须一致；已存在的纯进程内 nodelet 路径另作参考
 | T09 | 实现完成，跨机待验收 | f9977cf + 本卡提交 | build-shared-net / build-shared-net-sanitize / build-shared-net-off | 新增 GTest 4/0/0 + 多进程驱动 1/0/0；共享 CTest 21/0/0；sanitizer 5/0/0；OFF 2/0/0 | [双腿数据路径与隔离网关](shared_network_endpoint_evidence/20261005-t09/results.md) | 两套命名空间验证不能代替物理跨机；可靠发送由 T10 接入 |
 | T10 | 已完成 | 796129d + 本卡提交 | build-shared-net / build-shared-net-sanitize / build-shared-net-off | 新增 GTest 14/0/0 + 可靠驱动 1/0/0；共享 CTest 26/0/0；sanitizer 9/0/0；OFF 2/0/0 | [可靠发送与信用](shared_network_endpoint_evidence/20261005-t10/results.md) | 长时冷热公平性、尾延迟和真实跨机故障带宽留待 T14 |
 | T11 | 已完成 | f884f38 + 本卡提交 | shared / sanitize / off / python | 新增 GTest 8/0/0；共享 CTest 29/0/0；旧路径 7/0/0；sanitizer 3/0/0；OFF 2/0/0；Python 2/0/0 | [公共接口](shared_network_endpoint_evidence/20261005-t11/results.md) | 并发关闭与重启继续在 T12 验收；物理跨机仍待 T14 |
-| T12 | 未开始 | | | | | |
+| T12 | 已完成 | 1afee96 + 本卡提交 | shared / sanitize | 新增 GTest 8/0/0；共享 CTest 32/0/0；sanitizer 3/0/0 | [关闭与重启](shared_network_endpoint_evidence/20261005-t12/results.md) | 使用可重复故障与并发测试，未宣称 ThreadSanitizer 全库通过 |
 | T13 | 未开始 | | | | | |
 | T14 | 未开始 | | | | | |
 | T15 | 未开始 | | | | | |
