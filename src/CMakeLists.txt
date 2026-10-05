@@ -30,6 +30,7 @@ if(DZIPC_BUILD_SHARED_NET)
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/local_directory.cc
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/gateway_data.cc
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/publisher_endpoint.cc
+    ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/reliable_session.cc
         dzIPC/net/shm_wire.cc
         dzIPC/net/outbox.cc
         dzIPC/net/outbox_service.cc

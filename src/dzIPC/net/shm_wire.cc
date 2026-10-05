@@ -98,12 +98,16 @@ std::uint32_t ShmWireWriter::generation() const
     return impl_->ready() ? impl_->publisher->control_plane_.generation() : 0;
 }
 SubmitState ShmWireWriter::try_commit(const WireBlob &blob)
+{
+    return try_commit_until(blob, 0);
+}
+SubmitState ShmWireWriter::try_commit_until(const WireBlob &blob, std::uint64_t deadline)
 try
 {
     if (impl_->owner != getpid())
         return SubmitState::NotSubmitted;
     std::shared_lock<std::shared_mutex> lock(impl_->gate);
-    return impl_->commit(blob.view(), blob.encoding(), blob.msg_id(), blob.schema_hash(), 0);
+    return impl_->commit(blob.view(), blob.encoding(), blob.msg_id(), blob.schema_hash(), deadline);
 }
 catch (...)
 {

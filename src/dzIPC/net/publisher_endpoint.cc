@@ -28,7 +28,7 @@ struct PublisherEndpoint::Impl {
     PublishOutcome deliver(const WireBlob& blob, Delivery delivery, std::uint64_t deadline, bool local_required) {
         PublishOutcome out; out.sequence = next(); out.remote.publisher_id = id; out.remote.sequence = out.sequence;
         if (deadline && local::monotonic_ns() >= deadline) { out.remote.result = SendResultCode::TimedOut; return out; }
-        out.local = local_required ? writer->try_commit(blob) : SubmitState::NotRequired;
+        out.local = local_required ? writer->try_commit_until(blob, deadline) : SubmitState::NotRequired;
         if (local_required && out.local == SubmitState::NotRequired) out.local = SubmitState::NotSubmitted;
         if (!network_required(delivery)) { out.network = SubmitState::NotRequired; out.remote.result = SendResultCode::NoSubscribers; }
         else if (!runtime->healthy()) out.remote.result = SendResultCode::GatewayLost;

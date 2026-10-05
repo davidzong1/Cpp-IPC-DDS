@@ -3,6 +3,16 @@
 #include <stdexcept>
 
 namespace dzIPC::net {
+bool LocalRegistration::accept_sequence(std::uint64_t sequence) {
+    if (!sequence || (highest_sequence >= 4096 && sequence <= highest_sequence - 4096)) return false;
+    if (sequence > highest_sequence) {
+        if (sequence - highest_sequence >= 4096) sequences.fill(0);
+        else for (auto n = highest_sequence + 1; n <= sequence; ++n) { const auto slot = n % 4096; sequences[slot / 64] &= ~(1ull << (slot % 64)); if (n == UINT64_MAX) break; }
+        highest_sequence = sequence;
+    }
+    const auto slot = sequence % 4096; const auto bit = 1ull << (slot % 64);
+    if (sequences[slot / 64] & bit) return false; sequences[slot / 64] |= bit; return true;
+}
 struct LocalDirectory::Impl {
     struct Topic {
         std::shared_ptr<LocalBinding> binding;

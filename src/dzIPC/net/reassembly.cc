@@ -157,7 +157,7 @@ struct ReassemblyShard::Impl {
         return port <= 65535 && packet.source.port == port;
     }
     bool route_valid(const WireHeader& h, const ReceiveAdmission& a) const {
-        if (!a.publisher || !a.subscriber || !a.publisher->active.load() || !a.subscriber->active.load()) return false;
+        if (!a.publisher || !a.subscriber || !a.publisher->active.load() || !a.subscriber->active.load() || !a.publisher->publisher_active.load() || !a.subscriber->subscriber_active.load()) return false;
         const auto& p = a.publisher->descriptor; const auto& s = a.subscriber->descriptor;
         return p.key == h.route && s.key == h.route && p.topic == s.topic && (p.role_flags & 1) && (s.role_flags & 2) && s.receiver_route_epoch == h.receiver_route_epoch &&
             (h.encoding != Encoding::DzFlat || ((!p.schema_hash || p.schema_hash == h.schema_hash) && (!s.schema_hash || s.schema_hash == h.schema_hash)));
@@ -238,7 +238,7 @@ struct ReassemblyShard::Impl {
         for (std::size_t n = 0; n < count && !assemblies.empty(); ++n) {
             auto i = assembly_cursor ? assemblies.upper_bound(*assembly_cursor) : assemblies.begin(); if (i == assemblies.end()) i = assemblies.begin(); assembly_cursor = i->first;
             auto& a = i->second;
-            if (now >= a.deadline || (a.header.delivery == Delivery::BestEffort && a.stage == Stage::Collecting && now >= after(a.progress, best_effort_idle_ns)) || !a.admission.peer->active.load() || !a.admission.subscriber->active.load() || !a.admission.publisher->active.load()) { output.push_back(terminate(i, Terminal::Rejected, RejectReason::ShmUnavailable, now)); continue; }
+            if (now >= a.deadline || (a.header.delivery == Delivery::BestEffort && a.stage == Stage::Collecting && now >= after(a.progress, best_effort_idle_ns)) || !a.admission.peer->active.load() || !a.admission.subscriber->active.load() || !a.admission.publisher->active.load() || !a.admission.subscriber->subscriber_active.load() || !a.admission.publisher->publisher_active.load()) { output.push_back(terminate(i, Terminal::Rejected, RejectReason::ShmUnavailable, now)); continue; }
             if (a.stage == Stage::Pending) {
                 if (now < a.next_commit) continue;
                 ++stats.commit_attempts; SubmitState result;

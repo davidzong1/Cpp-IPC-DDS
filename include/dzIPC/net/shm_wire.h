@@ -12,6 +12,7 @@ class ShmWireWriter
     ShmWireWriter(const ShmWireWriter &) = delete;
     ShmWireWriter &operator=(const ShmWireWriter &) = delete;
     SubmitState try_commit(const WireBlob &);
+    SubmitState try_commit_until(const WireBlob &, std::uint64_t deadline_ns);
     SubmitState try_commit_local(IpcMsgBase &, bool prefer_dzflat = true,
                                  std::uint64_t deadline_ns = 0);
     SubmitState try_commit_prebuilt(ByteView, std::uint64_t deadline_ns = 0);

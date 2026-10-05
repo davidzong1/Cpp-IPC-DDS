@@ -11,10 +11,12 @@ struct PeerAdmission {
     DiscoveryHello hello;
     std::uint32_t ipv4 = 0;
     std::atomic<bool> active{true};
+    std::atomic<bool> retired{false};
 };
 struct RouteAdmission {
     RouteDescriptor descriptor;
     std::atomic<bool> active{true};
+    std::atomic<bool> publisher_active{true}, subscriber_active{true};
 };
 struct ReceiveAdmission {
     std::shared_ptr<PeerAdmission> peer;

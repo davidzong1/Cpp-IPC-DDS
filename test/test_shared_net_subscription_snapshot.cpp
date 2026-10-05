@@ -69,7 +69,7 @@ TEST(SharedNetSnapshot, TwoStageSubscriberAndLastReadyEpochAndTypeReservation) {
     auto admission = local.snapshot()->routes.at(topic.descriptor.key);
     auto sub2 = local.add(3, identity(3), topic.descriptor, false); EXPECT_EQ(local.ready(3, identity(3), generation), epoch);
     EXPECT_TRUE(local.remove(2, identity(2), false)); EXPECT_TRUE(admission->active.load());
-    EXPECT_TRUE(local.remove(3, identity(3), false)); EXPECT_FALSE(admission->active.load()); EXPECT_EQ(local.snapshot()->routes.at(topic.descriptor.key)->descriptor.role_flags, 1u);
+    EXPECT_TRUE(local.remove(3, identity(3), false)); EXPECT_FALSE(admission->subscriber_active.load()); EXPECT_TRUE(admission->publisher_active.load()); EXPECT_EQ(local.snapshot()->routes.at(topic.descriptor.key)->descriptor.role_flags, 1u);
     auto sub3 = local.add(4, identity(4), topic.descriptor, false); ASSERT_TRUE(local.set_bridge(sub3->binding, bridge));
     EXPECT_GT(local.ready(4, identity(4), generation), epoch);
     auto wrong = topic.descriptor; ++wrong.key.msg_id; EXPECT_THROW(local.add(5, identity(5), wrong, true), std::runtime_error);

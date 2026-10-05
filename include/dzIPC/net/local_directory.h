@@ -13,6 +13,10 @@ struct LocalRegistration {
     std::uint64_t session = 0;
     bool publisher = false, ready = false;
     std::shared_ptr<LocalBinding> binding;
+    std::uint64_t highest_sequence = 0;
+    std::array<std::uint64_t, 64> sequences{};
+    // 控制线程调用；发送记录重放不能重新冻结一批目标。
+    bool accept_sequence(std::uint64_t sequence);
 };
 // 控制线程拥有登记；bridge 初始化在公共初始化线程执行，完成后通过 set_bridge 交回。
 class LocalDirectory {

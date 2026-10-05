@@ -64,6 +64,9 @@ struct GatewayRuntime::Impl
         std::size_t cache_bytes = 0, output_bytes = 0;
         std::deque<Bytes> output;
         std::map<Identity, std::uint64_t> route_versions;
+        std::map<std::uint64_t, OutboxHeader> pending_sends;
+        std::map<std::uint64_t, SendResultBody> send_results;
+        std::deque<std::uint64_t> result_order;
     };
     struct Initializing {
         std::shared_ptr<LocalBinding> binding;
@@ -100,6 +103,9 @@ struct GatewayRuntime::Impl
     double control_tokens = 0;
     std::uint64_t token_time = 0;
     std::map<Identity, std::pair<double, std::uint64_t>> peer_tokens;
+    std::map<Identity, std::pair<double, std::uint64_t>> receive_tokens;
+    double receive_control_tokens = 0;
+    std::uint64_t receive_token_time = 0;
     std::atomic<std::uint64_t> snapshot_version{1}, active_peers{0}, registered_handles{0};
     std::thread thread;
     std::mutex stop_mutex;
@@ -126,6 +132,7 @@ struct GatewayRuntime::Impl
           << ",\"sent_messages\":" << traffic.sent_messages << ",\"sent_packets\":" << traffic.sent_packets
           << ",\"committed_messages\":" << traffic.committed_messages << ",\"source_injections\":0"
           << ",\"reassembly_bytes\":" << traffic.receive_usage.bytes << ",\"target_states\":" << traffic.target_states
+          << ",\"retry_packets\":" << traffic.retry_packets << ",\"nacks\":" << traffic.nacks << ",\"ignored_controls\":" << traffic.ignored_controls
           << ",\"data_ports\":[";
         for (std::uint64_t i = 0; i < config.data_shards; ++i)
         {
@@ -423,19 +430,30 @@ struct GatewayRuntime::Impl
             }
             auto session = std::find_if(sessions.begin(), sessions.end(), [&](const auto& entry) { return entry.second.id == event.header.session_id; });
             if (session == sessions.end()) continue;
-            if (event.header.delivery == Delivery::Reliable) { Bytes body; encode_send_result(event.result, body); queue(session->second, response(session->second, LocalKind::SendResult, event.header.request_id, body)); }
+            if (event.header.delivery == Delivery::Reliable) finish_send(session->second, event.header, event.result);
             queue(session->second, response(session->second, LocalKind::CreditGrant, 0, encode_credit_grant(session->second.account->granted())));
         }
     }
-    bool allow_control(const Identity& id, std::uint64_t now)
+    void finish_send(Session& session, const OutboxHeader& header, const SendResultBody& result)
     {
-        if (!token_time) { token_time = now; control_tokens = config.control_burst; }
-        control_tokens = std::min<double>(config.control_burst, control_tokens + (now - token_time) * 1e-9 * config.control_rate); token_time = now;
-        auto& token = peer_tokens[id];
+        if (!session.pending_sends.erase(header.request_id)) return;
+        if (config.limits.result_history) {
+            while (session.result_order.size() >= config.limits.result_history) { session.send_results.erase(session.result_order.front()); session.result_order.pop_front(); }
+            session.send_results.emplace(header.request_id, result); session.result_order.push_back(header.request_id);
+        }
+        Bytes body; encode_send_result(result, body); queue(session, response(session, LocalKind::SendResult, header.request_id, body));
+    }
+    bool allow_control(const Identity& id, std::uint64_t now, bool incoming = false)
+    {
+        auto& stamp = incoming ? receive_token_time : token_time;
+        auto& global = incoming ? receive_control_tokens : control_tokens;
+        if (!stamp) { stamp = now; global = config.control_burst; }
+        global = std::min<double>(config.control_burst, global + (now - stamp) * 1e-9 * config.control_rate); stamp = now;
+        auto& token = (incoming ? receive_tokens : peer_tokens)[id];
         if (!token.second) { token.first = config.control_burst; token.second = now; }
         token.first = std::min<double>(config.control_burst, token.first + (now - token.second) * 1e-9 * config.peer_control_rate); token.second = now;
-        if (control_tokens < 1 || token.first < 1) return false;
-        --control_tokens; --token.first; return true;
+        if (global < 1 || token.first < 1) return false;
+        --global; --token.first; return true;
     }
     void process_network_control()
     {
@@ -459,6 +477,15 @@ struct GatewayRuntime::Impl
                     const auto code = peer_directory->hello(h, packet.source, now);
                     if (code != DirectoryCode::Ok && code != DirectoryCode::Ignored) ++rejected;
                 } else {
+                    if (packet.size >= 4 && !std::memcmp(packet.bytes.data(), "DZMX", 4)) {
+                        WireHeader h; ByteView body;
+                        if (!decode_packet(packet.view(), h, body) || h.target_id != identity || h.target_epoch != epoch) { ++rejected; continue; }
+                        const auto peer = peer_directory->peer(h.source_id);
+                        if (!peer.admission || !peer.admission->active.load() || peer.admission->hello.gateway_epoch != h.source_epoch ||
+                            peer.admission->ipv4 != packet.source.host || peer.admission->hello.control_port != packet.source.port) { ++rejected; continue; }
+                        if (allow_control(h.source_id, now, true)) data->control(packet);
+                        continue;
+                    }
                     CatalogHeader h; ByteView payload;
                     if (!decode_catalog(packet.view(), h, payload)) { ++rejected; continue; }
                     if (h.kind == CatalogKind::Page) { peer_directory->page(packet, now); continue; }
@@ -553,10 +580,27 @@ struct GatewayRuntime::Impl
                 {
                     ++outbox_records;
                     const auto h = event.record.header;
+                    auto failure = SendResultCode::Rejected;
                     const auto publisher = local_directory->find(session.id, h.publisher_id);
+                    if (h.delivery == Delivery::Reliable) {
+                        const auto pending = session.pending_sends.find(h.request_id); const auto completed = session.send_results.find(h.request_id);
+                        if (pending != session.pending_sends.end() || completed != session.send_results.end()) {
+                            const auto id = pending != session.pending_sends.end() ? pending->second.publisher_id : completed->second.publisher_id;
+                            const auto sequence = pending != session.pending_sends.end() ? pending->second.sequence : completed->second.sequence;
+                            if (id != h.publisher_id || sequence != h.sequence) throw std::runtime_error("可靠请求 ID 冲突");
+                            event.record.release();
+                            queue(session, response(session, LocalKind::CreditGrant, 0, encode_credit_grant(session.account->granted())));
+                            continue; // 同一请求只终结一次，重复 DZTX 不重发也不重新结算旧事务。
+                        }
+                        if (session.pending_sends.size() >= config.limits.session_send_records) throw std::runtime_error("可靠等待队列达到上限");
+                        session.pending_sends.emplace(h.request_id, h);
+                    }
                     if (publisher && publisher->publisher && publisher->binding->descriptor.key == h.route &&
                         (!publisher->binding->descriptor.schema_hash || h.encoding == Encoding::Tlv || publisher->binding->descriptor.schema_hash == h.schema_hash) &&
-                        data->submit(event.record, peer_directory->targets(publisher->binding->descriptor))) continue;
+                        publisher->accept_sequence(h.sequence)) {
+                        failure = SendResultCode::Busy;
+                        if (data->submit(event.record, peer_directory->targets(publisher->binding->descriptor))) continue;
+                    }
                     event.record.release();
                     // 未登记或无法接管的记录明确拒绝，不伪报 NoSubscribers/成功。
                     if (h.delivery == Delivery::Reliable)
@@ -564,11 +608,8 @@ struct GatewayRuntime::Impl
                         SendResultBody result;
                         result.publisher_id = h.publisher_id;
                         result.sequence = h.sequence;
-                        result.result = SendResultCode::Rejected;
-                        Bytes body;
-                        encode_send_result(result, body);
-                        queue(session,
-                              response(session, LocalKind::SendResult, h.request_id, body));
+                        result.result = failure;
+                        finish_send(session, h, result);
                     }
                     queue(session, response(session, LocalKind::CreditGrant, 0,
                                             encode_credit_grant(session.account->granted())));

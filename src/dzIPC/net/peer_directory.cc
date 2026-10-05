@@ -66,12 +66,21 @@ std::shared_ptr<const DirectorySnapshot> DirectoryBudget::replace(const std::vec
         auto previous = old ? old->routes.find(descriptor.key) : next->routes.end();
         if (old && previous != old->routes.end() && previous->second->active.load() && equal(previous->second->descriptor, descriptor))
             next->routes.emplace(descriptor.key, previous->second);
-        else { auto route = std::make_shared<RouteAdmission>(); route->descriptor = descriptor; next->routes.emplace(descriptor.key, std::move(route)); }
+        else { auto route = std::make_shared<RouteAdmission>(); route->descriptor = descriptor;
+            route->publisher_active.store(descriptor.role_flags & 1); route->subscriber_active.store(descriptor.role_flags & 2);
+            next->routes.emplace(descriptor.key, std::move(route)); }
     }
     if (!impl_->retire(old)) return {};
     if (old) for (const auto& [key, route] : old->routes) {
         auto found = next->routes.find(key);
-        if (found == next->routes.end() || found->second != route) route->active.store(false);
+        if (found == next->routes.end()) route->active.store(false);
+        else if (found->second != route) {
+            const auto& before = route->descriptor; const auto& after = found->second->descriptor;
+            const bool same_type = before.topic == after.topic && before.schema_hash == after.schema_hash;
+            const bool pub = same_type && route->publisher_active.load() && (after.role_flags & 1);
+            const bool sub = same_type && route->subscriber_active.load() && (after.role_flags & 2) && before.receiver_route_epoch == after.receiver_route_epoch;
+            route->publisher_active.store(pub); route->subscriber_active.store(sub); route->active.store(pub || sub);
+        }
     }
     return next;
 }
@@ -94,6 +103,7 @@ struct PeerDirectory::Impl {
     std::map<Identity, Peer> entries;
     std::optional<Identity> cursor;
     void invalidate(Peer& p) {
+        p.view.admission->retired.store(true);
         p.view.admission->active.store(false);
         if (p.view.snapshot) for (const auto& [key, route] : p.view.snapshot->routes) route->active.store(false);
         p.view.snapshot.reset(); p.candidate.reset(); ++revision;

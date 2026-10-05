@@ -195,8 +195,10 @@ def driver(args):
             expected_remote = [0, 0]
             for seed, size in enumerate((64, 1023, 1024, 1025, 4096, 1048576), 1):
                 for sender in range(2):
-                    sent = request(sender, ['probe', 0, f'send {size} {sender + 1} {seed}'])
+                    sent = request(sender, ['probe', 0, f'send {size} {sender + 1} {seed} {1 if args.reliable else 0}'])
                     assert sent['success'] and sent['local'] == 2 and sent['network'] == 2, sent
+                    if args.reliable:
+                        assert sent['result'] == 0, sent
                     for receiver in range(2):
                         for app in range(2):
                             result = request(receiver, ['probe', app, 'recv 1 3000'])['received']
@@ -238,6 +240,7 @@ if __name__ == '__main__':
     parser.add_argument('--gateway', required=True)
     parser.add_argument('--probe', required=True)
     parser.add_argument('--host', action='store_true')
+    parser.add_argument('--reliable', action='store_true')
     parser.add_argument('--control')
     parser.add_argument('--topic')
     parser.add_argument('--base', type=int)
