@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""审计采样完整性，并按真实样本区间标记其他编译/压测重叠。"""
+import argparse
+import csv
+import gzip
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+from summarize_perf_scheduler import stats
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def original_bytes(path):
+    # 归档时仅无损压缩文本日志，采样 manifest 中的原始字节哈希保持不变。
+    return path.read_bytes() if path.exists() else gzip.decompress(Path(str(path)+'.gz').read_bytes())
+
+
+def check_settings(before, after):
+    assert before['cpus'] == after['cpus'] == list(range(32))
+    assert set(before['cpu']) == set(after['cpu'])
+    for cpu, values in before['cpu'].items():
+        final = after['cpu'][cpu]
+        for key in ('scaling_governor', 'scaling_driver', 'cpuinfo_max_freq'):
+            assert values['frequency'][key] == final['frequency'][key]
+        assert set(values['idle']) == set(final['idle'])
+        for state, idle in values['idle'].items():
+            for key in ('name', 'latency', 'disable'):
+                assert idle[key] == final['idle'][state][key]
+
+
+def read(path):
+    with gzip.open(path, 'rt') as f:
+        return [{k: int(v) for k, v in row.items()} for row in csv.DictReader(f)]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument('directory', type=Path); args = parser.parse_args()
+    windows = []
+    for manifest_path in sorted(args.directory.glob('*/manifest.json')):
+        manifest = json.loads(manifest_path.read_text())
+        base = manifest_path.parent
+        assert manifest['workload_uid'] == 1000
+        assert len(manifest['windows']) == len(manifest['cases'])
+        check_settings(manifest['settings_before'], manifest['settings_after'])
+        for path, sha in manifest['hashes'].items():
+            p = Path(path)
+            if 'build-local-latency' in path:
+                assert hashlib.sha256(p.read_bytes()).hexdigest() == sha
+            elif p.is_relative_to(ROOT):
+                source = subprocess.check_output(['git', 'show', f"{manifest['head']}:{p.relative_to(ROOT)}"], cwd=ROOT)
+                assert hashlib.sha256(source).hexdigest() == sha, path
+        for w in manifest['windows']:
+            folder = base/w['case']
+            assert w['returncode'] == w.get('decode_returncode', 0) == 0
+            check_settings(manifest['settings_before'], w['before'])
+            check_settings(w['before'], w['after'])
+            for path, sha in w['files'].items():
+                assert hashlib.sha256(original_bytes(base/path)).hexdigest() == sha, path
+            result = json.loads((folder/'result.json').read_text())
+            summary = json.loads((folder/'scheduler-summary.json').read_text())
+            expected = result['rate']*result['seconds']
+            pubs = read(folder/'pub.csv.gz')
+            assert len(pubs) == expected and len({p['sequence'] for p in pubs}) == expected
+            assert result['publish']['accepted'] == expected and result['publish']['rejected'] == 0
+            assert all(p['success'] == 1 for p in pubs)
+            samples = [r for path in folder.glob('sub*.csv.gz') for r in read(path)]
+            assert len(samples) == expected*result['subscribers'] == summary['samples']
+            assert len({r['reader_tid'] for r in samples}) == result['subscribers']
+            pub_by_seq = {p['sequence']: p for p in pubs}
+            assert all(r['read_ns']-pub_by_seq[r['sequence']]['start_ns'] == r['elapsed_ns'] >= 0 for r in samples)
+            assert summary['latency'] == stats([r['elapsed_ns'] for r in samples])
+            assert summary['publish'] == stats([p['elapsed_ns'] for p in pubs])
+            assert summary['copy_wall'] == stats([p['copy_end_ns']-p['copy_begin_ns'] for p in pubs])
+            assert summary['copy_cpu'] == stats([p['copy_cpu_end_ns']-p['copy_cpu_begin_ns'] for p in pubs])
+            perf_enabled = (folder/'events.txt.gz').exists()
+            if perf_enabled:
+                assert summary['matched'] == len(samples) and not summary['unmatched']
+                assert summary['publisher_wake_count'] == len(samples)
+                by_key = {(r['reader_tid'], r['sequence']): r for r in samples}
+                seen = set()
+                with gzip.open(folder/'joined.csv.gz', 'rt') as f:
+                    for joined in csv.DictReader(f):
+                        key = (int(joined['reader_tid']), int(joined['sequence']))
+                        assert key not in seen
+                        seen.add(key)
+                        original = by_key[key]
+                        assert int(joined['matched']) == int(joined['publisher_wake']) == 1
+                        assert int(joined['elapsed_ns']) == original['elapsed_ns']
+                        points = [int(joined[k]) for k in ('notify_ns', 'waking_ns', 'wakeup_ns', 'scheduled_ns', 'wait_end_ns')]
+                        assert points == sorted(points)
+                        assert points[0] == pub_by_seq[key[1]]['notify_begin_ns']
+                        assert points[-1] == original['wait_end_ns']
+                        for index, name in enumerate(('notify_to_waking_ns', 'waking_to_wakeup_ns', 'wakeup_to_scheduled_ns', 'scheduled_to_wait_end_ns')):
+                            assert int(joined[name]) == points[index+1]-points[index]
+                        assert int(joined['notify_to_wait_end_ns']) == points[-1]-points[0]
+                assert seen == set(by_key)
+            else:
+                assert summary['matched'] == 0 and summary['unmatched'] == {'perf_disabled': len(samples)}
+            for tid in {r['reader_tid'] for r in samples}:
+                selected = [r for r in samples if r['reader_tid'] == tid]
+                assert len(selected) == expected and {r['sequence'] for r in selected} == {p['sequence'] for p in pubs}
+            assert all(r['count'] == expected and not any(r[key] for key in ('lost', 'invalid', 'duplicates', 'trace_overflow', 'trace_missing_or_unordered')) for r in result['receivers'])
+            start = min(p['start_ns'] for p in pubs)
+            end = max(r['read_ns'] for r in samples)
+            foreign = [{'time_ns': sample['time_ns'], 'process': p} for sample in w['activity'] for p in sample['processes'] if not Path(p['cwd']).is_relative_to(ROOT)]
+            overlap = [item for item in foreign if start <= item['time_ns'] <= end]
+            uid_rows = [p for sample in w['activity'] for p in sample['processes'] if 'uid' in p]
+            assert all(p['uid'].split() == ['1000']*4 for p in uid_rows)
+            assert all(p['gid'].split() == ['1000']*4 for p in uid_rows)
+            if base.name == 'copy-affinity':
+                assert uid_rows
+            for side in ('before', 'after'):
+                for i, process in enumerate(result[side]):
+                    assert process['loaded_libraries'] == [str((ROOT/'build-local-latency/lib/libipc.so').resolve())]
+                    affinity = result['affinity_plan']
+                    allowed = '0-31' if not affinity else str(affinity['subscribers'][i] if i < result['subscribers'] else affinity['publisher'] if i == result['subscribers'] else affinity['gateway'])
+                    assert all(t['Cpus_allowed_list'] == allowed for t in process['thread_status'])
+            assert not summary['lost_event_lines'] and not summary['unknown_event_count']
+            windows.append({'case': str(folder.relative_to(args.directory)), 'accepted': expected, 'received': len(samples),
+                            'perf': perf_enabled, 'matched': summary['matched'], 'unmatched': summary['unmatched'],
+                            'foreign_during_capture': foreign, 'foreign_during_samples': overlap, 'uncontended_samples': not overlap,
+                            'uid_observations': len(uid_rows), 'latency': summary['latency']})
+    smoke = json.loads((args.directory/'smoke-lost-check.json').read_text())
+    assert smoke['returncode'] == 0 and not smoke['lost_lines'] and smoke['same_as_original_decode']
+    archive = args.directory/'archive-manifest.json'
+    if archive.exists():
+        for entry in json.loads(archive.read_text())['files']:
+            path = args.directory/entry['archive']
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == entry['archive_sha256']
+            assert hashlib.sha256(gzip.decompress(path.read_bytes())).hexdigest() == entry['original_sha256']
+    out = {'windows': windows, 'window_count': len(windows), 'accepted': sum(w['accepted'] for w in windows), 'received': sum(w['received'] for w in windows),
+           'perf_window_count': sum(w['perf'] for w in windows), 'matched': sum(w['matched'] for w in windows), 'overlapped_windows': [w['case'] for w in windows if not w['uncontended_samples']],
+           'lost_messages': 0, 'duplicates': 0, 'invalid': 0, 'unknown_events': 0, 'reported_lost_event_records': 0,
+           'settings_unchanged': True, 'settings_scope': '批次及每窗前后 CPU 集合、调频驱动/governor/最大频率、空闲态名称/公布延迟/禁用标志；不代表实际频率不变，未记录采样当时的 cpuidle 驱动名称。',
+           'diagnostic_only': True, 'limitations': '按秒采集已知进程名的活动，可能漏过不足一秒的任务和其他负载；perf OFF仍开启应用分段诊断；smoke已离线补查show-lost-events。'}
+    (args.directory/'audit.json').write_text(json.dumps(out, ensure_ascii=False, indent=2)+'\n')
+    print(json.dumps({k: v for k, v in out.items() if k != 'windows'}, ensure_ascii=False))
+
+
+if __name__ == '__main__': main()
