@@ -1,4 +1,5 @@
 #include "dzIPC/net/shared_config.h"
+#include "dzIPC/net/datagram_endpoint.h"
 #include "gtest/gtest.h"
 #include <cstdlib>
 #include <limits>
@@ -51,6 +52,7 @@ TEST(SharedNetConfig, DefaultsAndPortBoundaries)
     c.data_base_port = 65535;
     EXPECT_FALSE(validate_config(c));
     c.data_shards = 1;
+    c.data_port_range = "65535:65535";
     EXPECT_TRUE(validate_config(c));
     c.control_port = 65535;
     EXPECT_EQ(validate_config(c).code, ConfigCode::PortConflict);
@@ -66,6 +68,26 @@ TEST(SharedNetConfig, DefaultsAndPortBoundaries)
     EXPECT_TRUE(validate_config(c));
     c.data_workers = 65;
     EXPECT_FALSE(validate_config(c));
+    c = valid_config();
+    c.data_socket_cap = 0;
+    EXPECT_EQ(validate_config(c).code, ConfigCode::SocketCap);
+    c = valid_config();
+    c.data_socket_cap = 3;
+    EXPECT_EQ(validate_config(c).code, ConfigCode::SocketCap);
+    c = valid_config();
+    c.data_port_range = "24000:24002";
+    EXPECT_EQ(validate_config(c).code, ConfigCode::PortBudget);
+    c = valid_config();
+    c.data_port_range = "30000:49999";
+    EXPECT_TRUE(validate_config(c));
+    c = valid_config();
+    c.socket_fd_fraction = 0.500001;
+    EXPECT_EQ(validate_config(c).code, ConfigCode::FdBudget);
+    c.socket_fd_fraction = 0.0;
+    EXPECT_EQ(validate_config(c).code, ConfigCode::FdBudget);
+    c = valid_config();
+    c.socket_buffer_budget_bytes = 0;
+    EXPECT_EQ(validate_config(c).code, ConfigCode::BufferBudget);
 }
 TEST(SharedNetConfig, StrictAddressesAndPaths)
 {
@@ -111,6 +133,18 @@ TEST(SharedNetConfig, AtomicParsingAndOverflow)
     EXPECT_EQ(c.data_shards, 2u);
     EXPECT_EQ(c.data_workers, 1u);
     EXPECT_EQ(c.io_batch_max, 64u);
+    EXPECT_TRUE(parse_gateway_options({"--data-port-range", "22000:25000",
+                                       "--socket-fd-fraction", "0.25",
+                                       "--data-socket-cap", "8",
+                                       "--data-rcvbuf-bytes", "131072",
+                                       "--data-sndbuf-bytes", "131072",
+                                       "--socket-buffer-budget-bytes", "1048576"}, c));
+    EXPECT_EQ(c.data_port_range, "22000:25000");
+    EXPECT_DOUBLE_EQ(c.socket_fd_fraction, 0.25);
+    EXPECT_EQ(c.data_socket_cap, 8u);
+    EXPECT_EQ(c.data_rcvbuf_bytes, 131072u);
+    EXPECT_EQ(c.data_sndbuf_bytes, 131072u);
+    EXPECT_EQ(c.socket_buffer_budget_bytes, 1048576u);
 }
 TEST(SharedNetConfig, CapacityAndMetadataLimits)
 {
@@ -163,6 +197,16 @@ TEST(SharedNetConfig, TimerAndControlBounds)
     EXPECT_FALSE(validate_config(c));
 }
 #if defined(__linux__)
+TEST(SharedNetConfig, ResourceAuditIsReadOnlyAndSeparatesBudgets)
+{
+    auto c = valid_config();
+    const auto audit = endpoint_resource_audit(c, c.data_shards + 2);
+    EXPECT_GT(audit.fd_soft_limit, 0u);
+    EXPECT_GE(audit.fd_budget_limit, audit.fd_count);
+    EXPECT_EQ(audit.candidate_ports, 29998u);
+    EXPECT_EQ(audit.reserved_ports, 6u);
+    EXPECT_EQ(audit.buffer_budget_bytes, c.socket_buffer_budget_bytes);
+}
 TEST(SharedNetConfig, RealInterfaceCheckDoesNotBind)
 {
     auto c = valid_config();

@@ -153,3 +153,27 @@ TEST(SharedNetEndpoint, FixedKPlusTwoAndCrossShardConfigurations)
     }
     EXPECT_EQ(sockets(), before);
 }
+#if defined(__linux__)
+TEST(SharedNetEndpoint, ResourceBudgetRejectsBeforeOpeningSockets)
+{
+    GatewayConfig c;
+    c.listen_ip = "127.0.0.1";
+    c.interface = "lo";
+    c.control_path = "/tmp/unused-shared-net-budget.sock";
+    c.data_socket_cap = 1;
+    c.data_shards = 4;
+    EXPECT_EQ(validate_config(c).code, ConfigCode::SocketCap);
+    c = GatewayConfig{};
+    c.listen_ip = "127.0.0.1";
+    c.interface = "lo";
+    c.control_path = "/tmp/unused-shared-net-budget.sock";
+    c.data_port_range = "24000:24003";
+    c.data_base_port = 24000;
+    c.control_port = 24004;
+    c.discovery_port = 24005;
+    c.socket_buffer_budget_bytes = 1;
+    const auto before = sockets();
+    EXPECT_THROW(open_gateway_endpoints(c), ConfigError);
+    EXPECT_EQ(sockets(), before);
+}
+#endif

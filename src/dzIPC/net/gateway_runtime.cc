@@ -110,6 +110,7 @@ struct GatewayRuntime::Impl
     std::atomic<std::uint64_t> snapshot_version{1}, active_peers{0}, registered_handles{0};
     std::atomic<std::uint64_t> logical_publishers{0}, ready_subscribers{0}, active_routes{0};
     std::vector<std::pair<int, int>> socket_buffers;
+    EndpointResourceAudit resource_audit;
     std::thread thread;
     std::mutex stop_mutex;
     std::atomic<bool> running{true};
@@ -131,6 +132,8 @@ struct GatewayRuntime::Impl
           << ",\"udp_sockets\":" << (running.load() ? config.data_shards + 2 : 0)
           << ",\"data_sockets\":" << (running.load() ? config.data_shards : 0)
           << ",\"data_workers\":" << (running.load() ? config.data_workers : 0)
+          << ",\"data_socket_cap\":" << config.data_socket_cap
+          << ",\"socket_buffer_budget_bytes\":" << config.socket_buffer_budget_bytes
           << ",\"client_sessions\":" << session_count.load() << ",\"allocated_send_bytes\":\""
           << occupied.bytes << "\",\"send_inflight_bytes\":\"" << inflight.bytes << "\",\"send_inflight_records\":\"" << inflight.records
           << "\",\"allocated_send_records\":\"" << occupied.records
@@ -163,7 +166,17 @@ struct GatewayRuntime::Impl
             if (n) s << ',';
             s << "{\"receive_bytes\":" << socket_buffers[n].first << ",\"send_bytes\":" << socket_buffers[n].second << '}';
         }
-        s << "],\"logical_publishers\":" << logical_publishers.load()
+        s << "],\"resource_budget\":{\"fd_soft_limit\":" << resource_audit.fd_soft_limit
+          << ",\"fd_hard_limit\":" << resource_audit.fd_hard_limit
+          << ",\"fd_count\":" << resource_audit.fd_count
+          << ",\"fd_budget_limit\":" << resource_audit.fd_budget_limit
+          << ",\"fd_reserve\":" << resource_audit.fd_reserve
+          << ",\"candidate_ports\":" << resource_audit.candidate_ports
+          << ",\"reserved_ports\":" << resource_audit.reserved_ports
+          << ",\"actual_receive_buffer_bytes\":" << resource_audit.actual_receive_buffer_bytes
+          << ",\"actual_send_buffer_bytes\":" << resource_audit.actual_send_buffer_bytes
+          << ",\"buffer_budget_bytes\":" << resource_audit.buffer_budget_bytes << '}';
+        s << ",\"logical_publishers\":" << logical_publishers.load()
           << ",\"ready_subscribers\":" << ready_subscribers.load() << ",\"active_routes\":" << active_routes.load()
           << ",\"directory_bytes\":" << directory.installed << ",\"old_directory_bytes\":" << directory.old
           << ",\"candidate_bytes\":" << directory.candidates << ",\"peer_history\":" << directory.histories
@@ -843,6 +856,7 @@ GatewayRuntime::GatewayRuntime(GatewayConfig config) : impl_(new Impl)
     impl_->clock = local::clock_domain(getpid());
     impl_->listener = std::make_unique<local::Listener>(impl_->config.control_path);
     impl_->endpoints = open_gateway_endpoints(impl_->config);
+    impl_->resource_audit = endpoint_resource_audit(impl_->config, impl_->endpoints.size());
     impl_->wake = local::event();
     impl_->send_budget = std::make_unique<SendBudget>(
         CreditCounters{impl_->config.limits.send_bytes, impl_->config.limits.send_records},
@@ -853,7 +867,13 @@ GatewayRuntime::GatewayRuntime(GatewayConfig config) : impl_(new Impl)
     impl_->directory_budget = std::make_shared<DirectoryBudget>(impl_->config.limits, impl_->metrics);
     impl_->peer_directory = std::make_unique<PeerDirectory>(impl_->identity, impl_->epoch, impl_->directory_budget);
     impl_->local_directory = std::make_unique<LocalDirectory>(impl_->directory_budget, impl_->config.limits);
-    for (const auto& endpoint : impl_->endpoints) impl_->socket_buffers.emplace_back(endpoint->receive_buffer_bytes(), endpoint->send_buffer_bytes());
+    for (const auto& endpoint : impl_->endpoints) {
+        const auto receive = endpoint->receive_buffer_bytes();
+        const auto send = endpoint->send_buffer_bytes();
+        impl_->socket_buffers.emplace_back(receive, send);
+        impl_->resource_audit.actual_receive_buffer_bytes += receive > 0 ? static_cast<std::uint64_t>(receive) : 0;
+        impl_->resource_audit.actual_send_buffer_bytes += send > 0 ? static_cast<std::uint64_t>(send) : 0;
+    }
     std::vector<std::unique_ptr<DatagramEndpoint>> data_endpoints;
     for (unsigned i = 0; i < impl_->config.data_shards; ++i) data_endpoints.push_back(std::move(impl_->endpoints[i]));
     impl_->data = std::make_unique<GatewayData>(impl_->config, impl_->identity, impl_->epoch, impl_->wake.get(), std::move(data_endpoints), impl_->metrics);

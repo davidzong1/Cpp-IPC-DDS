@@ -54,7 +54,9 @@ struct OutgoingDatagram
 class DatagramEndpoint
 {
   public:
-    explicit DatagramEndpoint(Ipv4Address bind_address, bool discovery_reuse = false);
+    explicit DatagramEndpoint(Ipv4Address bind_address, bool discovery_reuse = false,
+                              std::uint64_t receive_buffer_bytes = 0,
+                              std::uint64_t send_buffer_bytes = 0);
     ~DatagramEndpoint();
     DatagramEndpoint(const DatagramEndpoint &) = delete;
     DatagramEndpoint &operator=(const DatagramEndpoint &) = delete;
@@ -82,6 +84,16 @@ class DatagramEndpoint
 };
 
 std::vector<std::unique_ptr<DatagramEndpoint>> open_gateway_endpoints(const GatewayConfig &config);
+struct EndpointResourceAudit
+{
+    std::uint64_t fd_soft_limit = 0, fd_hard_limit = 0, fd_count = 0;
+    std::uint64_t fd_budget_limit = 0, fd_reserve = 64;
+    std::uint64_t candidate_ports = 0, reserved_ports = 0;
+    std::uint64_t actual_receive_buffer_bytes = 0, actual_send_buffer_bytes = 0;
+    std::uint64_t buffer_budget_bytes = 0;
+};
+EndpointResourceAudit endpoint_resource_audit(const GatewayConfig &config,
+                                              std::uint64_t endpoint_count = 0);
 std::uint16_t data_port(const RouteKey &, std::uint16_t base, std::uint16_t shards);
 bool matches_data_shard(const RouteKey &, Ipv4Address observed, std::uint16_t base,
                         std::uint16_t shards) noexcept;

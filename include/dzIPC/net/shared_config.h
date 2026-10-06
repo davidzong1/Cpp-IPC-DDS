@@ -27,6 +27,12 @@ enum class ConfigCode
     InvalidControlPath,
     PortConflict,
     InvalidLimit,
+    SocketCap,
+    FdBudget,
+    PortBudget,
+    BufferBudget,
+    BindFailed,
+    OwnerFailed,
     NotImplemented
 };
 const char *config_code_name(ConfigCode code) noexcept;
@@ -97,6 +103,11 @@ struct GatewayConfig
     std::string listen_ip, interface, control_path;
     std::string discovery_group = "239.255.250.251";
     std::uint64_t data_base_port = 24000, data_shards = 4, data_workers = 4;
+    std::uint64_t data_socket_cap = 256;
+    std::string data_port_range = "20000:49999";
+    double socket_fd_fraction = 0.5;
+    std::uint64_t socket_buffer_budget_bytes = 256 * kMiB;
+    std::uint64_t data_rcvbuf_bytes = 262144, data_sndbuf_bytes = 262144;
     std::uint64_t control_port = 24004, discovery_port = 24005;
     std::uint64_t io_batch_max = 32, nack_delay_ms = 2, nack_interval_ms = 2;
     std::uint64_t io_round_packets = 64, io_round_bytes = 64 * 1024, io_round_us = 200;

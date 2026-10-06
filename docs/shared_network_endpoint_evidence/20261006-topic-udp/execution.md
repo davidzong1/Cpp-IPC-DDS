@@ -22,7 +22,8 @@
 | N02 | 已完成（短基线） | `baseline-network/results.md`；K=4/8/16 改造前与 S/W 解耦短窗口均完整交付，正式长窗口仍留给 N13 |
 | N03 | 已完成 | `design.md` 冻结 v1 S/W 配置、映射、所有权和 N02 选择依据；v2/资源预算留给后续节点 |
 | N04 | 已完成 | `candidate-v1-decoupled/results.md`；v1 pooled S/W 解耦实现、状态读回、参数转发和专项验证 |
-| N05-N15 | 未开始 | 依赖前序节点 |
+| N05 | 已完成 | `resources/n05-budget.md`；FD/端口/缓冲预算、状态读回和确定性失败回滚 |
+| N06-N15 | 未开始 | 依赖前序节点 |
 
 ## N00 验证
 
@@ -47,3 +48,5 @@ N00 尚未修改生产行为。环境原始输出见 `environment.txt`，计划�
 N02 短基线已完成并写入 `baseline-network/results.md`；N03 设计记录已根据短基线冻结默认和后续比较口径。
 
 N04 验证命令：`cmake --build build-shared-net --parallel 4`（退出码 0）；`ctest --test-dir build-shared-net -L shared_net --output-on-failure -j 1`（36/36，退出码 0）。S/W=(1,1),(4,1),(4,2),(4,4),(4,8),(16,4) 均完成 300/300 短冒烟，状态读回的 `data_sockets`、`data_workers`、`gateway_threads` 与映射一致，未观察 `wrong_shard` 或漏进展。
+
+N05 验证命令和资源审计见 `resources/n05-budget.md`。构建与 shared_net 36/36 回归通过；配置、端点预算拒绝和 CLI 状态 JSON 均通过。N05 仅实现 v1 启动期预算，v2 动态端口分配器和按话题端点留给 N06/N07。

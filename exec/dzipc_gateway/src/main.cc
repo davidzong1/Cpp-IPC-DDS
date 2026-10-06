@@ -20,7 +20,10 @@ int main(int argc, char **argv)
         std::cout << "用法：dzipc_gateway check-config|serve --listen-ip IPv4 --interface 网卡 "
                      "--control 绝对路径\n"
                      "dzipc_gateway status --control 绝对路径 --json [--topic 话题 --domain 域 --msg-id ID --peer-id 实例ID] [--metrics counters|quota|latency|shards]\n"
-                     "serve 可选：--data-shards S --data-workers W（v1 pooled；W 为本机 owner 数）\n";
+                     "serve 可选：--data-shards S --data-workers W --data-socket-cap C "
+                     "--data-port-range 起始:结束 --socket-fd-fraction F "
+                     "--data-rcvbuf-bytes B --data-sndbuf-bytes B --socket-buffer-budget-bytes B "
+                     "（v1 pooled；W 为本机 owner 数，资源不足时拒绝启动）\n";
         return argc < 2 ? 2 : 0;
     }
     const std::string command = argv[1];

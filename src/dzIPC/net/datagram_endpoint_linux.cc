@@ -7,11 +7,14 @@
 #include <arpa/inet.h>
 #include <atomic>
 #include <cerrno>
+#include <climits>
 #include <deque>
 #include <fcntl.h>
 #include <limits>
 #include <map>
 #include <net/if.h>
+#include <filesystem>
+#include <sys/resource.h>
 #include <set>
 #include <sys/socket.h>
 #include <system_error>
@@ -65,7 +68,9 @@ std::string Ipv4Address::ip() const
         system_failure("转换 IPv4 地址失败");
     return text;
 }
-DatagramEndpoint::DatagramEndpoint(Ipv4Address address, bool discovery_reuse)
+DatagramEndpoint::DatagramEndpoint(Ipv4Address address, bool discovery_reuse,
+                                   std::uint64_t receive_buffer_bytes,
+                                   std::uint64_t send_buffer_bytes)
 {
     fd_ = ::socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd_ < 0)
@@ -86,6 +91,22 @@ DatagramEndpoint::DatagramEndpoint(Ipv4Address address, bool discovery_reuse)
             int one = 1;
             if (setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)))
                 system_failure("设置发现 socket 复用失败");
+        }
+        if (receive_buffer_bytes)
+        {
+            if (receive_buffer_bytes > static_cast<std::uint64_t>(INT_MAX))
+                throw std::invalid_argument("接收缓冲超出系统接口范围");
+            const int value = static_cast<int>(receive_buffer_bytes);
+            if (setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &value, sizeof(value)))
+                system_failure("设置 UDP 接收缓冲失败");
+        }
+        if (send_buffer_bytes)
+        {
+            if (send_buffer_bytes > static_cast<std::uint64_t>(INT_MAX))
+                throw std::invalid_argument("发送缓冲超出系统接口范围");
+            const int value = static_cast<int>(send_buffer_bytes);
+            if (setsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &value, sizeof(value)))
+                system_failure("设置 UDP 发送缓冲失败");
         }
         auto addr = native(address);
         if (::bind(fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)))
@@ -211,18 +232,83 @@ std::vector<std::unique_ptr<DatagramEndpoint>> open_gateway_endpoints(const Gate
     auto status = validate_host_interface(c);
     if (!status)
         throw ConfigError(status);
+    const auto audit = endpoint_resource_audit(c, c.data_shards + 2);
+    if (c.data_shards > c.data_socket_cap)
+        throw ConfigError({ConfigCode::SocketCap, "数据 socket 数超过 data-socket-cap"});
+    if (audit.fd_budget_limit <= audit.fd_count ||
+        audit.fd_budget_limit - audit.fd_count <= audit.fd_reserve ||
+        c.data_shards + 2 > audit.fd_budget_limit - audit.fd_count - audit.fd_reserve)
+        throw ConfigError({ConfigCode::FdBudget, "数据端点创建将超过 FD 半数预算"});
+    if (c.data_shards > audit.candidate_ports / 2)
+        throw ConfigError({ConfigCode::PortBudget, "候选端口的一半不足以容纳数据 socket"});
     std::vector<std::unique_ptr<DatagramEndpoint>> endpoints;
     endpoints.reserve(c.data_shards + 2);
     for (std::uint64_t shard = 0; shard < c.data_shards; ++shard)
         endpoints.push_back(std::make_unique<DatagramEndpoint>(
-            Ipv4Address::parse(c.listen_ip, c.data_base_port + shard)));
+            Ipv4Address::parse(c.listen_ip, c.data_base_port + shard), false,
+            c.data_rcvbuf_bytes, c.data_sndbuf_bytes));
     endpoints.push_back(
-        std::make_unique<DatagramEndpoint>(Ipv4Address::parse(c.listen_ip, c.control_port)));
+        std::make_unique<DatagramEndpoint>(Ipv4Address::parse(c.listen_ip, c.control_port), false,
+                                           c.data_rcvbuf_bytes, c.data_sndbuf_bytes));
     auto discovery =
-        std::make_unique<DatagramEndpoint>(Ipv4Address::parse("0.0.0.0", c.discovery_port), true);
+        std::make_unique<DatagramEndpoint>(Ipv4Address::parse("0.0.0.0", c.discovery_port), true,
+                                           c.data_rcvbuf_bytes, c.data_sndbuf_bytes);
     discovery->join_discovery(c.discovery_group, c.interface, c.listen_ip);
     endpoints.push_back(std::move(discovery));
+    std::uint64_t receive = 0, send = 0;
+    for (const auto &endpoint : endpoints)
+    {
+        const auto rcv = endpoint->receive_buffer_bytes();
+        const auto snd = endpoint->send_buffer_bytes();
+        if (rcv <= 0 || snd <= 0 || receive > UINT64_MAX - static_cast<std::uint64_t>(rcv) ||
+            send > UINT64_MAX - static_cast<std::uint64_t>(snd))
+            throw ConfigError({ConfigCode::BufferBudget, "无法读取 UDP socket 实际缓冲"});
+        receive += static_cast<std::uint64_t>(rcv);
+        send += static_cast<std::uint64_t>(snd);
+        if (receive > c.socket_buffer_budget_bytes || send > c.socket_buffer_budget_bytes ||
+            receive > c.socket_buffer_budget_bytes - send)
+            throw ConfigError({ConfigCode::BufferBudget, "UDP socket 实际缓冲超过总预算"});
+    }
     return endpoints;
+}
+EndpointResourceAudit endpoint_resource_audit(const GatewayConfig &c, std::uint64_t endpoint_count)
+{
+    EndpointResourceAudit result;
+    result.buffer_budget_bytes = c.socket_buffer_budget_bytes;
+#if defined(__linux__)
+    rlimit limit{};
+    if (getrlimit(RLIMIT_NOFILE, &limit) == 0)
+    {
+        result.fd_soft_limit = limit.rlim_cur == RLIM_INFINITY ? UINT64_MAX : limit.rlim_cur;
+        result.fd_hard_limit = limit.rlim_max == RLIM_INFINITY ? UINT64_MAX : limit.rlim_max;
+        const auto scaled = static_cast<long double>(result.fd_soft_limit) * c.socket_fd_fraction;
+        result.fd_budget_limit = scaled >= static_cast<long double>(UINT64_MAX)
+                                     ? UINT64_MAX
+                                     : static_cast<std::uint64_t>(scaled);
+    }
+    std::error_code error;
+    result.fd_count = std::distance(std::filesystem::directory_iterator("/proc/self/fd", error),
+                                    std::filesystem::directory_iterator{});
+#endif
+    std::uint64_t first = 0, last = 0;
+    const auto split = c.data_port_range.find(':');
+    if (split != std::string::npos)
+    {
+        try
+        {
+            first = std::stoull(c.data_port_range.substr(0, split));
+            last = std::stoull(c.data_port_range.substr(split + 1));
+        }
+        catch (...) { first = last = 0; }
+    }
+    if (first && last >= first)
+    {
+        result.candidate_ports = last - first + 1;
+        if (c.control_port >= first && c.control_port <= last) --result.candidate_ports;
+        if (c.discovery_port >= first && c.discovery_port <= last && result.candidate_ports) --result.candidate_ports;
+    }
+    result.reserved_ports = endpoint_count;
+    return result;
 }
 std::uint16_t data_port(const RouteKey &key, std::uint16_t base, std::uint16_t shards)
 {

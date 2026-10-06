@@ -2,6 +2,7 @@
 #include "dzIPC/common/shm_mpmc_config.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <set>
@@ -33,6 +34,36 @@ bool number(const std::string &s, std::uint64_t &n)
         n = n * 10 + c - '0';
     }
     return true;
+}
+bool fraction(const std::string &s, double &out)
+{
+    if (s.empty() || s.front() == '+' || s.front() == '-' || s.find_first_of("eE") != std::string::npos)
+        return false;
+    const auto dot = s.find('.');
+    if (dot == std::string::npos)
+        return false;
+    const auto whole = s.substr(0, dot);
+    const auto decimal = s.substr(dot + 1);
+    std::uint64_t integer = 0, digits = 0, scale = 1;
+    if (!number(whole, integer) || decimal.empty() || decimal.size() > 9)
+        return false;
+    for (const unsigned char c : decimal)
+    {
+        if (c < '0' || c > '9' || scale > UINT64_MAX / 10)
+            return false;
+        digits = digits * 10 + c - '0';
+        scale *= 10;
+    }
+    out = static_cast<double>(integer) + static_cast<double>(digits) / static_cast<double>(scale);
+    return std::isfinite(out);
+}
+bool port_range(const std::string &s, std::uint64_t &first, std::uint64_t &last)
+{
+    const auto split = s.find(':');
+    if (split == std::string::npos || s.find(':', split + 1) != std::string::npos ||
+        !number(s.substr(0, split), first) || !number(s.substr(split + 1), last))
+        return false;
+    return first >= 1 && first <= last && last <= 65535;
 }
 bool ipv4(const std::string &s, std::uint32_t &addr)
 {
@@ -115,6 +146,10 @@ const NumberOption number_options[] = {
     }
     OPTION("data-base-port", data_base_port),     OPTION("data-shards", data_shards),
     OPTION("data-workers", data_workers),
+    OPTION("data-socket-cap", data_socket_cap),
+    OPTION("socket-buffer-budget-bytes", socket_buffer_budget_bytes),
+    OPTION("data-rcvbuf-bytes", data_rcvbuf_bytes),
+    OPTION("data-sndbuf-bytes", data_sndbuf_bytes),
     OPTION("control-port", control_port),         OPTION("discovery-port", discovery_port),
     OPTION("io-batch-max", io_batch_max),         OPTION("nack-delay-ms", nack_delay_ms),
     OPTION("io-round-packets", io_round_packets), OPTION("io-round-bytes", io_round_bytes),
@@ -145,6 +180,12 @@ const char *config_code_name(ConfigCode c) noexcept
         CODE(InvalidControlPath);
         CODE(PortConflict);
         CODE(InvalidLimit);
+        CODE(SocketCap);
+        CODE(FdBudget);
+        CODE(PortBudget);
+        CODE(BufferBudget);
+        CODE(BindFailed);
+        CODE(OwnerFailed);
         CODE(NotImplemented);
 #undef CODE
     }
@@ -235,10 +276,25 @@ ConfigStatus validate_config(const GatewayConfig &c)
     const auto in = [](std::uint64_t n, std::uint64_t a, std::uint64_t b) {
         return n >= a && n <= b;
     };
-    if (!in(c.data_shards, 1, 16) || !in(c.data_workers, 1, 64) || !in(c.data_base_port, 1, 65535) ||
+    std::uint64_t port_first = 0, port_last = 0;
+    if (!port_range(c.data_port_range, port_first, port_last))
+        return fail(ConfigCode::PortBudget, "data-port-range 须为 start:end 且均为 1～65535 的端口");
+    if (!in(c.data_socket_cap, 1, 65535))
+        return fail(ConfigCode::SocketCap, "data-socket-cap 须为 1～65535");
+    if (c.data_shards > c.data_socket_cap)
+        return fail(ConfigCode::SocketCap, "数据 socket 数超过 data-socket-cap");
+    if (!in(c.data_shards, 1, 16) || !in(c.data_workers, 1, 64) ||
+        !in(c.data_base_port, 1, 65535) ||
         c.data_shards - 1 > 65535 - c.data_base_port || !in(c.control_port, 1, 65535) ||
         !in(c.discovery_port, 1, 65535))
         return fail(ConfigCode::InvalidNumber, "数据分片须为 1～16，数据 worker 须为 1～64，端口须在 1～65535 内");
+    if (port_last - port_first + 1 < c.data_shards)
+        return fail(ConfigCode::PortBudget, "data-port-range 候选端口不足以容纳数据 socket");
+    if (!(c.socket_fd_fraction > 0.0) || !std::isfinite(c.socket_fd_fraction) || c.socket_fd_fraction > 0.5)
+        return fail(ConfigCode::FdBudget, "socket-fd-fraction 须大于 0 且不超过 0.5");
+    if (!in(c.socket_buffer_budget_bytes, 1, 64 * 1024ull * kMiB) ||
+        !in(c.data_rcvbuf_bytes, 1, 64 * kMiB) || !in(c.data_sndbuf_bytes, 1, 64 * kMiB))
+        return fail(ConfigCode::BufferBudget, "UDP 缓冲预算和单 socket 缓冲须在允许范围内");
     const auto is_data = [&](std::uint64_t p) {
         return p >= c.data_base_port && p - c.data_base_port < c.data_shards;
     };
@@ -315,6 +371,13 @@ ConfigStatus parse_gateway_options(const std::vector<std::string> &args, Gateway
             candidate.control_path = value;
         else if (key == "--discovery-group")
             candidate.discovery_group = value;
+        else if (key == "--data-port-range")
+            candidate.data_port_range = value;
+        else if (key == "--socket-fd-fraction")
+        {
+            if (!fraction(value, candidate.socket_fd_fraction))
+                return fail(ConfigCode::InvalidNumber, "需要十进制比例：" + key);
+        }
         else
         {
             std::uint64_t *dest = nullptr;
