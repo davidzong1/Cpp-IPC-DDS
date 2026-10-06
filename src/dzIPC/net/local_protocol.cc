@@ -185,7 +185,7 @@ ProtocolStatus encode_local(const LocalHeader &h, ByteView body, Bytes &out)
 }
 ProtocolStatus decode_local(ByteView b, LocalHeader &out, ByteView &body)
 {
-    if (!valid(b) || b.size < 40 || b.size > 8192)
+    if (!valid(b) || b.size < kLocalHeaderSize || b.size > kLocalMaxSize)
         return error(ProtocolCode::BadLength);
     const auto *d = b.data;
     if (std::memcmp(d, "DZLC", 4))

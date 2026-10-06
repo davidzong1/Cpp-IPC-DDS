@@ -23,6 +23,7 @@
 #include <limits>
 #include <tuple>
 #include <iterator>
+#include <iostream>
 #include <unistd.h>
 
 namespace dzIPC::net
@@ -306,6 +307,19 @@ struct GatewayRuntime::Impl
     std::size_t control_memory = 0;
     mutable std::mutex error_mutex; std::uint32_t last_error_code = 0; std::string last_error;
     std::uint32_t last_endpoint_failure_code = 0; std::string last_endpoint_failure;
+    std::string runtime_failure;
+    void note_runtime_failure(const char *where, const std::exception *error = nullptr) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(error_mutex);
+            runtime_failure = where;
+            if (error) {
+                runtime_failure += ": ";
+                runtime_failure += error->what();
+            }
+        } catch (...) {
+            // Failure reporting must not turn an already stopping gateway into terminate().
+        }
+    }
     void note_endpoint_failure(ConfigCode code, const std::string &detail) {
         std::lock_guard<std::mutex> lock(error_mutex);
         last_endpoint_failure_code = static_cast<std::uint32_t>(code);
@@ -445,7 +459,8 @@ struct GatewayRuntime::Impl
         s << "]";
         { std::lock_guard<std::mutex> lock(error_mutex); s << ",\"last_error_code\":" << last_error_code << ",\"last_error\":" << json_string(last_error)
           << ",\"last_endpoint_failure_code\":" << last_endpoint_failure_code
-          << ",\"last_endpoint_failure\":" << json_string(last_endpoint_failure); }
+          << ",\"last_endpoint_failure\":" << json_string(last_endpoint_failure)
+          << ",\"runtime_failure\":" << json_string(runtime_failure); }
         s << ",\"control_port\":" << config.control_port
           << ",\"discovery_port\":" << config.discovery_port
           << ",\"discovery_group\":" << json_string(config.discovery_group) << '}';
@@ -1287,16 +1302,31 @@ struct GatewayRuntime::Impl
                             session.output.pop_front();
                         }
                     }
+                    catch (const std::exception &error)
+                    {
+                        std::cerr << "GatewaySessionFailure: " << error.what() << '\n';
+                        ++rejected;
+                        close_session(found);
+                    }
                     catch (...)
                     {
+                        std::cerr << "GatewaySessionFailure: non-standard exception\n";
                         ++rejected;
                         close_session(found);
                     }
                 }
             }
         }
+        catch (const std::exception &error)
+        {
+            note_runtime_failure("gateway runtime", &error);
+            std::cerr << "GatewayRuntimeFailure: " << error.what() << '\n';
+            ++rejected;
+        }
         catch (...)
         {
+            note_runtime_failure("gateway runtime: non-standard exception");
+            std::cerr << "GatewayRuntimeFailure: non-standard exception\n";
             ++rejected;
         }
         running.store(false);

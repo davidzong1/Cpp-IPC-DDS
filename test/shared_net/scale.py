@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import select
 from pathlib import Path
 import subprocess
 import sys
@@ -10,6 +11,38 @@ import tempfile
 import time
 from benchmark import sample
 from end_to_end import Process, reserve_ports
+
+
+def gateway_status(gateway, executable, control, env):
+    try:
+        return json.loads(subprocess.check_output(
+            [executable, 'status', '--control', control, '--json'], env=env, text=True))
+    except subprocess.CalledProcessError as error:
+        stderr = b''
+        if gateway.stderr:
+            fd = gateway.stderr.fileno()
+            os.set_blocking(fd, False)
+            chunks = []
+            while select.select([fd], [], [], 0)[0]:
+                try:
+                    chunk = os.read(fd, 65536)
+                except BlockingIOError:
+                    break
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            stderr = b''.join(chunks)
+        if gateway.poll() is None:
+            try:
+                gateway.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                pass
+        if gateway.poll() is not None and gateway.stderr and not stderr:
+            stderr = gateway.stderr.read()
+        detail = stderr.decode(errors='replace') if isinstance(stderr, bytes) else str(stderr)
+        raise AssertionError({'status_returncode': error.returncode,
+                              'gateway_returncode': gateway.poll(),
+                              'gateway_stderr': detail}) from error
 
 
 def host(args):
@@ -32,7 +65,7 @@ def host(args):
             ready = process.receive(timeout=180)
             assert ready['topics'] == args.topics
             creation = time.monotonic() - started
-            stats = json.loads(subprocess.check_output([args.gateway, 'status', '--control', control, '--json'], env=env, text=True))
+            stats = gateway_status(gateway, args.gateway, control, env)
             live = {'application': sample(process.p.pid), 'gateway': sample(gateway.pid)}
             memory = os.statvfs('/dev/shm')
             shm_bytes = (memory.f_blocks-memory.f_bfree)*memory.f_frsize
@@ -42,7 +75,7 @@ def host(args):
             assert process.receive(timeout=180)['closed']
             time.sleep(.1)
             closed = {'application': sample(process.p.pid), 'gateway': sample(gateway.pid)}
-            status_closed = json.loads(subprocess.check_output([args.gateway, 'status', '--control', control, '--json'], env=env, text=True))
+            status_closed = gateway_status(gateway, args.gateway, control, env)
             assert status_closed['registered_handles'] == 0 and status_closed['active_routes'] == 0
             print(json.dumps({'topics': args.topics, 'creation_seconds': creation, 'before_gateway': before, 'live': live,
                 'closed': closed, 'shm_bytes': shm_bytes, 'status': stats, 'status_closed': status_closed}, ensure_ascii=False))

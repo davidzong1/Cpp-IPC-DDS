@@ -3,7 +3,8 @@
 
 namespace dzIPC::net
 {
-inline constexpr std::size_t kLocalHeaderSize = 40, kOutboxHeaderSize = 112, kLocalMaxSize = 8192;
+// 控制请求保持小而频繁；按需状态/指标响应可携带大规模话题目录。
+inline constexpr std::size_t kLocalHeaderSize = 40, kOutboxHeaderSize = 112, kLocalMaxSize = 1024 * 1024;
 enum class LocalKind : std::uint16_t
 {
     Hello = 1,

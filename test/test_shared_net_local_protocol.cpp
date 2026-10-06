@@ -166,3 +166,21 @@ TEST(SharedNetLocal, InvalidBodyBoundsAndUtf8)
     EXPECT_FALSE(encode_local(h, ByteView(Bytes(8)), encoded));
     EXPECT_FALSE(encode_local(h, ByteView(nullptr, 8), encoded));
 }
+TEST(SharedNetLocal, LargeStateResponseSupportsScaledRouteStatus)
+{
+    LocalHeader h{LocalKind::State, 1, 1, 1};
+    Bytes body(4 + 900000, 'a');
+    const auto length = static_cast<std::uint32_t>(body.size() - 4);
+    body[0] = static_cast<std::uint8_t>(length >> 24);
+    body[1] = static_cast<std::uint8_t>(length >> 16);
+    body[2] = static_cast<std::uint8_t>(length >> 8);
+    body[3] = static_cast<std::uint8_t>(length);
+    Bytes encoded;
+    ASSERT_TRUE(encode_local(h, ByteView(body), encoded));
+    EXPECT_EQ(encoded.size(), 40u + body.size());
+    LocalHeader decoded;
+    ByteView decoded_body;
+    ASSERT_TRUE(decode_local(ByteView(encoded), decoded, decoded_body));
+    EXPECT_EQ(decoded.kind, LocalKind::State);
+    EXPECT_EQ(decoded_body.size, body.size());
+}

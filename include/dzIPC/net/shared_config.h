@@ -100,7 +100,8 @@ struct Limits
     std::uint64_t candidate_bytes = 64 * kMiB, peer_candidate_bytes = 8 * kMiB;
     std::uint64_t directory_bytes = 64 * kMiB, old_directory_bytes = 64 * kMiB;
     std::uint64_t peer_history = 16384, gateway_history = 256;
-    std::uint64_t session_control_bytes = 256 * 1024, local_control_bytes = 8 * kMiB;
+    // 状态查询会包含大规模 RouteKey 映射；全局 local_control_bytes 仍限制所有会话总量。
+    std::uint64_t session_control_bytes = kMiB, local_control_bytes = 8 * kMiB;
     std::uint64_t network_control_bytes = 8 * kMiB;
     // 跨线程队列仅存命令/引用，payload 另记原账本；两者都有限额。
     std::uint64_t command_records = 4096, command_bytes = 8 * kMiB;

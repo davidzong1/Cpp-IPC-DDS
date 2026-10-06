@@ -43,7 +43,8 @@ std::uint64_t nearest_rank(const std::vector<std::uint64_t>& values, double perc
     return values[std::max<std::size_t>(1, rank) - 1];
 }
 void run_load(PublisherEndpoint& publisher, unsigned seconds, double rate, unsigned size,
-              bool reliable, std::chrono::steady_clock::time_point start, LoadResult& result) {
+              bool reliable, std::uint64_t tag,
+              std::chrono::steady_clock::time_point start, LoadResult& result) {
     const auto end = start + std::chrono::seconds(seconds);
     while (std::chrono::steady_clock::now() < end && result.sent < 600000) {
         if (rate > 0) {
@@ -58,7 +59,7 @@ void run_load(PublisherEndpoint& publisher, unsigned seconds, double rate, unsig
         const auto publisher_id = publisher.publisher_id();
         std::memcpy(&identity, publisher_id.data(), sizeof(identity));
         const auto seed = (identity & 0xffffffff00000000ull) | (result.sent & 0xffffffffull);
-        auto bytes = payload(size, 1, seed);
+        auto bytes = payload(size, tag, seed);
         const auto outcome = publisher.prebuilt(ByteView(bytes),
             reliable ? Delivery::Reliable : Delivery::BestEffort, reliable ? 5000 : 0);
         result.failed += !outcome.success;
@@ -89,11 +90,12 @@ void print_load_result(const LoadResult& result, bool include_samples) {
 int main(int argc, char** argv) try {
     if (argc != 4) { std::cerr << "用法：shared_net_probe 控制路径 话题 pub|sub|both\n"; return 2; }
     const std::string role = argv[3];
-    if (role != "pub" && role != "sub" && role != "both" && role != "pubset") return 2;
+    if (role != "pub" && role != "sub" && role != "both" && role != "pubset" &&
+        role != "bothset" && role != "subset") return 2;
     const auto topics = split_topics(argv[2]);
-    if (role != "pubset" && topics.size() != 1) return 2;
-    const bool is_publisher = role == "pub" || role == "both" || role == "pubset";
-    const bool is_subscriber = role == "sub" || role == "both";
+    if (role != "pubset" && role != "bothset" && role != "subset" && topics.size() != 1) return 2;
+    const bool is_publisher = role == "pub" || role == "both" || role == "pubset" || role == "bothset";
+    const bool is_subscriber = role == "sub" || role == "both" || role == "bothset" || role == "subset";
     std::vector<RouteDescriptor> descriptors;
     for (const auto& topic : topics) {
         RouteDescriptor descriptor; descriptor.topic = topic; descriptor.key.msg_id = 71; descriptor.schema_hash = 0xabcdef01;
@@ -105,18 +107,22 @@ int main(int argc, char** argv) try {
     std::vector<std::unique_ptr<PublisherEndpoint>> publishers;
     if (is_publisher) for (const auto& route : descriptors)
         publishers.push_back(std::make_unique<PublisherEndpoint>(runtime, route));
-    Identity sub{}; std::unique_ptr<ipc::mpmc_channel> receiver;
+    std::vector<Identity> subscribers;
+    std::vector<std::unique_ptr<ipc::mpmc_channel>> receivers;
     if (is_subscriber) {
-        // probe 句柄只在本进程/会话使用；业务公共订阅封装在 T11 接入。
-        const auto value = std::chrono::steady_clock::now().time_since_epoch().count(); std::memcpy(sub.data(), &value, 8); sub[15] = 2;
-        auto registered = runtime->request(LocalKind::RegisterSub, registration_body(sub, descriptor));
-        if (registered.header.kind != LocalKind::SubRegistered) throw std::runtime_error("probe 订阅登记失败");
-        const auto generation = read32(registered.body.data() + 16);
-        receiver = std::make_unique<ipc::mpmc_channel>(shm_topic_mpmc_segment_name(descriptor.topic, 0).c_str(), ipc::receiver, false);
-        dzIPC::control_plane_shm::TopicControlPlane control;
-        if (!control.open(shm_topic_mpmc_control_name(descriptor.topic, 0)) || control.generation() != generation) throw std::runtime_error("probe SHM generation 不匹配");
-        Bytes body(sub.begin(), sub.end()); put32(body, generation);
-        if (runtime->request(LocalKind::SubReady, body).header.kind != LocalKind::SubReadyAck) throw std::runtime_error("probe Ready 失败");
+        const auto value = std::chrono::steady_clock::now().time_since_epoch().count();
+        for (std::size_t i = 0; i < descriptors.size(); ++i) {
+            Identity sub{}; std::memcpy(sub.data(), &value, 8); std::memcpy(sub.data() + 8, &i, 4); sub[15] = 2;
+            auto registered = runtime->request(LocalKind::RegisterSub, registration_body(sub, descriptors[i]));
+            if (registered.header.kind != LocalKind::SubRegistered) throw std::runtime_error("probe 订阅登记失败");
+            const auto generation = read32(registered.body.data() + 16);
+            auto receiver = std::make_unique<ipc::mpmc_channel>(shm_topic_mpmc_segment_name(descriptors[i].topic, 0).c_str(), ipc::receiver, false);
+            dzIPC::control_plane_shm::TopicControlPlane control;
+            if (!control.open(shm_topic_mpmc_control_name(descriptors[i].topic, 0)) || control.generation() != generation) throw std::runtime_error("probe SHM generation 不匹配");
+            Bytes body(sub.begin(), sub.end()); put32(body, generation);
+            if (runtime->request(LocalKind::SubReady, body).header.kind != LocalKind::SubReadyAck) throw std::runtime_error("probe Ready 失败");
+            subscribers.push_back(sub); receivers.push_back(std::move(receiver));
+        }
     }
     std::cout << "{\"ready\":true}" << std::endl;
     std::string line;
@@ -188,16 +194,22 @@ int main(int argc, char** argv) try {
                 std::cout << ']';
             }
             std::cout << "}" << std::endl;
-        } else if (command == "loadset" && role == "pubset") {
-            unsigned seconds, size, reliable = 0; double rate; input >> seconds >> rate >> size >> reliable;
-            if (!seconds || seconds > 60 || rate < 0 || rate > 10000) throw std::invalid_argument("负载参数无效");
+        } else if ((command == "loadset" || command == "loadsetmix") &&
+                   (role == "pubset" || role == "bothset")) {
+            unsigned seconds, size, reliable = 0, hot_topics = publishers.size();
+            double rate, cold_rate = 0;
+            if (command == "loadsetmix") input >> seconds >> rate >> cold_rate >> size >> reliable >> hot_topics;
+            else input >> seconds >> rate >> size >> reliable;
+            if (!seconds || seconds > 60 || rate < 0 || rate > 10000 || cold_rate < 0 || cold_rate > 10000 ||
+                !hot_topics || hot_topics > publishers.size()) throw std::invalid_argument("负载参数无效");
             std::vector<LoadResult> results(publishers.size());
             std::vector<std::thread> workers;
             const auto start = std::chrono::steady_clock::now();
             const bool include_samples = std::getenv("DZIPC_TEST_LATENCY_SAMPLES") != nullptr;
             for (std::size_t i = 0; i < publishers.size(); ++i) {
                 workers.emplace_back([&, i] {
-                    try { run_load(*publishers[i], seconds, rate, size, reliable != 0, start, results[i]); }
+                    const auto topic_rate = command == "loadsetmix" && i >= hot_topics ? cold_rate : rate;
+                    try { run_load(*publishers[i], seconds, topic_rate, size, reliable != 0, i + 1, start, results[i]); }
                     catch (...) { ++results[i].failed; }
                 });
             }
@@ -208,13 +220,48 @@ int main(int argc, char** argv) try {
                 print_load_result(results[i], include_samples);
             }
             std::cout << "]" << std::endl;
-        } else if (command == "drain" && receiver) {
+        } else if (command == "drainset" && (role == "bothset" || role == "subset")) {
+            unsigned seconds; input >> seconds; if (!seconds || seconds > 65) throw std::invalid_argument("接收窗口无效");
+            const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+            struct DrainResult { std::uint64_t received = 0, invalid = 0, duplicates = 0; std::set<std::uint64_t> seen; };
+            std::vector<DrainResult> results(receivers.size());
+            const auto drain_workers = std::min<std::size_t>(4, receivers.size());
+            std::vector<std::thread> workers;
+            for (std::size_t worker = 0; worker < drain_workers; ++worker) {
+                workers.emplace_back([&, worker] {
+                    while (std::chrono::steady_clock::now() < end) {
+                        bool progressed = false;
+                        for (std::size_t i = worker; i < receivers.size(); i += drain_workers) {
+                            auto sample = receivers[i]->try_recv(); if (sample.empty()) continue;
+                            progressed = true; auto &result = results[i]; ++result.received;
+                            if (sample.size() < 48 || sample.size() > kMaxMessageBytes) { ++result.invalid; continue; }
+                            std::uint64_t tag = 0, sequence = 0;
+                            std::memcpy(&tag, static_cast<const std::uint8_t*>(sample.data()) + 32, 8);
+                            std::memcpy(&sequence, static_cast<const std::uint8_t*>(sample.data()) + 40, 8);
+                            if (tag != i + 1) ++result.invalid;
+                            if (!result.seen.insert(sequence).second) ++result.duplicates;
+                            const auto expected = payload(sample.size(), tag, sequence);
+                            result.invalid += std::memcmp(expected.data(), sample.data(), sample.size()) != 0;
+                        }
+                        if (!progressed) std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    }
+                });
+            }
+            for (auto &worker : workers) worker.join();
+            std::cout << "[";
+            for (std::size_t i = 0; i < results.size(); ++i) {
+                if (i) std::cout << ',';
+                std::cout << "{\"topic\":\"" << descriptors[i].topic << "\",\"received\":" << results[i].received
+                          << ",\"invalid\":" << results[i].invalid << ",\"duplicates\":" << results[i].duplicates << '}';
+            }
+            std::cout << "]\n";
+        } else if (command == "drain" && !receivers.empty()) {
             unsigned seconds; input >> seconds; if (!seconds || seconds > 65) throw std::invalid_argument("接收窗口无效");
             const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
             std::uint64_t count = 0, bad = 0, duplicates = 0, gap = 0; std::set<std::uint64_t> seen;
             auto last = std::chrono::steady_clock::time_point{};
             while (std::chrono::steady_clock::now() < end) {
-                auto sample = receiver->try_recv(); if (sample.empty()) { std::this_thread::sleep_for(std::chrono::microseconds(100)); continue; }
+                auto sample = receivers.front()->try_recv(); if (sample.empty()) { std::this_thread::sleep_for(std::chrono::microseconds(100)); continue; }
                 const auto now = std::chrono::steady_clock::now();
                 if (last != std::chrono::steady_clock::time_point{}) gap = std::max(gap, static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now-last).count())); last = now;
                 ++count; if (sample.size() < 48 || sample.size() > kMaxMessageBytes) { ++bad; continue; }
@@ -223,12 +270,12 @@ int main(int argc, char** argv) try {
                 const auto expected = payload(sample.size(),tag,sequence); bad += std::memcmp(expected.data(),sample.data(),sample.size()) != 0;
             }
             std::cout << "{\"received\":" << count << ",\"invalid\":" << bad << ",\"duplicates\":" << duplicates << ",\"max_gap_ns\":" << gap << "}" << std::endl;
-        } else if (command == "recv" && receiver) {
+        } else if (command == "recv" && !receivers.empty()) {
             unsigned count, timeout; input >> count >> timeout;
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
             std::cout << "{\"received\":["; unsigned received = 0;
             while (received < count && std::chrono::steady_clock::now() < deadline) {
-                auto sample = receiver->try_recv(); if (sample.empty()) { std::this_thread::sleep_for(std::chrono::microseconds(100)); continue; }
+                auto sample = receivers.front()->try_recv(); if (sample.empty()) { std::this_thread::sleep_for(std::chrono::microseconds(100)); continue; }
                 std::uint64_t tag = 0, seed = 0; bool valid = sample.size() >= 48 && sample.size() <= kMaxMessageBytes;
                 if (valid) { std::memcpy(&tag, static_cast<const std::uint8_t*>(sample.data()) + 32, 8); std::memcpy(&seed, static_cast<const std::uint8_t*>(sample.data()) + 40, 8);
                     const auto expected = payload(sample.size(), tag, seed); valid = !std::memcmp(expected.data(), sample.data(), sample.size()); }
@@ -238,6 +285,10 @@ int main(int argc, char** argv) try {
             std::cout << "]}" << std::endl;
         } else throw std::invalid_argument("probe 命令无效");
     }
-    if (receiver) { Bytes body(sub.begin(), sub.end()); body.push_back(2); if (runtime->healthy()) runtime->request(LocalKind::Unregister, body); receiver.reset(); }
+    receivers.clear();
+    if (runtime->healthy()) for (const auto &sub : subscribers) {
+        Bytes body(sub.begin(), sub.end()); body.push_back(2);
+        try { runtime->request(LocalKind::Unregister, body); } catch (...) {}
+    }
     return 0;
 } catch (const std::exception& e) { std::cerr << "probe 失败：" << e.what() << '\n'; return 1; }

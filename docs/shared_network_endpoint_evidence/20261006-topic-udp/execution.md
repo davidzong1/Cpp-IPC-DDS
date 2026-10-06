@@ -29,7 +29,8 @@
 | N09 | 已完成（保留失败样本） | `diagnostics/n09-20261006-185715/queue-attribution.md` 与 `queue-attribution.json`；同进程多话题、跨进程多话题均有分段链路，同话题双发布者可靠场景两轮均有 5 秒超时，未伪装成通过 |
 | N10 | 已完成，候选优化回退 | `diagnostics/n10-20261006-191735/` 与 `n10-comparison.md`；队列拆分无稳定净收益，保留实验记录并回退生产实现；39/39 shared_net 回归通过；同话题双发布者可靠失败仍存在 |
 | N11 | 已完成（保留失败分类） | `validation/n11-20261006-204455/results.md`；普通聚焦 13/13、OFF 聚焦 14/14、legacy 回退 3/3；全量普通 38/39、ASan/UBSan 36/39，失败均为已保留的 1MiB BestEffort 重组超时；生产实现未改变 |
-| N12-N15 | 未开始 | N12 规模、资源耗尽、故障和生命周期压力矩阵 |
+| N12 | 已完成（保留失败样本；物理跨机未验证） | `validation/n12-20261007-results.md`、`validation/n12-fault-matrix.md`；规模、资源边界、活跃冷热话题、注册注销和故障矩阵已执行；100 话题两模式均有短收，未宣称性能达标 |
+| N13-N15 | 未开始 | N13 正式性能冻结比较、N14 部署文档、N15 最终审计 |
 
 ## N00 验证
 
@@ -160,3 +161,11 @@ N11 在 N10 回退后的生产实现上完成普通、shared-net OFF、ASan/UBSa
 普通构建的 MPMC、DZFlat、生命周期和信息池聚焦集为 13/13；OFF 构建为 14/14；sanitizer 聚焦集为 12/13，唯一失败是已有的生命周期负向测试 `GenerationRebuildRequiresRemoveRouteFirstOrCrashStall`，ASan 记录预期的失效对象读取。安装目录回退脚本三项均通过，旧模式未连接共享网关。
 
 本轮普通 shared-net 全量为 38/39，sanitizer 全量为 36/39。失败均集中于 1 MiB BestEffort 场景，接收端在约 500～630 KiB 后重组超时；失败状态没有 `wrong_shard`、CRC、非法包或发送错误，且 sanitizer 全量没有新增 ASan/UBSan 报告。该结果保留为 N12 压力矩阵的输入，不宣称 N11 已关闭大消息丢收问题。物理跨主机仍未验证。
+
+## N12 验证
+
+N12 的规模、资源、活跃话题、生命周期和故障覆盖结果见 [`validation/n12-20261007-results.md`](validation/n12-20261007-results.md) 与 [`validation/n12-fault-matrix.md`](validation/n12-fault-matrix.md)。完整 100 话题证据使用 `validation/n12-active-100-20261007-002200/`；所有早期失败和实验目录保留。
+
+本节点通过了 1000 dedicated 资源边界、默认 cap=256 的第 257 个注册拒绝、100 活跃话题两种模式的注册/注销和资源读回，以及已有的重启、丢首包/分片/ACK、乱序/重复/错误包和配额回滚测试。100 话题冷热负载中两种模式发送计划均完整执行，但接收率存在短收，故只记录为失败事实，不作为 pooled/per-topic 性能优劣结论。当前环境没有第二台物理主机，真实跨主机网络故障与性能仍待 N13/外部环境完成。
+
+最终构建与回归：`cmake --build build-shared-net --parallel 4` 退出码 0；`ctest --test-dir build-shared-net -L shared_net --output-on-failure -j 1` 退出码 0，39/39 通过，26.87 秒。日志保存在 `validation/n12-20261007-final/shared-net-full.log`。该回归未覆盖物理跨主机环境，也不改写 N11 已保留的 1 MiB BestEffort 失败分类。

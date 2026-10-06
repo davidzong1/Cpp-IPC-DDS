@@ -6,6 +6,10 @@ add_executable(shared_net_probe src/shared_net_probe.cc)
 target_link_libraries(shared_net_probe PRIVATE ipc)
 set_target_properties(shared_net_probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+add_executable(shared_net_scale_probe src/shared_net_scale_probe.cc)
+target_link_libraries(shared_net_scale_probe PRIVATE ipc)
+set_target_properties(shared_net_scale_probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 if(UNIX AND NOT APPLE)
     set_target_properties(dzipc_gateway PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
 endif()
