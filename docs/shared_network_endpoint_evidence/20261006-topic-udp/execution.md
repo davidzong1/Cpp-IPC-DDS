@@ -19,8 +19,8 @@
 |---|---|---|
 | N00 | 已完成 | 本台账、环境审计、冻结基线清单 |
 | N01 | 已完成 | `test/shared_net/topic_udp_matrix.py`、计划 schema、统计单元测试和冒烟记录 |
-| N02 | 进行中 | 等 N01 工装接入真实网关参数后测 K=4/8/16 |
-| N03 | 进行中 | `design.md` 已冻结配置/协议/所有权草案，待 N02 结果补充选择理由 |
+| N02 | 已完成（短基线） | `baseline-network/results.md`；K=4/8/16 改造前与 S/W 解耦短窗口均完整交付，正式长窗口仍留给 N13 |
+| N03 | 进行中 | `design.md` 已形成草案，待作为独立节点提交 |
 | N04-N15 | 未开始 | 依赖前序节点 |
 
 ## N00 验证
@@ -41,6 +41,6 @@ N00 尚未修改生产行为。环境原始输出见 `environment.txt`，计划�
 
 ## N01 验证约定
 
-`topic_udp_matrix.py` 使用显式 JSON 计划，不复用 `performance_matrix.py` 的固定 54 窗口入口。它在 `--validate-plan` 阶段校验 RouteKey、发布者布置、发送时间表、资源预算和 nearest-rank 统计；`--preflight` 只运行短冒烟并标记为非正式证据。正式窗口失败会保留结果并以非零退出，不把基础设施失败归类为性能退化。
+`topic_udp_matrix.py` 使用显式 JSON 计划，不复用 `performance_matrix.py` 的固定 54 窗口入口。它在 `--validate-plan` 阶段校验 RouteKey、发布者布置、发送时间表、资源预算和 nearest-rank 统计；`--preflight` 只运行短冒烟并标记为非正式证据。正式窗口失败会保留结果并以非零退出，不把基础设施失败归类为性能退化。N01 校验和 preflight 已通过；`preflight2/` 是一次重复验证目录，未作为正式证据使用。
 
-下一步：用冻结计划运行原 v1 pooled 的 K=4/8/16 基线，补齐每个网关的实际数据端口、线程和资源读回，然后冻结 N03 设计选择。
+N02 短基线已完成并写入 `baseline-network/results.md`；N03 设计记录随后根据短基线冻结默认和后续比较口径。
