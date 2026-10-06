@@ -10,11 +10,18 @@ namespace {
 constexpr std::uint64_t lease_ns = 3000000000ull, candidate_ns = 2000000000ull;
 bool equal(const RouteDescriptor& a, const RouteDescriptor& b) {
     return a.key == b.key && a.topic == b.topic && a.schema_hash == b.schema_hash &&
-        a.role_flags == b.role_flags && a.receiver_route_epoch == b.receiver_route_epoch;
+        a.role_flags == b.role_flags && a.receiver_route_epoch == b.receiver_route_epoch &&
+        a.data_port == b.data_port && a.endpoint_flags == b.endpoint_flags &&
+        a.endpoint_epoch == b.endpoint_epoch;
 }
 std::uint64_t size_of(const std::vector<RouteDescriptor>& routes) {
     std::uint64_t size = 4;
     for (const auto& r : routes) size += 52 + r.topic.size();
+    return size;
+}
+std::uint64_t size_of_v2(const std::vector<RouteDescriptor>& routes) {
+    std::uint64_t size = 4;
+    for (const auto& r : routes) size += 64 + r.topic.size();
     return size;
 }
 }
@@ -52,15 +59,18 @@ std::shared_ptr<NetMetrics> DirectoryBudget::metrics() const { return impl_->met
 DirectoryBudget::~DirectoryBudget() = default;
 DirectoryUsage DirectoryBudget::usage() const { std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->used; }
 std::shared_ptr<const DirectorySnapshot> DirectoryBudget::replace(const std::vector<RouteDescriptor>& entries,
-        std::uint64_t version, const std::shared_ptr<const DirectorySnapshot>& old) {
+        std::uint64_t version, const std::shared_ptr<const DirectorySnapshot>& old,
+        NetworkVersion wire_version) {
     if (entries.size() > impl_->limits.topics) { impl_->metrics->reject(NetQuota::topics); return {}; }
-    if (size_of(entries) > impl_->limits.peer_candidate_bytes || size_of(entries) > 8 * kMiB) { impl_->metrics->reject(NetQuota::peer_candidate_bytes); return {}; }
+    const auto encoded_size = wire_version == NetworkVersion::V2 ? size_of_v2(entries) : size_of(entries);
+    if (encoded_size > impl_->limits.peer_candidate_bytes || encoded_size > 8 * kMiB) { impl_->metrics->reject(NetQuota::peer_candidate_bytes); return {}; }
     if (old && version <= old->version) return {};
     // 保守计费包含编码、解析条目、名称及树节点。新旧同时存在时先预留新表。
-    const auto bytes = 2 * size_of(entries) + entries.size() * (512 + sizeof(RouteMetrics)) + sizeof(DirectorySnapshot);
+    const auto bytes = 2 * encoded_size + entries.size() * (512 + sizeof(RouteMetrics)) + sizeof(DirectorySnapshot);
     auto charge = impl_->reserve(Impl::Kind::Installed, bytes); if (!charge) return {};
-    auto next = std::make_shared<DirectorySnapshot>(); next->charge = charge; next->version = version;
-    if (!encode_directory(entries, next->body)) return {};
+    auto next = std::make_shared<DirectorySnapshot>(); next->charge = charge; next->version = version; next->wire_version = wire_version;
+    if (wire_version == NetworkVersion::V2 ? !encode_directory_v2(entries, next->body)
+                                           : !encode_directory(entries, next->body)) return {};
     next->body_crc = crc32c(ByteView(next->body));
     std::map<Scope, const RouteDescriptor*> scopes;
     for (const auto& descriptor : entries) {
@@ -102,7 +112,7 @@ struct PeerDirectory::Impl {
         std::uint64_t seen = 0, desired = 0, next_request = 0, retry = 100000000;
         bool expired = false, needs_snapshot = true;
     };
-    Identity local; std::uint64_t epoch, revision = 1;
+    Identity local; std::uint64_t epoch, revision = 1; NetworkVersion wire_version = NetworkVersion::V1;
     std::shared_ptr<DirectoryBudget> budget;
     std::map<Identity, Peer> entries;
     std::optional<Identity> cursor;
@@ -122,6 +132,7 @@ struct PeerDirectory::Impl {
             if (pool.used.histories >= pool.limits.peer_history) { pool.metrics->reject(NetQuota::peer_history); return DirectoryCode::HistoryFull; }
             if (!pool.limits.gateway_history) { pool.metrics->reject(NetQuota::gateway_history); return DirectoryCode::HistoryFull; }
             Peer p; p.view.admission = std::make_shared<PeerAdmission>(); p.view.admission->active.store(false);
+            p.view.admission->network_version = NetworkVersion::V1;
             p.view.admission->hello = h; p.view.admission->ipv4 = source.host; p.history.insert(h.gateway_epoch);
             found = entries.emplace(h.gateway_id, std::move(p)).first;
             { std::lock_guard<std::mutex> lock(pool.mutex); ++pool.used.histories; pool.metrics->peak(NetQuota::peer_history, pool.used.histories); }
@@ -135,6 +146,7 @@ struct PeerDirectory::Impl {
                 if (pool.used.histories >= pool.limits.peer_history) { pool.metrics->reject(NetQuota::peer_history); return DirectoryCode::HistoryFull; }
                 // 新权限对象只在全部必要历史可保留后替换，旧对象绝不重新激活。
                 auto admission = std::make_shared<PeerAdmission>(); admission->hello = h; admission->ipv4 = source.host; admission->active.store(false);
+                admission->network_version = NetworkVersion::V1;
                 if (!pool.retire(p.view.snapshot)) return DirectoryCode::QuotaExceeded;
                 p.history.insert(h.gateway_epoch);
                 { std::lock_guard<std::mutex> lock(pool.mutex); ++pool.used.histories; pool.metrics->peak(NetQuota::peer_history, pool.used.histories); }
@@ -149,14 +161,52 @@ struct PeerDirectory::Impl {
         if (p.expired) { p.expired = false; p.needs_snapshot = true; p.next_request = 0; p.retry = 100000000; }
         return DirectoryCode::Ok;
     }
+    DirectoryCode hello_v2(const DiscoveryHelloV2& h, Ipv4Address source, std::uint64_t now) {
+        Bytes checked; if (!source.host || !encode_hello_v2(h, checked)) return DirectoryCode::Invalid;
+        if (h.gateway_id == local) return h.gateway_epoch == epoch ? DirectoryCode::Ignored : DirectoryCode::IdentityConflict;
+        auto found = entries.find(h.gateway_id);
+        if (found == entries.end()) {
+            if (entries.size() >= budget->impl_->limits.peers || budget->impl_->used.histories >= budget->impl_->limits.peer_history || !budget->impl_->limits.gateway_history) {
+                budget->metrics()->reject(entries.size() >= budget->impl_->limits.peers ? NetQuota::peers : NetQuota::peer_history); return DirectoryCode::HistoryFull;
+            }
+            Peer p; p.view.admission = std::make_shared<PeerAdmission>(); p.view.admission->hello_v2 = h;
+            p.view.admission->hello.gateway_id = h.gateway_id; p.view.admission->hello.gateway_epoch = h.gateway_epoch;
+            p.view.admission->hello.snapshot_version = h.snapshot_version; p.view.admission->hello.control_port = h.control_port;
+            p.view.admission->hello.max_message_bytes = h.max_message_bytes;
+            p.view.admission->network_version = NetworkVersion::V2; p.view.admission->ipv4 = source.host; p.view.admission->active.store(false);
+            p.history.insert(h.gateway_epoch); found = entries.emplace(h.gateway_id, std::move(p)).first;
+            { std::lock_guard<std::mutex> lock(budget->impl_->mutex); ++budget->impl_->used.histories; }
+        } else {
+            auto& p = found->second; const auto& old = p.view.admission->hello_v2;
+            if (p.view.admission->network_version != NetworkVersion::V2 || source.host != p.view.admission->ipv4) return DirectoryCode::IdentityConflict;
+            if (h.gateway_epoch != old.gateway_epoch) {
+                if (p.history.count(h.gateway_epoch) || p.history.size() >= budget->impl_->limits.gateway_history || budget->impl_->used.histories >= budget->impl_->limits.peer_history) return DirectoryCode::HistoryFull;
+                auto admission = std::make_shared<PeerAdmission>(); admission->hello_v2 = h; admission->network_version = NetworkVersion::V2; admission->ipv4 = source.host; admission->active.store(false);
+                admission->hello.gateway_id = h.gateway_id; admission->hello.gateway_epoch = h.gateway_epoch;
+                admission->hello.snapshot_version = h.snapshot_version; admission->hello.control_port = h.control_port;
+                admission->hello.max_message_bytes = h.max_message_bytes;
+                if (!budget->impl_->retire(p.view.snapshot)) return DirectoryCode::QuotaExceeded;
+                p.history.insert(h.gateway_epoch); { std::lock_guard<std::mutex> lock(budget->impl_->mutex); ++budget->impl_->used.histories; }
+                invalidate(p); p.view.admission = std::move(admission); p.desired = 0; p.needs_snapshot = true; p.expired = false; p.next_request = 0;
+            } else if (old.control_port != h.control_port || old.capabilities != h.capabilities || old.max_message_bytes != h.max_message_bytes) return DirectoryCode::IdentityConflict;
+        }
+        auto& p = found->second; p.seen = now;
+        if (h.snapshot_version > p.desired) { p.desired = h.snapshot_version; p.next_request = 0; p.retry = 100000000; p.needs_snapshot = true; ++revision; }
+        if (p.expired) { p.expired = false; p.needs_snapshot = true; p.next_request = 0; p.retry = 100000000; }
+        return DirectoryCode::Ok;
+    }
     DirectoryCode page(const ReceivedDatagram& packet, std::uint64_t now) {
         CatalogHeader h; ByteView body;
-        if (packet.status != IoStatus::Data || packet.size > packet.bytes.size() || !decode_catalog(packet.view(), h, body) || h.kind != CatalogKind::Page) return DirectoryCode::Invalid;
+        const auto decoded = wire_version == NetworkVersion::V2 ? decode_catalog_v2(packet.view(), h, body)
+                                                                  : decode_catalog(packet.view(), h, body);
+        if (packet.status != IoStatus::Data || packet.size > packet.bytes.size() || !decoded || h.kind != CatalogKind::Page) return DirectoryCode::Invalid;
         if (h.target_id != local || h.target_epoch != epoch) return DirectoryCode::Ignored;
         auto found = entries.find(h.source_id); if (found == entries.end()) return DirectoryCode::Ignored;
         auto& p = found->second; const auto& known = p.view.admission->hello;
-        if (known.gateway_epoch != h.source_epoch || p.expired || now - p.seen >= lease_ns ||
-            packet.source.host != p.view.admission->ipv4 || packet.source.port != known.control_port) return DirectoryCode::Ignored;
+        const auto control_port = p.view.admission->network_version == NetworkVersion::V2 ? p.view.admission->hello_v2.control_port : p.view.admission->hello.control_port;
+        const auto known_epoch = p.view.admission->network_version == NetworkVersion::V2 ? p.view.admission->hello_v2.gateway_epoch : known.gateway_epoch;
+        if (known_epoch != h.source_epoch || p.expired || now - p.seen >= lease_ns ||
+            packet.source.host != p.view.admission->ipv4 || packet.source.port != control_port) return DirectoryCode::Ignored;
         if (h.snapshot_version < p.desired || (p.view.snapshot && h.snapshot_version < p.view.snapshot->version) ||
             (p.candidate && h.snapshot_version < p.candidate->header.snapshot_version)) return DirectoryCode::Stale;
         if (!p.needs_snapshot && p.view.snapshot && h.snapshot_version == p.view.snapshot->version) return DirectoryCode::Ignored;
@@ -189,12 +239,14 @@ struct PeerDirectory::Impl {
         if (count > budget->impl_->limits.topics) { budget->metrics()->reject(NetQuota::topics); p.candidate.reset(); return DirectoryCode::QuotaExceeded; }
         auto parse_charge = budget->impl_->reserve(DirectoryBudget::Impl::Kind::Candidate, count * 512 + c.bytes.size());
         if (!parse_charge) { p.candidate.reset(); return DirectoryCode::QuotaExceeded; }
-        if (!decode_directory(ByteView(c.bytes), routes, budget->impl_->limits.topics)) { p.candidate.reset(); return DirectoryCode::Invalid; }
+        const auto directory_status = wire_version == NetworkVersion::V2 ? decode_directory_v2(ByteView(c.bytes), routes, budget->impl_->limits.topics)
+                                                                          : decode_directory(ByteView(c.bytes), routes, budget->impl_->limits.topics);
+        if (!directory_status) { p.candidate.reset(); return DirectoryCode::Invalid; }
         // 同版本恢复必须核验内容完全一致；快照版本不能被用来偷换目录。
         if (p.view.snapshot && h.snapshot_version == p.view.snapshot->version) {
             if (p.view.snapshot->body != c.bytes) { p.candidate.reset(); return DirectoryCode::Conflict; }
         } else {
-            auto next = budget->replace(routes, h.snapshot_version, p.view.snapshot);
+            auto next = budget->replace(routes, h.snapshot_version, p.view.snapshot, wire_version);
             if (!next) { p.candidate.reset(); return DirectoryCode::QuotaExceeded; }
             p.view.snapshot = std::move(next);
         }
@@ -202,9 +254,9 @@ struct PeerDirectory::Impl {
         return DirectoryCode::Ok;
     }
 };
-PeerDirectory::PeerDirectory(Identity id, std::uint64_t epoch, std::shared_ptr<DirectoryBudget> budget) : impl_(new Impl) {
+PeerDirectory::PeerDirectory(Identity id, std::uint64_t epoch, std::shared_ptr<DirectoryBudget> budget, NetworkVersion wire_version) : impl_(new Impl) {
     if (!nonzero(id) || !epoch || !budget) throw std::invalid_argument("目录身份无效");
-    impl_->local = id; impl_->epoch = epoch; impl_->budget = std::move(budget);
+    impl_->local = id; impl_->epoch = epoch; impl_->budget = std::move(budget); impl_->wire_version = wire_version;
 }
 PeerDirectory::~PeerDirectory() {
     std::uint64_t count = 0;
@@ -213,6 +265,13 @@ PeerDirectory::~PeerDirectory() {
 }
 DirectoryCode PeerDirectory::hello(const DiscoveryHello& h, Ipv4Address source, std::uint64_t now) {
     const auto code = impl_->hello(h, source, now); auto& m = *impl_->budget->metrics();
+    if (code == DirectoryCode::RetiredEpoch) m.add(NetMetric::peer_epoch_retired);
+    if (code == DirectoryCode::HistoryFull) m.add(NetMetric::peer_history_full);
+    if (code == DirectoryCode::IdentityConflict) m.add(NetMetric::identity_conflict);
+    return code;
+}
+DirectoryCode PeerDirectory::hello_v2(const DiscoveryHelloV2& h, Ipv4Address source, std::uint64_t now) {
+    const auto code = impl_->hello_v2(h, source, now); auto& m = *impl_->budget->metrics();
     if (code == DirectoryCode::RetiredEpoch) m.add(NetMetric::peer_epoch_retired);
     if (code == DirectoryCode::HistoryFull) m.add(NetMetric::peer_history_full);
     if (code == DirectoryCode::IdentityConflict) m.add(NetMetric::identity_conflict);
@@ -237,9 +296,10 @@ std::vector<CatalogRequest> PeerDirectory::tick(std::uint64_t now, std::size_t a
         if (p.candidate && now >= p.candidate->expires) { impl_->budget->metrics()->add(NetMetric::snapshot_timeout); p.candidate.reset(); }
         if (!p.needs_snapshot || now < p.next_request) continue;
         CatalogHeader h; h.source_id = impl_->local; h.source_epoch = impl_->epoch; h.target_id = it->first;
-        h.target_epoch = p.view.admission->hello.gateway_epoch; h.snapshot_version = p.desired;
+        h.target_epoch = p.view.admission->network_version == NetworkVersion::V2 ? p.view.admission->hello_v2.gateway_epoch : p.view.admission->hello.gateway_epoch; h.snapshot_version = p.desired;
         CatalogRequest r; r.destination = {p.view.admission->ipv4, p.view.admission->hello.control_port};
-        encode_catalog(h, {}, r.packet); out.push_back(std::move(r));
+        r.destination.port = p.view.admission->network_version == NetworkVersion::V2 ? p.view.admission->hello_v2.control_port : p.view.admission->hello.control_port;
+        if (impl_->wire_version == NetworkVersion::V2) encode_catalog_v2(h, {}, r.packet); else encode_catalog(h, {}, r.packet); out.push_back(std::move(r));
         p.next_request = now + p.retry; p.retry = std::min<std::uint64_t>(1000000000, p.retry * 2);
     }
     return out;
@@ -261,6 +321,7 @@ Bytes catalog_page(const DirectorySnapshot& snapshot, CatalogHeader h, std::uint
     Bytes result; const auto count = (snapshot.body.size() + 1023) / 1024; if (page >= count) return result;
     h.kind = CatalogKind::Page; h.snapshot_version = snapshot.version; h.page_index = page; h.page_count = count; h.body_crc = snapshot.body_crc;
     const auto offset = std::size_t(page) * 1024;
-    encode_catalog(h, {snapshot.body.data() + offset, std::min<std::size_t>(1024, snapshot.body.size() - offset)}, result); return result;
+    const ByteView payload{snapshot.body.data() + offset, std::min<std::size_t>(1024, snapshot.body.size() - offset)};
+    if (snapshot.wire_version == NetworkVersion::V2) encode_catalog_v2(h, payload, result); else encode_catalog(h, payload, result); return result;
 }
 } // namespace dzIPC::net

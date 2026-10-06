@@ -10,6 +10,8 @@ namespace dzIPC::net {
 // 由目录层签发；租约暂停只改变 active，不能清除同 epoch 的去重历史。
 struct PeerAdmission {
     DiscoveryHello hello;
+    DiscoveryHelloV2 hello_v2;
+    NetworkVersion network_version = NetworkVersion::V1;
     std::uint32_t ipv4 = 0;
     std::atomic<bool> active{true};
     std::atomic<bool> retired{false};
@@ -24,6 +26,8 @@ struct ReceiveAdmission {
     std::shared_ptr<PeerAdmission> peer;
     std::shared_ptr<RouteAdmission> publisher, subscriber;
     std::shared_ptr<const void> publisher_snapshot, subscriber_snapshot;
+    NetworkVersion network_version = NetworkVersion::V1;
+    std::uint16_t local_data_port = 0;
 };
 enum class RejectReason : std::uint32_t { UnknownRoute = 1, RouteEpochMismatch, QuotaExceeded, BadMetadata, ShmUnavailable, ShmCommitIndeterminate, UnsupportedEncoding };
 enum class ReceiveDisposition { Dropped, Accepted, CommitPending, Duplicate, Rejected, Committed };
@@ -51,7 +55,8 @@ public:
     using Committer = std::function<SubmitState(const WireHeader&, const WireBlob&)>;
     ReassemblyShard(Identity local_id, std::uint64_t epoch, unsigned shard, unsigned shards,
                     std::shared_ptr<ReassemblyBudget>, std::uint64_t nack_delay_ns = 2000000,
-                    std::uint64_t nack_interval_ns = 2000000);
+                    std::uint64_t nack_interval_ns = 2000000,
+                    NetworkVersion network_version = NetworkVersion::V1);
     ~ReassemblyShard();
     // 所有方法由所属 shard 单线程调用；committer 不可重入本对象。
     ReceiveFeedback ingest(const ReceivedDatagram&, const ReceiveAdmission&, std::uint64_t now_ns);

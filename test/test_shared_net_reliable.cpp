@@ -55,6 +55,31 @@ TEST(SharedNetReliable, WrongAckIdentityMetadataAddressAndPortCannotFinish) {
     tx.control(f.ack(), 3); ASSERT_TRUE(tx.result()); EXPECT_EQ(tx.result()->result, SendResultCode::Completed);
     tx.tick(6000000000ull); EXPECT_EQ(tx.result()->result, SendResultCode::Completed);
 }
+TEST(SharedNetReliable, V2FeedbackEchoesDataEndpointEpochsWithoutSwapping) {
+    ReliableFixture f;
+    auto header = f.header;
+    header.data_source_endpoint_epoch = 101;
+    header.data_target_endpoint_epoch = 202;
+    f.target.peer.admission->network_version = NetworkVersion::V2;
+    f.target.peer.admission->hello_v2.gateway_id = f.target.peer.admission->hello.gateway_id;
+    f.target.peer.admission->hello_v2.gateway_epoch = f.target.peer.admission->hello.gateway_epoch;
+    f.target.route->descriptor.endpoint_flags = 1;
+    f.target.route->descriptor.endpoint_epoch = 202;
+    f.target.route->descriptor.data_port = 31002;
+    ReliableSession tx(header, {f.target}, 5000000000ull);
+    const auto batch = tx.batch(1, 32); ASSERT_FALSE(batch.empty()); tx.accepted(batch.size(), 1);
+
+    auto ack = header; ack.kind = PacketKind::Ack;
+    std::swap(ack.source_id, ack.target_id); std::swap(ack.source_epoch, ack.target_epoch);
+    Bytes encoded; ASSERT_TRUE(encode_packet_v2(ack, {}, encoded));
+    auto control = f.control(encoded);
+    auto stale = ack; ++stale.data_source_endpoint_epoch;
+    Bytes wrong; ASSERT_TRUE(encode_packet_v2(stale, {}, wrong));
+    control.bytes.fill(0); std::copy(wrong.begin(), wrong.end(), control.bytes.begin()); control.size = wrong.size();
+    tx.control(control, 2); EXPECT_FALSE(tx.result());
+    control.bytes.fill(0); std::copy(encoded.begin(), encoded.end(), control.bytes.begin()); control.size = encoded.size();
+    tx.control(control, 3); ASSERT_TRUE(tx.result()); EXPECT_EQ(tx.result()->result, SendResultCode::Completed);
+}
 TEST(SharedNetReliable, TimeoutWithNoAckStillReportsPossibleDeliveryAndTerminalIsSingle) {
     ReliableFixture f; ReliableSession tx(f.header, {f.target}, 100);
     auto batch = tx.batch(1, 32); tx.accepted(batch.size(), 1); tx.control(f.ack(), 100);

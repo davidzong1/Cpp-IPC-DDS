@@ -1,6 +1,7 @@
 #include "dzIPC/net/wire_protocol.h"
 #include "byte_codec.h"
 #include "dzIPC/common/channel_scope.h"
+#include <map>
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 #include <nmmintrin.h>
 #endif
@@ -238,6 +239,23 @@ ProtocolStatus validate_descriptor_v2(const RouteDescriptor &d)
         return error(scope != d.key.scope ? ProtocolCode::IdentityMismatch : ProtocolCode::BadField);
     if (!(d.endpoint_flags & 1u) && d.endpoint_epoch == 0)
         return error(ProtocolCode::BadField);
+    return {};
+}
+ProtocolStatus validate_directory_v2_endpoints(const std::vector<RouteDescriptor> &routes)
+{
+    std::map<std::uint16_t, std::pair<std::uint64_t, std::uint16_t>> ports;
+    std::map<std::uint64_t, std::pair<std::uint16_t, std::uint16_t>> epochs;
+    for (const auto &route : routes) {
+        const auto port = ports.emplace(route.data_port, std::make_pair(route.endpoint_epoch, route.endpoint_flags));
+        if (!port.second && ((port.first->second.second & 1u) || (route.endpoint_flags & 1u) ||
+                             port.first->second.first != route.endpoint_epoch ||
+                             port.first->second.second != route.endpoint_flags))
+            return error(ProtocolCode::BadField);
+        const auto epoch = epochs.emplace(route.endpoint_epoch, std::make_pair(route.data_port, route.endpoint_flags));
+        if (!epoch.second && (epoch.first->second.first != route.data_port ||
+                              epoch.first->second.second != route.endpoint_flags))
+            return error(ProtocolCode::BadField);
+    }
     return {};
 }
 } // namespace
@@ -627,6 +645,7 @@ ProtocolStatus decode_directory(ByteView b, std::vector<RouteDescriptor> &out,
 ProtocolStatus encode_directory_v2(const std::vector<RouteDescriptor> &routes, Bytes &out)
 {
     if (routes.size() > 4096) return error(ProtocolCode::TooLarge);
+    auto endpoint_status = validate_directory_v2_endpoints(routes); if (!endpoint_status) return endpoint_status;
     Bytes b; append(b, routes.size(), 4);
     for (std::size_t i = 0; i < routes.size(); ++i)
     {
@@ -663,6 +682,8 @@ ProtocolStatus decode_directory_v2(ByteView b, std::vector<RouteDescriptor> &out
         if (!routes.empty() && !(routes.back().key < d.key)) return error(ProtocolCode::BadField);
         routes.push_back(std::move(d)); pos += length;
     }
-    if (pos != b.size) return error(ProtocolCode::BadLength); out.swap(routes); return {};
+    if (pos != b.size) return error(ProtocolCode::BadLength);
+    auto endpoint_status = validate_directory_v2_endpoints(routes); if (!endpoint_status) return endpoint_status;
+    out.swap(routes); return {};
 }
 } // namespace dzIPC::net

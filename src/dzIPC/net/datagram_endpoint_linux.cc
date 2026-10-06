@@ -232,21 +232,47 @@ std::vector<std::unique_ptr<DatagramEndpoint>> open_gateway_endpoints(const Gate
     auto status = validate_host_interface(c);
     if (!status)
         throw ConfigError(status);
-    const auto audit = endpoint_resource_audit(c, c.data_shards + 2);
-    if (c.data_shards > c.data_socket_cap)
+    const auto pool_sockets = c.network_version == NetworkVersion::V2 && c.data_mode == DataMode::PerTopic
+        ? std::uint64_t(0) : c.data_shards;
+    const auto audit = endpoint_resource_audit(c, pool_sockets + 2);
+    if (pool_sockets > c.data_socket_cap)
         throw ConfigError({ConfigCode::SocketCap, "数据 socket 数超过 data-socket-cap"});
     if (audit.fd_budget_limit <= audit.fd_count ||
         audit.fd_budget_limit - audit.fd_count <= audit.fd_reserve ||
-        c.data_shards + 2 > audit.fd_budget_limit - audit.fd_count - audit.fd_reserve)
+        pool_sockets + 2 > audit.fd_budget_limit - audit.fd_count - audit.fd_reserve)
         throw ConfigError({ConfigCode::FdBudget, "数据端点创建将超过 FD 半数预算"});
-    if (c.data_shards > audit.candidate_ports / 2)
+    if (pool_sockets > audit.candidate_ports / 2)
         throw ConfigError({ConfigCode::PortBudget, "候选端口的一半不足以容纳数据 socket"});
     std::vector<std::unique_ptr<DatagramEndpoint>> endpoints;
-    endpoints.reserve(c.data_shards + 2);
-    for (std::uint64_t shard = 0; shard < c.data_shards; ++shard)
-        endpoints.push_back(std::make_unique<DatagramEndpoint>(
-            Ipv4Address::parse(c.listen_ip, c.data_base_port + shard), false,
-            c.data_rcvbuf_bytes, c.data_sndbuf_bytes));
+    endpoints.reserve(pool_sockets + 2);
+    if (c.network_version == NetworkVersion::V1) {
+        for (std::uint64_t shard = 0; shard < pool_sockets; ++shard)
+            endpoints.push_back(std::make_unique<DatagramEndpoint>(
+                Ipv4Address::parse(c.listen_ip, c.data_base_port + shard), false,
+                c.data_rcvbuf_bytes, c.data_sndbuf_bytes));
+    } else {
+        const auto split = c.data_port_range.find(':');
+        const auto first = std::stoull(c.data_port_range.substr(0, split));
+        const auto last = std::stoull(c.data_port_range.substr(split + 1));
+        std::uint64_t port = first;
+        for (std::uint64_t shard = 0; shard < pool_sockets; ++shard) {
+            std::unique_ptr<DatagramEndpoint> endpoint;
+            for (; port <= last; ++port) {
+                if (port == c.control_port || port == c.discovery_port) continue;
+                try {
+                    endpoint = std::make_unique<DatagramEndpoint>(
+                        Ipv4Address::parse(c.listen_ip, static_cast<std::uint16_t>(port)), false,
+                        c.data_rcvbuf_bytes, c.data_sndbuf_bytes);
+                    ++port;
+                    break;
+                } catch (const std::system_error &error) {
+                    if (error.code().value() != EADDRINUSE) throw;
+                }
+            }
+            if (!endpoint) throw ConfigError({ConfigCode::PortBudget, "网络 v2 数据端口范围耗尽"});
+            endpoints.push_back(std::move(endpoint));
+        }
+    }
     endpoints.push_back(
         std::make_unique<DatagramEndpoint>(Ipv4Address::parse(c.listen_ip, c.control_port), false,
                                            c.data_rcvbuf_bytes, c.data_sndbuf_bytes));

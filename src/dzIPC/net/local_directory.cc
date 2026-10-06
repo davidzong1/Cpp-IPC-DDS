@@ -1,5 +1,6 @@
 #include "dzIPC/net/local_directory.h"
 #include <set>
+#include <algorithm>
 #include <stdexcept>
 
 namespace dzIPC::net {
@@ -20,6 +21,8 @@ struct LocalDirectory::Impl {
         std::uint64_t epoch = 0;
     };
     std::shared_ptr<DirectoryBudget> budget; Limits limits;
+    NetworkVersion wire_version = NetworkVersion::V1;
+    std::function<void(RouteDescriptor&)> endpoint_resolver;
     std::map<Identity, std::shared_ptr<LocalRegistration>> handles;
     std::map<std::uint64_t, std::set<Identity>> used_ids;
     std::map<Scope, Topic> topics;
@@ -31,18 +34,25 @@ struct LocalDirectory::Impl {
         std::vector<RouteDescriptor> routes;
         for (const auto& [scope, topic] : topics) if (topic.pubs || topic.ready) {
             auto d = topic.binding->descriptor; d.role_flags = (topic.pubs ? 1 : 0) | (topic.ready ? 2 : 0);
+            if (endpoint_resolver) endpoint_resolver(d);
             d.receiver_route_epoch = topic.ready ? topic.epoch : 0; routes.push_back(std::move(d));
         }
-        Bytes checked; if (!encode_directory(routes, checked)) throw std::runtime_error("目录不可公告");
+        Bytes checked;
+        if (wire_version == NetworkVersion::V2 ? !encode_directory_v2(routes, checked)
+                                                : !encode_directory(routes, checked))
+            throw std::runtime_error("目录不可公告");
         if (checked == current->body) return;
-        auto next = budget->replace(routes, current->version + 1, current);
+        auto next = budget->replace(routes, current->version + 1, current, wire_version);
         if (!next) throw std::runtime_error("目录配额不足");
         current = std::move(next);
     }
 };
-LocalDirectory::LocalDirectory(std::shared_ptr<DirectoryBudget> budget, Limits limits) : impl_(new Impl) {
+LocalDirectory::LocalDirectory(std::shared_ptr<DirectoryBudget> budget, Limits limits,
+                               NetworkVersion wire_version,
+                               std::function<void(RouteDescriptor&)> endpoint_resolver) : impl_(new Impl) {
     impl_->budget = std::move(budget); impl_->limits = limits;
-    impl_->current = impl_->budget->replace({}, 1);
+    impl_->wire_version = wire_version; impl_->endpoint_resolver = std::move(endpoint_resolver);
+    impl_->current = impl_->budget->replace({}, 1, {}, wire_version);
     if (!impl_->current) throw std::runtime_error("空目录配额不足");
 }
 LocalDirectory::~LocalDirectory() { for (const auto& [id, registration] : impl_->handles) registration->active.store(false); for (const auto& [key, route] : impl_->current->routes) route->active.store(false); }
@@ -132,8 +142,30 @@ std::shared_ptr<LocalRegistration> LocalDirectory::find(std::uint64_t session, I
 std::shared_ptr<LocalBinding> LocalDirectory::binding(const RouteKey& route) const {
     auto i = impl_->topics.find(route.scope); return i == impl_->topics.end() || i->second.binding->descriptor.key != route ? nullptr : i->second.binding;
 }
+std::vector<RouteKey> LocalDirectory::session_routes(std::uint64_t session) const {
+    std::vector<RouteKey> result;
+    for (const auto& [id, registration] : impl_->handles)
+        if (registration->session == session && registration->binding)
+            result.push_back(registration->binding->descriptor.key);
+    return result;
+}
 std::vector<std::shared_ptr<LocalRegistration>> LocalDirectory::publishers() const {
     std::vector<std::shared_ptr<LocalRegistration>> out; for (const auto& [id, entry] : impl_->handles) if (entry->publisher) out.push_back(entry); return out;
+}
+std::vector<LocalRouteStatus> LocalDirectory::route_statuses() const {
+    std::vector<LocalRouteStatus> out;
+    out.reserve(impl_->topics.size());
+    for (const auto& [scope, topic] : impl_->topics) {
+        if (!topic.binding || (!topic.pubs && !topic.subs && !topic.ready)) continue;
+        auto descriptor = topic.binding->descriptor;
+        if (impl_->current) {
+            const auto found = impl_->current->routes.find(descriptor.key);
+            if (found != impl_->current->routes.end()) descriptor = found->second->descriptor;
+        }
+        if (impl_->endpoint_resolver) impl_->endpoint_resolver(descriptor);
+        out.push_back({std::move(descriptor), topic.pubs, topic.subs, topic.ready});
+    }
+    return out;
 }
 std::shared_ptr<const DirectorySnapshot> LocalDirectory::snapshot() const { return impl_->current; }
 std::size_t LocalDirectory::publisher_count() const { std::size_t count = 0; for (const auto& [key, t] : impl_->topics) count += t.pubs; return count; }

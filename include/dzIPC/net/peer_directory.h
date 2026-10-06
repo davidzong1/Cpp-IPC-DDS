@@ -11,6 +11,7 @@ struct DirectorySnapshot {
     std::shared_ptr<void> charge;
     std::uint64_t version = 0;
     std::uint32_t body_crc = 0;
+    NetworkVersion wire_version = NetworkVersion::V1;
     Bytes body;
     std::map<RouteKey, std::shared_ptr<RouteAdmission>> routes;
 };
@@ -22,7 +23,8 @@ public:
     std::shared_ptr<NetMetrics> metrics() const;
     // 失败保持 old 不变；成功使消失/改变的 admission 永久失效。
     std::shared_ptr<const DirectorySnapshot> replace(const std::vector<RouteDescriptor>&,
-        std::uint64_t version, const std::shared_ptr<const DirectorySnapshot>& old = {});
+        std::uint64_t version, const std::shared_ptr<const DirectorySnapshot>& old = {},
+        NetworkVersion wire_version = NetworkVersion::V1);
 private:
     friend class PeerDirectory;
     struct Impl; std::shared_ptr<Impl> impl_;
@@ -34,10 +36,12 @@ struct PeerView {
 struct CatalogRequest { Ipv4Address destination; Bytes packet; };
 class PeerDirectory {
 public:
-    PeerDirectory(Identity local, std::uint64_t epoch, std::shared_ptr<DirectoryBudget>);
+    PeerDirectory(Identity local, std::uint64_t epoch, std::shared_ptr<DirectoryBudget>,
+                  NetworkVersion wire_version = NetworkVersion::V1);
     ~PeerDirectory();
     // 仅控制线程调用；datagram 来源 IP 是唯一远端地址。
     DirectoryCode hello(const DiscoveryHello&, Ipv4Address source, std::uint64_t now_ns);
+    DirectoryCode hello_v2(const DiscoveryHelloV2&, Ipv4Address source, std::uint64_t now_ns);
     DirectoryCode page(const ReceivedDatagram&, std::uint64_t now_ns);
     std::vector<CatalogRequest> tick(std::uint64_t now_ns, std::size_t allowance = 64);
     PeerView peer(const Identity&) const;

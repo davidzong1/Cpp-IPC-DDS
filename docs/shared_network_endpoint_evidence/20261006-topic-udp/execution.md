@@ -24,7 +24,8 @@
 | N04 | 已完成 | `candidate-v1-decoupled/results.md`；v1 pooled S/W 解耦实现、状态读回、参数转发和专项验证 |
 | N05 | 已完成 | `resources/n05-budget.md`；FD/端口/缓冲预算、状态读回和确定性失败回滚 |
 | N06 | 已完成 | `validation/n06-wire-v2.md`；双版本 DATA/HELLO/catalog/目录 codec 和独立向量 |
-| N07-N15 | 未开始 | 依赖前序节点 |
+| N07 | 已完成 | v2 pooled/hybrid/per-topic 生命周期、角色引用聚合、端点 owner add/remove、资源回滚与端到端覆盖；N08 等待/公平调度尚未实现 |
+| N08-N15 | 未开始 | 依赖前序节点 |
 
 ## N00 验证
 
@@ -53,3 +54,45 @@ N04 验证命令：`cmake --build build-shared-net --parallel 4`（退出码 0�
 N05 验证命令和资源审计见 `resources/n05-budget.md`。构建与 shared_net 36/36 回归通过；配置、端点预算拒绝和 CLI 状态 JSON 均通过。N05 仅实现 v1 启动期预算，v2 动态端口分配器和按话题端点留给 N06/N07。
 
 N06 验证命令和结果见 `validation/n06-wire-v2.md`。v1 字节兼容保持通过，v2 codec 已独立可测试；端点生命周期和模式接入留给 N07。
+
+## N07 验证
+
+N07 将 v2 pooled、hybrid 与 per-topic 接入网关端点生命周期。每个 RouteKey 聚合 PUB/SUB 注册引用；专用端点仅在首个本地角色注册时创建，在最后角色注销或会话超时时关闭。发送/接收路由通过当前端口绑定定位唯一 worker，v2 DATA 校验源/目标端口及 endpoint epoch；ACK/NACK/REJECT 原样回显 DATA 端点代次。动态端点创建、owner 注册和资源记账失败会回滚，端口冲突会尝试后续候选端口。
+
+验证命令与结果：
+
+```text
+cmake --build build-shared-net --parallel 4
+  退出码 0
+ctest --test-dir build-shared-net -L shared_net -N
+  38 tests
+ctest --test-dir build-shared-net -L shared_net --output-on-failure -j 1
+  38/38 passed, 退出码 0, 23.20s
+```
+
+两机隔离命名空间的端到端附加场景按序运行，网关真实 UDP、应用进程 UDP 数为 0：
+
+```text
+python3 test/shared_net/end_to_end.py --gateway build-shared-net/bin/dzipc_gateway --probe build-shared-net/bin/shared_net_probe --network-version 2 --data-mode hybrid --data-sockets 4 --data-workers 4 --dedicated-policy --lifecycle-roles sub
+  退出码 0；SUB-only 端点与最后角色回收通过
+python3 test/shared_net/end_to_end.py --gateway build-shared-net/bin/dzipc_gateway --probe build-shared-net/bin/shared_net_probe --network-version 2 --data-mode hybrid --data-sockets 4 --data-workers 4 --dedicated-policy --lifecycle-roles pub,pub
+  退出码 0；同 RouteKey 双 PUB 引用聚合与逐个注销通过
+python3 test/shared_net/end_to_end.py --gateway build-shared-net/bin/dzipc_gateway --probe build-shared-net/bin/shared_net_probe --network-version 2 --data-mode hybrid --data-sockets 4 --data-workers 4 --dedicated-policy --lifecycle-roles sub,sub
+  退出码 0；同 RouteKey 双 SUB 引用聚合与逐个注销通过
+python3 test/shared_net/end_to_end.py --gateway build-shared-net/bin/dzipc_gateway --probe build-shared-net/bin/shared_net_probe --network-version 2 --data-mode per-topic --data-workers 4 --lifecycle-roles both
+  退出码 0；both 对应两个注册引用，最后注销后 dedicated 端点回收
+python3 test/shared_net/end_to_end.py --gateway build-shared-net/bin/dzipc_gateway --probe build-shared-net/bin/shared_net_probe --network-version 2 --data-mode per-topic --data-workers 4
+  退出码 0；BestEffort 覆盖 64B、1023B、1024B、1025B、4KiB、1MiB，两方向共 12 条，零重复、损坏或错误投递
+python3 test/shared_net/end_to_end.py --gateway build-shared-net/bin/dzipc_gateway --probe build-shared-net/bin/shared_net_probe --network-version 2 --data-mode per-topic --data-workers 4 --reliable
+  退出码 0；Reliable 覆盖相同尺寸，两方向 6/6 完成，无超时
+python3 test/shared_net/end_to_end.py --gateway build-shared-net/bin/dzipc_gateway --probe build-shared-net/bin/shared_net_probe --network-version 2 --data-mode per-topic --data-workers 4 --block-first-dedicated-port
+  退出码 0；两网关均跳过首个已占用候选端口并选中下一端口，端到端尺寸矩阵通过
+python3 test/shared_net/end_to_end.py --gateway build-shared-net/bin/dzipc_gateway --probe build-shared-net/bin/shared_net_probe --network-version 2 --data-mode per-topic --data-workers 4 --expect-endpoint-failure --socket-buffer-budget-bytes 2097152
+  退出码 0；dedicated 注册报告 BufferBudget，路由/数据端点未残留，端口账本恢复到控制/发现基线
+```
+
+旧端口和旧 source/target endpoint epoch 在 `test_shared_net_reassembly` 中于申请重组内存前被拒绝；错误可靠反馈代次在 `test_shared_net_reliable` 中不能完成事务。端点引用测试会分别区分 PUB-only、SUB-only、双角色和多角色退出。
+
+执行中保留的测试修正/异常：首次 per-topic BestEffort 运行在暂停网关超过客户端 3 秒健康超时后，误把已由会话失效回收的端点当作“最后角色注销”失败；脚本现记录会话超时回收或主动注销回收，并由独立 lifecycle case 检查主动注销。`both` 的初次断言把一个 PUB+SUB probe 算作一个引用，已改为按两个角色登记计数。端口冲突场景最初有一次额外 SUB 注销后 UDP 计数 3→2 的断言失败；不改变行为代码的诊断运行和随后全量 CTest 均通过，现将此单次不一致保留为未复现观察，N08/N11 回归时继续关注。
+
+本节点只完成功能接入与同机隔离验证；未测试物理跨机互通。`GatewayData::Shard` 当前仍用每轮 `poll` 构造并扫描本 worker 所有 socket 的等待集合，未宣称满足 N08 对大规模多 FD epoll 等待、公平预算和 deferred 续跑的要求。

@@ -159,6 +159,19 @@ const NumberOption number_options[] = {
     OPTION("control-burst", control_burst)
 #undef OPTION
 };
+const char *network_version_name(NetworkVersion version) noexcept
+{
+    return version == NetworkVersion::V2 ? "2" : "1";
+}
+const char *data_mode_name(DataMode mode) noexcept
+{
+    switch (mode) {
+    case DataMode::Pooled: return "pooled";
+    case DataMode::Hybrid: return "hybrid";
+    case DataMode::PerTopic: return "per-topic";
+    }
+    return "unknown";
+}
 } // namespace
 
 const char *config_code_name(ConfigCode c) noexcept
@@ -279,27 +292,46 @@ ConfigStatus validate_config(const GatewayConfig &c)
     std::uint64_t port_first = 0, port_last = 0;
     if (!port_range(c.data_port_range, port_first, port_last))
         return fail(ConfigCode::PortBudget, "data-port-range 须为 start:end 且均为 1～65535 的端口");
+    if (c.network_version != NetworkVersion::V1 && c.network_version != NetworkVersion::V2)
+        return fail(ConfigCode::InvalidNumber, "network-version 仅接受 1 或 2");
+    if (c.data_mode != DataMode::Pooled && c.data_mode != DataMode::Hybrid && c.data_mode != DataMode::PerTopic)
+        return fail(ConfigCode::InvalidOption, "data-mode 仅接受 pooled、hybrid 或 per-topic");
+    if (c.network_version == NetworkVersion::V1 && c.data_mode != DataMode::Pooled)
+        return fail(ConfigCode::NotImplemented, "网络 v1 只允许 pooled 数据模式");
+    if (c.network_version == NetworkVersion::V1 && c.data_port_range_explicit)
+        return fail(ConfigCode::InvalidOption, "网络 v1 不接受显式 data-port-range，请使用 data-base-port");
+    if (c.network_version == NetworkVersion::V2 && c.data_base_port_explicit)
+        return fail(ConfigCode::InvalidOption, "网络 v2 使用 data-port-range，不接受 data-base-port");
+    if (c.network_version == NetworkVersion::V2 && c.data_mode == DataMode::PerTopic &&
+        (c.data_shards_explicit || c.data_sockets_explicit))
+        return fail(ConfigCode::InvalidOption, "per-topic 不接受显式 data-shards/data-sockets");
     if (!in(c.data_socket_cap, 1, 65535))
         return fail(ConfigCode::SocketCap, "data-socket-cap 须为 1～65535");
     if (c.data_shards > c.data_socket_cap)
         return fail(ConfigCode::SocketCap, "数据 socket 数超过 data-socket-cap");
-    if (!in(c.data_shards, 1, 16) || !in(c.data_workers, 1, 64) ||
-        !in(c.data_base_port, 1, 65535) ||
-        c.data_shards - 1 > 65535 - c.data_base_port || !in(c.control_port, 1, 65535) ||
+    const bool per_topic_v2 = c.network_version == NetworkVersion::V2 && c.data_mode == DataMode::PerTopic;
+    if ((!per_topic_v2 && !in(c.data_shards, 1, 16)) || (per_topic_v2 && c.data_shards > 16) ||
+        !in(c.data_workers, 1, 64) || !in(c.data_base_port, 1, 65535) ||
+        (!per_topic_v2 && c.data_shards - 1 > 65535 - c.data_base_port) || !in(c.control_port, 1, 65535) ||
         !in(c.discovery_port, 1, 65535))
         return fail(ConfigCode::InvalidNumber, "数据分片须为 1～16，数据 worker 须为 1～64，端口须在 1～65535 内");
-    if (port_last - port_first + 1 < c.data_shards)
+    if (c.network_version == NetworkVersion::V1 && port_last - port_first + 1 < c.data_shards)
         return fail(ConfigCode::PortBudget, "data-port-range 候选端口不足以容纳数据 socket");
+    if (c.network_version == NetworkVersion::V2 && c.data_mode != DataMode::PerTopic &&
+        port_last - port_first + 1 < c.data_shards)
+        return fail(ConfigCode::PortBudget, "网络 v2 数据端口候选范围不足以容纳共享池");
     if (!(c.socket_fd_fraction > 0.0) || !std::isfinite(c.socket_fd_fraction) || c.socket_fd_fraction > 0.5)
         return fail(ConfigCode::FdBudget, "socket-fd-fraction 须大于 0 且不超过 0.5");
     if (!in(c.socket_buffer_budget_bytes, 1, 64 * 1024ull * kMiB) ||
         !in(c.data_rcvbuf_bytes, 1, 64 * kMiB) || !in(c.data_sndbuf_bytes, 1, 64 * kMiB))
         return fail(ConfigCode::BufferBudget, "UDP 缓冲预算和单 socket 缓冲须在允许范围内");
     const auto is_data = [&](std::uint64_t p) {
-        return p >= c.data_base_port && p - c.data_base_port < c.data_shards;
+        return c.network_version == NetworkVersion::V1 && p >= c.data_base_port && p - c.data_base_port < c.data_shards;
     };
     if (is_data(c.control_port) || is_data(c.discovery_port) || c.control_port == c.discovery_port)
         return fail(ConfigCode::PortConflict, "数据、控制和发现端口不能重叠");
+    if (c.network_version == NetworkVersion::V2 && c.control_port >= port_first && c.control_port <= port_last)
+        ; // 候选分配器会跳过控制端口；范围允许覆盖控制端口以便使用默认值。
     std::uint32_t addr;
     if (!ipv4(c.listen_ip, addr) || (addr >> 24) == 0 || (addr >> 24) >= 224)
         return fail(ConfigCode::InvalidAddress, "listen-ip 须为明确的 IPv4 单播地址");
@@ -372,7 +404,25 @@ ConfigStatus parse_gateway_options(const std::vector<std::string> &args, Gateway
         else if (key == "--discovery-group")
             candidate.discovery_group = value;
         else if (key == "--data-port-range")
+        {
             candidate.data_port_range = value;
+            candidate.data_port_range_explicit = true;
+        }
+        else if (key == "--network-version")
+        {
+            if (value == "1") candidate.network_version = NetworkVersion::V1;
+            else if (value == "2") candidate.network_version = NetworkVersion::V2;
+            else return fail(ConfigCode::InvalidNumber, "network-version 仅接受 1 或 2");
+        }
+        else if (key == "--data-mode")
+        {
+            if (value == "pooled") candidate.data_mode = DataMode::Pooled;
+            else if (value == "hybrid") candidate.data_mode = DataMode::Hybrid;
+            else if (value == "per-topic") candidate.data_mode = DataMode::PerTopic;
+            else return fail(ConfigCode::InvalidOption, "data-mode 仅接受 pooled、hybrid 或 per-topic");
+        }
+        else if (key == "--topic-policy-file")
+            candidate.topic_policy_file = value;
         else if (key == "--socket-fd-fraction")
         {
             if (!fraction(value, candidate.socket_fd_fraction))
@@ -384,6 +434,13 @@ ConfigStatus parse_gateway_options(const std::vector<std::string> &args, Gateway
             for (const auto &opt : number_options)
                 if (key == opt.name)
                     dest = &(candidate.*(opt.member));
+            if (key == "--data-sockets")
+            {
+                dest = &candidate.data_shards;
+                candidate.data_sockets_explicit = true;
+            }
+            if (key == "--data-shards") candidate.data_shards_explicit = true;
+            if (key == "--data-base-port") candidate.data_base_port_explicit = true;
             for (const auto &opt : limit_options)
                 if (key == opt.name)
                     dest = &(candidate.limits.*(opt.member));

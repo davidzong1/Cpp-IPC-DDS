@@ -18,6 +18,39 @@ TEST(SharedNetReassembly, BoundarySizesReverseOrderAndDuplicatesPreserveEveryByt
     EXPECT_EQ(f.budget->usage().assemblies, 0u);
     Bytes too_large(kMaxMessageBytes + 1); EXPECT_THROW(f.packets(too_large), std::runtime_error);
 }
+TEST(SharedNetReassembly, V2RejectsStaleSourcePortAndEndpointEpochBeforeAllocation) {
+    ReassemblyFixture f;
+    f.admission.network_version = NetworkVersion::V2;
+    f.admission.peer->network_version = NetworkVersion::V2;
+    f.admission.peer->hello_v2.gateway_id = f.admission.peer->hello.gateway_id;
+    f.admission.peer->hello_v2.gateway_epoch = f.admission.peer->hello.gateway_epoch;
+    f.admission.publisher->descriptor.data_port = 31001;
+    f.admission.publisher->descriptor.endpoint_epoch = 101;
+    f.admission.publisher->descriptor.endpoint_flags = 1;
+    f.admission.subscriber->descriptor.data_port = 31002;
+    f.admission.subscriber->descriptor.endpoint_epoch = 202;
+    f.admission.subscriber->descriptor.endpoint_flags = 1;
+    f.admission.local_data_port = 31002;
+    f.shard = std::make_unique<ReassemblyShard>(f.local, 3, 0, 1, f.budget, 2000000, 2000000, NetworkVersion::V2);
+    const auto bytes = flat_blob(64);
+    auto packet = f.packets(bytes).front();
+
+    auto stale = changed_packet(packet, [](auto& h, auto&) { ++h.data_source_endpoint_epoch; });
+    EXPECT_EQ(f.shard->ingest(stale, f.admission, 1).disposition, ReceiveDisposition::Dropped);
+    stale = packet; ++stale.source.port;
+    EXPECT_EQ(f.shard->ingest(stale, f.admission, 1).disposition, ReceiveDisposition::Dropped);
+    stale = changed_packet(packet, [](auto& h, auto&) { ++h.data_target_endpoint_epoch; });
+    EXPECT_EQ(f.shard->ingest(stale, f.admission, 1).disposition, ReceiveDisposition::Dropped);
+    EXPECT_EQ(f.budget->usage().assemblies, 0u);
+
+    EXPECT_EQ(f.shard->ingest(packet, f.admission, 2).disposition, ReceiveDisposition::CommitPending);
+    const auto feedback = f.shard->tick(3, [](const auto&, const auto&) { return SubmitState::Committed; });
+    ASSERT_EQ(feedback.size(), 1u);
+    WireHeader ack; ByteView payload;
+    ASSERT_TRUE(decode_packet_v2(ByteView(feedback.front().control_packet), ack, payload));
+    EXPECT_EQ(ack.data_source_endpoint_epoch, 101u);
+    EXPECT_EQ(ack.data_target_endpoint_epoch, 202u);
+}
 TEST(SharedNetReassembly, InterleavedPublishersAndTopicsNeverMix) {
     ReassemblyFixture f, other; other.route("reassembly/b");
     std::vector<Bytes> originals; std::vector<std::vector<ReceivedDatagram>> batches;

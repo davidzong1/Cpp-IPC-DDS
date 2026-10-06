@@ -34,6 +34,9 @@ public:
                 std::vector<std::unique_ptr<DatagramEndpoint>> endpoints, std::shared_ptr<NetMetrics> metrics = {});
     ~GatewayData();
     std::shared_future<void> synchronize(std::shared_ptr<const GatewayDataView>);
+    // 动态端点由网关控制线程创建/撤销；返回时 worker 已完成 owner 注册或摘除。
+    bool add_endpoint(std::unique_ptr<DatagramEndpoint>, std::uint16_t port, unsigned worker);
+    bool remove_endpoint(std::uint16_t port);
     bool submit(OutboxRecord&, std::vector<PeerView> targets, std::shared_ptr<LocalRegistration> source = {});
     bool control(const ReceivedDatagram&);
     bool pop(GatewayDataEvent&);

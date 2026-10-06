@@ -133,7 +133,7 @@ TEST(SharedNetConfig, AtomicParsingAndOverflow)
     EXPECT_EQ(c.data_shards, 2u);
     EXPECT_EQ(c.data_workers, 1u);
     EXPECT_EQ(c.io_batch_max, 64u);
-    EXPECT_TRUE(parse_gateway_options({"--data-port-range", "22000:25000",
+    EXPECT_TRUE(parse_gateway_options({"--network-version", "2", "--data-port-range", "22000:25000",
                                        "--socket-fd-fraction", "0.25",
                                        "--data-socket-cap", "8",
                                        "--data-rcvbuf-bytes", "131072",
@@ -145,6 +145,21 @@ TEST(SharedNetConfig, AtomicParsingAndOverflow)
     EXPECT_EQ(c.data_rcvbuf_bytes, 131072u);
     EXPECT_EQ(c.data_sndbuf_bytes, 131072u);
     EXPECT_EQ(c.socket_buffer_budget_bytes, 1048576u);
+}
+TEST(SharedNetConfig, PerTopicInternalPoolAndPolicyModes)
+{
+    auto c = valid_config();
+    ASSERT_TRUE(parse_gateway_options({"--network-version", "2", "--data-mode", "per-topic",
+                                       "--data-port-range", "22000:25000", "--data-workers", "1"}, c));
+    c.data_shards = 0;
+    EXPECT_TRUE(validate_config(c));
+    c.data_shards = 17;
+    EXPECT_EQ(validate_config(c).code, ConfigCode::InvalidNumber);
+    c = valid_config();
+    c.network_version = NetworkVersion::V2;
+    c.data_mode = DataMode::PerTopic;
+    c.data_shards_explicit = true;
+    EXPECT_EQ(validate_config(c).code, ConfigCode::InvalidOption);
 }
 TEST(SharedNetConfig, CapacityAndMetadataLimits)
 {

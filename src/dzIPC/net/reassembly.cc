@@ -22,13 +22,20 @@ Key key_of(const WireHeader& h) { return {{h.route, h.source_id, h.publisher_id,
 bool same_message(const WireHeader& a, const WireHeader& b) {
     return a.route == b.route && a.source_id == b.source_id && a.source_epoch == b.source_epoch && a.target_id == b.target_id && a.target_epoch == b.target_epoch &&
         a.publisher_id == b.publisher_id && a.sequence == b.sequence && a.message_size == b.message_size && a.fragment_count == b.fragment_count &&
-        a.message_crc == b.message_crc && a.schema_hash == b.schema_hash && a.receiver_route_epoch == b.receiver_route_epoch && a.encoding == b.encoding && a.delivery == b.delivery;
+        a.message_crc == b.message_crc && a.schema_hash == b.schema_hash && a.receiver_route_epoch == b.receiver_route_epoch &&
+        a.data_source_endpoint_epoch == b.data_source_endpoint_epoch && a.data_target_endpoint_epoch == b.data_target_endpoint_epoch &&
+        a.encoding == b.encoding && a.delivery == b.delivery;
 }
 ReceiveFeedback feedback(const WireHeader& original, ReceiveDisposition disposition, PacketKind kind, const Bytes& payload = {}) {
     ReceiveFeedback result; result.original = original; result.disposition = disposition;
     if (original.delivery == Delivery::Reliable) {
         auto reply = original; std::swap(reply.source_id, reply.target_id); std::swap(reply.source_epoch, reply.target_epoch);
-        reply.kind = kind; reply.fragment_index = 0; encode_packet(reply, ByteView(payload), result.control_packet);
+        reply.kind = kind; reply.fragment_index = 0;
+        if (reply.data_source_endpoint_epoch || reply.data_target_endpoint_epoch) {
+            encode_packet_v2(reply, ByteView(payload), result.control_packet);
+        } else {
+            encode_packet(reply, ByteView(payload), result.control_packet);
+        }
     }
     return result;
 }
@@ -157,6 +164,7 @@ struct ReassemblyShard::Impl {
     };
     Identity local; std::uint64_t epoch, nack_delay, nack_interval; unsigned shard, shards;
     std::shared_ptr<ReassemblyBudget> budget;
+    NetworkVersion network_version = NetworkVersion::V1;
     std::map<StreamKey, Stream> streams;
     std::map<Key, Assembly> assemblies;
     std::map<Key, Receipt> receipts;
@@ -165,7 +173,15 @@ struct ReassemblyShard::Impl {
     NetMetrics& metrics() { return *budget->impl_->metrics; }
     ReceiveFeedback failure(const WireHeader& h, RejectReason reason) { ++stats.rejected; return reject(h, reason); }
     bool authorized(const WireHeader& h, const ReceivedDatagram& packet, const ReceiveAdmission& a) const {
-        if (!a.peer || !a.peer->active.load() || a.peer->hello.gateway_id != h.source_id || a.peer->hello.gateway_epoch != h.source_epoch || a.peer->ipv4 != packet.source.host || !a.peer->hello.data_shards || a.peer->hello.data_shards > 16) return false;
+        if (!a.peer || !a.peer->active.load() || a.peer->ipv4 != packet.source.host || a.peer->network_version != a.network_version) return false;
+        if (a.network_version == NetworkVersion::V2) {
+            return a.peer->hello_v2.gateway_id == h.source_id && a.peer->hello_v2.gateway_epoch == h.source_epoch &&
+                a.publisher && a.subscriber && packet.source.port == a.publisher->descriptor.data_port &&
+                a.local_data_port == a.subscriber->descriptor.data_port &&
+                h.data_source_endpoint_epoch == a.publisher->descriptor.endpoint_epoch &&
+                h.data_target_endpoint_epoch == a.subscriber->descriptor.endpoint_epoch;
+        }
+        if (a.peer->hello.gateway_id != h.source_id || a.peer->hello.gateway_epoch != h.source_epoch || !a.peer->hello.data_shards || a.peer->hello.data_shards > 16) return false;
         const auto port = std::uint64_t(a.peer->hello.data_base_port) + route_hash(h.route) % a.peer->hello.data_shards;
         return port <= 65535 && packet.source.port == port;
     }
@@ -192,12 +208,14 @@ struct ReassemblyShard::Impl {
     ReceiveFeedback ingest(const ReceivedDatagram& packet, const ReceiveAdmission& admission, std::uint64_t now) {
         WireHeader h; ByteView payload;
         if (packet.status != IoStatus::Data || packet.size > packet.bytes.size()) { ++stats.malformed; metrics().add(NetMetric::bad_header); return {}; }
-        const auto decoded = decode_packet(packet.view(), h, payload, budget->impl_->limits.message_bytes);
+        const auto decoded = network_version == NetworkVersion::V2
+            ? decode_packet_v2(packet.view(), h, payload, budget->impl_->limits.message_bytes)
+            : decode_packet(packet.view(), h, payload, budget->impl_->limits.message_bytes);
         if (!decoded) { ++stats.malformed; record_protocol_error(metrics(), decoded.code); return {}; }
         if (h.kind != PacketKind::Data) { ++stats.malformed; metrics().add(NetMetric::bad_header); return {}; }
         if (h.target_id != local || h.target_epoch != epoch) { metrics().add(NetMetric::foreign_route); return {}; }
         if (!authorized(h, packet, admission)) { metrics().add(NetMetric::source_route_unverified); return {}; }
-        if (route_hash(h.route) % shards != shard) { ++stats.wrong_shard; return {}; }
+        if (admission.network_version == NetworkVersion::V1 && route_hash(h.route) % shards != shard) { ++stats.wrong_shard; return {}; }
         if (!route_valid(h, admission)) { metrics().add(NetMetric::source_route_unverified); return failure(h, RejectReason::UnknownRoute); }
         const auto key = key_of(h);
         auto receipt = receipts.find(key);
@@ -296,9 +314,9 @@ struct ReassemblyShard::Impl {
         for (auto i = streams.begin(); i != streams.end();) if (predicate(i->first)) i = streams.erase(i); else ++i;
     }
 };
-ReassemblyShard::ReassemblyShard(Identity id, std::uint64_t epoch, unsigned shard, unsigned shards, std::shared_ptr<ReassemblyBudget> budget, std::uint64_t nack_delay, std::uint64_t nack_interval) : impl_(new Impl) {
+ReassemblyShard::ReassemblyShard(Identity id, std::uint64_t epoch, unsigned shard, unsigned shards, std::shared_ptr<ReassemblyBudget> budget, std::uint64_t nack_delay, std::uint64_t nack_interval, NetworkVersion network_version) : impl_(new Impl) {
     if (!nonzero(id) || !epoch || !shards || shards > 16 || shard >= shards || !budget || !nack_delay || !nack_interval) throw std::invalid_argument("重组 shard 配置无效");
-    impl_->local = id; impl_->epoch = epoch; impl_->shard = shard; impl_->shards = shards; impl_->budget = std::move(budget); impl_->nack_delay = nack_delay; impl_->nack_interval = nack_interval;
+    impl_->local = id; impl_->epoch = epoch; impl_->shard = shard; impl_->shards = shards; impl_->network_version = network_version; impl_->budget = std::move(budget); impl_->nack_delay = nack_delay; impl_->nack_interval = nack_interval;
 }
 ReassemblyShard::~ReassemblyShard() = default;
 ReceiveFeedback ReassemblyShard::ingest(const ReceivedDatagram& packet, const ReceiveAdmission& admission, std::uint64_t now) { return impl_->ingest(packet, admission, now); }

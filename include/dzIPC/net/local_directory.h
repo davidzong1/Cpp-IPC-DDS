@@ -1,6 +1,7 @@
 #pragma once
 #include "dzIPC/net/peer_directory.h"
 #include "dzIPC/net/shm_wire.h"
+#include <functional>
 
 namespace dzIPC::net {
 struct LocalBinding {
@@ -19,10 +20,18 @@ struct LocalRegistration {
     // 控制线程调用；发送记录重放不能重新冻结一批目标。
     bool accept_sequence(std::uint64_t sequence);
 };
+struct LocalRouteStatus {
+    RouteDescriptor descriptor;
+    std::size_t publishers = 0;
+    std::size_t subscribers = 0;
+    std::size_t ready_subscribers = 0;
+};
 // 控制线程拥有登记；bridge 初始化在公共初始化线程执行，完成后通过 set_bridge 交回。
 class LocalDirectory {
 public:
-    explicit LocalDirectory(std::shared_ptr<DirectoryBudget>, Limits = {});
+    explicit LocalDirectory(std::shared_ptr<DirectoryBudget>, Limits = {},
+                            NetworkVersion wire_version = NetworkVersion::V1,
+                            std::function<void(RouteDescriptor&)> endpoint_resolver = {});
     ~LocalDirectory();
     std::shared_ptr<LocalRegistration> add(std::uint64_t session, Identity id,
                                           RouteDescriptor, bool publisher);
@@ -32,7 +41,9 @@ public:
     void close_session(std::uint64_t session);
     std::shared_ptr<LocalRegistration> find(std::uint64_t session, Identity) const;
     std::shared_ptr<LocalBinding> binding(const RouteKey&) const;
+    std::vector<RouteKey> session_routes(std::uint64_t session) const;
     std::vector<std::shared_ptr<LocalRegistration>> publishers() const;
+    std::vector<LocalRouteStatus> route_statuses() const;
     std::shared_ptr<const DirectorySnapshot> snapshot() const;
     std::size_t handle_count() const;
     std::size_t publisher_count() const;

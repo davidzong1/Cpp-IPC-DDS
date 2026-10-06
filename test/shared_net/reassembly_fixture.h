@@ -28,12 +28,22 @@ struct ReassemblyFixture {
         h.target_id = local; h.target_epoch = 3; h.publisher_id[0] = publisher; h.sequence = sequence; h.message_size = bytes.size();
         h.fragment_count = (bytes.size() + 1023) / 1024; h.message_crc = crc32c(ByteView(bytes)); h.schema_hash = 0xabcdef01;
         h.receiver_route_epoch = admission.subscriber->descriptor.receiver_route_epoch; h.encoding = Encoding::DzFlat; h.delivery = delivery;
+        if (admission.network_version == NetworkVersion::V2) {
+            h.data_source_endpoint_epoch = admission.publisher->descriptor.endpoint_epoch;
+            h.data_target_endpoint_epoch = admission.subscriber->descriptor.endpoint_epoch;
+        }
         std::vector<ReceivedDatagram> result;
         for (h.fragment_index = 0; h.fragment_index < h.fragment_count; ++h.fragment_index) {
             const auto offset = std::size_t(h.fragment_index) * 1024;
-            Bytes encoded; if (!encode_packet(h, {bytes.data() + offset, std::min<std::size_t>(1024, bytes.size() - offset)}, encoded)) throw std::runtime_error("测试分片编码失败");
+            Bytes encoded;
+            const auto payload = ByteView(bytes.data() + offset, std::min<std::size_t>(1024, bytes.size() - offset));
+            const auto status = admission.network_version == NetworkVersion::V2
+                ? encode_packet_v2(h, payload, encoded) : encode_packet(h, payload, encoded);
+            if (!status) throw std::runtime_error("测试分片编码失败");
             ReceivedDatagram packet; std::copy(encoded.begin(), encoded.end(), packet.bytes.begin()); packet.size = encoded.size(); packet.status = IoStatus::Data;
-            packet.source = {admission.peer->ipv4, static_cast<std::uint16_t>(admission.peer->hello.data_base_port + route_hash(h.route) % admission.peer->hello.data_shards)};
+            packet.source = {admission.peer->ipv4, admission.network_version == NetworkVersion::V2
+                ? admission.publisher->descriptor.data_port
+                : static_cast<std::uint16_t>(admission.peer->hello.data_base_port + route_hash(h.route) % admission.peer->hello.data_shards)};
             result.push_back(packet);
         }
         return result;
@@ -45,13 +55,21 @@ struct ReassemblyFixture {
     }
 };
 inline ReceivedDatagram changed_packet(ReceivedDatagram packet, const std::function<void(WireHeader&, Bytes&)>& change) {
-    WireHeader h; ByteView p; if (!decode_packet(packet.view(), h, p)) throw std::runtime_error("测试分片解码失败");
+    WireHeader h; ByteView p;
+    const auto decoded = packet.size > 4 && packet.bytes[4] == 2
+        ? decode_packet_v2(packet.view(), h, p) : decode_packet(packet.view(), h, p);
+    if (!decoded) throw std::runtime_error("测试分片解码失败");
     Bytes body(p.data, p.data + p.size); change(h, body); Bytes encoded;
-    if (!encode_packet(h, ByteView(body), encoded)) throw std::runtime_error("测试分片重编码失败");
+    const auto status = packet.size > 4 && packet.bytes[4] == 2
+        ? encode_packet_v2(h, ByteView(body), encoded) : encode_packet(h, ByteView(body), encoded);
+    if (!status) throw std::runtime_error("测试分片重编码失败");
     std::copy(encoded.begin(), encoded.end(), packet.bytes.begin()); packet.size = encoded.size(); return packet;
 }
 inline PacketKind reply_kind(const ReceiveFeedback& feedback) {
     WireHeader h; ByteView body;
-    if (!decode_packet(ByteView(feedback.control_packet), h, body)) throw std::runtime_error("测试回执解码失败"); return h.kind;
+    const auto decoded = feedback.control_packet.size() > 4 && feedback.control_packet[4] == 2
+        ? decode_packet_v2(ByteView(feedback.control_packet), h, body)
+        : decode_packet(ByteView(feedback.control_packet), h, body);
+    if (!decoded) throw std::runtime_error("测试回执解码失败"); return h.kind;
 }
 } // namespace shared_net_test

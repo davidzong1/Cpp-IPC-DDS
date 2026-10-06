@@ -7,6 +7,11 @@
 
 namespace dzIPC::net
 {
+enum class NetworkVersion : std::uint8_t
+{
+    V1 = 1,
+    V2 = 2
+};
 using Bytes = std::vector<std::uint8_t>;
 using Identity = std::array<std::uint8_t, 16>;
 using Scope = std::array<std::uint8_t, 32>;

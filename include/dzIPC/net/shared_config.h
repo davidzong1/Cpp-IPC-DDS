@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "dzIPC/net/wire_protocol.h"
 
 namespace dzIPC::net
 {
@@ -12,6 +13,12 @@ enum class Backend
 {
     Legacy,
     SharedV1
+};
+enum class DataMode : std::uint8_t
+{
+    Pooled = 1,
+    Hybrid = 2,
+    PerTopic = 3
 };
 enum class ConfigCode
 {
@@ -102,12 +109,20 @@ struct GatewayConfig
 {
     std::string listen_ip, interface, control_path;
     std::string discovery_group = "239.255.250.251";
+    NetworkVersion network_version = NetworkVersion::V1;
+    DataMode data_mode = DataMode::Pooled;
     std::uint64_t data_base_port = 24000, data_shards = 4, data_workers = 4;
     std::uint64_t data_socket_cap = 256;
     std::string data_port_range = "20000:49999";
     double socket_fd_fraction = 0.5;
     std::uint64_t socket_buffer_budget_bytes = 256 * kMiB;
     std::uint64_t data_rcvbuf_bytes = 262144, data_sndbuf_bytes = 262144;
+    std::vector<std::uint16_t> data_ports;
+    std::vector<std::uint64_t> data_endpoint_epochs;
+    std::string topic_policy_file;
+    // 解析 CLI 时记录显式选项，用于拒绝 v1/v2 和 legacy/new 参数混用。
+    bool data_base_port_explicit = false, data_port_range_explicit = false,
+         data_sockets_explicit = false, data_shards_explicit = false;
     std::uint64_t control_port = 24004, discovery_port = 24005;
     std::uint64_t io_batch_max = 32, nack_delay_ms = 2, nack_interval_ms = 2;
     std::uint64_t io_round_packets = 64, io_round_bytes = 64 * 1024, io_round_us = 200;

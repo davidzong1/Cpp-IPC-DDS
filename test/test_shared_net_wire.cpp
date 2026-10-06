@@ -269,4 +269,25 @@ TEST(SharedNetWire, V2PacketHelloCatalogAndDirectoryAreExplicit)
     auto malformed = directory;
     malformed[54] = 2;
     EXPECT_FALSE(decode_directory_v2(ByteView(malformed), routes));
+
+    auto pooled = route; pooled.endpoint_flags = 0; pooled.data_port = 31001; pooled.endpoint_epoch = 21;
+    auto pooled_peer = pooled; pooled_peer.key.msg_id = 72; pooled_peer.data_port = 31001;
+    ASSERT_TRUE(encode_directory_v2({pooled, pooled_peer}, directory));
+    pooled_peer.endpoint_epoch = 22;
+    EXPECT_FALSE(encode_directory_v2({pooled, pooled_peer}, directory));
+    pooled_peer = pooled; pooled_peer.key.msg_id = 72; pooled_peer.data_port = 31002;
+    EXPECT_FALSE(encode_directory_v2({pooled, pooled_peer}, directory));
+
+    auto dedicated = route; dedicated.endpoint_flags = 1; dedicated.data_port = 31001; dedicated.endpoint_epoch = 31;
+    auto dedicated_peer = dedicated; dedicated_peer.key.msg_id = 72; dedicated_peer.endpoint_epoch = 32;
+    EXPECT_FALSE(encode_directory_v2({dedicated, dedicated_peer}, directory));
+    dedicated_peer.data_port = 31002; dedicated_peer.endpoint_epoch = 31;
+    EXPECT_FALSE(encode_directory_v2({dedicated, dedicated_peer}, directory));
+
+    pooled_peer = pooled; pooled_peer.key.msg_id = 72; pooled_peer.data_port = 31002; pooled_peer.endpoint_epoch = 22;
+    ASSERT_TRUE(encode_directory_v2({pooled, pooled_peer}, directory));
+    const auto second = 4 + 64 + route.topic.size();
+    directory[second + 52] = static_cast<std::uint8_t>(pooled.data_port >> 8);
+    directory[second + 53] = static_cast<std::uint8_t>(pooled.data_port);
+    EXPECT_FALSE(decode_directory_v2(ByteView(directory), routes));
 }

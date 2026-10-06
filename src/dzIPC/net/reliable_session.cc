@@ -28,14 +28,19 @@ struct ReliableSession::Impl {
     WireHeader header(std::size_t index) const {
         auto h = base; const auto& target = targets[index]; h.kind = PacketKind::Data; h.delivery = Delivery::Reliable;
         h.target_id = target.identity.peer.admission->hello.gateway_id; h.target_epoch = target.identity.peer.admission->hello.gateway_epoch;
-        h.receiver_route_epoch = target.identity.route->descriptor.receiver_route_epoch; return h;
+        h.receiver_route_epoch = target.identity.route->descriptor.receiver_route_epoch;
+        if (base.data_source_endpoint_epoch || base.data_target_endpoint_epoch)
+            h.data_target_endpoint_epoch = target.identity.route->descriptor.endpoint_epoch;
+        return h;
     }
     bool matches(const WireHeader& reply, const WireHeader& sent) const {
         return reply.route == sent.route && reply.source_id == sent.target_id && reply.source_epoch == sent.target_epoch &&
             reply.target_id == sent.source_id && reply.target_epoch == sent.source_epoch && reply.publisher_id == sent.publisher_id &&
             reply.sequence == sent.sequence && reply.receiver_route_epoch == sent.receiver_route_epoch && reply.encoding == sent.encoding &&
             reply.delivery == Delivery::Reliable && reply.schema_hash == sent.schema_hash && reply.message_size == sent.message_size &&
-            reply.message_crc == sent.message_crc && reply.fragment_count == sent.fragment_count;
+            reply.message_crc == sent.message_crc && reply.fragment_count == sent.fragment_count &&
+            reply.data_source_endpoint_epoch == sent.data_source_endpoint_epoch &&
+            reply.data_target_endpoint_epoch == sent.data_target_endpoint_epoch;
     }
     void tick(std::uint64_t now) {
         if (terminal) return;
@@ -103,7 +108,9 @@ void ReliableSession::accepted(std::size_t prefix, std::uint64_t now) {
 void ReliableSession::control(const ReceivedDatagram& packet, std::uint64_t now) {
     impl_->tick(now); if (impl_->terminal) return;
     WireHeader header; ByteView body;
-    if (packet.status != IoStatus::Data || packet.size > packet.bytes.size() || !decode_packet(packet.view(), header, body) || header.kind == PacketKind::Data) { ++impl_->stats.ignored_controls; return; }
+    const auto decoded = impl_->base.data_source_endpoint_epoch || impl_->base.data_target_endpoint_epoch
+        ? decode_packet_v2(packet.view(), header, body) : decode_packet(packet.view(), header, body);
+    if (packet.status != IoStatus::Data || packet.size > packet.bytes.size() || !decoded || header.kind == PacketKind::Data) { ++impl_->stats.ignored_controls; return; }
     for (std::size_t i = 0; i < impl_->targets.size(); ++i) {
         auto& target = impl_->targets[i]; const auto& peer = target.identity.peer.admission;
         if (header.source_id != peer->hello.gateway_id) continue;
@@ -133,7 +140,12 @@ bool ReliableSession::has_initial_pending() const {
 }
 void ReliableSession::tick(std::uint64_t now) { impl_->tick(now); }
 WireHeader ReliableSession::header(const SendFragment& f) const { auto h = impl_->header(f.target); h.fragment_index = f.fragment; return h; }
-Ipv4Address ReliableSession::destination(const SendFragment& f) const { const auto& peer = impl_->targets[f.target].identity.peer.admission; return {peer->ipv4, data_port(impl_->base.route, peer->hello.data_base_port, peer->hello.data_shards)}; }
+Ipv4Address ReliableSession::destination(const SendFragment& f) const {
+    const auto& target = impl_->targets[f.target]; const auto& peer = target.identity.peer.admission;
+    if (impl_->base.data_source_endpoint_epoch || impl_->base.data_target_endpoint_epoch)
+        return {peer->ipv4, target.identity.route->descriptor.data_port};
+    return {peer->ipv4, data_port(impl_->base.route, peer->hello.data_base_port, peer->hello.data_shards)};
+}
 std::optional<SendResultBody> ReliableSession::result() const { return impl_->terminal; }
 ReliableStats ReliableSession::stats() const { return impl_->stats; }
 } // namespace dzIPC::net
