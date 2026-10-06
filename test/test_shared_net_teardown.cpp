@@ -1,10 +1,81 @@
 #include "shared_net/public_fixture.h"
 #include "shared_net/reassembly_fixture.h"
 #include "../src/dzIPC/net/gateway_data.h"
+#include "dzIPC/threepools/socket_wait_set.h"
 #include "gtest/gtest.h"
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <thread>
+#include <vector>
+#include <time.h>
 using namespace shared_net_test;
 namespace {
 std::size_t threads() { return std::distance(std::filesystem::directory_iterator("/proc/self/task"), std::filesystem::directory_iterator{}); }
+std::vector<std::uint64_t> json_numbers(const std::string& json, const std::string& key) {
+    std::vector<std::uint64_t> values; const auto marker = "\"" + key + "\":"; std::size_t at = 0;
+    while ((at = json.find(marker, at)) != std::string::npos) {
+        at += marker.size(); values.push_back(std::stoull(json.substr(at)));
+    }
+    return values;
+}
+std::uint64_t process_cpu_ns() {
+    timespec value{}; if (::clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &value) != 0) return 0;
+    return static_cast<std::uint64_t>(value.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(value.tv_nsec);
+}
+}
+TEST(SharedNetTeardown, ManyIdleGatewayEndpointsBlockAndReturnOwnerSlots) {
+    if (!dzIPC::threepools::SocketWaitSet::backend_available()) GTEST_SKIP() << "多 FD 等待后端不可用";
+    Directory dir; auto config = configuration(dir); config.network_version = NetworkVersion::V2;
+    config.data_mode = DataMode::PerTopic; config.data_shards = 0; config.data_workers = 4;
+    std::vector<std::unique_ptr<DatagramEndpoint>> endpoints; auto wake = local::event();
+    Identity id{}; id[0] = 3;
+    GatewayData data(config, id, 1, wake.get(), std::move(endpoints), std::vector<unsigned>{});
+    auto view = std::make_shared<GatewayDataView>(); view->local = std::make_shared<DirectorySnapshot>();
+    view->bridges = std::make_shared<GatewayDataView::Bridges>(); data.synchronize(view).get();
+
+    constexpr unsigned endpoint_count = 256;
+    std::vector<std::uint16_t> ports; ports.reserve(endpoint_count);
+    std::vector<std::unique_ptr<DatagramEndpoint>> pending; pending.reserve(endpoint_count);
+    for (unsigned i = 0; i < endpoint_count; ++i) {
+        auto endpoint = std::make_unique<DatagramEndpoint>(Ipv4Address::parse("127.0.0.1", 0));
+        ports.push_back(endpoint->local_address().port);
+        pending.push_back(std::move(endpoint));
+    }
+    std::atomic<bool> add_ok{true};
+    std::vector<std::thread> adders;
+    for (unsigned worker = 0; worker < config.data_workers; ++worker)
+        adders.emplace_back([&, worker] {
+            for (unsigned i = worker; i < endpoint_count; i += config.data_workers)
+                if (!data.add_endpoint(std::move(pending[i]), ports[i], worker)) add_ok.store(false);
+        });
+    for (auto& adder : adders) adder.join();
+    ASSERT_TRUE(add_ok.load());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    auto baseline = data.shard_metrics();
+    const auto sockets = json_numbers(baseline, "socket_count");
+    ASSERT_EQ(sockets.size(), config.data_workers);
+    for (const auto count : sockets) EXPECT_EQ(count, endpoint_count / config.data_workers);
+    const auto wakeups_before = json_numbers(baseline, "wakeups");
+    const auto cpu_before = process_cpu_ns();
+    const auto wall_before = std::chrono::steady_clock::now();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const auto wall_elapsed = std::chrono::steady_clock::now() - wall_before;
+    const auto cpu_after = process_cpu_ns();
+    const auto idle = data.shard_metrics();
+    EXPECT_EQ(json_numbers(idle, "wakeups"), wakeups_before);
+    EXPECT_GE(wall_elapsed, std::chrono::milliseconds(180));
+    ASSERT_GT(cpu_after, cpu_before);
+    EXPECT_LT(cpu_after - cpu_before, 50000000ull) << "256 个空闲端点不应忙轮询";
+
+    ASSERT_TRUE(data.remove_endpoint(ports.back()));
+    auto replacement = std::make_unique<DatagramEndpoint>(Ipv4Address::parse("127.0.0.1", 0));
+    const auto replacement_port = replacement->local_address().port;
+    ASSERT_TRUE(data.add_endpoint(std::move(replacement), replacement_port, (endpoint_count - 1) % config.data_workers));
+    for (const auto port : ports) if (port != ports.back()) ASSERT_TRUE(data.remove_endpoint(port));
+    ASSERT_TRUE(data.remove_endpoint(replacement_port));
+    for (const auto count : json_numbers(data.shard_metrics(), "socket_count")) EXPECT_EQ(count, 0u);
+    data.stop();
 }
 TEST(SharedNetTeardown, OneHundredEndpointLifetimesReturnActiveResources) {
     PublicFixture f;

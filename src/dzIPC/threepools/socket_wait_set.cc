@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <array>
 #include <mutex>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "libipc/utility/log.h"
@@ -92,6 +95,10 @@ struct SocketWaitSet::Impl
     mutable std::mutex mtx;
     std::vector<Entry> entries;
     std::vector<SocketWaitToken> ready;
+#if defined(__linux__)
+    std::unordered_map<std::uint64_t, SocketWaitToken> tokens_by_epoch;
+    std::unordered_set<std::uint64_t> ready_epochs;
+#endif
     std::uint64_t next_epoch{1};
     bool stopped{false};
     /* 当前在 wait() 内部的线程数（含"已声明有等待者、尚未进 epoll_wait"的窗口）。
@@ -198,7 +205,24 @@ bool SocketWaitSet::add(const SocketWaitToken& token)
 #elif defined(_WIN32)
     if (impl_->wake_event == nullptr) return false;
 #endif
-    impl_->entries.push_back(Impl::Entry{token, epoch});
+    try
+    {
+        impl_->entries.push_back(Impl::Entry{token, epoch});
+#if defined(__linux__)
+        impl_->tokens_by_epoch.emplace(epoch, token);
+#endif
+    }
+    catch (...)
+    {
+#if defined(__linux__)
+        if (!impl_->entries.empty() && impl_->entries.back().epoch == epoch)
+            impl_->entries.pop_back();
+#endif
+#if defined(__linux__)
+        ::epoll_ctl(impl_->epfd, EPOLL_CTL_DEL, static_cast<int>(token.handle), nullptr);
+#endif
+        throw;
+    }
     return true;
 }
 
@@ -214,6 +238,8 @@ bool SocketWaitSet::remove(const SocketWaitToken& token)
      * 这是"fd 复用不误触发"的第一道保证；代际是第二道。 */
     if (impl_->epfd >= 0)
         ::epoll_ctl(impl_->epfd, EPOLL_CTL_DEL, static_cast<int>(it->token.handle), nullptr);
+    impl_->tokens_by_epoch.erase(it->epoch);
+    impl_->ready_epochs.erase(it->epoch);
 #endif
     impl_->entries.erase(it);
     /* 契约：remove 返回后该 token 不得再出现在 consume_ready()。已经收进 ready
@@ -252,12 +278,11 @@ bool SocketWaitSet::wait(std::chrono::milliseconds timeout)
      * 允许 add/remove 并发（它们都走 epoll_ctl，内核保证线程安全）；返回后
      * 再拿锁，按代际在当前 entries 中查找，查不到即丢弃 —— 这就同时覆盖了
      * "等待中被 remove"和"fd 被复用后旧事件残留"两种情形。 */
-    std::vector<epoll_event> events;
+    std::array<epoll_event, 64> events{};
     bool stopped = false;
     {
         std::lock_guard<std::mutex> lock(impl_->mtx);
         stopped = impl_->stopped;
-        events.resize(impl_->entries.size() + 1);
         if (!stopped) impl_->waiters++;   // 必须在释放锁前声明，否则 remove 会漏唤醒
     }
     if (stopped) return true;
@@ -304,11 +329,10 @@ bool SocketWaitSet::wait(std::chrono::milliseconds timeout)
             woke = true;
             continue;
         }
-        const auto it = std::find_if(impl_->entries.begin(), impl_->entries.end(),
-                                     [epoch](const Impl::Entry& e) { return e.epoch == epoch; });
-        if (it == impl_->entries.end()) continue;   // 已被 remove / fd 复用残留
-        if (std::find(impl_->ready.begin(), impl_->ready.end(), it->token) == impl_->ready.end())
-            impl_->ready.push_back(it->token);
+        const auto it = impl_->tokens_by_epoch.find(epoch);
+        if (it == impl_->tokens_by_epoch.end()) continue;   // 已被 remove / fd 复用残留
+        if (impl_->ready_epochs.insert(epoch).second)
+            impl_->ready.push_back(it->second);
     }
     if (impl_->stopped) return true;
     /* 契约：true = 至少一路就绪，或被 remove/stop 唤醒。被唤醒但 ready 为空
@@ -383,6 +407,9 @@ std::vector<SocketWaitToken> SocketWaitSet::consume_ready()
     std::lock_guard<std::mutex> lock(impl_->mtx);
     auto result = std::move(impl_->ready);
     impl_->ready.clear();
+#if defined(__linux__)
+    impl_->ready_epochs.clear();
+#endif
     return result;
 }
 
@@ -393,6 +420,9 @@ void SocketWaitSet::stop() noexcept
     if (impl_->stopped) return;
     impl_->stopped = true;
     impl_->ready.clear();
+#if defined(__linux__)
+    impl_->ready_epochs.clear();
+#endif
     /* 同 remove：只在有等待者时敲，避免留下虚假唤醒（stop 之后 wait 会在锁内
      * 直接看到 stopped 并返回 true，不需要唤醒通道）。 */
     const bool has_waiter = impl_->waiters > 0;

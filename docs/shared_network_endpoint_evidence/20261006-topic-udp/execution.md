@@ -25,7 +25,8 @@
 | N05 | 已完成 | `resources/n05-budget.md`；FD/端口/缓冲预算、状态读回和确定性失败回滚 |
 | N06 | 已完成 | `validation/n06-wire-v2.md`；双版本 DATA/HELLO/catalog/目录 codec 和独立向量 |
 | N07 | 已完成 | v2 pooled/hybrid/per-topic 生命周期、角色引用聚合、端点 owner add/remove、资源回滚与端到端覆盖；N08 等待/公平调度尚未实现 |
-| N08-N15 | 未开始 | 依赖前序节点 |
+| N08 | 已完成 | `validation/n08-scheduling.md`；epoll 多 FD 等待、按 socket/RouteKey 轮转、deferred 续跑、exclusive worker 映射及 256 空闲端点验证；保留一次未复现的 1MiB BestEffort 丢收观察 |
+| N09-N15 | 未开始 | 依赖前序节点 |
 
 ## N00 验证
 
@@ -96,3 +97,13 @@ python3 test/shared_net/end_to_end.py --gateway build-shared-net/bin/dzipc_gatew
 执行中保留的测试修正/异常：首次 per-topic BestEffort 运行在暂停网关超过客户端 3 秒健康超时后，误把已由会话失效回收的端点当作“最后角色注销”失败；脚本现记录会话超时回收或主动注销回收，并由独立 lifecycle case 检查主动注销。`both` 的初次断言把一个 PUB+SUB probe 算作一个引用，已改为按两个角色登记计数。端口冲突场景最初有一次额外 SUB 注销后 UDP 计数 3→2 的断言失败；不改变行为代码的诊断运行和随后全量 CTest 均通过，现将此单次不一致保留为未复现观察，N08/N11 回归时继续关注。
 
 本节点只完成功能接入与同机隔离验证；未测试物理跨机互通。`GatewayData::Shard` 当前仍用每轮 `poll` 构造并扫描本 worker 所有 socket 的等待集合，未宣称满足 N08 对大规模多 FD epoll 等待、公平预算和 deferred 续跑的要求。
+
+## N08 验证
+
+N08 将数据 worker 的逐轮 `pollfd` 构造改为 `SocketWaitSet`；Linux epoll 以固定 64 项批次等待，代际索引将内核事件关联至当前 token。worker 维护动态 endpoint owner 映射、ready socket 队列、按 socket/RouteKey 轮转的发送与接收队列；EAGAIN 按 socket 有界延后，接收 deferred 队列同时受包数和字节数约束，重组 tick 按 deadline 调度。发现 deferred 队列仍有 RouteKey 时，worker 仍读取预算内的其他已就绪 socket，避免热 RouteKey 挡住其它 socket。
+
+策略映射将池 socket 固定给普通 worker；`exclusive_worker` 只接收明确绑定到该 worker 的 dedicated RouteKey。专用 worker 不足以承载普通话题、普通话题指定独占 worker、重复独占要求等配置会被拒绝；状态输出读回池 worker 映射与独占 worker 列表。
+
+N08 构建与完整 shared_net 回归：`cmake --build build-shared-net --parallel 4` 退出码 0；最终 `ctest --test-dir build-shared-net -L shared_net --output-on-failure -j 1` 为 39/39 通过，27.45 秒。调度和 exclusive worker 变更后的聚焦等待集/端点 teardown/v2 e2e/exclusive worker/reliable e2e 为 5/5；之后并发 owner-slot 注册用例单独通过。256 个空闲 eventfd 和 256 个动态 UDP endpoint 的 CPU/wakeup/owner slot 结果、冷热同/异 socket 30 秒样本与原始文件、失败保留说明见 `validation/n08-scheduling.md`。
+
+此前完整集曾有一次 exclusive worker 场景的 1MiB BestEffort 消息接收为空；同一测试的后续诊断运行通过，调度修正后的完整回归也通过。该失败保留为未复现观察，未归因为测试采样问题，也不声称调度修正已证明消除此丢收。最后角色释放时 `/proc` 与状态命令的不同时间点读数曾短暂显示额外 UDP FD；脚本现在限时轮询两个读回源直至连续两次一致，并仍对泄漏超时失败。

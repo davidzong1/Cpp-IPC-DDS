@@ -32,6 +32,9 @@ class GatewayData {
 public:
     GatewayData(const GatewayConfig&, Identity, std::uint64_t epoch, int control_wake,
                 std::vector<std::unique_ptr<DatagramEndpoint>> endpoints, std::shared_ptr<NetMetrics> metrics = {});
+    GatewayData(const GatewayConfig&, Identity, std::uint64_t epoch, int control_wake,
+                std::vector<std::unique_ptr<DatagramEndpoint>> endpoints,
+                std::vector<unsigned> socket_workers, std::shared_ptr<NetMetrics> metrics = {});
     ~GatewayData();
     std::shared_future<void> synchronize(std::shared_ptr<const GatewayDataView>);
     // 动态端点由网关控制线程创建/撤销；返回时 worker 已完成 owner 注册或摘除。

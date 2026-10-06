@@ -925,6 +925,11 @@ if(DZIPC_BUILD_SHARED_NET)
         --socket-buffer-budget-bytes 2097152
         --gateway $<TARGET_FILE:dzipc_gateway> --probe $<TARGET_FILE:shared_net_probe>)
     set_tests_properties(test_shared_net_v2_endpoint_failure_rollback PROPERTIES LABELS shared_net TIMEOUT 30)
+    add_test(NAME test_shared_net_v2_exclusive_worker COMMAND ${Python3_EXECUTABLE}
+        ${LIBIPC_PROJECT_DIR}/test/shared_net/end_to_end.py
+        --network-version 2 --data-mode hybrid --data-sockets 4 --data-workers 4 --exclusive-worker
+        --gateway $<TARGET_FILE:dzipc_gateway> --probe $<TARGET_FILE:shared_net_probe>)
+    set_tests_properties(test_shared_net_v2_exclusive_worker PROPERTIES LABELS shared_net TIMEOUT 90)
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SIZEOF_VOID_P EQUAL 8)
     add_test(NAME test_shared_net_shm_capacity COMMAND test_shared_net_shm_capacity)

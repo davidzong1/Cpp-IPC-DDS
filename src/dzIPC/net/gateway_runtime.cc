@@ -212,6 +212,13 @@ TopicPolicySet load_topic_policy(const GatewayConfig &config) {
         if (policy.exclusive_worker && !result.exclusive_workers.insert(policy.worker).second) throw ConfigError({ConfigCode::InvalidOption, "exclusive worker 被重复指定"});
     }
     if (result.default_policy.exclusive_worker || result.default_policy.worker_set) throw ConfigError({ConfigCode::InvalidOption, "default 不能指定 worker"});
+    for (const auto& [key, policy] : result.routes) {
+        (void)key;
+        if (policy.worker_set && !policy.exclusive_worker && result.exclusive_workers.count(policy.worker))
+            throw ConfigError({ConfigCode::InvalidOption, "普通 dedicated 话题不能使用 exclusive_worker"});
+    }
+    if (result.exclusive_workers.size() >= config.data_workers)
+        throw ConfigError({ConfigCode::OwnerFailed, "exclusive_worker 必须为未指定 worker 的话题保留普通 worker"});
     return result;
 }
 } // namespace
@@ -286,6 +293,8 @@ struct GatewayRuntime::Impl
     TopicPolicySet topic_policy;
     std::vector<std::uint16_t> pooled_ports;
     std::vector<std::uint64_t> pooled_epochs;
+    std::vector<unsigned> pooled_workers;
+    std::vector<unsigned> ordinary_workers;
     struct DedicatedEndpoint { std::uint16_t port = 0; std::uint64_t epoch = 0; unsigned worker = 0; unsigned refs = 0; bool ready = false; };
     std::map<RouteKey, DedicatedEndpoint> dedicated_endpoints;
     std::set<std::uint16_t> closing_ports;
@@ -311,7 +320,7 @@ struct GatewayRuntime::Impl
             auto found = std::find(pooled_ports.begin(), pooled_ports.end(), descriptor.data_port);
             const auto index = found == pooled_ports.end() ? route_hash(descriptor.key) % pooled_ports.size()
                                                             : static_cast<std::size_t>(found - pooled_ports.begin());
-            return static_cast<unsigned>(index % std::max<std::uint64_t>(1, config.data_workers));
+            return pooled_workers.empty() ? 0 : pooled_workers[index];
         }
         return 0;
     }
@@ -362,6 +371,11 @@ struct GatewayRuntime::Impl
                 s << ',';
             s << config.data_ports[i];
         }
+        s << "],\"pooled_socket_workers\":[";
+        for (std::size_t i = 0; i < pooled_workers.size(); ++i) { if (i) s << ','; s << pooled_workers[i]; }
+        s << "],\"exclusive_workers\":[";
+        bool first_exclusive = true;
+        for (const auto worker : topic_policy.exclusive_workers) { if (!first_exclusive) s << ','; first_exclusive = false; s << worker; }
         s << "],\"socket_buffers\":[";
         for (std::size_t n = 0; n < socket_buffers.size(); ++n) {
             if (n) s << ',';
@@ -546,14 +560,9 @@ struct GatewayRuntime::Impl
         if (next_endpoint_epoch == UINT64_MAX) throw ConfigError({ConfigCode::OwnerFailed, "数据端点代次耗尽"});
         const auto epoch_value = next_endpoint_epoch++;
         const auto policy = policy_for(route, descriptor.topic);
-        unsigned worker = policy.worker_set ? policy.worker : static_cast<unsigned>(route_hash(route) % config.data_workers);
-        if (!policy.worker_set && topic_policy.exclusive_workers.count(worker)) {
-            std::vector<unsigned> ordinary;
-            for (unsigned i = 0; i < config.data_workers; ++i)
-                if (!topic_policy.exclusive_workers.count(i)) ordinary.push_back(i);
-            if (ordinary.empty()) throw ConfigError({ConfigCode::OwnerFailed, "没有可用于普通话题的数据 worker"});
-            worker = ordinary[route_hash(route) % ordinary.size()];
-        }
+        unsigned worker = policy.worker_set ? policy.worker
+            : policy.exclusive_worker ? policy.worker
+            : ordinary_workers[route_hash(route) % ordinary_workers.size()];
         const auto receive_requested = policy.receive_buffer ? policy.receive_buffer : config.data_rcvbuf_bytes;
         const auto send_requested = policy.send_buffer ? policy.send_buffer : config.data_sndbuf_bytes;
         const auto requested_receive = static_cast<std::uint64_t>(receive_requested);
@@ -1319,6 +1328,10 @@ GatewayRuntime::GatewayRuntime(GatewayConfig config) : impl_(new Impl)
     impl_->directory_budget = std::make_shared<DirectoryBudget>(impl_->config.limits, impl_->metrics);
     impl_->peer_directory = std::make_unique<PeerDirectory>(impl_->identity, impl_->epoch, impl_->directory_budget, impl_->config.network_version);
     impl_->topic_policy = load_topic_policy(impl_->config);
+    for (unsigned worker = 0; worker < impl_->config.data_workers; ++worker)
+        if (!impl_->topic_policy.exclusive_workers.count(worker)) impl_->ordinary_workers.push_back(worker);
+    if (impl_->ordinary_workers.empty())
+        throw ConfigError({ConfigCode::OwnerFailed, "没有可用于普通话题的数据 worker"});
     auto endpoint_resolver = [runtime = impl_.get()](RouteDescriptor &descriptor) {
         if (runtime->config.network_version != NetworkVersion::V2) return;
         const auto dedicated = runtime->dedicated_endpoints.find(descriptor.key);
@@ -1335,6 +1348,9 @@ GatewayRuntime::GatewayRuntime(GatewayConfig config) : impl_(new Impl)
                                                                impl_->config.network_version, endpoint_resolver);
     impl_->pooled_ports.assign(impl_->config.data_ports.begin(), impl_->config.data_ports.end());
     impl_->pooled_epochs.assign(impl_->config.data_endpoint_epochs.begin(), impl_->config.data_endpoint_epochs.end());
+    impl_->pooled_workers.reserve(impl_->pooled_ports.size());
+    for (std::size_t socket = 0; socket < impl_->pooled_ports.size(); ++socket)
+        impl_->pooled_workers.push_back(impl_->ordinary_workers[socket % impl_->ordinary_workers.size()]);
     for (const auto& endpoint : impl_->endpoints) {
         const auto receive = endpoint->receive_buffer_bytes();
         const auto send = endpoint->send_buffer_bytes();
@@ -1345,7 +1361,8 @@ GatewayRuntime::GatewayRuntime(GatewayConfig config) : impl_(new Impl)
     }
     std::vector<std::unique_ptr<DatagramEndpoint>> data_endpoints;
     for (unsigned i = 0; i < impl_->config.data_shards; ++i) data_endpoints.push_back(std::move(impl_->endpoints[i]));
-    impl_->data = std::make_unique<GatewayData>(impl_->config, impl_->identity, impl_->epoch, impl_->wake.get(), std::move(data_endpoints), impl_->metrics);
+    impl_->data = std::make_unique<GatewayData>(impl_->config, impl_->identity, impl_->epoch, impl_->wake.get(),
+                                                std::move(data_endpoints), impl_->pooled_workers, impl_->metrics);
     impl_->synchronize_data();
     impl_->thread = std::thread([p = impl_.get()] { p->run(); });
 }

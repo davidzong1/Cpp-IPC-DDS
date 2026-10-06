@@ -216,14 +216,15 @@ def driver(args):
         span = args.data_shards if args.network_version == 1 else 64
         bases, discovery = reserve_ports(args.data_shards if args.network_version == 1 else args.data_sockets, span)
         policy_file = None
-        if args.dedicated_policy:
+        if args.dedicated_policy or args.exclusive_worker:
             policy_file = str(pathlib.Path(directory) / 'topic-policy.json')
             default_endpoint = 'dedicated' if args.data_mode == 'per-topic' else 'pooled'
             pathlib.Path(policy_file).write_text(json.dumps({
                 'default': {'endpoint': default_endpoint},
                 'routes': ([] if args.data_mode == 'per-topic' else
                            [{'topic': 'shared_net_e2e', 'domain': '0', 'msg_id': 71,
-                             'endpoint': 'dedicated'}])}, ensure_ascii=False))
+                             'endpoint': 'dedicated',
+                             **({'worker': 0, 'exclusive_worker': True} if args.exclusive_worker else {})}])}, ensure_ascii=False))
         try:
             for i in range(2):
                 os.mkdir(directory + f'/host{i}', 0o700)
@@ -280,7 +281,7 @@ def driver(args):
                 print(json.dumps(evidence, ensure_ascii=False))
                 return
             if args.lifecycle_roles:
-                if args.network_version != 2 or not (args.dedicated_policy or args.data_mode == 'per-topic'):
+                if args.network_version != 2 or not (args.dedicated_policy or args.exclusive_worker or args.data_mode == 'per-topic'):
                     raise AssertionError('生命周期角色场景要求 v2 dedicated 端点')
                 roles = args.lifecycle_roles.split(',')
                 pubs = sum(role in ('pub', 'both') for role in roles)
@@ -324,7 +325,7 @@ def driver(args):
                 time.sleep(.05)
             for i in range(2):
                 resources = request(i, ['resources'])
-                dedicated = args.dedicated_policy or args.data_mode == 'per-topic'
+                dedicated = args.dedicated_policy or args.exclusive_worker or args.data_mode == 'per-topic'
                 expected_data = (args.data_shards if args.network_version == 1 else
                                  (args.data_sockets if args.data_mode != 'per-topic' else 0))
                 if dedicated:
@@ -337,9 +338,13 @@ def driver(args):
                 assert len(status['routes']) == 1 and status['routes'][0]['publisher_refs'] == 1 and status['routes'][0]['subscriber_refs'] == args.local_subscribers, status
                 if args.network_version == 2:
                     assert status['routes'][0]['data_port'] > 0 and status['routes'][0]['endpoint_epoch'] != '0', status
-                    if args.dedicated_policy or args.data_mode == 'per-topic':
+                    if args.dedicated_policy or args.exclusive_worker or args.data_mode == 'per-topic':
                         assert status['routes'][0]['endpoint'] == 'dedicated', status
                         assert status['routes'][0]['endpoint_flags'] == 1, status
+                        if args.exclusive_worker:
+                            assert status['routes'][0]['owner'] == 0, status
+                            assert status['exclusive_workers'] == [0], status
+                            assert 0 not in status['pooled_socket_workers'], status
                         if args.block_first_dedicated_port:
                             blocked = bases[i] if args.data_mode == 'per-topic' else bases[i] + args.data_sockets
                             assert status['routes'][0]['data_port'] == blocked + 1, status
@@ -356,7 +361,16 @@ def driver(args):
                     for receiver in range(2):
                         for app in range(args.local_subscribers):
                             result = request(receiver, ['probe', app, 'recv 1 3000'])['received']
-                            assert len(result) == 1 and result[0]['valid'], result
+                            if len(result) != 1 or not result[0]['valid']:
+                                diagnostics = {
+                                    'source': sender, 'receiver': receiver, 'subscriber': app,
+                                    'size': size, 'seed': seed, 'send_result': sent,
+                                    'received': result,
+                                    'subscriber_status': request(receiver, ['probe', app, 'status']),
+                                    'gateway_status': [request(i, ['gateway_status']) for i in range(2)],
+                                    'gateway_metrics': [request(i, ['metrics']) for i in range(2)],
+                                }
+                                raise AssertionError(diagnostics)
                             assert (result[0]['tag'], result[0]['seed'], result[0]['size'], result[0]['crc']) == (sender + 1, seed, size, sent['crc']), result
                     expected_remote[1 - sender] += 1
                     evidence['deliveries'].append({'source': sender, 'size': size, 'crc': sent['crc']})
@@ -370,7 +384,7 @@ def driver(args):
                 for metrics in evidence['metrics']:
                     assert metrics['counters']['reliable_completed'] == 6 and metrics['counters']['acks_rx'] == 6, metrics
                     assert metrics['counters']['acks_tx'] >= 6 and metrics['latency']['remote_commit']['count'] >= 6, metrics
-            if args.network_version == 2 and (args.dedicated_policy or args.data_mode == 'per-topic'):
+            if args.network_version == 2 and (args.dedicated_policy or args.exclusive_worker or args.data_mode == 'per-topic'):
                 # 先撤销额外 SUB。PUB+SUB 仍存活时，专用端点必须保持并只减少一个引用。
                 for host_index in range(2):
                     before = request(host_index, ['resources'])['gateway_udp']
@@ -394,31 +408,47 @@ def driver(args):
             time.sleep(3.3)
             sent = request(0, ['probe', 0, 'send 4096 9 99'])
             assert sent['success'] and sent['local'] == 2 and sent['network'] == 1, sent
-            active_subscribers = args.local_subscribers - 1 if args.network_version == 2 and (args.dedicated_policy or args.data_mode == 'per-topic') else args.local_subscribers
+            active_subscribers = args.local_subscribers - 1 if args.network_version == 2 and (args.dedicated_policy or args.exclusive_worker or args.data_mode == 'per-topic') else args.local_subscribers
             for app in range(active_subscribers):
                 result = request(0, ['probe', app, 'recv 1 500'])['received']
                 assert len(result) == 1 and result[0]['valid'] and result[0]['tag'] == 9, result
             assert not request(1, ['probe', 0, 'recv 1 50'])['received']
             request(0, ['signal', signal.SIGCONT])
-            if args.network_version == 2 and (args.dedicated_policy or args.data_mode == 'per-topic'):
+            if args.network_version == 2 and (args.dedicated_policy or args.exclusive_worker or args.data_mode == 'per-topic'):
                 reclamation = []
                 for host_index in range(2):
-                    before = request(host_index, ['resources'])['gateway_udp']
                     before_status = request(host_index, ['gateway_status'])
                     route_active = bool(before_status['routes'])
+                    before = request(host_index, ['resources'])['gateway_udp']
                     assert request(host_index, ['close_probe', 0])['closed']
-                    after = request(host_index, ['resources'])['gateway_udp']
-                    after_status = request(host_index, ['gateway_status'])
-                    if route_active:
-                        assert after == before - 1, (before, after, before_status, after_status)
-                        reclamation.append('last-role-unregister')
-                    else:
-                        # A paused gateway can time out its control session and reclaim the route first.
-                        pooled_sockets = args.data_sockets if args.data_mode != 'per-topic' else 0
-                        assert before == after == pooled_sockets + 2, (before, after, before_status, after_status)
-                        reclamation.append('session-timeout')
-                    assert not after_status['routes']
-                    assert after_status['endpoint_states']['ready'] == (args.data_sockets if args.data_mode != 'per-topic' else 0), after_status
+                    # /proc FD counts and the control status response are separate snapshots.
+                    # A route may already be withdrawn while its owner is finishing endpoint removal.
+                    pooled_sockets = args.data_sockets if args.data_mode != 'per-topic' else 0
+                    expected_udp = pooled_sockets + 2
+                    deadline = time.monotonic() + 3
+                    stable = 0
+                    samples = []
+                    while time.monotonic() < deadline:
+                        resources = request(host_index, ['resources'])
+                        after_status = request(host_index, ['gateway_status'])
+                        sample = {'gateway_udp': resources['gateway_udp'],
+                                  'routes': after_status['routes'],
+                                  'ready': after_status['endpoint_states']['ready']}
+                        samples.append(sample)
+                        if (sample['gateway_udp'] == expected_udp and not sample['routes'] and
+                                sample['ready'] == pooled_sockets):
+                            stable += 1
+                            if stable == 2:
+                                break
+                        else:
+                            stable = 0
+                        time.sleep(.02)
+                    assert stable == 2, {'before_udp': before, 'before_status': before_status,
+                                         'expected_udp': expected_udp, 'samples': samples[-8:]}
+                    reclamation.append('last-role-unregister' if route_active else 'session-timeout')
+                    evidence.setdefault('dedicated_role_reclamation_samples', []).append(
+                        {'before_udp': before, 'route_active_before_close': route_active,
+                         'stable_samples': stable, 'last_sample': samples[-1]})
                 evidence['dedicated_role_reclamation'] = reclamation
             evidence['gateway_pause_local_delivery'] = True
             print(json.dumps(evidence, ensure_ascii=False))
@@ -451,6 +481,7 @@ if __name__ == '__main__':
     parser.add_argument('--control-port', type=int)
     parser.add_argument('--topic-policy-file')
     parser.add_argument('--dedicated-policy', action='store_true')
+    parser.add_argument('--exclusive-worker', action='store_true')
     parser.add_argument('--lifecycle-roles', default='')
     parser.add_argument('--block-first-dedicated-port', action='store_true')
     parser.add_argument('--expect-endpoint-failure', action='store_true')

@@ -27,6 +27,11 @@
 #include <string>
 #include <thread>
 #include <vector>
+#if defined(__linux__)
+#include <sys/eventfd.h>
+#include <time.h>
+#include <unistd.h>
+#endif
 
 #include "dzIPC/common/data_rev.h"
 #include "dzIPC/common/hash.h"
@@ -249,6 +254,77 @@ TEST(SocketWaitSet, WaitTimesOutWithoutDataAndReportsRealChannel)
     EXPECT_TRUE(set.remove(token));
     EXPECT_TRUE(set.consume_ready().empty()) << "remove 之后该 token 不得再出现在 ready 里";
 }
+
+#if defined(__linux__)
+TEST(SocketWaitSet, LargeIdleSetAndHighTokenReuse)
+{
+    if (!SocketWaitSet::backend_available()) GTEST_SKIP() << "epoll unavailable";
+    constexpr std::size_t count = 256;
+    if (SocketWaitSet::max_channels() < count) GTEST_SKIP() << "backend channel limit is below this case";
+    SocketWaitSet set;
+    std::vector<int> fds;
+    struct FdCleanup { std::vector<int>& values; ~FdCleanup() { for (const auto fd : values) if (fd >= 0) ::close(fd); } } cleanup{fds};
+    std::vector<std::unique_ptr<unsigned>> owners;
+    std::vector<SocketWaitToken> tokens;
+    fds.reserve(count); owners.reserve(count); tokens.reserve(count);
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        const int fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        ASSERT_GE(fd, 0);
+        fds.push_back(fd);
+        owners.push_back(std::make_unique<unsigned>(static_cast<unsigned>(i)));
+        tokens.push_back({owners.back().get(), static_cast<std::uintptr_t>(fd)});
+        ASSERT_TRUE(set.add(tokens.back()));
+    }
+    ASSERT_EQ(set.size(), count);
+    timespec cpu_before{}, cpu_after{};
+    ASSERT_EQ(::clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu_before), 0);
+    const auto wall_before = Clock::now();
+    EXPECT_FALSE(set.wait(200ms)) << "256 路空闲 FD 必须阻塞到超时，不应被报告为就绪";
+    const auto wall_elapsed = Clock::now() - wall_before;
+    ASSERT_EQ(::clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu_after), 0);
+    const auto cpu_ns = (cpu_after.tv_sec - cpu_before.tv_sec) * 1000000000ll + cpu_after.tv_nsec - cpu_before.tv_nsec;
+    EXPECT_GE(wall_elapsed, 180ms);
+    EXPECT_LT(cpu_ns, 50000000ll) << "多 FD 空闲等待不应忙轮询";
+    EXPECT_TRUE(set.consume_ready().empty());
+
+    std::uint64_t one = 1;
+    ASSERT_EQ(::write(fds[count / 2], &one, sizeof(one)), static_cast<ssize_t>(sizeof(one)));
+    ASSERT_TRUE(set.wait(100ms));
+    auto ready = set.consume_ready();
+    ASSERT_EQ(ready.size(), 1u);
+    EXPECT_EQ(ready.front(), tokens[count / 2]);
+    std::uint64_t drained = 0;
+    ASSERT_EQ(::read(fds[count / 2], &drained, sizeof(drained)), static_cast<ssize_t>(sizeof(drained)));
+
+    const auto old_high = tokens.back();
+    const int old_fd = fds.back();
+    auto old_owner = std::move(owners.back());
+    ASSERT_TRUE(set.remove(old_high));
+    ::close(old_fd);
+    fds.back() = -1; fds.pop_back(); tokens.pop_back(); owners.pop_back();
+    const int replacement_fd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    ASSERT_GE(replacement_fd, 0);
+    fds.push_back(replacement_fd);
+    auto replacement_owner = std::make_unique<unsigned>(999u);
+    const SocketWaitToken replacement{replacement_owner.get(), static_cast<std::uintptr_t>(replacement_fd)};
+    ASSERT_TRUE(set.add(replacement));
+    ASSERT_EQ(::write(replacement_fd, &one, sizeof(one)), static_cast<ssize_t>(sizeof(one)));
+    ASSERT_TRUE(set.wait(100ms));
+    ready = set.consume_ready();
+    ASSERT_EQ(ready.size(), 1u);
+    EXPECT_EQ(ready.front(), replacement);
+    EXPECT_NE(replacement, old_high);
+    ASSERT_TRUE(set.remove(replacement));
+    (void)old_owner;
+    fds.back() = -1; ::close(replacement_fd);
+    for (std::size_t i = 0; i < tokens.size(); ++i)
+    {
+        ASSERT_TRUE(set.remove(tokens[i]));
+    }
+    EXPECT_EQ(set.size(), 0u);
+}
+#endif
 
 /* --------------------------------------------- remove/stop 唤醒并发 wait */
 
