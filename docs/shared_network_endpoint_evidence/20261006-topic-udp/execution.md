@@ -27,7 +27,8 @@
 | N07 | 已完成 | v2 pooled/hybrid/per-topic 生命周期、角色引用聚合、端点 owner add/remove、资源回滚与端到端覆盖；N08 等待/公平调度尚未实现 |
 | N08 | 已完成 | `validation/n08-scheduling.md`；epoll 多 FD 等待、按 socket/RouteKey 轮转、deferred 续跑、exclusive worker 映射及 256 空闲端点验证；保留一次未复现的 1MiB BestEffort 丢收观察 |
 | N09 | 已完成（保留失败样本） | `diagnostics/n09-20261006-185715/queue-attribution.md` 与 `queue-attribution.json`；同进程多话题、跨进程多话题均有分段链路，同话题双发布者可靠场景两轮均有 5 秒超时，未伪装成通过 |
-| N10-N15 | 未开始 | N09 已证明合格场景的 `ack_receive_to_gateway_result` 满足进入阈值；同话题多发布者可靠失败需在后续节点继续处理 |
+| N10 | 已完成，候选优化回退 | `diagnostics/n10-20261006-191735/` 与 `n10-comparison.md`；队列拆分无稳定净收益，保留实验记录并回退生产实现；39/39 shared_net 回归通过；同话题双发布者可靠失败仍存在 |
+| N11-N15 | 未开始 | N11 从回退后的最终候选继续完整功能、构建兼容和资源/故障回归 |
 
 ## N00 验证
 
@@ -131,3 +132,22 @@ python3 test/shared_net/analyze_queue_attribution.py --input docs/shared_network
 失败集中在 `same_topic_multipublisher`：v1 pooled、v2 pooled、v2 per-topic 的两轮均出现两个发布者各发送 36 条、各 1 条可靠调用等待 5 秒后失败；这不是 trace 丢弃或内容校验被静默忽略。其它布置的接收内容校验通过，但有少数轮次出现未完成链路或 trace 丢弃，分析器按严格门槛排除这些轮次。合格轮次中 `ack_receive_to_gateway_result` 在连续两轮最慢 1% API 耗时占比约 35%～39%，因此 N10 需要先针对 ACK 结果回传 owner 设计；该结论不覆盖已失败的同话题多发布者可靠路径。
 
 诊断工装同时修正了宿主响应解析：`load_all`/`recv_all` 返回 JSON 数组，`Process` 现在与对象响应一样入队，已用独立最小回归验证。N09 只定位排队区间，不替代 N13 的正式 3×60 秒窗口，也不构成物理跨机单向延迟证据。
+
+## N10 验证与回退
+
+N10 根据 N09 的 `ack_receive_to_gateway_result` 进入条件实现了 Result/Feedback 双 FIFO 队列和有限 Result 突发公平策略。候选实现未增加线程、socket、协议字段或可靠事务 owner；总事件记录数和字节预算保持不变。
+
+验证命令及结果：
+
+```text
+cmake --build build-shared-net --parallel 4
+  退出码 0
+ctest --test-dir build-shared-net -R '^(test_shared_net_metrics|test_shared_net_end_to_end)$' --output-on-failure -j 1
+  2/2 passed，退出码 0
+ctest --test-dir build-shared-net -L shared_net --output-on-failure -j 1
+  39/39 passed，退出码 0
+```
+
+与 N09 相同的 20 个诊断样本按相同顺序串行执行。两批均保留 8 个同话题双发布者 Reliable 超时；每个发布者发送 36 条，各有 1 条调用等待约 5 秒后失败。对 12 个内容校验通过且 trace 链完整的同轮样本，N10 API p99 两轮中位数相对 N09 在 v1 pooled 跨/同进程分别为 -10.4%/-6.3%，v2 per-topic 分别为 -8.0%/-11.9%，v2 pooled 跨进程为 +7.5%、同进程为 -5.5%。逐轮方向混合，且 ACK 区间占比没有稳定下降；完整数据和计算口径见 [`n10-comparison.md`](diagnostics/n10-20261006-191735/n10-comparison.md)。
+
+按照方案中“改造没有收益则回退并保留实验记录”的判据，N10 生产实现已回退到 N09 的单一事件队列。回退后的构建和 N11 回归作为下一节点验证对象；N10 设计、20 个原始样本、失败样本及分析 JSON 均保留。物理跨机仍未验证。
