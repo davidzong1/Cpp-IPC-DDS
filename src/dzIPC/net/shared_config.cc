@@ -114,6 +114,7 @@ const NumberOption number_options[] = {
         "--" name, &GatewayConfig::field                                                           \
     }
     OPTION("data-base-port", data_base_port),     OPTION("data-shards", data_shards),
+    OPTION("data-workers", data_workers),
     OPTION("control-port", control_port),         OPTION("discovery-port", discovery_port),
     OPTION("io-batch-max", io_batch_max),         OPTION("nack-delay-ms", nack_delay_ms),
     OPTION("io-round-packets", io_round_packets), OPTION("io-round-bytes", io_round_bytes),
@@ -234,10 +235,10 @@ ConfigStatus validate_config(const GatewayConfig &c)
     const auto in = [](std::uint64_t n, std::uint64_t a, std::uint64_t b) {
         return n >= a && n <= b;
     };
-    if (!in(c.data_shards, 1, 16) || !in(c.data_base_port, 1, 65535) ||
+    if (!in(c.data_shards, 1, 16) || !in(c.data_workers, 1, 64) || !in(c.data_base_port, 1, 65535) ||
         c.data_shards - 1 > 65535 - c.data_base_port || !in(c.control_port, 1, 65535) ||
         !in(c.discovery_port, 1, 65535))
-        return fail(ConfigCode::InvalidNumber, "数据分片须为 1～16，端口须在 1～65535 内");
+        return fail(ConfigCode::InvalidNumber, "数据分片须为 1～16，数据 worker 须为 1～64，端口须在 1～65535 内");
     const auto is_data = [&](std::uint64_t p) {
         return p >= c.data_base_port && p - c.data_base_port < c.data_shards;
     };

@@ -62,6 +62,10 @@ TEST(SharedNetConfig, DefaultsAndPortBoundaries)
     c.control_port = 24016;
     c.discovery_port = 24017;
     EXPECT_TRUE(validate_config(c));
+    c.data_workers = 1;
+    EXPECT_TRUE(validate_config(c));
+    c.data_workers = 65;
+    EXPECT_FALSE(validate_config(c));
 }
 TEST(SharedNetConfig, StrictAddressesAndPaths)
 {
@@ -93,6 +97,8 @@ TEST(SharedNetConfig, AtomicParsingAndOverflow)
                                                {"--data-shards", "2", "--data-shards", "3"},
                                                {"--data-shard", "2"},
                                                {"--data-shards", "-1"},
+                                               {"--data-workers", "0"},
+                                               {"--data-workers", "65"},
                                                {"--data-shards", "+1"},
                                                {"--data-shards", "18446744073709551616"},
                                                {"--send-bytes", "18446744073709551615"}})
@@ -101,8 +107,9 @@ TEST(SharedNetConfig, AtomicParsingAndOverflow)
         EXPECT_EQ(c.data_shards, 4u);
     }
     EXPECT_TRUE(parse_gateway_options(
-        {"--data-shards", "2", "--io-batch-max", "64", "--nack-delay-ms", "1"}, c));
+        {"--data-shards", "2", "--data-workers", "1", "--io-batch-max", "64", "--nack-delay-ms", "1"}, c));
     EXPECT_EQ(c.data_shards, 2u);
+    EXPECT_EQ(c.data_workers, 1u);
     EXPECT_EQ(c.io_batch_max, 64u);
 }
 TEST(SharedNetConfig, CapacityAndMetadataLimits)

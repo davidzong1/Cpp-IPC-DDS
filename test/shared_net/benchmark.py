@@ -59,9 +59,12 @@ def host(args):
             return ['taskset', '-c', str(cpu), *command] if affinity else command
         try:
             if args.mode == 'shared_v1':
-                bases, discovery = reserve_ports()
+                bases, discovery = reserve_ports(args.data_shards)
                 gateway = subprocess.Popen(launched([args.gateway, 'serve', '--control', control, '--interface', 'lo', '--listen-ip', '127.0.0.1',
-                    '--data-base-port', str(bases[0]), '--control-port', str(bases[0]+4), '--discovery-port', str(discovery)], affinity['gateway'] if affinity else 0),
+                    '--data-base-port', str(bases[0]), '--data-shards', str(args.data_shards),
+                    *([] if args.legacy_gateway else ['--data-workers', str(args.data_workers)]),
+                    '--control-port', str(bases[0]+args.data_shards),
+                    '--discovery-port', str(discovery)], affinity['gateway'] if affinity else 0),
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
                 end = time.monotonic() + 5
                 while not os.path.exists(control):
@@ -89,6 +92,8 @@ def host(args):
             gateway_metrics = {category: json.loads(subprocess.check_output(
                 [args.gateway, 'status', '--control', control, '--metrics', category], env=env, text=True))
                 for category in ('counters', 'quota', 'latency', 'shards')} if gateway else None
+            gateway_status = json.loads(subprocess.check_output(
+                [args.gateway, 'status', '--control', control, '--json'], env=env, text=True)) if gateway else None
             sub_results = [p.request('stop') for p in processes[:-1]]
             for p in processes:
                 if p.p.poll() is None:
@@ -138,7 +143,7 @@ def host(args):
                 'publish_latency': quantiles([int(row['elapsed_ns']) for row in pub_rows]),
                 'receivers': receiver_stats, 'before': before, 'after': after,
                 'cpu_seconds': [b['cpu_seconds']-a['cpu_seconds'] for a,b in zip(before,after)],
-                'gateway_metrics': gateway_metrics, 'shm_peak_sample_bytes': peak_shm, 'idle_gateway': idle, 'idle_status': status,
+                'gateway_status': gateway_status, 'gateway_metrics': gateway_metrics, 'shm_peak_sample_bytes': peak_shm, 'idle_gateway': idle, 'idle_status': status,
                 'stage_window': '应用直方图含2秒预热，网关指标为进程累计；精确端到端CSV仅正式窗口',
                 'environment': {'DZIPC_SHM_MPMC': '1', 'DZIPC_SHM_RECV_WORKERS': '1', 'DZIPC_SHARED_RECV_ASSIST': args.receive_assist,
                     'receive_trace': args.receive_trace, 'publish_trace': args.publish_trace,
@@ -178,7 +183,15 @@ if __name__ == '__main__':
     parser.add_argument('--subscribers', type=int, default=1)
     parser.add_argument('--seconds', type=int, default=30)
     parser.add_argument('--rate', type=int, default=100)
+    parser.add_argument('--data-shards', type=int, default=4,
+                        help='shared_v1 网关数据 socket 数（v1 HELLO 仍公告该数）')
+    parser.add_argument('--data-workers', type=int,
+                        help='shared_v1 网关数据 worker 数；可与 data-shards 不同')
+    parser.add_argument('--legacy-gateway', action='store_true',
+                        help='兼容改造前网关：不转发 data-workers')
     args = parser.parse_args()
+    if args.data_workers is None:
+        args.data_workers = args.data_shards
     if args.publish_cpu_trace:
         args.publish_trace = True
     if args.host:

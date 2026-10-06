@@ -129,6 +129,8 @@ struct GatewayRuntime::Impl
           << "\",\"data_plane_ready\":" << (running.load() ? "true" : "false") << ",\"listen_ip\":" << json_string(config.listen_ip)
           << ",\"interface\":" << json_string(config.interface)
           << ",\"udp_sockets\":" << (running.load() ? config.data_shards + 2 : 0)
+          << ",\"data_sockets\":" << (running.load() ? config.data_shards : 0)
+          << ",\"data_workers\":" << (running.load() ? config.data_workers : 0)
           << ",\"client_sessions\":" << session_count.load() << ",\"allocated_send_bytes\":\""
           << occupied.bytes << "\",\"send_inflight_bytes\":\"" << inflight.bytes << "\",\"send_inflight_records\":\"" << inflight.records
           << "\",\"allocated_send_records\":\"" << occupied.records
@@ -176,8 +178,8 @@ struct GatewayRuntime::Impl
           << ",\"retry_initial_ms\":" << config.retry_initial_ms << ",\"retry_max_ms\":" << config.retry_max_ms
           << ",\"control_rate\":" << config.control_rate << ",\"peer_control_rate\":" << config.peer_control_rate
           << ",\"control_burst\":" << config.control_burst
-          << ",\"gateway_threads\":" << (running.load() ? config.data_shards + 3 : 0)
-          << ",\"thread_scope\":\"控制、drain、初始化和 K 个 shard；SHM 公共调度线程另由 /proc 采样\""
+          << ",\"gateway_threads\":" << (running.load() ? config.data_workers + 3 : 0)
+          << ",\"thread_scope\":\"控制、drain、初始化和 W 个 data worker；每个 worker 可持有多个数据 socket；SHM 公共调度线程另由 /proc 采样\""
           << ",\"limits\":{";
         bool first_limit = true;
 #define SHOW_LIMIT(field) if (!first_limit) s << ','; first_limit = false; s << "\"" #field "\":" << config.limits.field;

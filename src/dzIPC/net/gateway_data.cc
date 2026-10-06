@@ -33,6 +33,7 @@ struct GatewayData::Impl {
         OutboxRecord record;
         std::shared_ptr<LocalRegistration> source;
         std::vector<Target> targets;
+        unsigned socket_index = 0;
         std::size_t cursor = 0;
         std::uint64_t expires = 0, first_send_ns = 0;
         std::uint32_t crc = 0;
@@ -48,14 +49,29 @@ struct GatewayData::Impl {
     };
     struct Shard {
         Impl& parent; unsigned index;
-        local::Fd wake = local::event(); std::unique_ptr<DatagramEndpoint> endpoint;
+        local::Fd wake = local::event();
+        std::vector<std::unique_ptr<DatagramEndpoint>> endpoints;
+        std::vector<unsigned> socket_indices;
         std::mutex mutex; std::deque<Command> commands;
         std::thread thread;
         mutable std::mutex stats_mutex; ReassemblyStats snapshot;
         std::atomic<std::uint64_t> rx_bytes{0}, tx_bytes{0}, wakeups{0}, budget_yields{0}, queued{0}, queued_peak{0};
-        void capture() { std::lock_guard<std::mutex> lock(stats_mutex); if (receive) snapshot = receive->stats(); }
+        void capture() {
+            std::lock_guard<std::mutex> lock(stats_mutex);
+            snapshot = {};
+            for (const auto& receive : receives) {
+                const auto current = receive->stats();
+                snapshot.malformed += current.malformed; snapshot.wrong_shard += current.wrong_shard;
+                snapshot.rejected += current.rejected; snapshot.duplicates += current.duplicates;
+                snapshot.completed += current.completed; snapshot.committed += current.committed;
+                snapshot.commit_attempts += current.commit_attempts;
+                snapshot.commit_not_submitted += current.commit_not_submitted;
+                snapshot.commit_indeterminate += current.commit_indeterminate;
+                snapshot.expired += current.expired; snapshot.message_crc_fail += current.message_crc_fail;
+            }
+        }
         std::shared_ptr<const GatewayDataView> view;
-        std::unique_ptr<ReassemblyShard> receive;
+        std::vector<std::unique_ptr<ReassemblyShard>> receives;
         std::map<RouteKey, std::deque<std::unique_ptr<Tx>>> sends;
         std::deque<RouteKey> ready_routes;
         std::size_t send_count = 0;
@@ -81,18 +97,24 @@ struct GatewayData::Impl {
         std::map<std::pair<Identity, std::uint64_t>, Tx*> active;
         std::uint64_t send_blocked_until = 0;
         bool send_progress = false;
-        Shard(Impl& p, unsigned i, std::unique_ptr<DatagramEndpoint> e) : parent(p), index(i), endpoint(std::move(e)),
-            receive(std::make_unique<ReassemblyShard>(p.identity, p.epoch, i, p.config.data_shards, p.receive_budget, p.config.nack_delay_ms * 1000000, p.config.nack_interval_ms * 1000000)) {}
+        Shard(Impl& p, unsigned i, std::vector<std::unique_ptr<DatagramEndpoint>> e, std::vector<unsigned> slots)
+            : parent(p), index(i), endpoints(std::move(e)), socket_indices(std::move(slots)) {
+            receives.reserve(socket_indices.size());
+            for (const auto slot : socket_indices)
+                receives.push_back(std::make_unique<ReassemblyShard>(p.identity, p.epoch, slot, p.config.data_shards,
+                    p.receive_budget, p.config.nack_delay_ms * 1000000, p.config.nack_interval_ms * 1000000));
+        }
         void update(std::shared_ptr<const GatewayDataView> next) {
             if (view) {
                 for (const auto& [id, peer] : view->peers) {
                     auto now = next->peers.find(id);
-                    if (now == next->peers.end() || now->second.admission != peer.admission) receive->retire_peer_epoch(peer.admission);
+                    if (now == next->peers.end() || now->second.admission != peer.admission)
+                        for (auto& receive : receives) receive->retire_peer_epoch(peer.admission);
                 }
                 for (const auto& [key, route] : view->local->routes) if (route->descriptor.role_flags & 2) {
                     auto now = next->local->routes.find(key);
                     if (now == next->local->routes.end() || now->second->descriptor.receiver_route_epoch != route->descriptor.receiver_route_epoch)
-                        receive->retire_route(route);
+                        for (auto& receive : receives) receive->retire_route(route);
                 }
             }
             // 确认注销屏障前，取消该逻辑发布者尚未终结的网络事务。
@@ -119,7 +141,7 @@ struct GatewayData::Impl {
             event.destination = {peer->second.admission->ipv4, peer->second.admission->hello.control_port};
             event.packet = std::move(f.control_packet); parent.emit(std::move(event));
         }
-        void incoming(const ReceivedDatagram& packet) {
+        void incoming(const ReceivedDatagram& packet, unsigned socket_index) {
             if (!view) return;
             WireHeader h; ByteView bytes;
             ++parent.rx_packets; parent.rx_bytes += packet.size; rx_bytes += packet.size;
@@ -131,7 +153,7 @@ struct GatewayData::Impl {
             if (p == view->peers.end() || s == view->local->routes.end() || !p->second.snapshot) { ++parent.unverified_route; parent.metrics->add(NetMetric::source_route_unverified); return; }
             const auto pub = p->second.snapshot->routes.find(h.route); if (pub == p->second.snapshot->routes.end()) { ++parent.unverified_route; parent.metrics->add(NetMetric::source_route_unverified); return; }
             ReceiveAdmission admission{p->second.admission, pub->second, s->second, p->second.snapshot, view->local};
-            feedback(receive->ingest(packet, admission, local::monotonic_ns()));
+            feedback(receives[socket_index]->ingest(packet, admission, local::monotonic_ns()));
         }
         void finish(std::unique_ptr<Tx> tx, SendResultCode result) {
             GatewayDataEvent event; event.header = tx->record.header; event.result.publisher_id = event.header.publisher_id;
@@ -232,7 +254,7 @@ struct GatewayData::Impl {
                     }
                     tx->reliable->tick(local::monotonic_ns());
                     if (tx->reliable->result()) { finish(std::move(tx), SendResultCode::TimedOut); continue; }
-                    const auto result = endpoint->send_batch(outgoing.data(), outgoing.size());
+                    const auto result = endpoints[tx->socket_index]->send_batch(outgoing.data(), outgoing.size());
                     if (result.status == IoStatus::WouldBlock) ++parent.send_eagain;
                     if (result.status == IoStatus::Fatal) ++parent.send_error;
                     std::uint64_t accepted_bytes = 0;
@@ -269,7 +291,7 @@ struct GatewayData::Impl {
                     outgoing[n] = {{target.peer.admission->ipv4, data_port(h.route, target.peer.admission->hello.data_base_port, target.peer.admission->hello.data_shards)}, ByteView(storage[n])};
                 }
                 if (local::monotonic_ns() >= tx->expires) { finish(std::move(tx), SendResultCode::TimedOut); continue; }
-                const auto result = endpoint->send_batch(outgoing.data(), outgoing.size());
+                const auto result = endpoints[tx->socket_index]->send_batch(outgoing.data(), outgoing.size());
                     if (result.status == IoStatus::WouldBlock) ++parent.send_eagain;
                     if (result.status == IoStatus::Fatal) ++parent.send_error;
                     std::uint64_t accepted_bytes = 0;
@@ -305,32 +327,39 @@ struct GatewayData::Impl {
                             }
                         }
                     }
-                    pollfd fds[]{{wake.get(), POLLIN, 0}, {endpoint->native_handle(), POLLIN, 0}};
+                    std::vector<pollfd> fds;
+                    fds.reserve(endpoints.size() + 1);
+                    fds.push_back({wake.get(), POLLIN, 0});
+                    for (const auto& endpoint : endpoints) fds.push_back({endpoint->native_handle(), POLLIN, 0});
                     // 不可因 EAGAIN 忙转；定时轮次保持短上界，不等待凑批。
                     const bool deferred = (send_progress || new_send) && !ready_routes.empty() && local::monotonic_ns() >= send_blocked_until;
                     bool pending_commands;
                     { std::lock_guard<std::mutex> lock(mutex); pending_commands = !commands.empty(); }
-                    const int timeout = (deferred || pending_commands) ? 0 : (!ready_routes.empty() ? 1 : receive->idle_wait_ms());
-                    if (::poll(fds, 2, timeout) < 0 && errno != EINTR) throw std::runtime_error("数据 shard 轮询失败");
+                    const int timeout = (deferred || pending_commands) ? 0 : (!ready_routes.empty() ? 1 : (receives.empty() ? 50 : receives.front()->idle_wait_ms()));
+                    if (::poll(fds.data(), fds.size(), timeout) < 0 && errno != EINTR) throw std::runtime_error("数据 shard 轮询失败");
                     ++wakeups; parent.metrics->add(NetMetric::shard_wakeups);
                     if (fds[0].revents) local::drain_event(wake.get());
-                    if (fds[1].revents & POLLIN) {
-                        std::array<ReceivedDatagram, 32> input; const auto until = local::monotonic_ns() + parent.config.io_round_us * 1000;
-                        std::size_t packets = 0, bytes = 0;
+                    const auto until = local::monotonic_ns() + parent.config.io_round_us * 1000;
+                    std::size_t packets = 0, bytes = 0;
+                    for (std::size_t socket = 0; socket < endpoints.size() && packets < parent.config.io_round_packets && bytes < parent.config.io_round_bytes; ++socket) {
+                        if (!(fds[socket + 1].revents & POLLIN)) continue;
+                        std::array<ReceivedDatagram, 32> input;
                         while (packets < parent.config.io_round_packets && bytes < parent.config.io_round_bytes && local::monotonic_ns() < until) {
-                            const auto result = endpoint->receive_batch(input.data(), std::min<std::size_t>({input.size(), parent.config.io_batch_max, parent.config.io_round_packets - packets}));
+                            const auto result = endpoints[socket]->receive_batch(input.data(), std::min<std::size_t>({input.size(), parent.config.io_batch_max, parent.config.io_round_packets - packets}));
                             if (!result.count) break;
-                            for (unsigned n = 0; n < result.count; ++n) { incoming(input[n]); bytes += input[n].size; }
+                            for (unsigned n = 0; n < result.count; ++n) { incoming(input[n], static_cast<unsigned>(socket)); bytes += input[n].size; }
                             packets += result.count;
                         }
-                        if (packets >= parent.config.io_round_packets || bytes >= parent.config.io_round_bytes || local::monotonic_ns() >= until) { ++budget_yields; parent.metrics->add(NetMetric::shard_budget_yields); }
                     }
-                    for (auto& result : receive->tick(local::monotonic_ns(), [&](const WireHeader& h, const WireBlob& blob) {
-                        if (!view) return SubmitState::NotSubmitted;
-                        const auto bridge = view->bridges->find(h.route); const auto route = view->local->routes.find(h.route);
-                        if (bridge == view->bridges->end() || route == view->local->routes.end() || !route->second->active.load() || route->second->descriptor.receiver_route_epoch != h.receiver_route_epoch) return SubmitState::NotSubmitted;
-                        return bridge->second->try_commit(blob);
-                    })) feedback(std::move(result));
+                    if (packets >= parent.config.io_round_packets || bytes >= parent.config.io_round_bytes || local::monotonic_ns() >= until) { ++budget_yields; parent.metrics->add(NetMetric::shard_budget_yields); }
+                    for (std::size_t socket = 0; socket < receives.size(); ++socket) {
+                        for (auto& result : receives[socket]->tick(local::monotonic_ns(), [&](const WireHeader& h, const WireBlob& blob) {
+                            if (!view) return SubmitState::NotSubmitted;
+                            const auto bridge = view->bridges->find(h.route); const auto route = view->local->routes.find(h.route);
+                            if (bridge == view->bridges->end() || route == view->local->routes.end() || !route->second->active.load() || route->second->descriptor.receiver_route_epoch != h.receiver_route_epoch) return SubmitState::NotSubmitted;
+                            return bridge->second->try_commit(blob);
+                        })) feedback(std::move(result));
+                    }
                     if (local::monotonic_ns() >= send_blocked_until) sending();
                     capture();
                 }
@@ -342,7 +371,7 @@ struct GatewayData::Impl {
             }
             ready_routes.clear(); send_count = 0; queued.store(0);
             { std::lock_guard<std::mutex> lock(mutex); for (auto& command : commands) { --parent.queued_commands; parent.queued_bytes -= command.charged_bytes; if (command.tx) finish(std::move(command.tx), SendResultCode::GatewayLost); } commands.clear(); }
-            capture(); active.clear(); receive.reset(); view.reset();
+            capture(); active.clear(); receives.clear(); endpoints.clear(); view.reset();
         }
     };
     std::shared_ptr<NetMetrics> metrics;
@@ -392,7 +421,15 @@ GatewayData::GatewayData(const GatewayConfig& c, Identity id, std::uint64_t epoc
     impl_->metrics = metrics ? std::move(metrics) : std::make_shared<NetMetrics>();
     impl_->receive_budget = std::make_shared<ReassemblyBudget>(c.limits, impl_->metrics);
     if (endpoints.size() != c.data_shards) throw std::invalid_argument("数据端点数不匹配");
-    for (unsigned i = 0; i < endpoints.size(); ++i) impl_->shards.push_back(std::make_unique<Impl::Shard>(*impl_, i, std::move(endpoints[i])));
+    std::vector<std::vector<std::unique_ptr<DatagramEndpoint>>> owned(c.data_workers);
+    std::vector<std::vector<unsigned>> slots(c.data_workers);
+    for (unsigned global = 0; global < endpoints.size(); ++global) {
+        const auto worker = global % c.data_workers;
+        owned[worker].push_back(std::move(endpoints[global]));
+        slots[worker].push_back(global);
+    }
+    for (unsigned worker = 0; worker < c.data_workers; ++worker)
+        impl_->shards.push_back(std::make_unique<Impl::Shard>(*impl_, worker, std::move(owned[worker]), std::move(slots[worker])));
     try { for (auto& shard : impl_->shards) shard->thread = std::thread([p = shard.get()] { p->run(); }); }
     catch (...) { stop(); throw; }
 }
@@ -402,7 +439,7 @@ void GatewayData::stop() {
     impl_->stopped.store(true);
     for (auto& shard : impl_->shards) local::notify(shard->wake.get());
     for (auto& shard : impl_->shards) if (shard->thread.joinable()) shard->thread.join();
-    for (auto& shard : impl_->shards) { shard->endpoint.reset(); }
+    for (auto& shard : impl_->shards) shard->endpoints.clear();
     std::lock_guard<std::mutex> events(impl_->events_mutex); impl_->events.clear(); impl_->event_bytes = 0;
 }
 std::shared_future<void> GatewayData::synchronize(std::shared_ptr<const GatewayDataView> view) {
@@ -431,9 +468,11 @@ bool GatewayData::submit(OutboxRecord& record, std::vector<PeerView> peers, std:
     for (auto& peer : peers) { auto route = peer.snapshot->routes.at(record.header.route); tx->targets.push_back({std::move(peer), std::move(route), 0}); }
     tx->expires = local::monotonic_ns() + 500000000ull;
     tx->record = std::move(record); Impl::Command command; command.tx = std::move(tx);
-    const auto index = route_hash(command.tx->record.header.route) % impl_->config.data_shards;
+    const auto global = route_hash(command.tx->record.header.route) % impl_->config.data_shards;
+    const auto worker = global % impl_->config.data_workers;
+    command.tx->socket_index = global / impl_->config.data_workers;
     try {
-        if (impl_->enqueue(index, command)) { impl_->metrics->add(NetMetric::remote_target_copies, size); if (!size) impl_->metrics->add(NetMetric::no_target_dropped); return true; }
+        if (impl_->enqueue(worker, command)) { impl_->metrics->add(NetMetric::remote_target_copies, size); if (!size) impl_->metrics->add(NetMetric::no_target_dropped); return true; }
     } catch (...) { record = std::move(command.tx->record); throw; }
     record = std::move(command.tx->record); return false;
 }
@@ -441,14 +480,17 @@ bool GatewayData::control(const ReceivedDatagram& packet) {
     WireHeader h; ByteView body;
     if (packet.status != IoStatus::Data || packet.size > packet.bytes.size() || !decode_packet(packet.view(), h, body) || h.kind == PacketKind::Data) return false;
     Impl::Command command; command.control = std::make_unique<ReceivedDatagram>(packet);
-    return impl_->enqueue(route_hash(h.route) % impl_->config.data_shards, command);
+    const auto global = route_hash(h.route) % impl_->config.data_shards;
+    return impl_->enqueue(global % impl_->config.data_workers, command);
 }
 bool GatewayData::pop(GatewayDataEvent& event) { std::lock_guard<std::mutex> lock(impl_->events_mutex); if (impl_->events.empty()) return false; impl_->event_bytes -= sizeof(GatewayDataEvent) + impl_->events.front().packet.capacity(); event = std::move(impl_->events.front()); impl_->events.pop_front(); return true; }
 std::string GatewayData::shard_metrics() const {
     std::ostringstream out; out << "{\"shards\":["; bool first = true;
     for (const auto& shard : impl_->shards) {
         if (!first) out << ','; first = false;
-        out << "{\"index\":" << shard->index << ",\"rx_bytes\":" << shard->rx_bytes.load() << ",\"tx_bytes\":" << shard->tx_bytes.load()
+        out << "{\"index\":" << shard->index << ",\"socket_count\":" << shard->endpoints.size() << ",\"sockets\":[";
+        for (std::size_t n = 0; n < shard->socket_indices.size(); ++n) { if (n) out << ','; out << shard->socket_indices[n]; }
+        out << "],\"rx_bytes\":" << shard->rx_bytes.load() << ",\"tx_bytes\":" << shard->tx_bytes.load()
             << ",\"wakeups\":" << shard->wakeups.load() << ",\"budget_yields\":" << shard->budget_yields.load()
             << ",\"queued\":" << shard->queued.load() << ",\"queued_peak\":" << shard->queued_peak.load() << '}';
     }

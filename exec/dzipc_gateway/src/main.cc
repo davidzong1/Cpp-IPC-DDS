@@ -19,7 +19,8 @@ int main(int argc, char **argv)
     {
         std::cout << "用法：dzipc_gateway check-config|serve --listen-ip IPv4 --interface 网卡 "
                      "--control 绝对路径\n"
-                     "dzipc_gateway status --control 绝对路径 --json [--topic 话题 --domain 域 --msg-id ID --peer-id 实例ID] [--metrics counters|quota|latency|shards]\n";
+                     "dzipc_gateway status --control 绝对路径 --json [--topic 话题 --domain 域 --msg-id ID --peer-id 实例ID] [--metrics counters|quota|latency|shards]\n"
+                     "serve 可选：--data-shards S --data-workers W（v1 pooled；W 为本机 owner 数）\n";
         return argc < 2 ? 2 : 0;
     }
     const std::string command = argv[1];
@@ -129,7 +130,7 @@ int main(int argc, char **argv)
             return 3;
         }
     }
-    std::cout << "配置校验通过；数据分片=" << config.data_shards
+    std::cout << "配置校验通过；数据分片=" << config.data_shards << "，数据 worker=" << config.data_workers
               << "，UDP 端点预算=" << config.data_shards + 2
               << "，最大消息=" << config.limits.message_bytes << " 字节（未绑定端口）\n";
     return 0;

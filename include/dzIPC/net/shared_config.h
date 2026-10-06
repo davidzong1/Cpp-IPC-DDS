@@ -96,7 +96,7 @@ struct GatewayConfig
 {
     std::string listen_ip, interface, control_path;
     std::string discovery_group = "239.255.250.251";
-    std::uint64_t data_base_port = 24000, data_shards = 4;
+    std::uint64_t data_base_port = 24000, data_shards = 4, data_workers = 4;
     std::uint64_t control_port = 24004, discovery_port = 24005;
     std::uint64_t io_batch_max = 32, nack_delay_ms = 2, nack_interval_ms = 2;
     std::uint64_t io_round_packets = 64, io_round_bytes = 64 * 1024, io_round_us = 200;

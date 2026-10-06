@@ -147,11 +147,11 @@ def host(args):
                 gateway.wait()
 
 
-def reserve_ports():
+def reserve_ports(data_shards=4):
     rng = random.Random(20261005)
     for _ in range(100):
         bases = [rng.randrange(18000, 31000), rng.randrange(18000, 31000)]
-        ports = [p for b in bases for p in range(b, b + 5)]
+        ports = [p for b in bases for p in range(b, b + data_shards + 1)]
         discovery = rng.randrange(18000, 31000)
         ports.append(discovery)
         if len(set(ports)) != len(ports):
