@@ -27,6 +27,8 @@
 #if defined(__linux__)
 #include <sched.h>
 #include <time.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #endif
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
@@ -133,9 +135,14 @@ int main(int argc, char** argv) try {
         auto sub = dzIPC::SubscriberIPCPtrMake(model, topic, 0, 1024, transport); sub->InitChannel();
         std::atomic<bool> running{true}; std::uint64_t count = 0, invalid = 0;
         csv << "sequence,read_ns,elapsed_ns,bytes";
-        if (tracing) csv << ",recv_begin_ns,recv_return_ns,enqueue_before_ns,dequeue_after_ns,assisted,handoff_ns,wait_begin_ns,wait_end_ns,wait_cpu_ns,recv_cpu_ns,process_cpu_ns,enqueue_after_ns,assist_acquire_ns,get_cpu_ns";
+        if (tracing) csv << ",recv_begin_ns,recv_return_ns,enqueue_before_ns,dequeue_after_ns,assisted,handoff_ns,wait_begin_ns,wait_end_ns,wait_cpu_ns,recv_cpu_ns,process_cpu_ns,enqueue_after_ns,assist_acquire_ns,get_cpu_ns,reader_tid";
         csv << '\n';
         std::thread reader([&] {
+#if defined(__linux__)
+            const auto reader_tid = tracing ? ::syscall(SYS_gettid) : 0;
+#else
+            const auto reader_tid = 0;
+#endif
             while (running.load()) {
                 dzIPC::Sample sample;
                 handoff_elapsed = 0;
@@ -162,6 +169,7 @@ int main(int argc, char** argv) try {
                                 << ',' << trace.recv_cpu.load() << ',' << trace.process_cpu.load() << ',' << trace.enqueue_after.load()
                                 << ',' << trace.acquire_ns.load() << ',' << get_cpu;
                         }
+                        csv << ',' << reader_tid;
                     }
                     csv << '\n';
                 }
