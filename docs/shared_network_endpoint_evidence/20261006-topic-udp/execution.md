@@ -28,7 +28,8 @@
 | N08 | 已完成 | `validation/n08-scheduling.md`；epoll 多 FD 等待、按 socket/RouteKey 轮转、deferred 续跑、exclusive worker 映射及 256 空闲端点验证；保留一次未复现的 1MiB BestEffort 丢收观察 |
 | N09 | 已完成（保留失败样本） | `diagnostics/n09-20261006-185715/queue-attribution.md` 与 `queue-attribution.json`；同进程多话题、跨进程多话题均有分段链路，同话题双发布者可靠场景两轮均有 5 秒超时，未伪装成通过 |
 | N10 | 已完成，候选优化回退 | `diagnostics/n10-20261006-191735/` 与 `n10-comparison.md`；队列拆分无稳定净收益，保留实验记录并回退生产实现；39/39 shared_net 回归通过；同话题双发布者可靠失败仍存在 |
-| N11-N15 | 未开始 | N11 从回退后的最终候选继续完整功能、构建兼容和资源/故障回归 |
+| N11 | 已完成（保留失败分类） | `validation/n11-20261006-204455/results.md`；普通聚焦 13/13、OFF 聚焦 14/14、legacy 回退 3/3；全量普通 38/39、ASan/UBSan 36/39，失败均为已保留的 1MiB BestEffort 重组超时；生产实现未改变 |
+| N12-N15 | 未开始 | N12 规模、资源耗尽、故障和生命周期压力矩阵 |
 
 ## N00 验证
 
@@ -151,3 +152,11 @@ ctest --test-dir build-shared-net -L shared_net --output-on-failure -j 1
 与 N09 相同的 20 个诊断样本按相同顺序串行执行。两批均保留 8 个同话题双发布者 Reliable 超时；每个发布者发送 36 条，各有 1 条调用等待约 5 秒后失败。对 12 个内容校验通过且 trace 链完整的同轮样本，N10 API p99 两轮中位数相对 N09 在 v1 pooled 跨/同进程分别为 -10.4%/-6.3%，v2 per-topic 分别为 -8.0%/-11.9%，v2 pooled 跨进程为 +7.5%、同进程为 -5.5%。逐轮方向混合，且 ACK 区间占比没有稳定下降；完整数据和计算口径见 [`n10-comparison.md`](diagnostics/n10-20261006-191735/n10-comparison.md)。
 
 按照方案中“改造没有收益则回退并保留实验记录”的判据，N10 生产实现已回退到 N09 的单一事件队列。回退后的构建和 N11 回归作为下一节点验证对象；N10 设计、20 个原始样本、失败样本及分析 JSON 均保留。物理跨机仍未验证。
+
+## N11 验证
+
+N11 在 N10 回退后的生产实现上完成普通、shared-net OFF、ASan/UBSan 三套构建，修正 OFF 配置测试在未构建 shared-net 时的条件编译，并验证安装目录 legacy 回退。结果和原始日志见 [`validation/n11-20261006-204455/results.md`](validation/n11-20261006-204455/results.md)。
+
+普通构建的 MPMC、DZFlat、生命周期和信息池聚焦集为 13/13；OFF 构建为 14/14；sanitizer 聚焦集为 12/13，唯一失败是已有的生命周期负向测试 `GenerationRebuildRequiresRemoveRouteFirstOrCrashStall`，ASan 记录预期的失效对象读取。安装目录回退脚本三项均通过，旧模式未连接共享网关。
+
+本轮普通 shared-net 全量为 38/39，sanitizer 全量为 36/39。失败均集中于 1 MiB BestEffort 场景，接收端在约 500～630 KiB 后重组超时；失败状态没有 `wrong_shard`、CRC、非法包或发送错误，且 sanitizer 全量没有新增 ASan/UBSan 报告。该结果保留为 N12 压力矩阵的输入，不宣称 N11 已关闭大消息丢收问题。物理跨主机仍未验证。

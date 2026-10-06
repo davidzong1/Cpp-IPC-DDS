@@ -211,7 +211,7 @@ TEST(SharedNetConfig, TimerAndControlBounds)
     c.io_round_us = 1000001;
     EXPECT_FALSE(validate_config(c));
 }
-#if defined(__linux__)
+#if defined(__linux__) && DZIPC_TEST_SHARED_NET_BUILT
 TEST(SharedNetConfig, ResourceAuditIsReadOnlyAndSeparatesBudgets)
 {
     auto c = valid_config();
