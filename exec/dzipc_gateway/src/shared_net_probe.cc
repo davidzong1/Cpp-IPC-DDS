@@ -1,18 +1,18 @@
 #include "dzIPC/net/publisher_endpoint.h"
-#include "dzIPC/dzipc.h"
-#include "ipc_msg/ipc_msg_base/generic_message.hpp"
 #include "dzIPC/common/channel_scope.h"
 #include "dzIPC/common/name_operator.h"
 #include "dzIPC/shm_pub_sub_ipc.h"
 #include "ipc_msg/ipc_msg_base/dzflat.h"
 #include "libipc/ipc.h"
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <sstream>
 #include <thread>
 #include <set>
 #include <algorithm>
+#include <numeric>
 
 using namespace dzIPC::net;
 namespace {
@@ -25,18 +25,88 @@ Bytes payload(std::size_t size, std::uint64_t tag, std::uint64_t seed) {
 }
 void put32(Bytes& b, std::uint32_t v) { for (int i = 3; i >= 0; --i) b.push_back(v >> (i * 8)); }
 std::uint32_t read32(const std::uint8_t* p) { return (std::uint32_t(p[0]) << 24) | (std::uint32_t(p[1]) << 16) | (std::uint32_t(p[2]) << 8) | p[3]; }
+std::vector<std::string> split_topics(const std::string& text) {
+    std::vector<std::string> topics; std::size_t begin = 0;
+    while (begin <= text.size()) {
+        const auto end = text.find(',', begin); const auto length = (end == std::string::npos ? text.size() : end) - begin;
+        if (!length) throw std::invalid_argument("话题列表包含空项");
+        topics.push_back(text.substr(begin, length));
+        if (end == std::string::npos) break;
+        begin = end + 1;
+    }
+    return topics;
+}
+struct LoadResult { std::uint64_t sent = 0, failed = 0; std::vector<std::uint64_t> latency; };
+std::uint64_t nearest_rank(const std::vector<std::uint64_t>& values, double percentile) {
+    if (values.empty()) return 0;
+    const auto rank = static_cast<std::size_t>(std::ceil(values.size() * percentile));
+    return values[std::max<std::size_t>(1, rank) - 1];
+}
+void run_load(PublisherEndpoint& publisher, unsigned seconds, double rate, unsigned size,
+              bool reliable, std::chrono::steady_clock::time_point start, LoadResult& result) {
+    const auto end = start + std::chrono::seconds(seconds);
+    while (std::chrono::steady_clock::now() < end && result.sent < 600000) {
+        if (rate > 0) {
+            const auto due = start + std::chrono::nanoseconds(
+                static_cast<std::uint64_t>(result.sent * 1000000000.0 / rate));
+            std::this_thread::sleep_until(due);
+        }
+        if (std::chrono::steady_clock::now() >= end) break;
+        const auto began = std::chrono::steady_clock::now();
+        ++result.sent;
+        std::uint64_t identity = 0;
+        const auto publisher_id = publisher.publisher_id();
+        std::memcpy(&identity, publisher_id.data(), sizeof(identity));
+        const auto seed = (identity & 0xffffffff00000000ull) | (result.sent & 0xffffffffull);
+        auto bytes = payload(size, 1, seed);
+        const auto outcome = publisher.prebuilt(ByteView(bytes),
+            reliable ? Delivery::Reliable : Delivery::BestEffort, reliable ? 5000 : 0);
+        result.failed += !outcome.success;
+        result.latency.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - began).count());
+    }
+    std::sort(result.latency.begin(), result.latency.end());
+}
+void print_load_result(const LoadResult& result, bool include_samples) {
+    const auto mean = result.latency.empty() ? 0.0 :
+        static_cast<double>(std::accumulate(result.latency.begin(), result.latency.end(), std::uint64_t{0})) / result.latency.size();
+    std::cout << "{\"sent\":" << result.sent << ",\"failed\":" << result.failed
+              << ",\"mean_ns\":" << mean << ",\"p50_ns\":" << nearest_rank(result.latency, .50)
+              << ",\"p95_ns\":" << nearest_rank(result.latency, .95)
+              << ",\"p99_ns\":" << nearest_rank(result.latency, .99)
+              << ",\"max_ns\":" << nearest_rank(result.latency, 1.0);
+    if (include_samples) {
+        std::cout << ",\"latency_samples_ns\":[";
+        for (std::size_t i = 0; i < result.latency.size(); ++i) {
+            if (i) std::cout << ',';
+            std::cout << result.latency[i];
+        }
+        std::cout << ']';
+    }
+    std::cout << '}';
+}
 }
 int main(int argc, char** argv) try {
     if (argc != 4) { std::cerr << "用法：shared_net_probe 控制路径 话题 pub|sub|both\n"; return 2; }
-    const std::string role = argv[3]; if (role != "pub" && role != "sub" && role != "both") return 2;
-    RouteDescriptor descriptor; descriptor.topic = argv[2]; descriptor.key.msg_id = 71; descriptor.schema_hash = 0xabcdef01;
-    descriptor.key.scope = dzIPC::common::channel_scope_token(descriptor.topic, 0, dzIPC::common::ScopeKind::PubSub);
+    const std::string role = argv[3];
+    if (role != "pub" && role != "sub" && role != "both" && role != "pubset") return 2;
+    const auto topics = split_topics(argv[2]);
+    if (role != "pubset" && topics.size() != 1) return 2;
+    const bool is_publisher = role == "pub" || role == "both" || role == "pubset";
+    const bool is_subscriber = role == "sub" || role == "both";
+    std::vector<RouteDescriptor> descriptors;
+    for (const auto& topic : topics) {
+        RouteDescriptor descriptor; descriptor.topic = topic; descriptor.key.msg_id = 71; descriptor.schema_hash = 0xabcdef01;
+        descriptor.key.scope = dzIPC::common::channel_scope_token(descriptor.topic, 0, dzIPC::common::ScopeKind::PubSub);
+        descriptors.push_back(std::move(descriptor));
+    }
+    const auto& descriptor = descriptors.front();
     auto runtime = ClientRuntime::acquire(argv[1]);
-    std::unique_ptr<PublisherEndpoint> publisher;
-    dzIPC::PublisherIPCPtr public_publisher;
-    if (role != "sub") publisher = std::make_unique<PublisherEndpoint>(runtime, descriptor);
+    std::vector<std::unique_ptr<PublisherEndpoint>> publishers;
+    if (is_publisher) for (const auto& route : descriptors)
+        publishers.push_back(std::make_unique<PublisherEndpoint>(runtime, route));
     Identity sub{}; std::unique_ptr<ipc::mpmc_channel> receiver;
-    if (role != "pub") {
+    if (is_subscriber) {
         // probe 句柄只在本进程/会话使用；业务公共订阅封装在 T11 接入。
         const auto value = std::chrono::steady_clock::now().time_since_epoch().count(); std::memcpy(sub.data(), &value, 8); sub[15] = 2;
         auto registered = runtime->request(LocalKind::RegisterSub, registration_body(sub, descriptor));
@@ -54,39 +124,63 @@ int main(int argc, char** argv) try {
         std::istringstream input(line); std::string command; input >> command;
         if (command == "quit") break;
         if (command == "state") {
-            const auto hint = publisher ? runtime->route_state(publisher->publisher_id()) : RouteStateBody{};
-            std::cout << "{\"remote\":" << hint.remote_ready_count << ",\"synchronized\":" << (hint.synchronized ? "true" : "false") << ",\"healthy\":" << (runtime->healthy() ? "true" : "false") << "}" << std::endl;
+            std::cout << "{\"remote\":" << (publishers.empty() ? 0 : runtime->route_state(publishers.front()->publisher_id()).remote_ready_count)
+                      << ",\"synchronized\":" << (publishers.empty() || runtime->route_state(publishers.front()->publisher_id()).synchronized ? "true" : "false")
+                      << ",\"healthy\":" << (runtime->healthy() ? "true" : "false") << ",\"routes\":[";
+            for (std::size_t i = 0; i < publishers.size(); ++i) {
+                if (i) std::cout << ',';
+                const auto hint = runtime->route_state(publishers[i]->publisher_id());
+                std::cout << "{\"remote\":" << hint.remote_ready_count << ",\"synchronized\":" << (hint.synchronized ? "true" : "false") << '}';
+            }
+            std::cout << "]}" << std::endl;
         } else if (command == "diagnostics") std::cout << runtime->diagnostics_json() << std::endl;
+        else if (command == "trace") {
+            std::cout << "{\"pages\":["; std::uint32_t offset = 0; bool first = true;
+            for (;;) {
+                const auto page = runtime->metrics().trace_page(offset);
+                if (!first) std::cout << ','; first = false; std::cout << page.json;
+                if (page.complete) break;
+                if (page.next_offset <= offset) throw std::runtime_error("应用 trace 分页未前进");
+                offset = page.next_offset;
+            }
+            std::cout << "]}" << std::endl;
+        }
         else if (command == "status") std::cout << runtime->status() << std::endl;
-        else if (command == "send" && publisher) {
-            std::size_t size; std::uint64_t tag, seed; unsigned reliable = 0; input >> size >> tag >> seed >> reliable;
-            auto bytes = payload(size, tag, seed); const auto result = publisher->prebuilt(ByteView(bytes), reliable ? Delivery::Reliable : Delivery::BestEffort, reliable ? 5000 : 0);
+        else if (command == "send" && is_publisher) {
+            std::size_t publisher_index = 0, size; std::uint64_t tag, seed; unsigned reliable = 0;
+            if (publishers.size() > 1) input >> publisher_index;
+            input >> size >> tag >> seed >> reliable;
+            if (publisher_index >= publishers.size()) throw std::invalid_argument("发布者下标越界");
+            auto bytes = payload(size, tag, seed); const auto result = publishers[publisher_index]->prebuilt(ByteView(bytes), reliable ? Delivery::Reliable : Delivery::BestEffort, reliable ? 5000 : 0);
             std::cout << "{\"success\":" << (result.success ? "true" : "false") << ",\"local\":" << static_cast<int>(result.local)
                       << ",\"network\":" << static_cast<int>(result.network) << ",\"sequence\":" << result.sequence
-                      << ",\"result\":" << static_cast<unsigned>(result.remote.result) << ",\"crc\":" << crc32c(ByteView(bytes)) << "}" << std::endl;
-        } else if (command == "load" && publisher) {
-            unsigned seconds, size; double rate; input >> seconds >> rate >> size;
+                      << ",\"publisher_index\":" << publisher_index << ",\"result\":" << static_cast<unsigned>(result.remote.result)
+                      << ",\"crc\":" << crc32c(ByteView(bytes)) << "}" << std::endl;
+        } else if (command == "load" && is_publisher) {
+            unsigned seconds, size, reliable = 0; double rate; input >> seconds >> rate >> size >> reliable;
             if (!seconds || seconds > 60 || rate < 0 || rate > 10000) throw std::invalid_argument("负载参数无效");
-            if (!public_publisher) {
-                dzIPC::EnableDzFlat(true); dzIPC::EnableNodelet(false);
-                auto model = std::make_shared<dzIPC::TopicData>(std::make_shared<dzIPC::GenericMessage>(), 71);
-                public_publisher = dzIPC::PublisherIPCPtrMake(model, descriptor.topic, 0, dzIPC::IPC_SOCKET);
-                public_publisher->InitChannel();
-            }
             const auto start = std::chrono::steady_clock::now(), end = start + std::chrono::seconds(seconds);
             std::uint64_t count = 0, failed = 0; std::vector<std::uint64_t> latency;
             while (std::chrono::steady_clock::now() < end && count < 600000) {
                 if (rate) std::this_thread::sleep_until(start + std::chrono::nanoseconds(static_cast<std::uint64_t>(count * 1000000000.0 / rate)));
                 if (std::chrono::steady_clock::now() >= end) break;
-                auto bytes = payload(size, 1, ++count); auto message = std::make_shared<dzIPC::GenericMessage>();
-                message->set_msg_id(71); if (!message->dzflat_read(bytes.data(), bytes.size())) throw std::runtime_error("负载段无效");
+                ++count;
                 const auto began = std::chrono::steady_clock::now();
-                failed += !public_publisher->publish_blocking(message, 1000);
+                const auto publisher_index = (count - 1) % publishers.size();
+                std::uint64_t identity = 0;
+                const auto publisher_id = publishers[publisher_index]->publisher_id();
+                std::memcpy(&identity, publisher_id.data(), sizeof(identity));
+                const auto seed = (identity & 0xffffffff00000000ull) | (count & 0xffffffffull);
+                auto bytes = payload(size, 1, seed);
+                const auto outcome = publishers[publisher_index]->prebuilt(ByteView(bytes),
+                    reliable ? Delivery::Reliable : Delivery::BestEffort, reliable ? 5000 : 0);
+                failed += !outcome.success;
                 latency.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - began).count());
             }
             std::sort(latency.begin(), latency.end());
             const auto percentile = [&](double p) { return latency.empty() ? 0ull : static_cast<unsigned long long>(latency[std::min(latency.size()-1, static_cast<std::size_t>(latency.size()*p))]); };
-            std::cout << "{\"sent\":" << count << ",\"failed\":" << failed << ",\"p50_ns\":" << percentile(.50)
+            const auto mean = latency.empty() ? 0.0 : static_cast<double>(std::accumulate(latency.begin(), latency.end(), std::uint64_t{0})) / latency.size();
+            std::cout << "{\"sent\":" << count << ",\"failed\":" << failed << ",\"mean_ns\":" << mean << ",\"p50_ns\":" << percentile(.50)
                       << ",\"p95_ns\":" << percentile(.95) << ",\"p99_ns\":" << percentile(.99) << ",\"max_ns\":" << percentile(1);
             if (std::getenv("DZIPC_TEST_LATENCY_SAMPLES")) {
                 std::cout << ",\"latency_samples_ns\":[";
@@ -94,6 +188,26 @@ int main(int argc, char** argv) try {
                 std::cout << ']';
             }
             std::cout << "}" << std::endl;
+        } else if (command == "loadset" && role == "pubset") {
+            unsigned seconds, size, reliable = 0; double rate; input >> seconds >> rate >> size >> reliable;
+            if (!seconds || seconds > 60 || rate < 0 || rate > 10000) throw std::invalid_argument("负载参数无效");
+            std::vector<LoadResult> results(publishers.size());
+            std::vector<std::thread> workers;
+            const auto start = std::chrono::steady_clock::now();
+            const bool include_samples = std::getenv("DZIPC_TEST_LATENCY_SAMPLES") != nullptr;
+            for (std::size_t i = 0; i < publishers.size(); ++i) {
+                workers.emplace_back([&, i] {
+                    try { run_load(*publishers[i], seconds, rate, size, reliable != 0, start, results[i]); }
+                    catch (...) { ++results[i].failed; }
+                });
+            }
+            for (auto& worker : workers) worker.join();
+            std::cout << "[";
+            for (std::size_t i = 0; i < results.size(); ++i) {
+                if (i) std::cout << ',';
+                print_load_result(results[i], include_samples);
+            }
+            std::cout << "]" << std::endl;
         } else if (command == "drain" && receiver) {
             unsigned seconds; input >> seconds; if (!seconds || seconds > 65) throw std::invalid_argument("接收窗口无效");
             const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);

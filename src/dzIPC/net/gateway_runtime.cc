@@ -224,7 +224,7 @@ TopicPolicySet load_topic_policy(const GatewayConfig &config) {
 } // namespace
 struct GatewayRuntime::Impl
 {
-    std::shared_ptr<NetMetrics> metrics = std::make_shared<NetMetrics>();
+    std::shared_ptr<NetMetrics> metrics = std::make_shared<NetMetrics>("gateway");
     struct Cached
     {
         Bytes request, response;
@@ -453,7 +453,11 @@ struct GatewayRuntime::Impl
     }
     std::string query(ByteView body) const {
         if (!body.data[0]) return status();
-        if (body.data[0] == 3) return body.data[1] == 3 ? data->shard_metrics() : metrics->json(body.data[1]);
+        if (body.data[0] == 3) {
+            if (body.data[1] == 3) return data->shard_metrics();
+            if (body.data[1] == 4) return metrics->trace_page(codec::get(body.data + 2, 4)).json;
+            return metrics->json(body.data[1]);
+        }
         RouteKey key; codec::copy(key.scope, body.data + 1); key.msg_id = codec::get(body.data + 33, 4);
         auto snapshot = local_directory->snapshot(); bool verified = true, reachable = true;
         Identity peer_id = identity; std::uint64_t peer_epoch = epoch;
@@ -946,6 +950,11 @@ struct GatewayRuntime::Impl
                     if (sent.status == IoStatus::Data) {
                         if (h.kind == PacketKind::Ack) metrics->add(NetMetric::acks_tx);
                         if (h.kind == PacketKind::Nack) metrics->add(NetMetric::nacks_tx);
+                        if (h.kind == PacketKind::Ack && metrics->trace_enabled()) {
+                            auto key = trace_key(h); key.gateway_epoch = h.target_epoch;
+                            key.session_known = false; key.session_id = 0;
+                            metrics->trace(key, MessageTracePoint::AckSent);
+                        }
                     }
                 }
                 continue;
@@ -963,6 +972,7 @@ struct GatewayRuntime::Impl
             while (session.result_order.size() >= config.limits.result_history) { session.send_results.erase(session.result_order.front()); session.result_order.pop_front(); }
             session.send_results.emplace(header.request_id, result); session.result_order.push_back(header.request_id);
         }
+        if (metrics->trace_enabled()) metrics->trace(trace_key(header), MessageTracePoint::ReliableResultQueued);
         Bytes body; encode_send_result(result, body); queue(session, response(session, LocalKind::SendResult, header.request_id, body));
     }
     bool allow_control(const Identity& id, std::uint64_t now, bool incoming = false, bool catalog = false)
@@ -1128,6 +1138,7 @@ struct GatewayRuntime::Impl
                 else if (event.kind == OutboxEvent::Kind::Record)
                 {
                     ++outbox_records;
+                    event.record.trace(MessageTracePoint::ControlDequeued);
                     const auto h = event.record.header;
                     auto failure = SendResultCode::Rejected;
                     const auto publisher = local_directory->find(session.id, h.publisher_id);
@@ -1148,6 +1159,7 @@ struct GatewayRuntime::Impl
                         (!publisher->binding->descriptor.schema_hash || h.encoding == Encoding::Tlv || publisher->binding->descriptor.schema_hash == h.schema_hash) &&
                         publisher->accept_sequence(h.sequence)) {
                         failure = SendResultCode::Busy;
+                        event.record.trace(MessageTracePoint::ControlAccepted);
                         if (data->submit(event.record, peer_directory->targets(publisher->binding->descriptor), publisher)) continue;
                     }
                     event.record.release();

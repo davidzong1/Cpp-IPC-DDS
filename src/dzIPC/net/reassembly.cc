@@ -287,7 +287,11 @@ struct ReassemblyShard::Impl {
                 try { MetricTimer timer(&metrics(), NetStage::RemoteCommit); result = commit(a.header, a.blob); } catch (...) { result = SubmitState::Indeterminate; }
                 if (result == SubmitState::Indeterminate) ++stats.commit_indeterminate;
                 else if (result != SubmitState::Committed) ++stats.commit_not_submitted;
-                if (result == SubmitState::Committed) output.push_back(terminate(i, Terminal::Committed, RejectReason::ShmUnavailable, now));
+                if (result == SubmitState::Committed) {
+                    if (metrics().trace_enabled())
+                        metrics().trace(trace_key(a.header), MessageTracePoint::ReceiveCommit);
+                    output.push_back(terminate(i, Terminal::Committed, RejectReason::ShmUnavailable, now));
+                }
                 else if (result == SubmitState::Indeterminate) output.push_back(terminate(i, Terminal::Rejected, RejectReason::ShmCommitIndeterminate, now));
                 else if (a.header.delivery == Delivery::BestEffort) output.push_back(terminate(i, Terminal::Rejected, RejectReason::ShmUnavailable, now));
                 else a.next_commit = after(now, nack_interval);

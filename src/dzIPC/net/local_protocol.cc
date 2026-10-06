@@ -84,6 +84,8 @@ ProtocolStatus validate_body(const LocalHeader &h, ByteView b)
         return fields(b.size == 17 && handle(b) && (b.data[16] == 1 || b.data[16] == 2));
     case LocalKind::QueryState: {
         if (b.size == 2 && b.data[0] == 3) return fields(b.data[1] <= 3);
+        if (b.size == 6 && b.data[0] == 3 && b.data[1] == 4)
+            return fields(get(b.data + 2, 4) <= 65536);
         if (b.size < 1 || b.data[0] > 2)
             return error(ProtocolCode::BadLength);
         const auto required = b.data[0] == 0 ? 1u : b.data[0] == 1 ? 37u : 53u;

@@ -89,6 +89,8 @@ struct OutboxRecord
     OutboxRecord(const OutboxRecord &) = delete;
     OutboxRecord &operator=(const OutboxRecord &) = delete;
     void release() noexcept;
+    void trace(MessageTracePoint point, std::uint64_t stamp_ns = 0) const noexcept;
+    std::shared_ptr<NetMetrics> trace_metrics() const noexcept { return trace_metrics_; }
     OutboxHeader header;
     WireBlob blob;
     CreditCounters network_cost;
@@ -97,6 +99,7 @@ struct OutboxRecord
   private:
     friend class OutboxReceiver;
     std::shared_ptr<SendAccount> account_;
+    std::shared_ptr<NetMetrics> trace_metrics_;
 };
 class OutboxReceiver
 {

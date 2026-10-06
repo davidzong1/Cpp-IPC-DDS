@@ -355,6 +355,7 @@ OutboxRecord &OutboxRecord::operator=(OutboxRecord &&other) noexcept
         blob = std::move(other.blob);
         network_cost = other.network_cost;
         account_ = std::move(other.account_);
+        trace_metrics_ = std::move(other.trace_metrics_);
     }
     return *this;
 }
@@ -366,6 +367,12 @@ void OutboxRecord::release() noexcept
         account_->finish(network_cost);
         account_.reset();
     }
+    trace_metrics_.reset();
+}
+void OutboxRecord::trace(MessageTracePoint point, std::uint64_t stamp_ns) const noexcept
+{
+    if (trace_metrics_ && trace_metrics_->trace_enabled())
+        trace_metrics_->trace(trace_key(header), point, stamp_ns);
 }
 struct OutboxReceiver::Impl
 {
@@ -451,6 +458,8 @@ bool OutboxReceiver::pull(OutboxRecord &record)
     impl_->progress = add(impl_->progress, {actual, 1});
     record.release();
     record.header = h; record.pulled_ns = metric_now_ns();
+    record.trace_metrics_ = impl_->account->pool_->metrics;
+    record.trace(MessageTracePoint::DrainPulled, record.pulled_ns);
     record.blob = std::move(blob);
     record.network_cost = cost;
     record.account_ = impl_->account;

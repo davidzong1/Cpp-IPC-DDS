@@ -3,6 +3,7 @@
 #include "dzIPC/net/outbox.h"
 #include "local_control_linux.h"
 #include <atomic>
+#include <charconv>
 #include <condition_variable>
 #include <deque>
 #include <fcntl.h>
@@ -147,7 +148,7 @@ struct ClientRuntime::Impl
     std::shared_ptr<OutboxSender> outbox;
     std::uint64_t credit_request = 0, credit_retry_after = 0;
     std::array<std::atomic<std::uint64_t>, 4> local_results{}, network_results{};
-    NetMetrics metrics; bool closing = false;
+    NetMetrics metrics{"client"}; bool closing = false;
     std::atomic<std::uint64_t> partial_submit{0}, credit_wait_count{0}, credit_wait_ns{0};
     std::condition_variable changed;
     std::map<std::uint64_t, std::shared_ptr<Waiter>> pending;
@@ -614,6 +615,31 @@ std::string ClientRuntime::gateway_metrics(unsigned category) {
     if (reply.header.kind != LocalKind::State) throw std::runtime_error("指标响应类型错误");
     return std::string(reply.body.begin()+4, reply.body.end());
 }
+MessageTracePage ClientRuntime::gateway_trace_page(std::uint32_t start_offset) {
+    if (start_offset > kMessageTraceCapacity) throw std::invalid_argument("trace offset 超出范围");
+    Bytes body{3, 4};
+    for (int shift = 24; shift >= 0; shift -= 8) body.push_back(static_cast<std::uint8_t>(start_offset >> shift));
+    const auto reply = request(LocalKind::QueryState, std::move(body));
+    if (reply.header.kind != LocalKind::State) throw std::runtime_error("网关 trace 响应类型错误");
+    MessageTracePage page; page.json.assign(reply.body.begin() + 4, reply.body.end());
+    const auto field = [&](const char* name) -> std::uint64_t {
+        const auto marker = std::string("\"") + name + "\":";
+        const auto found = page.json.find(marker);
+        if (found == std::string::npos) throw std::runtime_error("网关 trace 页缺少字段");
+        const auto begin = found + marker.size();
+        std::uint64_t value = 0; const auto parsed = std::from_chars(page.json.data() + begin, page.json.data() + page.json.size(), value);
+        if (parsed.ec != std::errc{}) throw std::runtime_error("网关 trace 页字段格式错误");
+        return value;
+    };
+    const auto next = field("next_offset");
+    if (next > kMessageTraceCapacity) throw std::runtime_error("网关 trace 页游标越界");
+    page.next_offset = static_cast<std::uint32_t>(next);
+    const auto complete = page.json.find("\"complete\":true");
+    if (complete == std::string::npos && page.json.find("\"complete\":false") == std::string::npos)
+        throw std::runtime_error("网关 trace 页 complete 字段无效");
+    page.complete = complete != std::string::npos;
+    return page;
+}
 std::string ClientRuntime::status()
 {
     const auto reply = request(LocalKind::QueryState, Bytes{0});
@@ -657,27 +683,41 @@ void ClientRuntime::attach_outbox()
 OutboxSubmit ClientRuntime::submit_outbox(const OutboxHeader &header, ByteView blob)
 {
     check_process();
+    const bool tracing = impl_->metrics.trace_enabled();
+    const auto trace = tracing ? trace_key(header) : MessageTraceKey{};
+    const auto mark = [&](MessageTracePoint point) { if (tracing) impl_->metrics.trace(trace, point); };
+    mark(MessageTracePoint::OutboxSubmitBegin);
     std::shared_ptr<OutboxSender> sender;
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         if (!healthy() || !impl_->outbox)
+        {
+            mark(MessageTracePoint::OutboxSubmitEnd);
             return {};
+        }
         sender = impl_->outbox;
     }
     for (;;)
     {
         OutboxSubmit result;
         try { MetricTimer timer(&impl_->metrics, NetStage::OutboxSubmit); result = sender->submit(header, blob); }
-        catch (...) { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->fail_locked("出站提交前失败"); throw; }
+        catch (...) {
+            mark(MessageTracePoint::OutboxSubmitEnd);
+            std::lock_guard<std::mutex> lock(impl_->mutex); impl_->fail_locked("出站提交前失败"); throw;
+        }
         if (result.state == SubmitState::Indeterminate)
         {
+            mark(MessageTracePoint::OutboxSubmitEnd);
             std::lock_guard<std::mutex> lock(impl_->mutex);
             impl_->fail_locked("出站提交状态不确定");
             return result;
         }
         if (result.code != OutboxCode::CreditUnavailable &&
             result.code != OutboxCode::LoanUnavailable)
+        {
+            mark(MessageTracePoint::OutboxSubmitEnd);
             return result;
+        }
         const auto need = sender->needed(blob.size);
         if (need.bytes || need.records)
         {
@@ -700,12 +740,20 @@ OutboxSubmit ClientRuntime::submit_outbox(const OutboxHeader &header, ByteView b
                 }
             }
         }
-        if (header.delivery != Delivery::Reliable) return result;
+        if (header.delivery != Delivery::Reliable) {
+            mark(MessageTracePoint::OutboxSubmitEnd);
+            return result;
+        }
+        mark(MessageTracePoint::CreditWaitBegin);
         const auto wait_start = local::monotonic_ns(); ++impl_->credit_wait_count;
         const auto ready = sender->wait(header.deadline_monotonic_ns);
         const auto elapsed = local::monotonic_ns() - wait_start;
         impl_->credit_wait_ns += elapsed; impl_->metrics.observe(NetStage::CreditWait, elapsed);
-        if (!ready) return result;
+        mark(MessageTracePoint::CreditWaitEnd);
+        if (!ready) {
+            mark(MessageTracePoint::OutboxSubmitEnd);
+            return result;
+        }
     }
 }
 } // namespace dzIPC::net

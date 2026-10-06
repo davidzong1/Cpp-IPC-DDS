@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """两套真实网关/应用进程，共享网络、隔离 /dev/shm；不冒充物理跨机测试。"""
 import argparse
+import concurrent.futures
 import json
 import os
 import pathlib
@@ -25,7 +26,7 @@ class Process:
         self.errors = []
         def read():
             for line in self.p.stdout:
-                if line.startswith('{'):
+                if line.startswith(('{', '[')):
                     try:
                         self.lines.put(json.loads(line))
                     except json.JSONDecodeError:
@@ -83,7 +84,7 @@ def udp_count(pid):
 
 def host(args):
     subprocess.run(['mount', '-t', 'tmpfs', '-o', 'size=768m', 'tmpfs', '/dev/shm'], check=True)
-    env = dict(os.environ, DZIPC_SHM_MPMC='1')
+    env = dict(os.environ, DZIPC_SHM_MPMC='1', DZIPC_NET_TRACE='1' if args.message_trace else '0')
     control = args.control
     gateway_args = [args.gateway, 'serve', '--listen-ip', '127.0.0.1',
         '--interface', 'lo', '--control', control]
@@ -117,10 +118,16 @@ def host(args):
             time.sleep(.01)
         roles = (args.lifecycle_roles.split(',') if args.lifecycle_roles else
                  ['both'] + ['sub'] * (args.local_subscribers - 1) + ['pub'] * (args.local_publishers - 1))
-        if not roles or any(role not in ('pub', 'sub', 'both') for role in roles):
-            raise AssertionError('生命周期角色只接受 pub、sub 或 both')
-        for role in roles:
-            probe = Process([args.probe, control, args.topic, role], env)
+        parsed_roles = []
+        for item in roles:
+            role, separator, route = item.partition(':')
+            if role not in ('pub', 'sub', 'both', 'pubset'):
+                raise AssertionError('生命周期角色只接受 pub、sub、both 或 pubset')
+            parsed_roles.append((role, route if separator else args.topic))
+        if not parsed_roles:
+            raise AssertionError('生命周期角色列表为空')
+        for role, route in parsed_roles:
+            probe = Process([args.probe, control, route, role], env)
             probes.append(probe)
             if args.expect_endpoint_failure:
                 try:
@@ -153,6 +160,42 @@ def host(args):
                 result = {category: json.loads(subprocess.check_output([args.gateway, 'status', '--control', args.control, '--metrics', category], env=env, text=True))
                           for category in ('counters', 'quota', 'latency', 'shards')}
                 result['application'] = probes[0].request('diagnostics')
+                if args.message_trace:
+                    result['trace'] = json.loads(subprocess.check_output(
+                        [args.gateway, 'status', '--control', args.control, '--metrics', 'trace'], env=env, text=True))
+                    result['application_traces'] = [probe.request('trace') for probe in probes]
+            elif command[0] == 'load_all':
+                _, seconds, rate, size, *options = command
+                reliable = options[0] if options else 0
+                if len(probes) == 1:
+                    result = [probes[0].request(f'load {seconds} {rate} {size} {reliable}')]
+                else:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(probes)) as pool:
+                        futures = [pool.submit(probe.request, f'load {seconds} {rate} {size} {reliable}')
+                                   for probe in probes if probe.p.poll() is None]
+                        result = list(future.result() for future in futures)
+            elif command[0] == 'loadset':
+                _, seconds, rate, size, *options = command
+                reliable = options[0] if options else 0
+                result = probes[0].request(f'loadset {seconds} {rate} {size} {reliable}')
+            elif command[0] == 'drain_all':
+                _, seconds = command
+                if len(probes) == 1:
+                    result = [probes[0].request(f'drain {seconds}')]
+                else:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(probes)) as pool:
+                        futures = [pool.submit(probe.request, f'drain {seconds}')
+                                   for probe in probes if probe.p.poll() is None]
+                        result = list(future.result() for future in futures)
+            elif command[0] == 'recv_all':
+                _, count, timeout = command
+                if len(probes) == 1:
+                    result = [probes[0].request(f'recv {count} {timeout}')]
+                else:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(probes)) as pool:
+                        futures = [pool.submit(probe.request, f'recv {count} {timeout}')
+                                   for probe in probes if probe.p.poll() is None]
+                        result = list(future.result() for future in futures)
             elif command[0] == 'resources':
                 result = {'gateway_udp': udp_count(gateway.pid),
                           'application_udp': [udp_count(p.p.pid) for p in probes if p.p.poll() is None]}
@@ -244,6 +287,8 @@ def driver(args):
                     '--data-workers', str(args.data_workers)]
                 if args.lifecycle_roles:
                     command += ['--lifecycle-roles', args.lifecycle_roles]
+                if args.message_trace:
+                    command += ['--message-trace']
                 if args.block_first_dedicated_port:
                     command += ['--block-first-dedicated-port']
                 if args.expect_endpoint_failure:
@@ -486,6 +531,7 @@ if __name__ == '__main__':
     parser.add_argument('--block-first-dedicated-port', action='store_true')
     parser.add_argument('--expect-endpoint-failure', action='store_true')
     parser.add_argument('--socket-buffer-budget-bytes', type=int)
+    parser.add_argument('--message-trace', action='store_true', help='启用有界按消息诊断记录')
     parser.add_argument('--control')
     parser.add_argument('--topic')
     parser.add_argument('--base', type=int)

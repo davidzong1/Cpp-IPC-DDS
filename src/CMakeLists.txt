@@ -22,6 +22,7 @@ list(APPEND SRC_FILES ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/shared_config.cc)
 if(DZIPC_BUILD_SHARED_NET)
   list(APPEND SRC_FILES
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/wire_protocol.cc
+    ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/message_trace.cc
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/local_protocol.cc
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/wire_blob.cc
     ${LIBIPC_PROJECT_DIR}/src/dzIPC/net/local_control_linux.cc

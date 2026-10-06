@@ -4,6 +4,7 @@
 #include "shared_net/shm_wire_fixture.h"
 #include "dzIPC/net/publisher_endpoint.h"
 #include "gtest/gtest.h"
+#include <cstdlib>
 using namespace shared_net_test;
 namespace {
 std::uint64_t number(const std::string& json, const std::string& key) {
@@ -89,6 +90,14 @@ TEST(SharedNetMetrics, DirectoryChargesRouteMetricsAndExpiresOnlyOnce) {
     EXPECT_EQ(number(stage(tiny.metrics()->json(1), "directory_bytes"), "rejected"), 1u); EXPECT_EQ(tiny.usage().installed, 0u);
 }
 TEST(SharedNetMetrics, RealAckPopulatesStagesRouteAndShardAndReleasesCredit) {
+    const auto* old_trace = std::getenv("DZIPC_NET_TRACE");
+    const std::string old_trace_value = old_trace ? old_trace : "";
+    const bool had_trace = old_trace != nullptr;
+    ASSERT_EQ(::setenv("DZIPC_NET_TRACE", "1", 1), 0);
+    struct RestoreTraceEnv {
+        bool present; std::string value;
+        ~RestoreTraceEnv() { if (present) ::setenv("DZIPC_NET_TRACE", value.c_str(), 1); else ::unsetenv("DZIPC_NET_TRACE"); }
+    } restore{had_trace, old_trace_value};
     BusinessTopic topic; Directory dir; auto config = configuration(dir); GatewayRuntime gateway(config);
     auto client = ClientRuntime::acquire(dir.control()); PublisherEndpoint publisher(client, topic.descriptor);
     PeerStub peer; peer.announce(config, topic.descriptor, client, publisher.publisher_id()); const auto bytes = flat_blob(1024);
@@ -105,12 +114,57 @@ TEST(SharedNetMetrics, RealAckPopulatesStagesRouteAndShardAndReleasesCredit) {
     EXPECT_EQ(number(stage(client->metrics().json(2), "outbox_submit"), "count"), 1u);
     EXPECT_EQ(number(stage(client->metrics().json(2), "api_return"), "count"), 1u);
     EXPECT_GT(number(client->route_status(topic.descriptor.key), "tx_bytes"), 0u);
+    std::string gateway_trace; std::uint32_t trace_offset = 0;
+    for (;;) {
+        const auto page = client->gateway_trace_page(trace_offset);
+        EXPECT_LT(page.json.size(), 8192u);
+        gateway_trace += page.json;
+        if (page.complete) break;
+        ASSERT_GT(page.next_offset, trace_offset); trace_offset = page.next_offset;
+    }
+    EXPECT_NE(gateway_trace.find("\"node\":\"gateway\""), std::string::npos);
+    EXPECT_NE(gateway_trace.find("\"drain_pulled\":"), std::string::npos);
+    EXPECT_NE(gateway_trace.find("\"control_dequeued\":"), std::string::npos);
+    EXPECT_NE(gateway_trace.find("\"first_send\":"), std::string::npos);
+    EXPECT_NE(gateway_trace.find("\"ack_received\":"), std::string::npos);
+    const auto client_trace = client->metrics().trace_page();
+    EXPECT_NE(client_trace.json.find("\"node\":\"client\""), std::string::npos);
+    EXPECT_NE(client_trace.json.find("\"publish_begin\":"), std::string::npos);
+    EXPECT_NE(client_trace.json.find("\"publish_api_return\":"), std::string::npos);
     EXPECT_NE(client->gateway_metrics(3).find("\"shards\":["), std::string::npos);
     for (unsigned category = 0; category < 4; ++category) EXPECT_LT(client->gateway_metrics(category).size(), 8000u);
     EXPECT_THROW(client->gateway_metrics(4), std::invalid_argument);
     ASSERT_TRUE(until([&] { return client->granted().records == granted.records + 1; }));
     publisher.close(); EXPECT_NE(client->route_status(topic.descriptor.key).find("\"ready\":false"), std::string::npos);
     client->stop(); EXPECT_EQ(client->metrics().get(NetMetric::gateway_lost), 0u);
+}
+
+TEST(SharedNetMetrics, TraceIsDisabledByDefaultAndCountsUnmatchedEvents) {
+    const auto* old_trace = std::getenv("DZIPC_NET_TRACE");
+    const std::string old_trace_value = old_trace ? old_trace : "";
+    const bool had_trace = old_trace != nullptr;
+    ASSERT_EQ(::unsetenv("DZIPC_NET_TRACE"), 0);
+    NetMetrics disabled("test");
+    EXPECT_FALSE(disabled.trace_enabled());
+    EXPECT_NE(disabled.trace_page().json.find("\"enabled\":false"), std::string::npos);
+
+    ASSERT_EQ(::setenv("DZIPC_NET_TRACE", "1", 1), 0);
+    NetMetrics enabled("test");
+    EXPECT_TRUE(enabled.trace_enabled());
+    MessageTraceKey key; key.gateway_epoch = 11; key.session_id = 12; key.sequence = 13;
+    key.route.msg_id = 71; key.publisher_id[0] = 1;
+    enabled.trace(key, MessageTracePoint::PublishBegin, 100);
+    enabled.trace(key, MessageTracePoint::OutboxSubmitBegin, 120);
+    enabled.trace(key, MessageTracePoint::OutboxSubmitEnd, 150);
+    MessageTraceKey unmatched = key; ++unmatched.sequence;
+    enabled.trace(unmatched, MessageTracePoint::OutboxSubmitEnd, 200);
+    const auto page = enabled.trace_page();
+    EXPECT_TRUE(page.complete);
+    EXPECT_NE(page.json.find("\"gateway_epoch\":\"11\""), std::string::npos);
+    EXPECT_NE(page.json.find("\"session_id\":\"12\""), std::string::npos);
+    EXPECT_NE(page.json.find("\"outbox_submit_end\":150"), std::string::npos);
+    EXPECT_NE(page.json.find("\"dropped\":1"), std::string::npos);
+    if (had_trace) ::setenv("DZIPC_NET_TRACE", old_trace_value.c_str(), 1); else ::unsetenv("DZIPC_NET_TRACE");
 }
 TEST(SharedNetMetrics, CreditWaitSamplesOnlyActualResourceWaits) {
     BusinessTopic topic; Directory dir; auto config = configuration(dir);

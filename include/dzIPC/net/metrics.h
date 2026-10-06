@@ -7,6 +7,7 @@
 #include <sstream>
 #include <string>
 
+#include "dzIPC/net/message_trace.h"
 #include "dzIPC/net/wire_protocol.h"
 
 namespace dzIPC::net {
@@ -65,13 +66,18 @@ class NetMetrics {
     std::array<std::atomic<std::uint64_t>,static_cast<unsigned>(NetMetric::Count)> counters_{};
     struct Quota { std::atomic<std::uint64_t> peak{0}, rejected{0}; };
     std::array<Quota,static_cast<unsigned>(NetQuota::Count)> quotas_{};
+    MessageTraceRecorder trace_;
 public:
+    explicit NetMetrics(const char* trace_node = "unknown") : trace_(trace_node) {}
     std::array<LatencyHistogram,static_cast<unsigned>(NetStage::Count)> stages;
     void add(NetMetric id, std::uint64_t n=1) noexcept { counters_[static_cast<unsigned>(id)].fetch_add(n,std::memory_order_relaxed); }
     std::uint64_t get(NetMetric id) const noexcept { return counters_[static_cast<unsigned>(id)].load(std::memory_order_relaxed); }
     void reject(NetQuota id) noexcept { quotas_[static_cast<unsigned>(id)].rejected.fetch_add(1,std::memory_order_relaxed); }
     void peak(NetQuota id, std::uint64_t n) noexcept { auto& value=quotas_[static_cast<unsigned>(id)].peak; auto old=value.load(std::memory_order_relaxed); while(n>old&&!value.compare_exchange_weak(old,n,std::memory_order_relaxed)) {} }
     void observe(NetStage stage,std::uint64_t ns) noexcept { stages[static_cast<unsigned>(stage)].observe(ns); }
+    bool trace_enabled() const noexcept { return trace_.enabled(); }
+    void trace(const MessageTraceKey& key, MessageTracePoint point, std::uint64_t stamp_ns = 0) noexcept { trace_.record(key, point, stamp_ns); }
+    MessageTracePage trace_page(std::uint32_t start_offset = 0) const { return trace_.page(start_offset); }
     std::string json(unsigned category) const {
         std::ostringstream out; out << '{'; bool first=true;
         auto key=[&](const char* name){if(!first)out<<',';first=false;out<<'"'<<name<<"\":";};

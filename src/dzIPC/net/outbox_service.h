@@ -26,6 +26,7 @@ struct OutboxEvent
     } kind;
     std::shared_ptr<OutboxAttachment> attachment;
     OutboxRecord record;
+    std::uint64_t queued_ns = 0;
     CreditCounters progress;
 };
 class OutboxService

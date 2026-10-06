@@ -77,6 +77,7 @@ class ClientRuntime : public std::enable_shared_from_this<ClientRuntime>
     SendResultBody cancel_send(const SendTicket &, SendResultCode);
     std::string status();
     std::string gateway_metrics(unsigned category = 0);
+    MessageTracePage gateway_trace_page(std::uint32_t start_offset = 0);
     NetMetrics& metrics() const;
     void record_publish(SubmitState local, SubmitState network);
     std::string diagnostics_json() const;

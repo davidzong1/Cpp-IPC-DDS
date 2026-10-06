@@ -19,7 +19,7 @@ int main(int argc, char **argv)
     {
         std::cout << "用法：dzipc_gateway check-config|serve --listen-ip IPv4 --interface 网卡 "
                      "--control 绝对路径\n"
-                     "dzipc_gateway status --control 绝对路径 --json [--topic 话题 --domain 域 --msg-id ID --peer-id 实例ID] [--metrics counters|quota|latency|shards]\n"
+                     "dzipc_gateway status --control 绝对路径 --json [--topic 话题 --domain 域 --msg-id ID --peer-id 实例ID] [--metrics counters|quota|latency|shards|trace]\n"
                      "serve 可选：--data-shards S --data-workers W --data-socket-cap C "
                      "--data-port-range 起始:结束 --socket-fd-fraction F "
                      "--data-rcvbuf-bytes B --data-sndbuf-bytes B --socket-buffer-budget-bytes B "
@@ -69,7 +69,7 @@ int main(int argc, char **argv)
             }
             if (!nonzero(peer)) { std::cerr << "InvalidOption: peer-id 不可全零\n"; return 2; }
         }
-        const std::vector<std::string> categories{"counters", "quota", "latency", "shards"};
+        const std::vector<std::string> categories{"counters", "quota", "latency", "shards", "trace"};
         const auto category = std::find(categories.begin(), categories.end(), metric_category);
         if (seen.count("--metrics") && (category == categories.end() || !topic.empty())) { std::cerr << "InvalidOption: 指标类别无效或与话题明细冲突\n"; return 2; }
         const auto status = validate_control_path(config.control_path);
@@ -81,7 +81,20 @@ int main(int argc, char **argv)
         try
         {
             auto runtime = ClientRuntime::acquire(config.control_path);
-            if (!metric_category.empty()) std::cout << runtime->gateway_metrics(category - categories.begin()) << '\n';
+            if (metric_category == "trace") {
+                std::cout << "{\"pages\":[";
+                std::uint32_t offset = 0; bool first = true;
+                for (;;) {
+                    const auto page = runtime->gateway_trace_page(offset);
+                    if (!first) std::cout << ',';
+                    first = false; std::cout << page.json;
+                    if (page.complete) break;
+                    if (page.next_offset <= offset) throw std::runtime_error("网关 trace 分页未前进");
+                    offset = page.next_offset;
+                }
+                std::cout << "]}\n";
+            }
+            else if (!metric_category.empty()) std::cout << runtime->gateway_metrics(category - categories.begin()) << '\n';
             else if (topic.empty()) std::cout << runtime->status() << '\n';
             else {
                 RouteKey key; key.scope = dzIPC::common::channel_scope_token(topic, domain, dzIPC::common::ScopeKind::PubSub); key.msg_id = message_id;

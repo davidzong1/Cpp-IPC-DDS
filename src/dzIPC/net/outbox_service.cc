@@ -30,16 +30,24 @@ struct OutboxService::Impl
     bool emit(OutboxEvent event) noexcept
     {
         const auto attachment = event.attachment;
+        auto trace_metrics = event.kind == OutboxEvent::Kind::Record ? event.record.trace_metrics() : nullptr;
+        if (trace_metrics && !trace_metrics->trace_enabled()) trace_metrics.reset();
+        const auto trace_identity = trace_metrics ? trace_key(event.record.header) : MessageTraceKey{};
+        std::uint64_t queued_ns = 0;
         try
         {
-            std::lock_guard<std::mutex> lock(mutex);
+            std::unique_lock<std::mutex> lock(mutex);
             if (events.size() >= event_limit)
             {
                 event.attachment->cancelled.store(true);
                 local::notify(control_wake);
                 return false;
             }
+            queued_ns = metric_now_ns();
+            event.queued_ns = queued_ns;
             events.push_back(std::move(event));
+            lock.unlock();
+            if (trace_metrics) trace_metrics->trace(trace_identity, MessageTracePoint::DrainEventQueued, queued_ns);
             local::notify(control_wake);
             return true;
         }

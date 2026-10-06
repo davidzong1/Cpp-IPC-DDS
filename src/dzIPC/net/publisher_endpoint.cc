@@ -26,9 +26,22 @@ struct PublisherEndpoint::Impl {
         if (delivery == Delivery::Reliable || !runtime->healthy()) return true;
         return !route_hint || !route_hint->local_only();
     }
-    PublishOutcome deliver(const WireBlob& blob, Delivery delivery, std::uint64_t deadline, bool local_required) {
+    PublishOutcome deliver(const WireBlob& blob, Delivery delivery, std::uint64_t deadline, bool local_required,
+                           std::uint64_t call_started_ns) {
         PublishOutcome out; out.sequence = next(); out.remote.publisher_id = id; out.remote.sequence = out.sequence;
-        if (deadline && local::monotonic_ns() >= deadline) { out.remote.result = SendResultCode::TimedOut; return out; }
+        const bool tracing = runtime->metrics().trace_enabled();
+        MessageTraceKey trace;
+        if (tracing) {
+            trace.gateway_epoch = runtime->gateway_epoch(); trace.session_id = runtime->session_id();
+            trace.publisher_id = id; trace.sequence = out.sequence; trace.route = descriptor.key;
+            trace.reliable = delivery == Delivery::Reliable;
+            runtime->metrics().trace(trace, MessageTracePoint::PublishBegin, call_started_ns);
+        }
+        if (deadline && local::monotonic_ns() >= deadline) {
+            out.remote.result = SendResultCode::TimedOut;
+            if (tracing) runtime->metrics().trace(trace, MessageTracePoint::PublishApiReturn);
+            return out;
+        }
         out.local = local_required ? writer->try_commit_until(blob, deadline) : SubmitState::NotRequired;
         if (local_required && out.local == SubmitState::NotRequired) out.local = SubmitState::NotSubmitted;
         if (!network_required(delivery)) { out.network = SubmitState::NotRequired; out.remote.result = SendResultCode::NoSubscribers; }
@@ -44,6 +57,7 @@ struct PublisherEndpoint::Impl {
                     // 未接管时立即结束等待者；不会留到原 deadline，也不会重发本机腿。
                     if (out.network == SubmitState::NotSubmitted) out.remote = runtime->cancel_send(ticket, SendResultCode::Busy);
                     else out.remote = runtime->wait_send(ticket, deadline);
+                    if (tracing) runtime->metrics().trace(trace, MessageTracePoint::ReliableCompleted);
                 }
             } catch (...) {
                 out.remote.result = SendResultCode::GatewayLost;
@@ -51,6 +65,7 @@ struct PublisherEndpoint::Impl {
             }
         }
         out.success = delivery == Delivery::Reliable ? reliable_result(out.local, out.remote) : best_effort_result(out.local, out.network);
+        if (tracing) runtime->metrics().trace(trace, MessageTracePoint::PublishApiReturn);
         return out;
     }
     static bool timeout(Delivery delivery, std::uint64_t ms, std::uint64_t& deadline, PublishOutcome& failure) {
@@ -71,6 +86,7 @@ PublisherEndpoint::~PublisherEndpoint() { if (impl_->owner != getpid()) { impl_.
 PublishOutcome PublisherEndpoint::publish(IpcMsgBase& message, Delivery delivery, std::uint64_t ms) {
     PublishOutcome failure; std::uint64_t deadline = 0;
     if (impl_->owner != getpid() || !Impl::timeout(delivery, ms, deadline, failure)) return failure;
+    const auto call_started_ns = metric_now_ns();
     MetricTimer api(&impl_->runtime->metrics(), NetStage::ApiReturn);
     std::shared_lock<std::shared_mutex> lock(impl_->gate); if (impl_->closed) return failure;
     const bool local_required = impl_->writer->has_subscribers();
@@ -84,11 +100,12 @@ PublishOutcome PublisherEndpoint::publish(IpcMsgBase& message, Delivery delivery
     WireBlob blob;
     try { MetricTimer timer(&impl_->runtime->metrics(), NetStage::Encode); if (!WireEncoder::encode(message, IsDzFlatEnabled(), blob)) return failure; } catch (...) { return failure; }
     impl_->runtime->metrics().add(NetMetric::encode_copy_bytes, blob.size());
-    return impl_->deliver(blob, delivery, deadline, local_required);
+    return impl_->deliver(blob, delivery, deadline, local_required, call_started_ns);
 }
 PublishOutcome PublisherEndpoint::prebuilt(ByteView bytes, Delivery delivery, std::uint64_t ms) {
     PublishOutcome failure; std::uint64_t deadline = 0;
     if (impl_->owner != getpid() || !Impl::timeout(delivery, ms, deadline, failure)) return failure;
+    const auto call_started_ns = metric_now_ns();
     MetricTimer api(&impl_->runtime->metrics(), NetStage::ApiReturn);
     std::shared_lock<std::shared_mutex> lock(impl_->gate); if (impl_->closed) return failure;
     const bool local_required = impl_->writer->has_subscribers(); WireBlob blob;
@@ -101,15 +118,16 @@ PublishOutcome PublisherEndpoint::prebuilt(ByteView bytes, Delivery delivery, st
     }
     try { MetricTimer timer(&impl_->runtime->metrics(), NetStage::Encode); if (!WireEncoder::encode_prebuilt(bytes, impl_->descriptor.key.msg_id, impl_->descriptor.schema_hash, blob)) return failure; } catch (...) { return failure; }
     impl_->runtime->metrics().add(NetMetric::encode_copy_bytes, blob.size());
-    return impl_->deliver(blob, delivery, deadline, local_required);
+    return impl_->deliver(blob, delivery, deadline, local_required, call_started_ns);
 }
 PublishOutcome PublisherEndpoint::publish_blob(const WireBlob& blob, Delivery delivery, std::uint64_t ms) {
     PublishOutcome failure; std::uint64_t deadline = 0;
     if (impl_->owner != getpid() || !Impl::timeout(delivery, ms, deadline, failure)) return failure;
+    const auto call_started_ns = metric_now_ns();
     MetricTimer api(&impl_->runtime->metrics(), NetStage::ApiReturn);
     std::shared_lock<std::shared_mutex> lock(impl_->gate); if (impl_->closed || blob.msg_id() != impl_->descriptor.key.msg_id ||
         (blob.encoding() == Encoding::DzFlat && impl_->descriptor.schema_hash && blob.schema_hash() != impl_->descriptor.schema_hash)) return failure;
-    return impl_->deliver(blob, delivery, deadline, impl_->writer->has_subscribers());
+    return impl_->deliver(blob, delivery, deadline, impl_->writer->has_subscribers(), call_started_ns);
 }
 bool PublisherEndpoint::has_subscribers() const {
     if (impl_->owner != getpid()) return false;

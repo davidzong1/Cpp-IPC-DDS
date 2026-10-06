@@ -26,7 +26,8 @@
 | N06 | 已完成 | `validation/n06-wire-v2.md`；双版本 DATA/HELLO/catalog/目录 codec 和独立向量 |
 | N07 | 已完成 | v2 pooled/hybrid/per-topic 生命周期、角色引用聚合、端点 owner add/remove、资源回滚与端到端覆盖；N08 等待/公平调度尚未实现 |
 | N08 | 已完成 | `validation/n08-scheduling.md`；epoll 多 FD 等待、按 socket/RouteKey 轮转、deferred 续跑、exclusive worker 映射及 256 空闲端点验证；保留一次未复现的 1MiB BestEffort 丢收观察 |
-| N09-N15 | 未开始 | 依赖前序节点 |
+| N09 | 已完成（保留失败样本） | `diagnostics/n09-20261006-185715/queue-attribution.md` 与 `queue-attribution.json`；同进程多话题、跨进程多话题均有分段链路，同话题双发布者可靠场景两轮均有 5 秒超时，未伪装成通过 |
+| N10-N15 | 未开始 | N09 已证明合格场景的 `ack_receive_to_gateway_result` 满足进入阈值；同话题多发布者可靠失败需在后续节点继续处理 |
 
 ## N00 验证
 
@@ -107,3 +108,26 @@ N08 将数据 worker 的逐轮 `pollfd` 构造改为 `SocketWaitSet`；Linux epo
 N08 构建与完整 shared_net 回归：`cmake --build build-shared-net --parallel 4` 退出码 0；最终 `ctest --test-dir build-shared-net -L shared_net --output-on-failure -j 1` 为 39/39 通过，27.45 秒。调度和 exclusive worker 变更后的聚焦等待集/端点 teardown/v2 e2e/exclusive worker/reliable e2e 为 5/5；之后并发 owner-slot 注册用例单独通过。256 个空闲 eventfd 和 256 个动态 UDP endpoint 的 CPU/wakeup/owner slot 结果、冷热同/异 socket 30 秒样本与原始文件、失败保留说明见 `validation/n08-scheduling.md`。
 
 此前完整集曾有一次 exclusive worker 场景的 1MiB BestEffort 消息接收为空；同一测试的后续诊断运行通过，调度修正后的完整回归也通过。该失败保留为未复现观察，未归因为测试采样问题，也不声称调度修正已证明消除此丢收。最后角色释放时 `/proc` 与状态命令的不同时间点读数曾短暂显示额外 UDP FD；脚本现在限时轮询两个读回源直至连续两次一致，并仍对泄漏超时失败。
+
+## N09 验证
+
+N09 使用同一有界 message-trace schema 关联 `(gateway_epoch, session, publisher_id, sequence, RouteKey)`，覆盖应用 publish、outbox/drain、控制循环、数据 worker、首/末包、接收提交、ACK 和可靠完成。诊断窗口为 2 秒、每发布者 20 Hz、64B、可靠发布，按“轮次 → v1 pooled → v2 pooled → v2 per-topic”串行执行；共 20 个样本文件（两轮 × 三配置 × 三布置，加两轮 trace-off 开销配对），物理跨机标记为未验证。
+
+验证命令及结果：
+
+```text
+cmake --build build-shared-net --parallel 4
+  退出码 0
+ctest --test-dir build-shared-net -R '^(test_shared_net_metrics|test_shared_net_end_to_end)$' --output-on-failure -j 1
+  2/2 passed，退出码 0
+python3 -m py_compile test/shared_net/end_to_end.py test/shared_net/topic_queue_diagnostic.py test/shared_net/analyze_queue_attribution.py
+  退出码 0
+python3 test/shared_net/topic_queue_diagnostic.py --gateway build-shared-net/bin/dzipc_gateway --probe build-shared-net/bin/shared_net_probe --output docs/shared_network_endpoint_evidence/20261006-topic-udp/diagnostics/n09-20261006-185715 --seconds 2 --rate 20 --payload-bytes 64
+  退出码 1；20 个样本中 8 个失败，全部保留在 manifest.json 和 runs/，未用重跑结果替换
+python3 test/shared_net/analyze_queue_attribution.py --input docs/shared_network_endpoint_evidence/20261006-topic-udp/diagnostics/n09-20261006-185715 --output docs/shared_network_endpoint_evidence/20261006-topic-udp/diagnostics/n09-20261006-185715/queue-attribution.json
+  退出码 0；N10 进入判据在 5 个配置/布置组合上满足
+```
+
+失败集中在 `same_topic_multipublisher`：v1 pooled、v2 pooled、v2 per-topic 的两轮均出现两个发布者各发送 36 条、各 1 条可靠调用等待 5 秒后失败；这不是 trace 丢弃或内容校验被静默忽略。其它布置的接收内容校验通过，但有少数轮次出现未完成链路或 trace 丢弃，分析器按严格门槛排除这些轮次。合格轮次中 `ack_receive_to_gateway_result` 在连续两轮最慢 1% API 耗时占比约 35%～39%，因此 N10 需要先针对 ACK 结果回传 owner 设计；该结论不覆盖已失败的同话题多发布者可靠路径。
+
+诊断工装同时修正了宿主响应解析：`load_all`/`recv_all` 返回 JSON 数组，`Process` 现在与对象响应一样入队，已用独立最小回归验证。N09 只定位排队区间，不替代 N13 的正式 3×60 秒窗口，也不构成物理跨机单向延迟证据。
