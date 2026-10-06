@@ -80,8 +80,8 @@ def analyze(folder):
         entry = {k: row[k] for k in ('subscriber', 'reader_tid', 'sequence', 'elapsed_ns', 'assisted', 'wait_begin_ns', 'wait_end_ns')}
         entry.update(notify_ns=p['notify_begin_ns'], matched=0)
         end = row['wait_end_ns']
-        reason = ''
-        if not end or row['wait_begin_ns'] >= end: reason = 'no_wait_interval'
+        reason = '' if (folder/'events.txt.gz').exists() else 'perf_disabled'
+        if not reason and (not end or row['wait_begin_ns'] >= end): reason = 'no_wait_interval'
         w = first(waking, row['reader_tid'], max(p['notify_begin_ns'], row['wait_begin_ns']), end) if not reason else None
         if not reason and not w: reason = 'no_waking_in_interval'
         up = first(wakeup, row['reader_tid'], w[0], end) if not reason else None

@@ -36,7 +36,7 @@ def activity():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--suite', choices=('smoke', 'paired', 'copy'), required=True)
+    parser.add_argument('--suite', choices=('smoke', 'paired', 'paired32', 'copy'), required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if os.geteuid() != 0 or not os.environ.get('SUDO_UID'):
@@ -50,9 +50,10 @@ def main():
     os.chown(args.output, uid, gid)
     if args.suite == 'smoke':
         cases = [('smoke', 1, 4096, True, None, 3)]
-    elif args.suite == 'paired':
+    elif args.suite in ('paired', 'paired32'):
+        sizes = ((1, 4096), (32, 64)) if args.suite == 'paired' else ((32, 64),)
         cases = [(f'r{r}-sub{n}-perf{int(enabled)}', n, b, enabled, None, 10)
-                 for r in (1, 2) for n, b in ((1, 4096), (32, 64))
+                 for r in (1, 2) for n, b in sizes
                  for enabled in ((False, True) if r == 1 else (True, False))]
     else:
         placements = [('pp', 0, 4), ('pe', 0, 16), ('ep', 16, 4)]
