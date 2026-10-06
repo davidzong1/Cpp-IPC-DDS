@@ -28,7 +28,11 @@ def activity():
         try:
             name = (p/'comm').read_text().strip()
             if name in ('cc1plus', 'cc1', 'cmake', 'ninja', 'make', 'gmake', 'ctest', COMM, 'dzipc_gateway', 'perf'):
-                result.append({'pid': int(p.name), 'name': name, 'cwd': str((p/'cwd').resolve())})
+                item = {'pid': int(p.name), 'name': name, 'cwd': str((p/'cwd').resolve())}
+                if name == COMM and item['cwd'] == str(ROOT):
+                    status = dict(line.split(':', 1) for line in (p/'status').read_text().splitlines())
+                    item['uid'] = status['Uid'].strip(); item['gid'] = status['Gid'].strip()
+                result.append(item)
         except OSError:
             pass
     return result
@@ -38,6 +42,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--suite', choices=('smoke', 'paired', 'paired32', 'copy'), required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--quiet-seconds', type=int, default=0, help='每窗前连续无编译/压测的秒数')
     args = parser.parse_args()
     if os.geteuid() != 0 or not os.environ.get('SUDO_UID'):
         raise RuntimeError('请通过 sudo 运行，业务工装必须降回原用户')
@@ -65,15 +70,21 @@ def main():
     frozen = hashes()
     manifest = {'head': subprocess.check_output(['git', '-c', f'safe.directory={ROOT}', 'rev-parse', 'HEAD'], text=True).strip(), 'hashes': frozen,
                 'perf_version': subprocess.check_output(['perf', '--version'], text=True).strip(), 'clock': 'CLOCK_MONOTONIC / perf --clockid mono',
-                'workload_uid': uid, 'cases': cases, 'windows': [], 'settings_before': snapshot()}
+                'workload_uid': uid, 'quiet_seconds': args.quiet_seconds, 'cases': cases, 'windows': [], 'settings_before': snapshot()}
     for event in ('sched/sched_waking', 'sched/sched_wakeup', 'sched/sched_switch', 'sched/sched_migrate_task', 'power/cpu_idle'):
         source = Path('/sys/kernel/tracing/events')/event/'format'
         (args.output/(event.replace('/', '-')+'.format')).write_text(source.read_text())
     try:
         for name, n, b, enabled, affinity, seconds in cases:
-            while activity():
-                print('等待无其他编译/压测窗口', activity(), flush=True)
-                time.sleep(10)
+            quiet_since = time.monotonic()
+            while True:
+                active = activity()
+                if active:
+                    quiet_since = time.monotonic()
+                    print('等待无其他编译/压测窗口', active, flush=True)
+                elif time.monotonic() - quiet_since >= args.quiet_seconds:
+                    break
+                time.sleep(5)
             folder = args.output/name
             folder.mkdir()
             os.chown(folder, uid, gid)
