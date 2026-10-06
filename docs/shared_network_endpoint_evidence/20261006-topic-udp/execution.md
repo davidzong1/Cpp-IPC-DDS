@@ -20,8 +20,9 @@
 | N00 | 已完成 | 本台账、环境审计、冻结基线清单 |
 | N01 | 已完成 | `test/shared_net/topic_udp_matrix.py`、计划 schema、统计单元测试和冒烟记录 |
 | N02 | 已完成（短基线） | `baseline-network/results.md`；K=4/8/16 改造前与 S/W 解耦短窗口均完整交付，正式长窗口仍留给 N13 |
-| N03 | 进行中 | `design.md` 已形成草案，待作为独立节点提交 |
-| N04-N15 | 未开始 | 依赖前序节点 |
+| N03 | 已完成 | `design.md` 冻结 v1 S/W 配置、映射、所有权和 N02 选择依据；v2/资源预算留给后续节点 |
+| N04 | 进行中 | v1 pooled S/W 解耦实现已完成首版，待独立提交和专项验证 |
+| N05-N15 | 未开始 | 依赖前序节点 |
 
 ## N00 验证
 
@@ -43,4 +44,4 @@ N00 尚未修改生产行为。环境原始输出见 `environment.txt`，计划�
 
 `topic_udp_matrix.py` 使用显式 JSON 计划，不复用 `performance_matrix.py` 的固定 54 窗口入口。它在 `--validate-plan` 阶段校验 RouteKey、发布者布置、发送时间表、资源预算和 nearest-rank 统计；`--preflight` 只运行短冒烟并标记为非正式证据。正式窗口失败会保留结果并以非零退出，不把基础设施失败归类为性能退化。N01 校验和 preflight 已通过；`preflight2/` 是一次重复验证目录，未作为正式证据使用。
 
-N02 短基线已完成并写入 `baseline-network/results.md`；N03 设计记录随后根据短基线冻结默认和后续比较口径。
+N02 短基线已完成并写入 `baseline-network/results.md`；N03 设计记录已根据短基线冻结默认和后续比较口径。
