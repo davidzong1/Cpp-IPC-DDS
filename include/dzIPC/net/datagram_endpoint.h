@@ -35,7 +35,7 @@ struct IoResult
 };
 struct ReceivedDatagram
 {
-    std::array<std::uint8_t, 1184> bytes{};
+    std::array<std::uint8_t, kMaxDatagramBytesV2> bytes{};
     std::size_t size = 0;
     Ipv4Address source;
     IoStatus status = IoStatus::WouldBlock;

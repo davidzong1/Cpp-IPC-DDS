@@ -155,7 +155,7 @@ void DatagramEndpoint::join_discovery(const std::string &group, const std::strin
 }
 IoResult DatagramEndpoint::send(ByteView b, Ipv4Address destination) noexcept
 {
-    if ((!b.data && b.size) || b.size > 1184 || !destination.port)
+    if ((!b.data && b.size) || b.size > kMaxDatagramBytesV2 || !destination.port)
         return {IoStatus::Fatal, 0, EINVAL};
     auto addr = native(destination);
     const auto sent = sendto(fd_, b.data, b.size, MSG_DONTWAIT | MSG_NOSIGNAL,
@@ -178,7 +178,7 @@ IoResult DatagramEndpoint::send_batch(const OutgoingDatagram *items, std::size_t
     for (std::size_t i = 0; i < count; ++i)
     {
         const auto &item = items[i];
-        if ((!item.payload.data && item.payload.size) || item.payload.size > 1184 ||
+        if ((!item.payload.data && item.payload.size) || item.payload.size > kMaxDatagramBytesV2 ||
             !item.destination.port)
             return {IoStatus::Fatal, 0, EINVAL};
         addresses[i] = native(item.destination);

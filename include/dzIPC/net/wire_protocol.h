@@ -41,7 +41,9 @@ struct ProtocolStatus
         return code == ProtocolCode::Ok;
     }
 };
-inline constexpr std::size_t kWireHeaderSize = 160, kFragmentBytes = 1024;
+inline constexpr std::size_t kWireHeaderSize = 160, kWireHeaderV2Size = 176,
+                             kFragmentBytes = 1024, kMaxDatagramBytesV1 = 1184,
+                             kMaxDatagramBytesV2 = 1200;
 inline constexpr std::uint32_t kMaxMessageBytes = 16 * 1024 * 1024;
 enum class Encoding : std::uint8_t
 {
@@ -92,6 +94,7 @@ struct WireHeader
     std::uint32_t message_size = 0, fragment_index = 0, fragment_count = 0;
     std::uint32_t message_crc = 0, schema_hash = 0;
     std::uint64_t receiver_route_epoch = 0;
+    std::uint64_t data_source_endpoint_epoch = 0, data_target_endpoint_epoch = 0;
     Encoding encoding = Encoding::Tlv;
     Delivery delivery = Delivery::BestEffort;
 };
@@ -99,6 +102,9 @@ struct WireHeader
 ProtocolStatus encode_packet(const WireHeader &, ByteView payload, Bytes &out);
 ProtocolStatus decode_packet(ByteView packet, WireHeader &out, ByteView &payload,
                              std::uint32_t max_message = kMaxMessageBytes);
+ProtocolStatus encode_packet_v2(const WireHeader &, ByteView payload, Bytes &out);
+ProtocolStatus decode_packet_v2(ByteView packet, WireHeader &out, ByteView &payload,
+                               std::uint32_t max_message = kMaxMessageBytes);
 
 struct DiscoveryHello
 {
@@ -109,6 +115,15 @@ struct DiscoveryHello
 };
 ProtocolStatus encode_hello(const DiscoveryHello &, Bytes &out);
 ProtocolStatus decode_hello(ByteView packet, DiscoveryHello &out);
+struct DiscoveryHelloV2
+{
+    Identity gateway_id{};
+    std::uint64_t gateway_epoch = 0, snapshot_version = 0;
+    std::uint16_t control_port = 24004, capabilities = 3;
+    std::uint32_t max_message_bytes = kMaxMessageBytes;
+};
+ProtocolStatus encode_hello_v2(const DiscoveryHelloV2 &, Bytes &out);
+ProtocolStatus decode_hello_v2(ByteView packet, DiscoveryHelloV2 &out);
 enum class CatalogKind : std::uint8_t
 {
     Request = 1,
@@ -123,6 +138,8 @@ struct CatalogHeader
 };
 ProtocolStatus encode_catalog(const CatalogHeader &, ByteView payload, Bytes &out);
 ProtocolStatus decode_catalog(ByteView packet, CatalogHeader &out, ByteView &payload);
+ProtocolStatus encode_catalog_v2(const CatalogHeader &, ByteView payload, Bytes &out);
+ProtocolStatus decode_catalog_v2(ByteView packet, CatalogHeader &out, ByteView &payload);
 
 struct RouteDescriptor
 {
@@ -131,6 +148,8 @@ struct RouteDescriptor
     std::uint64_t receiver_route_epoch = 0;
     std::uint16_t role_flags = 0;
     std::string topic;
+    std::uint16_t data_port = 0, endpoint_flags = 0;
+    std::uint64_t endpoint_epoch = 0;
 };
 // registration=true 时 role/epoch 均须为零；目录需角色 1/2/3。
 ProtocolStatus encode_descriptor(const RouteDescriptor &, bool registration, Bytes &out);
@@ -138,4 +157,7 @@ ProtocolStatus decode_descriptor(ByteView bytes, bool registration, RouteDescrip
 ProtocolStatus encode_directory(const std::vector<RouteDescriptor> &, Bytes &out);
 ProtocolStatus decode_directory(ByteView bytes, std::vector<RouteDescriptor> &out,
                                 std::uint32_t max_routes = 4096);
+ProtocolStatus encode_directory_v2(const std::vector<RouteDescriptor> &, Bytes &out);
+ProtocolStatus decode_directory_v2(ByteView bytes, std::vector<RouteDescriptor> &out,
+                                   std::uint32_t max_routes = 4096);
 } // namespace dzIPC::net

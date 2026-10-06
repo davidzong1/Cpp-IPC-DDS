@@ -191,3 +191,82 @@ TEST(SharedNetWire, AcceleratedAndPortableCrcMatchIndependentBitwiseReference) {
     EXPECT_EQ(codec::packet_crc({nullptr, 7}, 0), 0u);
     EXPECT_EQ(codec::packet_crc_portable({}, SIZE_MAX), 0u);
 }
+
+TEST(SharedNetWire, V2PacketHelloCatalogAndDirectoryAreExplicit)
+{
+    auto v1 = vector("dzmx_data");
+    WireHeader h;
+    ByteView payload;
+    ASSERT_TRUE(decode_packet(ByteView(v1), h, payload));
+    h.data_source_endpoint_epoch = 0x5152535455565758ull;
+    h.data_target_endpoint_epoch = 0x6162636465666768ull;
+    Bytes encoded;
+    ASSERT_TRUE(encode_packet_v2(h, payload, encoded));
+    EXPECT_EQ(encoded.size(), kWireHeaderV2Size + payload.size);
+    EXPECT_EQ(encoded.size(), 177u);
+    WireHeader decoded;
+    ByteView decoded_payload;
+    ASSERT_TRUE(decode_packet_v2(ByteView(encoded), decoded, decoded_payload));
+    EXPECT_EQ(decoded.data_source_endpoint_epoch, h.data_source_endpoint_epoch);
+    EXPECT_EQ(decoded.data_target_endpoint_epoch, h.data_target_endpoint_epoch);
+    EXPECT_EQ(Bytes(decoded_payload.data, decoded_payload.data + decoded_payload.size),
+              Bytes(payload.data, payload.data + payload.size));
+    EXPECT_EQ(decode_packet(ByteView(encoded), decoded, decoded_payload).code, ProtocolCode::BadVersion);
+    EXPECT_FALSE(decode_packet_v2(ByteView(v1), decoded, decoded_payload));
+
+    DiscoveryHelloV2 hello;
+    hello.gateway_id = h.source_id;
+    hello.gateway_epoch = h.source_epoch;
+    hello.snapshot_version = 7;
+    hello.control_port = 24004;
+    Bytes hello_bytes;
+    ASSERT_TRUE(encode_hello_v2(hello, hello_bytes));
+    EXPECT_EQ(hello_bytes[4], 2);
+    EXPECT_EQ(hello_bytes[32], 0);
+    EXPECT_EQ(hello_bytes[34], 0);
+    DiscoveryHelloV2 hello_roundtrip;
+    ASSERT_TRUE(decode_hello_v2(ByteView(hello_bytes), hello_roundtrip));
+    EXPECT_EQ(hello_roundtrip.capabilities, 3);
+    DiscoveryHello legacy_hello;
+    EXPECT_EQ(decode_hello(ByteView(hello_bytes), legacy_hello).code, ProtocolCode::BadVersion);
+
+    CatalogHeader catalog;
+    catalog.kind = CatalogKind::Page;
+    catalog.source_id = h.source_id;
+    catalog.target_id = h.target_id;
+    catalog.source_epoch = h.source_epoch;
+    catalog.target_epoch = h.target_epoch;
+    catalog.snapshot_version = 7;
+    catalog.page_index = 0;
+    catalog.page_count = 1;
+    Bytes catalog_bytes;
+    ASSERT_TRUE(encode_catalog_v2(catalog, ByteView(v1.data(), 100), catalog_bytes));
+    CatalogHeader catalog_roundtrip;
+    ByteView catalog_payload;
+    ASSERT_TRUE(decode_catalog_v2(ByteView(catalog_bytes), catalog_roundtrip, catalog_payload));
+    EXPECT_EQ(catalog_roundtrip.snapshot_version, 7u);
+    EXPECT_EQ(decode_catalog(ByteView(catalog_bytes), catalog_roundtrip, catalog_payload).code,
+              ProtocolCode::BadVersion);
+
+    RouteDescriptor route;
+    route.topic = "/v2/topic";
+    route.key.scope = dzIPC::common::channel_scope_token(route.topic, 0, dzIPC::common::ScopeKind::PubSub);
+    route.key.msg_id = 71;
+    route.role_flags = 3;
+    route.receiver_route_epoch = 9;
+    route.data_port = 31001;
+    route.endpoint_epoch = 17;
+    route.endpoint_flags = 1;
+    Bytes directory;
+    ASSERT_TRUE(encode_directory_v2({route}, directory));
+    EXPECT_EQ(directory.size(), 4u + 64u + route.topic.size());
+    std::vector<RouteDescriptor> routes;
+    ASSERT_TRUE(decode_directory_v2(ByteView(directory), routes));
+    ASSERT_EQ(routes.size(), 1u);
+    EXPECT_EQ(routes.front().data_port, 31001u);
+    EXPECT_EQ(routes.front().endpoint_epoch, 17u);
+    EXPECT_EQ(routes.front().endpoint_flags, 1u);
+    auto malformed = directory;
+    malformed[54] = 2;
+    EXPECT_FALSE(decode_directory_v2(ByteView(malformed), routes));
+}
