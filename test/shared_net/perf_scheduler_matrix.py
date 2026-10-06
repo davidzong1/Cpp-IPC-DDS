@@ -100,9 +100,11 @@ def main():
                 raise RuntimeError('采样二进制或工装改变')
             if enabled and (folder/'perf.data').exists():
                 with gzip.open(folder/'events.txt.gz', 'wt') as events, (folder/'decode.log').open('w') as errors:
-                    decode = subprocess.Popen(['perf', 'script', '--ns', '-i', str(folder/'perf.data'), '-F', 'tid,cpu,time,event,trace'], stdout=subprocess.PIPE, stderr=errors, text=True)
+                    decode = subprocess.Popen(['perf', 'script', '--ns', '--show-lost-events', '-i', str(folder/'perf.data'), '-F', 'trace:tid,cpu,time,event,trace'], stdout=subprocess.PIPE, stderr=errors, text=True)
                     shutil.copyfileobj(decode.stdout, events)
                     window['decode_returncode'] = decode.wait()
+                with (folder/'perf-header.txt').open('w') as header:
+                    subprocess.run(['perf', 'report', '--stdio', '--header-only', '-i', str(folder/'perf.data')], stdout=header, stderr=subprocess.STDOUT, check=True)
             for pattern in ('*.csv', 'perf.data'):
                 for source in folder.glob(pattern):
                     with source.open('rb') as a, gzip.open(str(source)+'.gz', 'wb') as z:
