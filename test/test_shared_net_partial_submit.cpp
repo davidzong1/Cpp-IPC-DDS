@@ -1,6 +1,7 @@
 #include "shared_net/shm_wire_fixture.h"
 #include "shared_net/directory_fixture.h"
 #include "dzIPC/net/publisher_endpoint.h"
+#include "ipc_msg/std_msgs/std_image.hpp"
 #include "gtest/gtest.h"
 using namespace shared_net_test;
 namespace {
@@ -44,6 +45,40 @@ TEST(SharedNetPartialSubmit, HealthyZeroDemandSkipsOutboxAndGatewayLossKeepsLoca
     sent = writer.prebuilt(ByteView(bytes), Delivery::Reliable, 1000);
     EXPECT_FALSE(sent.success); EXPECT_EQ(sent.local, SubmitState::Committed); EXPECT_EQ(sent.remote.result, SendResultCode::GatewayLost);
     sample = receiver.try_recv(); ASSERT_EQ(sample.size(), bytes.size()); EXPECT_TRUE(receiver.try_recv().empty());
+}
+TEST(SharedNetPartialSubmit, LocalAndOfflineOutcomesKeepEachPublisherIdentity) {
+    BusinessTopic topic; Directory dir; auto config = configuration(dir); GatewayRuntime gateway(config);
+    auto client = ClientRuntime::acquire(dir.control());
+    PublisherEndpoint first(client, topic.descriptor), second(client, topic.descriptor);
+    const auto first_id = first.publisher_id(), second_id = second.publisher_id();
+    ASSERT_NE(first_id, second_id);
+    ipc::mpmc_channel receiver(topic.segment().c_str(), ipc::receiver, false);
+    const auto first_hint = client->watch_route(first_id), second_hint = client->watch_route(second_id);
+    ASSERT_TRUE(until([&] { return first_hint->local_only() && second_hint->local_only(); }));
+    const auto bytes = flat_blob(64);
+    dzIPC::Msg::StdImage message; message.set_msg_id(71); message.data.assign(64, 0x7b);
+    for (unsigned phase = 0; phase != 2; ++phase) {
+        if (phase) { gateway.stop(); ASSERT_TRUE(until([&] { return !client->healthy(); })); }
+        for (auto* writer : {&first, &second}) {
+            const auto check = [&](const PublishOutcome& sent, std::uint64_t sequence) {
+                EXPECT_TRUE(sent.success);
+                EXPECT_EQ(sent.local, SubmitState::Committed);
+                EXPECT_EQ(sent.network, phase ? SubmitState::NotSubmitted : SubmitState::NotRequired);
+                EXPECT_EQ(sent.sequence, sequence);
+                EXPECT_EQ(sent.remote.sequence, sequence);
+                EXPECT_EQ(sent.remote.publisher_id, writer->publisher_id());
+                EXPECT_FALSE(receiver.try_recv().empty());
+                EXPECT_TRUE(receiver.try_recv().empty());
+            };
+            check(writer->prebuilt(ByteView(bytes)), phase * 2 + 1);
+            check(writer->publish(message), phase * 2 + 2);
+        }
+    }
+    first.close();
+    const auto last = second.prebuilt(ByteView(bytes));
+    EXPECT_TRUE(last.success); EXPECT_EQ(last.sequence, 5u);
+    EXPECT_EQ(last.remote.sequence, 5u); EXPECT_EQ(last.remote.publisher_id, second_id);
+    EXPECT_FALSE(receiver.try_recv().empty()); EXPECT_TRUE(receiver.try_recv().empty());
 }
 TEST(SharedNetPartialSubmit, LocalPoolFailureStillHandsOffNetworkAndNeverRetriesLocalLeg) {
     BusinessTopic topic; Directory dir; auto config = configuration(dir); GatewayRuntime gateway(config);
