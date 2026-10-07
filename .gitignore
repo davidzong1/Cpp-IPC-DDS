@@ -30,6 +30,7 @@ ui_*.h
 Makefile*
 *build-*
 *build_*
+!/test/perf/w10/w10_rebuild_crash.cpp
 
 # Qt unit tests
 target_wrapper.*
