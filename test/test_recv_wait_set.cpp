@@ -1,4 +1,6 @@
 #include <atomic>
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <future>
@@ -18,6 +20,33 @@
 
 namespace {
 using namespace std::chrono_literals;
+
+constexpr std::size_t trace_event_capacity = 512;
+std::array<ipc::detail::recv_wait_trace_event, trace_event_capacity> trace_events{};
+std::atomic<std::size_t> trace_event_count{0};
+
+void collect_wait_trace(const ipc::detail::recv_wait_trace_event& event) noexcept
+{
+    const auto index = trace_event_count.fetch_add(1, std::memory_order_relaxed);
+    if (index < trace_event_capacity) trace_events[index] = event;
+}
+
+struct WaitTraceHookGuard
+{
+    WaitTraceHookGuard() { ipc::detail::set_recv_wait_trace_hook(&collect_wait_trace); }
+    ~WaitTraceHookGuard() { ipc::detail::set_recv_wait_trace_hook(nullptr); }
+};
+
+std::size_t count_trace(ipc::detail::recv_wait_trace_point point,
+                        ipc::detail::recv_wait_trace_result result = ipc::detail::recv_wait_trace_result::none)
+{
+    const auto count = std::min(trace_event_count.load(std::memory_order_acquire), trace_event_capacity);
+    std::size_t found = 0;
+    for (std::size_t i = 0; i < count; ++i)
+        if (trace_events[i].point == point && (result == ipc::detail::recv_wait_trace_result::none || trace_events[i].result == result))
+            ++found;
+    return found;
+}
 
 struct RoutePair
 {
@@ -46,6 +75,57 @@ bool require_backend(ipc::recv_wait_set& set, const ipc::recv_wait_token& token)
     return set.add(token);
 }
 }  // namespace
+
+TEST(RecvWaitTrace, ReportsSignalSequenceWaiterAndWaitSetOutcomes)
+{
+    if (!ipc::recv_wait_change_supported()) GTEST_SKIP();
+    trace_event_count.store(0, std::memory_order_relaxed);
+    WaitTraceHookGuard hook_guard;
+
+    ipc::recv_local_signal signal;
+    const auto before = signal.snapshot();
+    signal.notify();
+    EXPECT_EQ(signal.wait({}, 0, before, 1000000), ipc::recv_wait_result::changed);
+
+    RoutePair pair{"trace"}; ipc::recv_wait_set set;
+    const auto token = pair.sub->read_wait_token();
+    ASSERT_TRUE(set.add(token));
+    ASSERT_TRUE(set.set_enabled(token, false));
+    ASSERT_TRUE(set.set_enabled(token, true));
+    EXPECT_TRUE(set.wait(0ms)); // 消费 set_enabled 的 interrupt。
+    EXPECT_FALSE(set.wait(2ms));
+    ASSERT_TRUE(pair.pub->try_send("trace", sizeof("trace"), 100));
+    EXPECT_TRUE(set.wait(100ms));
+    EXPECT_EQ(set.consume_ready().size(), 1u);
+    EXPECT_FALSE(pair.sub->recv(0).empty());
+    EXPECT_TRUE(set.remove(token));
+
+    EXPECT_EQ(count_trace(ipc::detail::recv_wait_trace_point::local_notify,
+                          ipc::detail::recv_wait_trace_result::changed), 1u);
+    EXPECT_EQ(count_trace(ipc::detail::recv_wait_trace_point::local_wait_begin), 1u);
+    EXPECT_EQ(count_trace(ipc::detail::recv_wait_trace_point::local_wait_end,
+                          ipc::detail::recv_wait_trace_result::changed), 1u);
+    EXPECT_GE(count_trace(ipc::detail::recv_wait_trace_point::set_enable), 2u);
+    EXPECT_GE(count_trace(ipc::detail::recv_wait_trace_point::set_wait_scan), 3u);
+    EXPECT_EQ(count_trace(ipc::detail::recv_wait_trace_point::set_wait_begin), 1u);
+    EXPECT_EQ(count_trace(ipc::detail::recv_wait_trace_point::set_wait_end,
+                          ipc::detail::recv_wait_trace_result::timeout), 1u);
+    EXPECT_GE(count_trace(ipc::detail::recv_wait_trace_point::route_notify), 1u);
+    EXPECT_GE(count_trace(ipc::detail::recv_wait_trace_point::set_consume_ready), 1u);
+
+    bool saw_sequence = false;
+    const auto count = std::min(trace_event_count.load(std::memory_order_acquire), trace_event_capacity);
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& event = trace_events[i];
+        if (event.point == ipc::detail::recv_wait_trace_point::local_notify) {
+            EXPECT_EQ(event.sequence_before, before);
+            EXPECT_EQ(event.sequence_after, before + 1);
+            EXPECT_EQ(event.waiters, 0u);
+            saw_sequence = true;
+        }
+    }
+    EXPECT_TRUE(saw_sequence);
+}
 
 TEST(RecvWaitChange, SnapshotClosesNotificationBeforeSleepAndPreservesDeadline)
 {

@@ -7,6 +7,7 @@
 #endif
 #include "dzIPC/common/sample_message.h"
 #include "dzIPC/detail/shm_sub_seam.h"
+#include "libipc/recv_wait_set.h"
 #if __has_include("libipc/detail/publish_trace.h")
 #include "libipc/detail/publish_trace.h"
 #define DZIPC_BENCH_PUBLISH_TRACE 1
@@ -24,6 +25,7 @@
 #include <iostream>
 #include <thread>
 #include <vector>
+#include <string_view>
 #if defined(__linux__)
 #include <sched.h>
 #include <time.h>
@@ -43,17 +45,94 @@ static std::uint64_t thread_cpu_now() noexcept {
     return 0;
 }
 constexpr std::size_t trace_capacity = 65536;
+constexpr std::size_t wait_trace_capacity = 32768;
 struct ReceiveTrace {
     std::atomic<std::uint64_t> begin{0}, received{0}, enqueue{0}, dequeue{0}, handoff{0};
     std::atomic<unsigned> assisted{0};
     std::atomic<std::uint64_t> wait_begin{0}, wait_end{0}, wait_cpu{0}, recv_cpu{0}, process_cpu{0}, enqueue_after{0}, acquire_ns{0};
 };
+struct WaitTraceRecord {
+    std::uint64_t timestamp_ns{0};
+    std::uint64_t route_key{0};
+    std::uint32_t pid{0}, tid{0}, subscribers{0}, payload_bytes{0}, subscriber_id{0}, generation{0};
+    int cpu{-1};
+    ipc::detail::recv_wait_trace_event event{};
+};
 std::unique_ptr<ReceiveTrace[]> traces;
+std::unique_ptr<WaitTraceRecord[]> wait_traces;
 std::atomic<std::uint64_t> trace_overflow{0};
+std::atomic<std::uint64_t> wait_trace_count{0}, wait_trace_overflow{0};
+std::atomic<std::uint32_t> wait_trace_generation{0};
+std::atomic<bool> receive_trace_enabled{false};
+std::uint64_t wait_trace_route_key = 0;
+std::uint32_t wait_trace_subscribers = 0, wait_trace_payload_bytes = 0, wait_trace_subscriber_id = UINT32_MAX;
+std::string wait_trace_mode;
 thread_local std::uint64_t recv_begin = 0;
 thread_local std::uint64_t receive_sequence = UINT64_MAX;
 thread_local std::uint64_t handoff_start = 0, handoff_elapsed = 0;
 thread_local std::uint64_t wait_begin = 0, wait_end = 0, wait_cpu_begin = 0, wait_cpu = 0, recv_cpu_begin = 0, received_cpu = 0, acquire_begin = 0, acquire_ns = 0;
+std::uint64_t route_key(std::string_view name, std::uint32_t domain) noexcept {
+    std::uint64_t hash = 14695981039346656037ull;
+    for (const unsigned char c : name) { hash ^= c; hash *= 1099511628211ull; }
+    for (int i = 0; i < 4; ++i) { hash ^= (domain >> (8 * i)) & 0xffu; hash *= 1099511628211ull; }
+    return hash;
+}
+std::uint32_t subscriber_id_from_path(const std::string& path) noexcept {
+    const auto marker = path.rfind("sub");
+    if (marker == std::string::npos) return UINT32_MAX;
+    char* end = nullptr;
+    const auto value = std::strtoul(path.c_str() + marker + 3, &end, 10);
+    return end != path.c_str() + marker + 3 ? static_cast<std::uint32_t>(value) : UINT32_MAX;
+}
+void wait_trace(const ipc::detail::recv_wait_trace_event& event) noexcept {
+    const auto index = wait_trace_count.fetch_add(1, std::memory_order_relaxed);
+    if (index >= wait_trace_capacity) { wait_trace_overflow.fetch_add(1, std::memory_order_relaxed); return; }
+    auto& record = wait_traces[index];
+    record.timestamp_ns = now();
+    record.route_key = wait_trace_route_key;
+    record.pid =
+#if defined(__linux__)
+        static_cast<std::uint32_t>(::getpid());
+#else
+        0;
+#endif
+    record.tid =
+#if defined(__linux__)
+        static_cast<std::uint32_t>(::syscall(SYS_gettid));
+#else
+        0;
+#endif
+    record.cpu =
+#if defined(__linux__)
+        ::sched_getcpu();
+#else
+        -1;
+#endif
+    record.subscribers = wait_trace_subscribers;
+    record.payload_bytes = wait_trace_payload_bytes;
+    record.subscriber_id = wait_trace_subscriber_id;
+    record.generation = wait_trace_generation.load(std::memory_order_relaxed);
+    record.event = event;
+}
+void flush_wait_trace(const std::string& output) {
+    if (!wait_traces) return;
+    std::ofstream file(output + ".wait_trace.csv");
+    if (!file) throw std::runtime_error("不能创建recv_wait_set trace文件");
+    file << "timestamp_ns,pid,tid,cpu,mode,subscribers,payload_bytes,subscriber_id,route_key,generation,point,result,flags,object,token,error_code,wake_result,sequence_before,sequence_after,expected,observed,interrupt_before,interrupt_after,waiters,entries,enabled,ready\n";
+    const auto count = std::min<std::uint64_t>(wait_trace_count.load(std::memory_order_acquire), wait_trace_capacity);
+    for (std::uint64_t i = 0; i < count; ++i) {
+        const auto& r = wait_traces[i]; const auto& e = r.event;
+        file << r.timestamp_ns << ',' << r.pid << ',' << r.tid << ',' << r.cpu << ',' << wait_trace_mode << ','
+             << r.subscribers << ',' << r.payload_bytes << ',' << r.subscriber_id << ',' << r.route_key << ',' << r.generation << ','
+             << static_cast<unsigned>(e.point) << ',' << static_cast<int>(e.result) << ',' << e.flags << ','
+             << reinterpret_cast<std::uintptr_t>(e.object) << ',' << reinterpret_cast<std::uintptr_t>(e.token) << ','
+             << e.error_code << ',' << e.wake_result << ',' << e.sequence_before << ',' << e.sequence_after << ','
+             << e.expected << ',' << e.observed << ',' << e.interrupt_before << ',' << e.interrupt_after << ','
+             << e.waiters << ',' << e.entries << ',' << e.enabled << ',' << e.ready << '\n';
+    }
+    file.close();
+    if (!file) throw std::runtime_error("写入recv_wait_set trace文件失败");
+}
 #ifdef DZIPC_BENCH_PUBLISH_TRACE
 thread_local std::array<std::uint64_t, static_cast<unsigned>(ipc::detail::PublishPoint::Count)> publish_stamps{};
 thread_local bool publish_active = false;
@@ -87,6 +166,11 @@ void publish_trace(ipc::detail::PublishPoint point) noexcept {
 void receive_trace(const dzIPC::detail::SeamEvent& event) noexcept {
     // 数值属于内部缝的稳定编号，同一源码也能链接尚无2/3/4打点的f066a82。
     const auto point = static_cast<int>(event.point);
+    if (point == 32 || point == 33) {
+        wait_trace_generation.store(event.generation, std::memory_order_relaxed);
+        return;
+    }
+    if (!receive_trace_enabled.load(std::memory_order_relaxed)) return;
     if (point == 7) { wait_begin = now(); wait_cpu_begin = thread_cpu_now(); return; }
     if (point == 10) { wait_end = now(); wait_cpu = thread_cpu_now() - wait_cpu_begin; return; }
     if (point == 11) { acquire_begin = now(); return; }
@@ -131,7 +215,22 @@ int main(int argc, char** argv) try {
     std::ofstream csv(output); if (!csv) throw std::runtime_error("不能创建样本文件");
     if (role == "sub") {
         const bool tracing = std::getenv("DZIPC_TEST_RECEIVE_TRACE") && std::string(std::getenv("DZIPC_TEST_RECEIVE_TRACE")) == "1";
-        if (tracing) { traces.reset(new ReceiveTrace[trace_capacity]); dzIPC::detail::SetSeamHook(receive_trace); }
+        const bool wait_tracing = std::getenv("DZIPC_TEST_WAIT_TRACE") && std::string(std::getenv("DZIPC_TEST_WAIT_TRACE")) == "1";
+        if (tracing) traces.reset(new ReceiveTrace[trace_capacity]);
+        if (wait_tracing) {
+            wait_traces.reset(new WaitTraceRecord[wait_trace_capacity]);
+            wait_trace_count.store(0, std::memory_order_relaxed);
+            wait_trace_overflow.store(0, std::memory_order_relaxed);
+            wait_trace_route_key = route_key(topic, 0);
+            wait_trace_subscribers = std::getenv("DZIPC_TEST_CASE_SUBSCRIBERS") ?
+                static_cast<std::uint32_t>(std::strtoul(std::getenv("DZIPC_TEST_CASE_SUBSCRIBERS"), nullptr, 10)) : 0;
+            wait_trace_payload_bytes = static_cast<std::uint32_t>(size);
+            wait_trace_subscriber_id = subscriber_id_from_path(output);
+            wait_trace_mode = std::getenv("DZIPC_TEST_CASE_MODE") ? std::getenv("DZIPC_TEST_CASE_MODE") : "unknown";
+        }
+        receive_trace_enabled.store(tracing, std::memory_order_relaxed);
+        if (tracing || wait_tracing) dzIPC::detail::SetSeamHook(receive_trace);
+        if (wait_tracing) ipc::detail::set_recv_wait_trace_hook(wait_trace);
         auto sub = dzIPC::SubscriberIPCPtrMake(model, topic, 0, 1024, transport); sub->InitChannel();
         std::atomic<bool> running{true}; std::uint64_t count = 0, invalid = 0;
         csv << "sequence,read_ns,elapsed_ns,bytes";
@@ -177,9 +276,12 @@ int main(int argc, char** argv) try {
         });
         std::cout << "{\"ready\":true}" << std::endl;
         std::string command; std::getline(std::cin, command); running.store(false); reader.join(); sub.reset();
-        dzIPC::detail::SetSeamHook(nullptr); csv.close();
-        std::cout << "{\"received\":" << count << ",\"invalid\":" << invalid << ",\"trace_overflow\":" << trace_overflow.load() << "}" << std::endl;
-        return invalid || trace_overflow.load() ? 1 : 0;
+        if (wait_tracing) ipc::detail::set_recv_wait_trace_hook(nullptr);
+        dzIPC::detail::SetSeamHook(nullptr); receive_trace_enabled.store(false, std::memory_order_relaxed); csv.close();
+        flush_wait_trace(output);
+        std::cout << "{\"received\":" << count << ",\"invalid\":" << invalid << ",\"trace_overflow\":" << trace_overflow.load()
+                  << ",\"wait_trace_events\":" << wait_trace_count.load() << ",\"wait_trace_overflow\":" << wait_trace_overflow.load() << "}" << std::endl;
+        return invalid || trace_overflow.load() || wait_trace_overflow.load() ? 1 : 0;
     }
     if (role != "pub") return 2;
     auto pub = dzIPC::PublisherIPCPtrMake(model, topic, 0, transport); pub->InitChannel();
