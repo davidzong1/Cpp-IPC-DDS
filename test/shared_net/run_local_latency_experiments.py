@@ -8,6 +8,7 @@ from pathlib import Path
 import resource
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -91,14 +92,72 @@ def activity_delta(before, after, ticks_per_second):
     changes = []
     for pid, current in after["processes"].items():
         previous = before["processes"].get(pid)
-        if not previous or current["start_ticks"] != previous["start_ticks"]:
-            continue
-        cpu_seconds = ((current["utime_ticks"] + current["stime_ticks"])
-                       - (previous["utime_ticks"] + previous["stime_ticks"])) / ticks_per_second
+        if previous and current["start_ticks"] == previous["start_ticks"]:
+            cpu_ticks = ((current["utime_ticks"] + current["stime_ticks"])
+                         - (previous["utime_ticks"] + previous["stime_ticks"]))
+        else:
+            cpu_ticks = current["utime_ticks"] + current["stime_ticks"]
+        cpu_seconds = cpu_ticks / ticks_per_second
         if cpu_seconds > 0:
-            changes.append({"pid": int(pid), "comm": current["comm"], "cpu_seconds": cpu_seconds})
+            changes.append({"pid": int(pid), "comm": current["comm"],
+                            "start_ticks": current["start_ticks"], "cpu_seconds": cpu_seconds})
     changes.sort(key=lambda item: (-item["cpu_seconds"], item["pid"]))
     return changes
+
+
+def process_cwd(pid):
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        return None
+
+
+def system_busy_delta(before, after):
+    return ((after["cpu"]["total_ticks"] - before["cpu"]["total_ticks"])
+            - (after["cpu"]["idle_ticks"] - before["cpu"]["idle_ticks"]))
+
+
+def observed_competitors(activity, current_pid=None, minimum_cpu_seconds=1.0,
+                         worktree_root=None):
+    if current_pid is None:
+        current_pid = os.getpid()
+    worktree_root = str(worktree_root) if worktree_root else None
+    return [item for item in activity if item["pid"] != current_pid
+            and not (worktree_root and item.get("cwd")
+                     and (item["cwd"] == worktree_root
+                          or item["cwd"].startswith(worktree_root + "/")))
+            and item["cpu_seconds"] >= minimum_cpu_seconds]
+
+
+def aggregate_process_activity(samples):
+    totals = {}
+    for sample in samples:
+        for item in sample["process_cpu_delta"]:
+            key = (item["pid"], item["start_ticks"])
+            current = totals.get(key)
+            if current is None:
+                totals[key] = dict(item)
+            else:
+                current["cpu_seconds"] += item["cpu_seconds"]
+                current["comm"] = item["comm"]
+                current["cwd"] = item.get("cwd") or current.get("cwd")
+    result = list(totals.values())
+    result.sort(key=lambda item: (-item["cpu_seconds"], item["pid"]))
+    return result
+
+
+def monitor_process_activity(stop_event, state, ticks_per_second):
+    while not stop_event.wait(1.0):
+        current = process_snapshot()
+        delta = activity_delta(state["last_processes"], current, ticks_per_second)
+        root = str(B_WORKTREE)
+        for item in delta:
+            item["cwd"] = process_cwd(item["pid"])
+        state["samples"].append({
+            "monotonic_ns": time.monotonic_ns(),
+            "process_cpu_delta": delta,
+        })
+        state["last_processes"] = current
 
 
 def wait_for_idle_gate(max_wait_seconds=300, trace_path=None):
@@ -110,12 +169,10 @@ def wait_for_idle_gate(max_wait_seconds=300, trace_path=None):
         time.sleep(IDLE_SECONDS)
         after = environment_snapshot()
         activity = activity_delta(before, after, ticks)
-        external = [item for item in activity if item["pid"] != os.getpid()
-                    and item["cpu_seconds"] >= 1.0]
+        external = observed_competitors(activity)
         attempt = {"seconds": IDLE_SECONDS, "before": before, "after": after,
                          "process_cpu_delta": activity, "observed_competitors": external,
-                         "system_busy_ticks_delta": (after["cpu"]["total_ticks"] - before["cpu"]["total_ticks"])
-                         - (after["cpu"]["idle_ticks"] - before["cpu"]["idle_ticks"])}
+                         "system_busy_ticks_delta": system_busy_delta(before, after)}
         attempts.append(attempt)
         if trace_path:
             with Path(trace_path).open("a") as stream:
@@ -186,7 +243,9 @@ def main():
             "environment": {"uid": os.getuid(), "gid": os.getgid(),
                             "allowed_cpus": sorted(os.sched_getaffinity(0)),
                             "rlimit_nofile": list(resource.getrlimit(resource.RLIMIT_NOFILE)),
-                            "idle_gate_seconds": IDLE_SECONDS},
+                            "idle_gate_seconds": IDLE_SECONDS,
+                            "process_sample_interval_seconds": 1.0,
+                            "process_competitor_cpu_seconds": 1.0},
             "windows": windows}
     plan_path = output / "plan.json"
     plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
@@ -210,21 +269,60 @@ def main():
         run_dir = output / window["id"]
         if run_dir.exists():
             raise RuntimeError(f"窗口目录已存在：{run_dir}")
+        run_dir.mkdir(parents=True)
         command = [sys.executable, str(BENCHMARK), "--binary", str(binary),
                    "--gateway", str(B_GATEWAY), "--mode", mode,
                    "--output", str(run_dir), "--bytes", str(window["bytes"]),
                    "--subscribers", str(window["subscribers"]),
                    "--seconds", str(window["seconds"]), "--rate", str(window["rate_hz"]),
                    "--data-shards", "4", "--data-workers", "4"]
+        environment_before = environment_snapshot()
         started = time.time_ns()
-        completed = subprocess.run(command, cwd=B_WORKTREE, text=True,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        ticks = os.sysconf("SC_CLK_TCK")
+        monitor_state = {"last_processes": environment_before["processes"], "samples": []}
+        monitor_stop = threading.Event()
+        monitor = threading.Thread(target=monitor_process_activity,
+                                   args=(monitor_stop, monitor_state, ticks), daemon=True)
+        monitor.start()
+        try:
+            completed = subprocess.run(command, cwd=B_WORKTREE, text=True,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        finally:
+            monitor_stop.set()
+            monitor.join()
         ended = time.time_ns()
+        environment_after = environment_snapshot()
+        tail_activity = activity_delta(monitor_state["last_processes"],
+                                       environment_after["processes"], ticks)
+        if tail_activity:
+            root = str(B_WORKTREE)
+            for item in tail_activity:
+                item["cwd"] = process_cwd(item["pid"])
+            monitor_state["samples"].append({"monotonic_ns": environment_after["monotonic_ns"],
+                                             "process_cpu_delta": tail_activity})
+        process_activity = aggregate_process_activity(monitor_state["samples"])
+        competitors = observed_competitors(process_activity, worktree_root=B_WORKTREE)
+        sampling_environment = {
+            "before": environment_before,
+            "after": environment_after,
+            "process_cpu_delta": process_activity,
+            "process_activity_samples": monitor_state["samples"],
+            "process_sample_interval_seconds": 1.0,
+            "observed_competitors": competitors,
+            "system_busy_ticks_delta": system_busy_delta(environment_before, environment_after),
+            "detector_limit": "窗内每秒采集进程CPU增量；同一进程实例累计CPU >=1s且工作目录不在本测试worktree的进程标记为竞争。短于采样间隔且在两次采样间退出的任务、阈值以下活动及内核/硬件噪声可能漏检",
+        }
+        (run_dir / "environment.json").write_text(
+            json.dumps(sampling_environment, ensure_ascii=False, indent=2) + "\n")
         log_path = output / f"{window['id']}.log"
         log_path.write_text(completed.stdout)
         window_result = {"window": window, "argv": command, "started_ns": started,
                          "ended_ns": ended, "exit_code": completed.returncode,
                          "idle_gate": idle_gate,
+                         "environment_file": str(run_dir.relative_to(output) / "environment.json"),
+                         "environment_sha256": sha256(run_dir / "environment.json"),
+                         "observed_competitors": competitors,
+                         "validity": "受干扰" if competitors else "待完整性审计",
                          "binary_sha256": sha256(binary), "library_sha256": sha256(library),
                          "log": log_path.name}
         result_path = run_dir / "result.json"
@@ -237,7 +335,12 @@ def main():
         (output / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n")
         print(json.dumps({"completed": len(results), "total": len(windows),
                           "window": window["id"], "exit_code": window_result["exit_code"],
-                          "idle_gate_passed": idle_gate["passed"]}, ensure_ascii=False), flush=True)
+                          "idle_gate_passed": idle_gate["passed"],
+                          "observed_competitors": competitors}, ensure_ascii=False), flush=True)
+        if competitors:
+            window_result["failure"] = "采样期间检测到竞争任务；保留当前窗并停止该平衡批次"
+            (output / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n")
+            return 2
         if window_result["exit_code"] != 0:
             return 1
     return 0

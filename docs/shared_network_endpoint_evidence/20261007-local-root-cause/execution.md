@@ -21,8 +21,14 @@ D01 先完成双版本构建、工装自检和能力矩阵；D02 运行三失败
 
 - B 配置/构建：`cmake -S . -B build-latency-formal -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DDZIPC_BUILD_SHARED_NET=ON -DLIBIPC_BUILD_TESTS=ON -DLIBIPC_BUILD_PYTHON=OFF -DLIBIPC_BUILD_DEMOS=OFF -DUPDATA_MSG_SRV_GENERATOR=OFF`，构建退出码 0。
 - A 生产库构建：冻结 A 不含 shared-net；首次全量 CMake 生成因忽略的 `test/perf/w10/w10_rebuild_crash.cpp` 缺失而失败，随后以 `LIBIPC_BUILD_TESTS=OFF` 构建 `ipc` 目标成功。A 的同一 benchmark 工装使用 A 头文件/生成消息头和 A `libipc.so` 手工链接，未复制 B 生产代码。
-- 解析器自检：现有 `test/shared_net/test_*.py` 10 项全部通过；能力清单见 `tool-validation/capability.json`。
+- 解析器自检：D01 原记录中的“10 项”计数不准确；当前 8 个 `test_*.py` 脚本共 22 个用例全部通过。增加逐窗环境检测后，当前共 27 个用例通过；能力清单见 `tool-validation/capability.json`。
 - 六个 L0 冒烟：`tool-validation/d01-smoke-002/`，A/B 各覆盖 1 SUB/4KiB、32 SUB/64B、1 SUB/1MiB，3 秒正式窗口、100 Hz、2 秒预热；6/6 退出码 0，发布/接收完整、无重复/损坏/丢失，业务进程 UDP FD 为 0。中断的首次尝试 `d01-smoke-001/` 保留，未计入通过样本。
-- 运行器：`test/shared_net/run_local_latency_experiments.py`，串行窗口、20 秒静置检查、每窗哈希和环境快照；静置检测只能排除超过 1 秒 CPU 的可见进程，不能声称系统绝对空闲。
+- 运行器：`test/shared_net/run_local_latency_experiments.py`，串行窗口、20 秒静置检查、每窗哈希和环境快照；采样期间每秒记录进程 CPU 增量，同一进程实例累计 CPU 达 1 秒且工作目录不属于测试 worktree 时标记为竞争，并停止受影响的平衡批次。低于阈值、短于采样间隔的进程和内核活动仍可能漏检，不能声称系统绝对空闲。
 
 D02 进入条件满足：A/B 双侧工装完整性成立，开始三失败场景的 24 窗 L0 `ABBA|BAAB` 对照。
+
+## D02 中断批次
+
+- `d02-l0-pairs/001/` 已启动但被外部 JAX CPU 密集任务打断；只完成前 9/24 窗。结果内容计数完整（9000 次发布、72000 次接收），但 4KiB 窗静置记录已出现外部竞争进程，32SUB 场景期间又观察到高负载任务。采样窗没有结束快照，不能按新检测逻辑完整判定环境。
+- 本批整体标记为中断且不用于 A/B 性能比较；原始 CSV、日志、结果及静置记录完整保留，具体观察见 `d02-l0-pairs/001/status.md`。不从该批抽取有利窗口。
+- `d02-l0-pairs/002/` 只在外部任务退出且重新通过每窗 20 秒静置门控后执行完整 24 窗。若仍不满足，记录失败并保留批次，不终止外部进程。
