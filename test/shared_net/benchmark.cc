@@ -27,21 +27,33 @@
 #if defined(__linux__)
 #include <sched.h>
 #include <time.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #endif
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
 static std::uint64_t now() { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); }
 namespace {
+static std::uint64_t thread_cpu_now() noexcept {
+#if defined(__linux__)
+    timespec value{};
+    if (::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) == 0)
+        return std::uint64_t(value.tv_sec) * 1000000000ull + value.tv_nsec;
+#endif
+    return 0;
+}
 constexpr std::size_t trace_capacity = 65536;
 struct ReceiveTrace {
     std::atomic<std::uint64_t> begin{0}, received{0}, enqueue{0}, dequeue{0}, handoff{0};
     std::atomic<unsigned> assisted{0};
+    std::atomic<std::uint64_t> wait_begin{0}, wait_end{0}, wait_cpu{0}, recv_cpu{0}, process_cpu{0}, enqueue_after{0}, acquire_ns{0};
 };
 std::unique_ptr<ReceiveTrace[]> traces;
 std::atomic<std::uint64_t> trace_overflow{0};
 thread_local std::uint64_t recv_begin = 0;
 thread_local std::uint64_t receive_sequence = UINT64_MAX;
 thread_local std::uint64_t handoff_start = 0, handoff_elapsed = 0;
+thread_local std::uint64_t wait_begin = 0, wait_end = 0, wait_cpu_begin = 0, wait_cpu = 0, recv_cpu_begin = 0, received_cpu = 0, acquire_begin = 0, acquire_ns = 0;
 #ifdef DZIPC_BENCH_PUBLISH_TRACE
 thread_local std::array<std::uint64_t, static_cast<unsigned>(ipc::detail::PublishPoint::Count)> publish_stamps{};
 thread_local bool publish_active = false;
@@ -51,14 +63,6 @@ struct CopyCpuTrace {
     int begin_cpu{-1}, end_cpu{-1};
 };
 thread_local CopyCpuTrace copy_cpu;
-static std::uint64_t thread_cpu_now() noexcept {
-#if defined(__linux__)
-    timespec value{};
-    if (::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) == 0)
-        return std::uint64_t(value.tv_sec) * 1000000000ull + value.tv_nsec;
-#endif
-    return 0;
-}
 void publish_trace(ipc::detail::PublishPoint point) noexcept {
     if (!publish_active) return;
 #if defined(__linux__)
@@ -83,12 +87,17 @@ void publish_trace(ipc::detail::PublishPoint point) noexcept {
 void receive_trace(const dzIPC::detail::SeamEvent& event) noexcept {
     // 数值属于内部缝的稳定编号，同一源码也能链接尚无2/3/4打点的f066a82。
     const auto point = static_cast<int>(event.point);
+    if (point == 7) { wait_begin = now(); wait_cpu_begin = thread_cpu_now(); return; }
+    if (point == 10) { wait_end = now(); wait_cpu = thread_cpu_now() - wait_cpu_begin; return; }
+    if (point == 11) { acquire_begin = now(); return; }
+    if (point == 12) { acquire_ns = now() - acquire_begin; return; }
+    if (point == 13) { if (receive_sequence < trace_capacity) traces[receive_sequence].enqueue_after.store(now()); return; }
     if (point == 8) { handoff_start = now(); return; }
     if (point == 9) { handoff_elapsed = now() - handoff_start; return; }
     if (point == 5) { if (receive_sequence < trace_capacity) traces[receive_sequence].assisted.store(1); return; }
     if (point != 0 && point != 2 && point != 3 && point != 4) return;
     const auto stamp = now();
-    if (point == 2) { recv_begin = stamp; receive_sequence = UINT64_MAX; return; }
+    if (point == 2) { recv_begin = stamp; recv_cpu_begin = thread_cpu_now(); receive_sequence = UINT64_MAX; return; }
     if (!event.data || !event.size) return;
     const auto view = dzIPC::Msg::StdImageFlat::view_t::bind(event.data, event.size);
     if (!view.valid() || view.data().size() < 64) return;
@@ -96,9 +105,9 @@ void receive_trace(const dzIPC::detail::SeamEvent& event) noexcept {
     std::memcpy(&sequence, view.data().data() + 8, 8);
     if (sequence >= trace_capacity) { trace_overflow.fetch_add(1, std::memory_order_relaxed); return; }
     auto& trace = traces[sequence];
-    if (point == 0) { receive_sequence = sequence; trace.begin.store(recv_begin, std::memory_order_relaxed); trace.received.store(stamp, std::memory_order_relaxed); }
-    if (point == 3) trace.enqueue.store(stamp, std::memory_order_relaxed);
-    if (point == 4) { trace.dequeue.store(stamp, std::memory_order_relaxed); trace.handoff.store(handoff_elapsed, std::memory_order_relaxed); handoff_elapsed = 0; }
+    if (point == 0) { receive_sequence = sequence; trace.begin.store(recv_begin, std::memory_order_relaxed); trace.received.store(stamp, std::memory_order_relaxed); received_cpu = thread_cpu_now(); trace.recv_cpu.store(received_cpu - recv_cpu_begin); }
+    if (point == 3) { trace.enqueue.store(stamp, std::memory_order_relaxed); trace.process_cpu.store(thread_cpu_now() - received_cpu); }
+    if (point == 4) { trace.dequeue.store(stamp, std::memory_order_relaxed); trace.handoff.store(handoff_elapsed, std::memory_order_relaxed); handoff_elapsed = 0; trace.wait_begin.store(wait_begin); trace.wait_end.store(wait_end); trace.wait_cpu.store(wait_cpu); trace.acquire_ns.store(acquire_ns); }
 }
 }
 int main(int argc, char** argv) try {
@@ -126,14 +135,22 @@ int main(int argc, char** argv) try {
         auto sub = dzIPC::SubscriberIPCPtrMake(model, topic, 0, 1024, transport); sub->InitChannel();
         std::atomic<bool> running{true}; std::uint64_t count = 0, invalid = 0;
         csv << "sequence,read_ns,elapsed_ns,bytes";
-        if (tracing) csv << ",recv_begin_ns,recv_return_ns,enqueue_before_ns,dequeue_after_ns,assisted,handoff_ns";
+        if (tracing) csv << ",recv_begin_ns,recv_return_ns,enqueue_before_ns,dequeue_after_ns,assisted,handoff_ns,wait_begin_ns,wait_end_ns,wait_cpu_ns,recv_cpu_ns,process_cpu_ns,enqueue_after_ns,assist_acquire_ns,get_cpu_ns,reader_tid";
         csv << '\n';
         std::thread reader([&] {
+#if defined(__linux__)
+            const auto reader_tid = tracing ? ::syscall(SYS_gettid) : 0;
+#else
+            const auto reader_tid = 0;
+#endif
             while (running.load()) {
                 dzIPC::Sample sample;
                 handoff_elapsed = 0;
+                wait_begin = wait_end = wait_cpu = acquire_ns = 0;
+                const auto get_cpu_begin = tracing ? thread_cpu_now() : 0;
                 if (!sub->get(sample, 20)) continue;
                 const auto received = now();
+                const auto get_cpu = tracing ? thread_cpu_now() - get_cpu_begin : 0;
                 const auto view = sample.view<dzIPC::Msg::StdImageFlat>();
                 if (!view.valid() || view.data().size() != size) { ++invalid; continue; }
                 const auto* data = view.data().data();
@@ -144,11 +161,15 @@ int main(int argc, char** argv) try {
                 if (data[16]) {
                     ++count; csv << sequence << ',' << received << ',' << received - stamp << ',' << sample.size();
                     if (tracing) {
-                        if (sequence >= trace_capacity) { ++invalid; csv << ",0,0,0,0,0,0"; }
+                        if (sequence >= trace_capacity) { ++invalid; csv << ",0,0,0,0,0,0,0,0,0,0,0,0,0,0"; }
                         else {
                             const auto& trace = traces[sequence];
-                            csv << ',' << trace.begin.load() << ',' << trace.received.load() << ',' << trace.enqueue.load() << ',' << trace.dequeue.load() << ',' << trace.assisted.load() << ',' << trace.handoff.load();
+                            csv << ',' << trace.begin.load() << ',' << trace.received.load() << ',' << trace.enqueue.load() << ',' << trace.dequeue.load() << ',' << trace.assisted.load() << ',' << trace.handoff.load()
+                                << ',' << trace.wait_begin.load() << ',' << trace.wait_end.load() << ',' << trace.wait_cpu.load()
+                                << ',' << trace.recv_cpu.load() << ',' << trace.process_cpu.load() << ',' << trace.enqueue_after.load()
+                                << ',' << trace.acquire_ns.load() << ',' << get_cpu;
                         }
+                        csv << ',' << reader_tid;
                     }
                     csv << '\n';
                 }

@@ -22,13 +22,17 @@ struct PublisherEndpoint::Impl {
     std::uint64_t next() {
         auto old = sequence.load(); do { if (old == UINT64_MAX) throw std::runtime_error("发布序号耗尽"); } while (!sequence.compare_exchange_weak(old, old + 1)); return old + 1;
     }
+    void identify(PublishOutcome& out) {
+        // 逻辑发布身份不随本机/网络路径切换；仅在原有分配点消费一个序号。
+        out.sequence = next(); out.remote.publisher_id = id; out.remote.sequence = out.sequence;
+    }
     bool network_required(Delivery delivery) const {
         if (delivery == Delivery::Reliable || !runtime->healthy()) return true;
         return !route_hint || !route_hint->local_only();
     }
     PublishOutcome deliver(const WireBlob& blob, Delivery delivery, std::uint64_t deadline, bool local_required,
                            std::uint64_t call_started_ns) {
-        PublishOutcome out; out.sequence = next(); out.remote.publisher_id = id; out.remote.sequence = out.sequence;
+        PublishOutcome out; identify(out);
         const bool tracing = runtime->metrics().trace_enabled();
         MessageTraceKey trace;
         if (tracing) {
@@ -91,7 +95,7 @@ PublishOutcome PublisherEndpoint::publish(IpcMsgBase& message, Delivery delivery
     std::shared_lock<std::shared_mutex> lock(impl_->gate); if (impl_->closed) return failure;
     const bool local_required = impl_->writer->has_subscribers();
     if (!impl_->runtime->healthy() || !impl_->network_required(delivery)) {
-        failure.sequence = impl_->next(); failure.network = impl_->runtime->healthy() ? SubmitState::NotRequired : SubmitState::NotSubmitted;
+        impl_->identify(failure); failure.network = impl_->runtime->healthy() ? SubmitState::NotRequired : SubmitState::NotSubmitted;
         failure.remote.result = failure.network == SubmitState::NotRequired ? SendResultCode::NoSubscribers : SendResultCode::GatewayLost;
         failure.local = local_required ? impl_->writer->try_commit_local(message, IsDzFlatEnabled(), deadline) : SubmitState::NotRequired;
         if (local_required && failure.local == SubmitState::NotRequired) failure.local = SubmitState::NotSubmitted;
@@ -110,7 +114,7 @@ PublishOutcome PublisherEndpoint::prebuilt(ByteView bytes, Delivery delivery, st
     std::shared_lock<std::shared_mutex> lock(impl_->gate); if (impl_->closed) return failure;
     const bool local_required = impl_->writer->has_subscribers(); WireBlob blob;
     if (!impl_->runtime->healthy() || !impl_->network_required(delivery)) {
-        failure.sequence = impl_->next(); failure.network = impl_->runtime->healthy() ? SubmitState::NotRequired : SubmitState::NotSubmitted;
+        impl_->identify(failure); failure.network = impl_->runtime->healthy() ? SubmitState::NotRequired : SubmitState::NotSubmitted;
         failure.remote.result = failure.network == SubmitState::NotRequired ? SendResultCode::NoSubscribers : SendResultCode::GatewayLost;
         failure.local = local_required ? impl_->writer->try_commit_prebuilt(bytes, deadline) : SubmitState::NotRequired;
         if (local_required && failure.local == SubmitState::NotRequired) failure.local = SubmitState::NotSubmitted;
