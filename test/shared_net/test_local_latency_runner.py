@@ -1,7 +1,8 @@
 import unittest
 
 from run_local_latency_experiments import (activity_delta, aggregate_process_activity,
-                                           observed_competitors, system_busy_delta)
+                                           activity_under_roots, observed_competitors,
+                                           system_busy_delta)
 
 
 class LocalLatencyRunnerTest(unittest.TestCase):
@@ -56,6 +57,18 @@ class LocalLatencyRunnerTest(unittest.TestCase):
 
         self.assertEqual(observed_competitors(activity, current_pid=99,
                                                worktree_root="/tmp/test-worktree"), [activity[1]])
+
+    def test_declared_ambient_processes_are_recorded_but_not_competitors(self):
+        activity = [
+            {"pid": 10, "cpu_seconds": 3.0, "cwd": "/home/zwc/MPC_GPU/job"},
+            {"pid": 11, "cpu_seconds": 2.0, "cwd": "/tmp/external-job"},
+        ]
+
+        self.assertEqual(activity_under_roots(activity, ["/home/zwc/MPC_GPU"]),
+                         [activity[0]])
+        self.assertEqual(observed_competitors(
+            activity, current_pid=99, ambient_roots=["/home/zwc/MPC_GPU"]),
+            [activity[1]])
 
     def test_system_busy_ticks_excludes_idle(self):
         before = {"cpu": {"total_ticks": 1000, "idle_ticks": 700}}

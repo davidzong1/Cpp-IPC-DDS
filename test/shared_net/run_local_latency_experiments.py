@@ -117,15 +117,43 @@ def system_busy_delta(before, after):
             - (after["cpu"]["idle_ticks"] - before["cpu"]["idle_ticks"]))
 
 
+def _normalise_roots(roots):
+    """Return absolute roots used for cwd classification."""
+    normalised = []
+    for root in roots or ():
+        value = os.path.abspath(os.path.expanduser(str(root)))
+        if value not in normalised:
+            normalised.append(value)
+    return tuple(normalised)
+
+
+def _path_under_root(path, root):
+    if not path:
+        return False
+    path = os.path.abspath(path)
+    root = os.path.abspath(root)
+    return path == root or path.startswith(root + os.sep)
+
+
+def activity_under_roots(activity, roots):
+    """Select activity whose process cwd is under a declared ambient root."""
+    roots = _normalise_roots(roots)
+    if not roots:
+        return []
+    return [item for item in activity
+            if any(_path_under_root(item.get("cwd"), root) for root in roots)]
+
+
 def observed_competitors(activity, current_pid=None, minimum_cpu_seconds=1.0,
-                         worktree_root=None):
+                         worktree_root=None, ambient_roots=None):
     if current_pid is None:
         current_pid = os.getpid()
-    worktree_root = str(worktree_root) if worktree_root else None
+    excluded_roots = list(_normalise_roots(ambient_roots))
+    if worktree_root:
+        excluded_roots.extend(_normalise_roots((worktree_root,)))
     return [item for item in activity if item["pid"] != current_pid
-            and not (worktree_root and item.get("cwd")
-                     and (item["cwd"] == worktree_root
-                          or item["cwd"].startswith(worktree_root + "/")))
+            and not any(_path_under_root(item.get("cwd"), root)
+                        for root in excluded_roots)
             and item["cpu_seconds"] >= minimum_cpu_seconds]
 
 
@@ -161,8 +189,9 @@ def monitor_process_activity(stop_event, state, ticks_per_second):
         state["last_processes"] = current
 
 
-def wait_for_idle_gate(max_wait_seconds=300, trace_path=None):
+def wait_for_idle_gate(max_wait_seconds=300, trace_path=None, ambient_roots=None):
     ticks = os.sysconf("SC_CLK_TCK")
+    ambient_roots = list(_normalise_roots(ambient_roots))
     elapsed = 0
     attempts = []
     while elapsed < max_wait_seconds:
@@ -170,9 +199,13 @@ def wait_for_idle_gate(max_wait_seconds=300, trace_path=None):
         time.sleep(IDLE_SECONDS)
         after = environment_snapshot()
         activity = activity_delta(before, after, ticks)
-        external = observed_competitors(activity)
+        for item in activity:
+            item["cwd"] = process_cwd(item["pid"])
+        ambient = activity_under_roots(activity, ambient_roots)
+        external = observed_competitors(activity, ambient_roots=ambient_roots)
         attempt = {"seconds": IDLE_SECONDS, "before": before, "after": after,
-                         "process_cpu_delta": activity, "observed_competitors": external,
+                         "process_cpu_delta": activity, "ambient_activity": ambient,
+                         "observed_competitors": external,
                          "system_busy_ticks_delta": system_busy_delta(before, after)}
         attempts.append(attempt)
         if trace_path:
@@ -225,11 +258,14 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--validate-plan", action="store_true")
     parser.add_argument("--max-idle-wait-seconds", type=int, default=300)
+    parser.add_argument("--ambient-root", action="append", default=[],
+                        help="声明为环境负载的进程 cwd 根目录；仍记录活动，但不触发批次中止")
     args = parser.parse_args()
     output = Path(args.output).resolve()
     if output.exists() and any(output.iterdir()):
         raise RuntimeError(f"证据目录必须为空：{output}")
     output.mkdir(parents=True, exist_ok=True)
+    ambient_roots = list(_normalise_roots(args.ambient_root))
     windows = make_windows(args.phase)
     files = {"A_binary": A_BINARY, "A_library": A_LIBRARY,
              "B_binary": B_BINARY, "B_library": B_LIBRARY, "B_gateway": B_GATEWAY,
@@ -246,7 +282,8 @@ def main():
                             "rlimit_nofile": list(resource.getrlimit(resource.RLIMIT_NOFILE)),
                             "idle_gate_seconds": IDLE_SECONDS,
                             "process_sample_interval_seconds": 1.0,
-                            "process_competitor_cpu_seconds": 1.0},
+                            "process_competitor_cpu_seconds": 1.0,
+                            "ambient_roots": ambient_roots},
             "windows": windows}
     plan_path = output / "plan.json"
     plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
@@ -258,7 +295,8 @@ def main():
     results = []
     for window in windows:
         idle_gate = wait_for_idle_gate(args.max_idle_wait_seconds,
-                                       output / f"{window['id']}.idle.jsonl")
+                                       output / f"{window['id']}.idle.jsonl",
+                                       ambient_roots=ambient_roots)
         if not idle_gate["passed"]:
             result = {"window": window, "exit_code": None,
                       "failure": "未能取得连续20秒无可见竞争任务的静置窗口",
@@ -302,12 +340,16 @@ def main():
             monitor_state["samples"].append({"monotonic_ns": environment_after["monotonic_ns"],
                                              "process_cpu_delta": tail_activity})
         process_activity = aggregate_process_activity(monitor_state["samples"])
-        competitors = observed_competitors(process_activity, worktree_root=B_WORKTREE)
+        ambient = activity_under_roots(process_activity, ambient_roots)
+        competitors = observed_competitors(process_activity, worktree_root=B_WORKTREE,
+                                           ambient_roots=ambient_roots)
         sampling_environment = {
             "before": environment_before,
             "after": environment_after,
             "process_cpu_delta": process_activity,
             "process_activity_samples": monitor_state["samples"],
+            "ambient_roots": ambient_roots,
+            "ambient_activity": ambient,
             "process_sample_interval_seconds": 1.0,
             "observed_competitors": competitors,
             "system_busy_ticks_delta": system_busy_delta(environment_before, environment_after),
