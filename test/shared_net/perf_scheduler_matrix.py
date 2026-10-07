@@ -16,6 +16,10 @@ COMM = 'shared_net_benc'
 
 def snapshot():
     result = {'time_ns': time.monotonic_ns(), 'load': os.getloadavg(), 'cpus': sorted(os.sched_getaffinity(0)), 'cpu': {}}
+    result['kernel'] = os.uname().release
+    result['cpuidle_driver'] = Path('/sys/devices/system/cpu/cpuidle/current_driver').read_text().strip()
+    result['core_types'] = {name: (Path('/sys/devices')/name/'cpus').read_text().strip()
+                            for name in ('cpu_core', 'cpu_atom') if (Path('/sys/devices')/name/'cpus').exists()}
     for cpu in sorted(Path('/sys/devices/system/cpu').glob('cpu[0-9]*')):
         result['cpu'][cpu.name] = {'idle': {s.name: {key: (s/key).read_text().strip() for key in ('name', 'latency', 'disable', 'usage', 'time')} for s in (cpu/'cpuidle').glob('state*')},
             'frequency': {key: (cpu/'cpufreq'/key).read_text().strip() for key in ('scaling_governor', 'scaling_driver', 'scaling_cur_freq', 'cpuinfo_max_freq') if (cpu/'cpufreq'/key).exists()}}
@@ -40,9 +44,10 @@ def activity():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--suite', choices=('smoke', 'paired', 'paired32', 'copy'), required=True)
+    parser.add_argument('--suite', choices=('smoke', 'paired', 'paired32', 'copy', 'stacks'), required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--quiet-seconds', type=int, default=0, help='每窗前连续无编译/压测的秒数')
+    parser.add_argument('--kernel-stacks', action='store_true', help='仅唤醒事件增加内核栈；独立诊断，不作无栈配对')
     args = parser.parse_args()
     if os.geteuid() != 0 or not os.environ.get('SUDO_UID'):
         raise RuntimeError('请通过 sudo 运行，业务工装必须降回原用户')
@@ -55,6 +60,11 @@ def main():
     os.chown(args.output, uid, gid)
     if args.suite == 'smoke':
         cases = [('smoke', 1, 4096, True, None, 3)]
+    elif args.suite == 'stacks':
+        if not args.kernel_stacks:
+            raise ValueError('stacks 批次必须指定 --kernel-stacks')
+        cases = [(f'r{r}-sub{n}-stacks', n, b, True, None, 10)
+                 for r in (1, 2) for n, b in ((1, 4096), (32, 64))]
     elif args.suite in ('paired', 'paired32'):
         sizes = ((1, 4096), (32, 64)) if args.suite == 'paired' else ((32, 64),)
         cases = [(f'r{r}-sub{n}-perf{int(enabled)}', n, b, enabled, None, 10)
@@ -70,7 +80,8 @@ def main():
     frozen = hashes()
     manifest = {'head': subprocess.check_output(['git', '-c', f'safe.directory={ROOT}', 'rev-parse', 'HEAD'], text=True).strip(), 'hashes': frozen,
                 'perf_version': subprocess.check_output(['perf', '--version'], text=True).strip(), 'clock': 'CLOCK_MONOTONIC / perf --clockid mono',
-                'workload_uid': uid, 'quiet_seconds': args.quiet_seconds, 'cases': cases, 'windows': [], 'settings_before': snapshot()}
+                'workload_uid': uid, 'kernel_stacks': args.kernel_stacks, 'quiet_seconds': args.quiet_seconds,
+                'cases': cases, 'windows': [], 'settings_before': snapshot()}
     for event in ('sched/sched_waking', 'sched/sched_wakeup', 'sched/sched_switch', 'sched/sched_migrate_task', 'power/cpu_idle'):
         source = Path('/sys/kernel/tracing/events')/event/'format'
         (args.output/(event.replace('/', '-')+'.format')).write_text(source.read_text())
@@ -95,9 +106,11 @@ def main():
                 workload += ['--affinity', json.dumps(affinity)]
             command = workload
             if enabled:
+                stack_term = '/call-graph=fp/' if args.kernel_stacks else ''
                 command = ['perf', 'record', '-a', '--clockid', 'mono', '--no-buildid', '--no-buildid-cache', '-m', '1024', '-o', str(folder/'perf.data'),
-                           '-e', 'sched:sched_waking', '--filter', f'comm == "{COMM}"',
-                           '-e', 'sched:sched_wakeup', '--filter', f'comm == "{COMM}"',
+                           *(['--kernel-callchains', '--no-user-callchains'] if args.kernel_stacks else []),
+                           '-e', 'sched:sched_waking'+stack_term, '--filter', f'comm == "{COMM}"',
+                           '-e', 'sched:sched_wakeup'+stack_term, '--filter', f'comm == "{COMM}"',
                            '-e', 'sched:sched_switch', '--filter', f'prev_comm == "{COMM}" || next_comm == "{COMM}"',
                            '-e', 'sched:sched_migrate_task', '--filter', f'comm == "{COMM}"', '-e', 'power:cpu_idle', '--', *workload]
             window = {'case': name, 'command': command, 'before': snapshot(), 'activity': []}
@@ -112,9 +125,15 @@ def main():
                 raise RuntimeError('采样二进制或工装改变')
             if enabled and (folder/'perf.data').exists():
                 with gzip.open(folder/'events.txt.gz', 'wt') as events, (folder/'decode.log').open('w') as errors:
-                    decode = subprocess.Popen(['perf', 'script', '--ns', '--show-lost-events', '-i', str(folder/'perf.data'), '-F', 'trace:tid,cpu,time,event,trace'], stdout=subprocess.PIPE, stderr=errors, text=True)
+                    decode = subprocess.Popen(['perf', 'script', '--ns', '--show-lost-events', '--no-call-graph', '-i', str(folder/'perf.data'), '-F', 'trace:tid,cpu,time,event,trace'], stdout=subprocess.PIPE, stderr=errors, text=True)
                     shutil.copyfileobj(decode.stdout, events)
                     window['decode_returncode'] = decode.wait()
+                if args.kernel_stacks:
+                    with gzip.open(folder/'stacks.txt.gz', 'wt') as stacks, (folder/'stacks-decode.log').open('w') as errors:
+                        decode = subprocess.Popen(['perf', 'script', '--ns', '--show-lost-events', '-i', str(folder/'perf.data'),
+                                                   '-F', 'trace:tid,cpu,time,event,trace,ip,sym'], stdout=subprocess.PIPE, stderr=errors, text=True)
+                        shutil.copyfileobj(decode.stdout, stacks)
+                        window['stacks_decode_returncode'] = decode.wait()
                 with (folder/'perf-header.txt').open('w') as header:
                     subprocess.run(['perf', 'report', '--stdio', '--header-only', '-i', str(folder/'perf.data')], stdout=header, stderr=subprocess.STDOUT, check=True)
             for pattern in ('*.csv', 'perf.data'):
@@ -126,7 +145,7 @@ def main():
             manifest['windows'].append(window)
             (args.output/'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2)+'\n')
             print(name, '退出码', process.returncode, flush=True)
-            if process.returncode or window.get('decode_returncode', 0):
+            if process.returncode or window.get('decode_returncode', 0) or window.get('stacks_decode_returncode', 0):
                 raise RuntimeError('采样或解析失败，保留证据后停止')
     finally:
         manifest['settings_after'] = snapshot()
