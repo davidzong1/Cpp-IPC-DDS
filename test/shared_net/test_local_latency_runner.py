@@ -63,6 +63,20 @@ class LocalLatencyRunnerTest(unittest.TestCase):
 
         self.assertEqual(system_busy_delta(before, after), 300)
 
+    def test_monitor_delta_uses_process_snapshot_shape(self):
+        before = {"processes": {
+            "10": {"comm": "worker", "utime_ticks": 10,
+                   "stime_ticks": 0, "start_ticks": 100},
+        }}
+        after = {"processes": {
+            "10": {"comm": "worker", "utime_ticks": 25,
+                   "stime_ticks": 0, "start_ticks": 100},
+        }}
+        self.assertEqual(activity_delta(before, after, 100), [
+            {"pid": 10, "comm": "worker", "start_ticks": 100,
+             "cpu_seconds": 0.15},
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

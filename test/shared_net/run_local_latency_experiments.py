@@ -149,7 +149,8 @@ def aggregate_process_activity(samples):
 def monitor_process_activity(stop_event, state, ticks_per_second):
     while not stop_event.wait(1.0):
         current = process_snapshot()
-        delta = activity_delta(state["last_processes"], current, ticks_per_second)
+        delta = activity_delta({"processes": state["last_processes"]},
+                               {"processes": current}, ticks_per_second)
         root = str(B_WORKTREE)
         for item in delta:
             item["cwd"] = process_cwd(item["pid"])
@@ -292,8 +293,8 @@ def main():
             monitor.join()
         ended = time.time_ns()
         environment_after = environment_snapshot()
-        tail_activity = activity_delta(monitor_state["last_processes"],
-                                       environment_after["processes"], ticks)
+        tail_activity = activity_delta({"processes": monitor_state["last_processes"]},
+                                       environment_after, ticks)
         if tail_activity:
             root = str(B_WORKTREE)
             for item in tail_activity:
