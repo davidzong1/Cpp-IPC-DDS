@@ -10,6 +10,71 @@
 namespace ipc {
 namespace detail { class waiter; }
 
+/*
+ * Internal wait-path diagnostic seam.  It is deliberately separate from the
+ * public wait API: when no hook is installed the implementation only performs
+ * one relaxed atomic load and does not change the wait protocol.  A hook must
+ * be noexcept and should not block or call back into recv_wait_set.
+ *
+ * The event is a value type so a collector can copy it into a bounded buffer
+ * from any wait/notify thread.  `flags` is a point-specific bit set:
+ *   bit 0: a futex/event wake was issued;
+ *   bit 1: the initial scan found a ready entry;
+ *   bit 2: the return observed an interrupt;
+ *   bit 3: the wait set was stopped;
+ *   bit 4: the backend returned an error/unavailable result.
+ */
+namespace detail {
+enum class recv_wait_trace_point : std::uint8_t {
+    local_notify = 0,
+    local_wait_begin = 1,
+    local_wait_end = 2,
+    set_add = 3,
+    set_remove = 4,
+    set_enable = 5,
+    set_interrupt = 6,
+    set_wait_begin = 7,
+    set_wait_scan = 8,
+    set_wait_end = 9,
+    set_consume_ready = 10,
+    set_stop = 11,
+    route_notify = 12,
+};
+
+enum class recv_wait_trace_result : std::int8_t {
+    none = 0,
+    changed = 1,
+    timeout = 2,
+    unavailable = 3,
+    error = 4,
+};
+
+struct recv_wait_trace_event {
+    recv_wait_trace_point point{recv_wait_trace_point::local_notify};
+    recv_wait_trace_result result{recv_wait_trace_result::none};
+    std::uint16_t flags{0};
+    const void* object{nullptr};
+    const void* token{nullptr};
+    std::int32_t error_code{0};
+    std::int32_t wake_result{0};
+    std::uint32_t sequence_before{0};
+    std::uint32_t sequence_after{0};
+    std::uint32_t expected{0};
+    std::uint32_t observed{0};
+    std::uint32_t interrupt_before{0};
+    std::uint32_t interrupt_after{0};
+    std::uint32_t waiters{0};
+    std::uint32_t entries{0};
+    std::uint32_t enabled{0};
+    std::uint32_t ready{0};
+};
+
+using recv_wait_trace_hook = void (*)(const recv_wait_trace_event&) noexcept;
+
+IPC_EXPORT void set_recv_wait_trace_hook(recv_wait_trace_hook hook) noexcept;
+IPC_EXPORT recv_wait_trace_hook get_recv_wait_trace_hook() noexcept;
+} // namespace detail
+
 class IPC_EXPORT recv_wait_token
 {
 public:

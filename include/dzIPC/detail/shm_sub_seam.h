@@ -80,6 +80,10 @@ enum class SeamPoint : int
     kBeforeCallerWait      = 7, // 调用线程即将阻塞；可能持有lease，钩子不得阻塞。
     kBeforeAssistRelease   = 8, // 恢复worker之前/之后；只允许不阻塞的诊断。
     kAfterAssistRelease    = 9,
+    kAfterCallerWait       = 10, // 等待返回，仍可能持有lease；诊断钩子不得阻塞。
+    kBeforeAssistAcquire   = 11,
+    kAfterAssistAcquire    = 12,
+    kAfterViewEnqueue      = 13, // 入队完成，不借用可能已被消费的样本字节。
 
     /* ---- 析构 (shm_sub_ipc::~shm_sub_ipc, 说明 §5 的八步) ---- */
     kDtorAfterUnregister    = 16,   /* §5 第 1 步: LocalPubSubRegistry 已注销 */

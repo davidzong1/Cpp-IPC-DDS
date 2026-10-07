@@ -310,6 +310,7 @@ void process_received_buffer(const std::shared_ptr<SubState>& state, ipc::buff_t
             auto sample = std::make_shared<Sample>(std::move(raw_data), seg_id, exp_hash);
             detail::FireSeam({detail::SeamPoint::kBeforeViewEnqueue, 0, nullptr, sample->data(), sample->size()});
             state->view_queue->push(std::move(sample));
+            detail::FireSeam({detail::SeamPoint::kAfterViewEnqueue});
             return;
         }
 
@@ -693,8 +694,10 @@ bool assisted_pop(ShmRouteSession& session, const std::shared_ptr<SubState>& sta
     if (arbitration->cancelled.load()) return false;
     if (queue.try_pop(out)) return true;
     // 已入队或纯try_get不需要暂停；有限等待的截止时间包含交接开销。
+    detail::FireSeam({detail::SeamPoint::kBeforeAssistAcquire});
     auto cooperation = timeout ? dzIPC::threepools::RecvWorkerPool::instance().assist_route(
         arbitration->assist_route.load(std::memory_order_acquire)) : dzIPC::threepools::RecvWorker::AssistLease{};
+    detail::FireSeam({detail::SeamPoint::kAfterAssistAcquire});
     for (;;) {
         if (arbitration->cancelled.load()) return false;
         const auto signal = arbitration->signal.snapshot();
@@ -717,6 +720,7 @@ bool assisted_pop(ShmRouteSession& session, const std::shared_ptr<SubState>& sta
         if (arbitration->assist_disabled.load()) break;
         detail::FireSeam({detail::SeamPoint::kBeforeCallerWait, 0, nullptr, nullptr, 0});
         const auto result = arbitration->signal.wait(token, sequence, signal, remaining());
+        detail::FireSeam({detail::SeamPoint::kAfterCallerWait});
         if (result == ipc::recv_wait_result::timeout) return !arbitration->cancelled.load() && queue.try_pop(out);
         if (result == ipc::recv_wait_result::unavailable) {
             arbitration->assist_disabled.store(true);
