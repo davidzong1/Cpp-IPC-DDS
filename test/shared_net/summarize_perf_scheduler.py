@@ -14,9 +14,27 @@ LINE = re.compile(r'^\s*(-?\d+)\s+\[(\d+)\]\s+(\d+)\.(\d+):\s+(\S+):\s+(.*)$')
 FIELD = re.compile(r'\b(\w+)=([^ ]+)')
 
 
+def _open_text(path):
+    """Open either the archived gzip stream or a live plain-text capture."""
+    path = Path(path)
+    if path.suffix == '.gz':
+        return gzip.open(path, 'rt')
+    return path.open('r')
+
+
 def rows(path):
-    with gzip.open(path, 'rt') as f:
+    with _open_text(path) as f:
         return [{k: int(v) for k, v in row.items()} for row in csv.DictReader(f)]
+
+
+def event_source(folder):
+    """Return the decoded perf stream, accepting D05's uncompressed smoke files."""
+    for base in (Path(folder), Path(folder).parent):
+        for name in ('events.txt.gz', 'events.txt'):
+            path = base / name
+            if path.exists():
+                return _open_text(path)
+    return None
 
 
 def stats(values):
@@ -29,8 +47,10 @@ def stats(values):
 
 def analyze(folder):
     result = json.loads((folder/'result.json').read_text())
-    pub = {r['sequence']: r for r in rows(folder/'pub.csv.gz')}
-    samples = [dict(r, subscriber=p.stem.split('.')[0]) for p in sorted(folder.glob('sub*.csv.gz')) for r in rows(p)]
+    pub_path = folder/'pub.csv.gz' if (folder/'pub.csv.gz').exists() else folder/'pub.csv'
+    pub = {r['sequence']: r for r in rows(pub_path)}
+    sample_paths = sorted(folder.glob('sub*.csv.gz')) or sorted(folder.glob('sub*.csv'))
+    samples = [dict(r, subscriber=p.stem.split('.')[0]) for p in sample_paths for r in rows(p)]
     for row in samples:
         row['scheduler_tid'] = row.get('receiver_tid', row['reader_tid'])
         row['scheduler_wait_begin_ns'] = row.get('receiver_wait_begin_ns', row['wait_begin_ns'])
@@ -47,8 +67,20 @@ def analyze(folder):
     waking, wakeup, switched, idle, exits, migrations = (defaultdict(list) for _ in range(6))
     counts = Counter()
     lost_lines, unknown = [], []
-    if (folder/'events.txt.gz').exists():
-        with gzip.open(folder/'events.txt.gz', 'rt') as source:
+    source = event_source(folder)
+    # D05's raw perf smoke stores events beside the workload directory.  Keep
+    # the output artifacts beside the CSVs while retaining the raw source.
+    source_path = None
+    for base in (Path(folder), Path(folder).parent):
+        for name in ('events.txt.gz', 'events.txt'):
+            candidate = base / name
+            if candidate.exists():
+                source_path = candidate
+                break
+        if source_path is not None:
+            break
+    if source is not None:
+        with source:
             for line in source:
                 if 'LOST' in line.upper():
                     lost_lines.append(line.strip())
@@ -75,10 +107,48 @@ def analyze(folder):
                     migrations[int(fields['pid'])].append((ns, int(fields['orig_cpu']), int(fields['dest_cpu'])))
     for data in (waking, wakeup, switched, idle, exits, migrations):
         for values in data.values(): values.sort()
-    def first(data, key, start, end):
-        values = data[key]
+    def in_interval(data, key, start, end):
+        """Select events by target TID and interval without implicit nearest pairing."""
+        values = data.get(key, ())
         i = bisect_left(values, (start,))
-        return values[i] if i < len(values) and values[i][0] <= end else None
+        j = bisect_right(values, (end, 2**64, 2**64, 2**64))
+        return values[i:j]
+
+    def chain_for(row, notify_ns, start, end):
+        """Build one complete wake chain or return an explicit ambiguity/miss reason.
+
+        A wake chain is valid only when the same receiver TID has one waking,
+        one following wakeup, and one following sched_switch(next_pid).  We do
+        not choose the first/nearest event when more than one complete chain is
+        present; that would silently attach a kernel event to the wrong sample.
+        """
+        tid = row['scheduler_tid']
+        chains = []
+        for w in in_interval(waking, tid, max(notify_ns, start), end):
+            # The first wakeup after a waking and the first switch to the
+            # receiver after that wakeup are the kernel's one activation
+            # chain.  Later switches belong to the receiver's work and must
+            # not manufacture extra candidate chains for this sample.
+            ups = in_interval(wakeup, tid, w[0], end)
+            if not ups:
+                continue
+            up = ups[0]
+            runs = in_interval(switched, tid, up[0], end)
+            if runs:
+                chains.append((w, up, runs[0]))
+        if not chains:
+            if not in_interval(waking, tid, max(notify_ns, start), end):
+                return None, 'no_waking_in_interval'
+            if not any(in_interval(wakeup, tid, w[0], end) for w in in_interval(waking, tid, max(notify_ns, start), end)):
+                return None, 'no_wakeup_in_interval'
+            return None, 'no_switch_in_interval'
+        # A single wake can have more than one switch record only when the
+        # target ran and was switched out/requeued in the same wait interval.
+        # Such a sample is not safe for a one-shot activation decomposition.
+        unique = {(w[0], up[0], run[0]) for w, up, run in chains}
+        if len(unique) != 1:
+            return None, 'ambiguous_wake_chain'
+        return chains[0], ''
     matched, misses = [], Counter()
     joined = []
     for row in samples:
@@ -91,15 +161,14 @@ def analyze(folder):
         entry.update(notify_ns=p['notify_begin_ns'], matched=0)
         end = row['scheduler_wait_end_ns']
         start = row['scheduler_wait_begin_ns']
-        reason = '' if (folder/'events.txt.gz').exists() else 'perf_disabled'
+        reason = '' if source_path is not None else 'perf_disabled'
         if not reason and (not end or start >= end): reason = 'no_wait_interval'
         if not reason and end < p['notify_begin_ns']: reason = 'wait_ended_before_notify'
-        w = first(waking, row['scheduler_tid'], max(p['notify_begin_ns'], start), end) if not reason else None
-        if not reason and not w: reason = 'no_waking_in_interval'
-        up = first(wakeup, row['scheduler_tid'], w[0], end) if not reason else None
-        if not reason and not up: reason = 'no_wakeup_in_interval'
-        run = first(switched, row['scheduler_tid'], up[0], end) if not reason else None
-        if not reason and not run: reason = 'no_switch_in_interval'
+        chain, chain_reason = (chain_for(row, p['notify_begin_ns'], start, end)
+                               if not reason else (None, ''))
+        if not reason and chain is None:
+            reason = chain_reason
+        w, up, run = chain if chain is not None else (None, None, None)
         if reason:
             misses[reason] += 1; entry['unmatched_reason'] = reason
         else:
@@ -170,7 +239,7 @@ def analyze(folder):
         grouped = defaultdict(list)
         for entry in matched: grouped[entry[key]].append(entry)
         out['by_'+name] = {str(k): summarize(v) for k, v in grouped.items()}
-    if (folder/'events.txt.gz').exists():
+    if source is not None:
         fields = sorted({k for entry in joined for k in entry})
         with gzip.open(folder/'joined.csv.gz', 'wt', newline='') as f:
             writer = csv.DictWriter(f, fields); writer.writeheader(); writer.writerows(joined)

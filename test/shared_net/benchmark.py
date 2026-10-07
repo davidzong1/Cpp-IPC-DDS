@@ -57,6 +57,17 @@ def host(args):
         control = control_dir + '/control.sock'
         env['DZIPC_GATEWAY_CONTROL'] = control
         affinity = json.loads(args.affinity) if args.affinity else None
+        receiver_affinity = json.loads(args.receiver_affinity) if args.receiver_affinity else None
+        if receiver_affinity is not None:
+            if affinity:
+                raise ValueError('接收线程亲和性诊断不能同时固定整个进程')
+            if not args.receive_trace:
+                raise ValueError('接收线程亲和性诊断要求开启接收 trace 以核对实际 TID')
+            if len(receiver_affinity) != args.subscribers:
+                raise ValueError('接收线程亲和性列表长度必须等于订阅者数量')
+            allowed = os.sched_getaffinity(0)
+            if any(cpu not in allowed for cpu in receiver_affinity):
+                raise ValueError('接收线程亲和性包含当前进程不可用的 CPU')
         if affinity:
             allowed = os.sched_getaffinity(0)
             assert set(affinity['subscribers'] + [affinity['publisher'], affinity['gateway']]) <= allowed
@@ -77,7 +88,12 @@ def host(args):
                     time.sleep(.01)
             transport = 'socket' if args.mode == 'shared_v1' else 'shm'
             for index in range(args.subscribers):
-                sub = Process(launched([args.binary, 'sub', transport, 'benchmark', str(args.bytes), str(directory/f'sub{index}.csv'), str(args.rate)], affinity['subscribers'][index % len(affinity['subscribers'])] if affinity else 0), env)
+                sub_env = dict(env)
+                if receiver_affinity is not None:
+                    result_path = directory/f'sub{index}.csv.receiver_affinity.json'
+                    sub_env['DZIPC_TEST_RECEIVER_CPU'] = str(receiver_affinity[index])
+                    sub_env['DZIPC_TEST_RECEIVER_AFFINITY_RESULT'] = str(result_path)
+                sub = Process(launched([args.binary, 'sub', transport, 'benchmark', str(args.bytes), str(directory/f'sub{index}.csv'), str(args.rate)], affinity['subscribers'][index % len(affinity['subscribers'])] if affinity else 0), sub_env)
                 processes.append(sub)
                 sub.receive()
             pub = Process(launched([args.binary, 'pub', transport, 'benchmark', str(args.bytes), str(directory/'pub.csv'), str(args.rate)], affinity['publisher'] if affinity else 0), env)
@@ -121,6 +137,7 @@ def host(args):
                         from summarize_copy_cpu import decode_cpu
                         decode_cpu(row)
             receiver_stats = []
+            receiver_affinity_results = []
             for index, sub_result in enumerate(sub_results):
                 with (directory/f'sub{index}.csv').open() as file:
                     rows = list(csv.DictReader(file))
@@ -147,6 +164,22 @@ def host(args):
                             known.update(t['tid'] for t in after[index]['thread_status'])
                             if receiver not in known or not int(row['generation']):
                                 stats['trace_missing_or_unordered'] += 1
+                if receiver_affinity is not None:
+                    affinity_path = directory/f'sub{index}.csv.receiver_affinity.json'
+                    affinity_result = json.loads(affinity_path.read_text())
+                    expected_cpu = receiver_affinity[index]
+                    assert affinity_result['requested_cpu'] == expected_cpu
+                    assert affinity_result['set_result'] == affinity_result['get_result'] == 0
+                    assert affinity_result['allowed_cpus'] == [expected_cpu]
+                    receiver_tid = int(rows[0]['receiver_tid']) if rows else 0
+                    assert affinity_result['tid'] == receiver_tid
+                    for captured in (before[index], after[index]):
+                        tids = {thread['tid']: thread for thread in captured['thread_status']}
+                        assert receiver_tid in tids
+                        assert tids[receiver_tid]['Cpus_allowed_list'] == str(expected_cpu)
+                    receiver_affinity_results.append(affinity_result)
+                else:
+                    receiver_affinity_results.append(None)
                 if args.wait_trace:
                     wait_csv = directory/f'sub{index}.csv.wait_trace.csv'
                     with wait_csv.open() as file:
@@ -156,7 +189,8 @@ def host(args):
                     stats['wait_trace_overflow'] = sub_result['wait_trace_overflow']
                     stats['wait_trace_mismatch'] = wait_rows != sub_result['wait_trace_events']
                 receiver_stats.append(stats)
-            evidence = {'affinity_plan': affinity, 'host_loadavg_after': list(os.getloadavg()), 'mode': args.mode, 'bytes': args.bytes, 'subscribers': args.subscribers,
+            evidence = {'affinity_plan': affinity, 'receiver_affinity': receiver_affinity_results,
+                'host_loadavg_after': list(os.getloadavg()), 'mode': args.mode, 'bytes': args.bytes, 'subscribers': args.subscribers,
                 'seconds': args.seconds, 'rate': args.rate, 'cpu_window_seconds': wall, 'publish': result,
                 'wire_bytes': int(pub_rows[0]['bytes']) if pub_rows else 0,
                 'publish_latency': quantiles([int(row['elapsed_ns']) for row in pub_rows]),
@@ -167,6 +201,7 @@ def host(args):
                 'environment': {'DZIPC_SHM_MPMC': '1', 'DZIPC_SHM_RECV_WORKERS': '1', 'DZIPC_SHARED_RECV_ASSIST': args.receive_assist,
                     'receive_trace': args.receive_trace, 'publish_trace': args.publish_trace,
                     'publish_cpu_trace': args.publish_cpu_trace, 'wait_trace': args.wait_trace,
+                    'receiver_affinity_cpus': receiver_affinity,
                     'nodelet': False, 'wire': 'prebuilt StdImage DZFlat'}}
             (directory/'result.json').write_text(json.dumps(evidence, ensure_ascii=False, indent=2)+'\n')
             assert result['accepted'] == args.seconds * args.rate and result['rejected'] == 0, evidence
@@ -198,6 +233,7 @@ if __name__ == '__main__':
     parser.add_argument('--publish-cpu-trace', action='store_true', help='同时开启发布分段与复制线程CPU时间诊断；不用于正式验收')
     parser.add_argument('--receive-assist', choices=('0', '1'), default='1', help='共享后端调用线程协作接收开关；0用于同库回退对照')
     parser.add_argument('--affinity', help='可选JSON：publisher/gateway CPU及subscribers CPU列表；两模式必须一致')
+    parser.add_argument('--receiver-affinity', help='仅诊断：JSON CPU列表；只固定每个订阅进程中接收线程')
     parser.add_argument('--binary', required=True)
     parser.add_argument('--gateway', required=True)
     parser.add_argument('--mode', choices=('baseline', 'shared_v1'), required=True)

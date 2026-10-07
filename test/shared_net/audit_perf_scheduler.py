@@ -63,6 +63,9 @@ def main():
                 assert hashlib.sha256(source).hexdigest() == sha, path
                 if p.name == 'perf_scheduler_matrix.py':
                     legacy_decode |= b'--show-lost-events' not in source
+            elif path in manifest.get('hashes', {}):
+                # 旧版本诊断工件来自独立冻结工作区，必须由批次内内容寻址快照校验。
+                raise AssertionError(f'缺少来源快照: {path}')
         for w in manifest['windows']:
             folder = base/w['case']
             assert w['returncode'] == w.get('decode_returncode', 0) == 0
@@ -73,6 +76,21 @@ def main():
                 assert hashlib.sha256(original_bytes(base/path)).hexdigest() == sha, path
             result = json.loads((folder/'result.json').read_text())
             summary = json.loads((folder/'scheduler-summary.json').read_text())
+            receiver_cpu_requests = result.get('environment', {}).get('receiver_affinity_cpus')
+            receiver_affinity = result.get('receiver_affinity') or []
+            if receiver_cpu_requests is None:
+                assert not any(receiver_affinity)
+            else:
+                assert len(receiver_cpu_requests) == result['subscribers']
+                assert len(receiver_affinity) == result['subscribers']
+                for index, cpu in enumerate(receiver_cpu_requests):
+                    placement = receiver_affinity[index]
+                    assert placement is not None
+                    assert placement['requested_cpu'] == cpu
+                    assert placement['set_result'] == placement['get_result'] == 0
+                    assert placement['allowed_cpus'] == [cpu]
+                    rows = read(folder/f'sub{index}.csv.gz')
+                    assert {row['receiver_tid'] for row in rows} == {placement['tid']}
             expected = result['rate']*result['seconds']
             pubs = read(folder/'pub.csv.gz')
             assert len(pubs) == expected and len({p['sequence'] for p in pubs}) == expected
@@ -143,10 +161,14 @@ def main():
                     assert process['loaded_libraries'] == [library]
                     affinity = result['affinity_plan']
                     allowed = '0-31' if not affinity else str(affinity['subscribers'][i] if i < result['subscribers'] else affinity['publisher'] if i == result['subscribers'] else affinity['gateway'])
-                    assert all(t['Cpus_allowed_list'] == allowed for t in process['thread_status'])
+                    target = receiver_affinity[i] if receiver_cpu_requests is not None and i < result['subscribers'] else None
+                    for thread in process['thread_status']:
+                        expected_allowed = str(target['requested_cpu']) if target and thread['tid'] == target['tid'] else allowed
+                        assert thread['Cpus_allowed_list'] == expected_allowed
             assert not summary['lost_event_lines'] and not summary['unknown_event_count']
             windows.append({'case': str(folder.relative_to(args.directory)), 'accepted': expected, 'received': len(samples),
                             'perf': perf_enabled, 'matched': summary['matched'], 'unmatched': summary['unmatched'],
+                            'receiver_affinity': receiver_cpu_requests,
                             'foreign_during_capture': foreign, 'foreign_during_samples': overlap, 'uncontended_samples': not overlap,
                             'uid_observations': len(uid_rows), 'latency': summary['latency']})
     if legacy_decode:

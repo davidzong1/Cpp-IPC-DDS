@@ -38,6 +38,15 @@ class SchedulerEvidenceTest(unittest.TestCase):
         with gzip.open(self.folder/'events.txt.gz', 'wt') as f:
             f.write('\n'.join(self.events)+'\n')
 
+    def write_plain_capture(self):
+        for name in ('pub', 'sub0'):
+            source = self.folder/(name+'.csv.gz')
+            with gzip.open(source, 'rt', newline='') as f:
+                content = f.read()
+            source.unlink()
+            (self.folder/(name+'.csv')).write_text(content)
+        (self.folder/'events.txt').write_text('\n'.join(self.events)+'\n')
+
     def test_migration_uses_activation_cpu_and_does_not_zero_fill_missing_chain(self):
         self.write_events()
         result = analyze(self.folder)
@@ -59,6 +68,23 @@ class SchedulerEvidenceTest(unittest.TestCase):
         self.write_events()
         result = analyze(self.folder)
         self.assertEqual(result['lost_event_lines'], ['LOST 7 events'])
+
+    def test_plain_d05_capture_is_supported(self):
+        self.write_plain_capture()
+        result = analyze(self.folder)
+        self.assertEqual(result['matched'], 1)
+        self.assertEqual(result['unmatched'], {'no_waking_in_interval': 1})
+
+    def test_multiple_wake_chains_are_not_nearest_paired(self):
+        self.events[1:1] = [
+            '77 [000] 0.000003000: sched:sched_waking: comm=shared_net_benc pid=12 prio=120 target_cpu=002',
+            '0 [004] 0.000003500: sched:sched_wakeup: comm=shared_net_benc pid=12 prio=120 target_cpu=004',
+            '0 [004] 0.000004000: sched:sched_switch: prev_comm=swapper prev_pid=0 prev_state=R ==> next_comm=shared_net_benc next_pid=12 next_prio=120',
+        ]
+        self.write_events()
+        result = analyze(self.folder)
+        self.assertEqual(result['matched'], 0)
+        self.assertEqual(result['unmatched'], {'ambiguous_wake_chain': 1, 'no_waking_in_interval': 1})
 
     def test_background_receiver_is_joined_instead_of_getter(self):
         with gzip.open(self.folder/'sub0.csv.gz', 'rt') as f:

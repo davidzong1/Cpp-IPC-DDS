@@ -19,6 +19,7 @@
 #include <atomic>
 #include <array>
 #include <chrono>
+#include <cerrno>
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
@@ -28,6 +29,7 @@
 #include <string_view>
 #if defined(__linux__)
 #include <sched.h>
+#include <pthread.h>
 #include <time.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -268,6 +270,40 @@ int main(int argc, char** argv) try {
         std::thread reader([&] {
 #if defined(__linux__)
             const auto reader_tid = tracing ? ::syscall(SYS_gettid) : 0;
+            if (const char* requested_cpu = std::getenv("DZIPC_TEST_RECEIVER_CPU")) {
+                char* end = nullptr;
+                const long parsed_cpu = std::strtol(requested_cpu, &end, 10);
+                int set_result = EINVAL;
+                int get_result = EINVAL;
+                cpu_set_t requested_set;
+                cpu_set_t actual_set;
+                CPU_ZERO(&requested_set);
+                CPU_ZERO(&actual_set);
+                if (end != requested_cpu && *end == '\0' && parsed_cpu >= 0 && parsed_cpu < CPU_SETSIZE) {
+                    CPU_SET(static_cast<int>(parsed_cpu), &requested_set);
+                    set_result = ::pthread_setaffinity_np(::pthread_self(), sizeof(requested_set), &requested_set);
+                    get_result = ::pthread_getaffinity_np(::pthread_self(), sizeof(actual_set), &actual_set);
+                }
+                if (const char* result_path = std::getenv("DZIPC_TEST_RECEIVER_AFFINITY_RESULT")) {
+                    std::ofstream result(result_path);
+                    result << "{\"requested_cpu\":" << parsed_cpu
+                           << ",\"tid\":" << reader_tid
+                           << ",\"set_result\":" << set_result
+                           << ",\"get_result\":" << get_result
+                           << ",\"allowed_cpus\":[";
+                    bool first = true;
+                    if (get_result == 0) {
+                        for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+                            if (!CPU_ISSET(cpu, &actual_set)) continue;
+                            if (!first) result << ',';
+                            result << cpu;
+                            first = false;
+                        }
+                    }
+                    result << "]}\n";
+                    result.flush();
+                }
+            }
 #else
             const auto reader_tid = 0;
 #endif

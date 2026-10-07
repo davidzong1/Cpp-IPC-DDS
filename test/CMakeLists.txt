@@ -137,6 +137,9 @@ endforeach()
 #         && ctest --test-dir build -R test_udp_port_boundary --output-on-failure
 add_test(NAME test_udp_port_boundary COMMAND test_udp_port_boundary)
 
+add_test(NAME test_waiter_legacy_compatibility COMMAND test_waiter_legacy_compatibility)
+set_tests_properties(test_waiter_legacy_compatibility PROPERTIES RUN_SERIAL TRUE TIMEOUT 30)
+
 # 阶段 1 控制面调度器聚焦用例 (16 条, 见 test/test_shm_control_scheduler.cpp 抬头注释)。
 # 它**必须**进 CTest: 该用例是并发注销协议(I1-I4)的回归闸, 靠手工跑
 # build/bin/test_shm_control_scheduler 无法进入任何自动回路; 而调度器一旦回归,
