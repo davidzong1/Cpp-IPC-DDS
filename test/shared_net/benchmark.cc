@@ -50,6 +50,9 @@ struct ReceiveTrace {
     std::atomic<std::uint64_t> begin{0}, received{0}, enqueue{0}, dequeue{0}, handoff{0};
     std::atomic<unsigned> assisted{0};
     std::atomic<std::uint64_t> wait_begin{0}, wait_end{0}, wait_cpu{0}, recv_cpu{0}, process_cpu{0}, enqueue_after{0}, acquire_ns{0};
+    std::atomic<std::uint64_t> receiver_tid{0}, receiver_wait_begin{0}, receiver_wait_end{0};
+    std::atomic<int> receiver_cpu{-1};
+    std::atomic<std::uint32_t> generation{0};
 };
 struct WaitTraceRecord {
     std::uint64_t timestamp_ns{0};
@@ -71,6 +74,8 @@ thread_local std::uint64_t recv_begin = 0;
 thread_local std::uint64_t receive_sequence = UINT64_MAX;
 thread_local std::uint64_t handoff_start = 0, handoff_elapsed = 0;
 thread_local std::uint64_t wait_begin = 0, wait_end = 0, wait_cpu_begin = 0, wait_cpu = 0, recv_cpu_begin = 0, received_cpu = 0, acquire_begin = 0, acquire_ns = 0;
+thread_local std::uint64_t receiver_wait_begin = 0, receiver_wait_end = 0;
+thread_local bool receiver_wait_active = false;
 std::uint64_t route_key(std::string_view name, std::uint32_t domain) noexcept {
     std::uint64_t hash = 14695981039346656037ull;
     for (const unsigned char c : name) { hash ^= c; hash *= 1099511628211ull; }
@@ -85,6 +90,17 @@ std::uint32_t subscriber_id_from_path(const std::string& path) noexcept {
     return end != path.c_str() + marker + 3 ? static_cast<std::uint32_t>(value) : UINT32_MAX;
 }
 void wait_trace(const ipc::detail::recv_wait_trace_event& event) noexcept {
+    using Point = ipc::detail::recv_wait_trace_point;
+    if (event.point == Point::set_wait_begin || event.point == Point::local_wait_begin) {
+        receiver_wait_begin = now();
+        receiver_wait_end = 0;
+        receiver_wait_active = true;
+    } else if (event.point == Point::set_wait_end || event.point == Point::local_wait_end) {
+        if (receiver_wait_active) receiver_wait_end = now();
+        else receiver_wait_begin = receiver_wait_end = 0;
+        receiver_wait_active = false;
+    }
+    if (!wait_traces) return;
     const auto index = wait_trace_count.fetch_add(1, std::memory_order_relaxed);
     if (index >= wait_trace_capacity) { wait_trace_overflow.fetch_add(1, std::memory_order_relaxed); return; }
     auto& record = wait_traces[index];
@@ -189,7 +205,20 @@ void receive_trace(const dzIPC::detail::SeamEvent& event) noexcept {
     std::memcpy(&sequence, view.data().data() + 8, 8);
     if (sequence >= trace_capacity) { trace_overflow.fetch_add(1, std::memory_order_relaxed); return; }
     auto& trace = traces[sequence];
-    if (point == 0) { receive_sequence = sequence; trace.begin.store(recv_begin, std::memory_order_relaxed); trace.received.store(stamp, std::memory_order_relaxed); received_cpu = thread_cpu_now(); trace.recv_cpu.store(received_cpu - recv_cpu_begin); }
+    if (point == 0) {
+        receive_sequence = sequence;
+        trace.begin.store(recv_begin, std::memory_order_relaxed);
+        trace.received.store(stamp, std::memory_order_relaxed);
+        received_cpu = thread_cpu_now();
+        trace.recv_cpu.store(received_cpu - recv_cpu_begin);
+        trace.receiver_wait_begin.store(receiver_wait_begin);
+        trace.receiver_wait_end.store(receiver_wait_end);
+        trace.generation.store(event.generation);
+#if defined(__linux__)
+        trace.receiver_tid.store(::syscall(SYS_gettid));
+        trace.receiver_cpu.store(::sched_getcpu());
+#endif
+    }
     if (point == 3) { trace.enqueue.store(stamp, std::memory_order_relaxed); trace.process_cpu.store(thread_cpu_now() - received_cpu); }
     if (point == 4) { trace.dequeue.store(stamp, std::memory_order_relaxed); trace.handoff.store(handoff_elapsed, std::memory_order_relaxed); handoff_elapsed = 0; trace.wait_begin.store(wait_begin); trace.wait_end.store(wait_end); trace.wait_cpu.store(wait_cpu); trace.acquire_ns.store(acquire_ns); }
 }
@@ -230,11 +259,11 @@ int main(int argc, char** argv) try {
         }
         receive_trace_enabled.store(tracing, std::memory_order_relaxed);
         if (tracing || wait_tracing) dzIPC::detail::SetSeamHook(receive_trace);
-        if (wait_tracing) ipc::detail::set_recv_wait_trace_hook(wait_trace);
+        if (tracing || wait_tracing) ipc::detail::set_recv_wait_trace_hook(wait_trace);
         auto sub = dzIPC::SubscriberIPCPtrMake(model, topic, 0, 1024, transport); sub->InitChannel();
         std::atomic<bool> running{true}; std::uint64_t count = 0, invalid = 0;
         csv << "sequence,read_ns,elapsed_ns,bytes";
-        if (tracing) csv << ",recv_begin_ns,recv_return_ns,enqueue_before_ns,dequeue_after_ns,assisted,handoff_ns,wait_begin_ns,wait_end_ns,wait_cpu_ns,recv_cpu_ns,process_cpu_ns,enqueue_after_ns,assist_acquire_ns,get_cpu_ns,reader_tid";
+        if (tracing) csv << ",recv_begin_ns,recv_return_ns,enqueue_before_ns,dequeue_after_ns,assisted,handoff_ns,wait_begin_ns,wait_end_ns,wait_cpu_ns,recv_cpu_ns,process_cpu_ns,enqueue_after_ns,assist_acquire_ns,get_cpu_ns,reader_tid,receiver_tid,receiver_cpu,receiver_wait_begin_ns,receiver_wait_end_ns,generation";
         csv << '\n';
         std::thread reader([&] {
 #if defined(__linux__)
@@ -269,6 +298,13 @@ int main(int argc, char** argv) try {
                                 << ',' << trace.acquire_ns.load() << ',' << get_cpu;
                         }
                         csv << ',' << reader_tid;
+                        if (sequence >= trace_capacity) csv << ",0,-1,0,0,0";
+                        else {
+                            const auto& trace = traces[sequence];
+                            csv << ',' << trace.receiver_tid.load() << ',' << trace.receiver_cpu.load()
+                                << ',' << trace.receiver_wait_begin.load() << ',' << trace.receiver_wait_end.load()
+                                << ',' << trace.generation.load();
+                        }
                     }
                     csv << '\n';
                 }
@@ -276,7 +312,7 @@ int main(int argc, char** argv) try {
         });
         std::cout << "{\"ready\":true}" << std::endl;
         std::string command; std::getline(std::cin, command); running.store(false); reader.join(); sub.reset();
-        if (wait_tracing) ipc::detail::set_recv_wait_trace_hook(nullptr);
+        if (tracing || wait_tracing) ipc::detail::set_recv_wait_trace_hook(nullptr);
         dzIPC::detail::SetSeamHook(nullptr); receive_trace_enabled.store(false, std::memory_order_relaxed); csv.close();
         flush_wait_trace(output);
         std::cout << "{\"received\":" << count << ",\"invalid\":" << invalid << ",\"trace_overflow\":" << trace_overflow.load()

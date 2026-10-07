@@ -60,6 +60,22 @@ class SchedulerEvidenceTest(unittest.TestCase):
         result = analyze(self.folder)
         self.assertEqual(result['lost_event_lines'], ['LOST 7 events'])
 
+    def test_background_receiver_is_joined_instead_of_getter(self):
+        with gzip.open(self.folder/'sub0.csv.gz', 'rt') as f:
+            rows = list(csv.DictReader(f))
+        for row in rows:
+            row.update(receiver_tid=34, receiver_cpu=4, generation=1,
+                       receiver_wait_begin_ns=int(row['wait_begin_ns']),
+                       receiver_wait_end_ns=int(row['wait_end_ns']), recv_return_ns=int(row['read_ns'])-200)
+        self.write_csv('sub0', rows)
+        self.events = [line.replace('pid=12', 'pid=34') for line in self.events]
+        self.write_events()
+        result = analyze(self.folder)
+        self.assertEqual(result['matched'], 1)
+        self.assertEqual(result['receive_roles'], {'background': 2})
+        self.assertEqual(result['receiver_tids'], [34])
+        self.assertEqual(result['all_matched']['wait_end_to_recv_return_ns']['mean_us'], .3)
+
     def test_perf_off_is_distinguished_from_missing_wakeup(self):
         result = analyze(self.folder)
         self.assertEqual(result['matched'], 0)

@@ -54,7 +54,9 @@ def main():
         check_settings(manifest['settings_before'], manifest['settings_after'])
         for path, sha in manifest['hashes'].items():
             p = Path(path)
-            if 'build-local-latency' in path:
+            if path in manifest.get('source_snapshots', {}):
+                assert hashlib.sha256((base/manifest['source_snapshots'][path]).read_bytes()).hexdigest() == sha, path
+            elif '/build-' in path:
                 assert hashlib.sha256(p.read_bytes()).hexdigest() == sha
             elif p.is_relative_to(ROOT):
                 source = subprocess.check_output(['git', 'show', f"{manifest['head']}:{p.relative_to(ROOT)}"], cwd=ROOT)
@@ -105,10 +107,14 @@ def main():
                         matched += 1
                         publisher_wakes += int(joined['publisher_wake'])
                         assert int(joined['publisher_wake']) == int(int(joined['waker_tid']) == summary['publisher_tid'])
-                        points = [int(joined[k]) for k in ('notify_ns', 'waking_ns', 'wakeup_ns', 'scheduled_ns', 'wait_end_ns')]
+                        end_field = 'scheduler_wait_end_ns' if 'scheduler_wait_end_ns' in joined else 'wait_end_ns'
+                        points = [int(joined[k]) for k in ('notify_ns', 'waking_ns', 'wakeup_ns', 'scheduled_ns', end_field)]
                         assert points == sorted(points)
                         assert points[0] == pub_by_seq[key[1]]['notify_begin_ns']
-                        assert points[-1] == original['wait_end_ns']
+                        assert points[-1] == original.get('receiver_wait_end_ns', original['wait_end_ns'])
+                        if 'receiver_tid' in original:
+                            assert int(joined['scheduler_tid']) == original['receiver_tid']
+                            assert points[-1] <= original['recv_return_ns'] <= original['read_ns']
                         for index, name in enumerate(('notify_to_waking_ns', 'waking_to_wakeup_ns', 'wakeup_to_scheduled_ns', 'scheduled_to_wait_end_ns')):
                             assert int(joined[name]) == points[index+1]-points[index]
                         assert int(joined['notify_to_wait_end_ns']) == points[-1]-points[0]
@@ -132,7 +138,9 @@ def main():
                 assert uid_rows
             for side in ('before', 'after'):
                 for i, process in enumerate(result[side]):
-                    assert process['loaded_libraries'] == [str((ROOT/'build-local-latency/lib/libipc.so').resolve())]
+                    artifacts = manifest.get('artifacts')
+                    library = artifacts[w['artifact']]['library'] if artifacts else str((ROOT/'build-local-latency/lib/libipc.so').resolve())
+                    assert process['loaded_libraries'] == [library]
                     affinity = result['affinity_plan']
                     allowed = '0-31' if not affinity else str(affinity['subscribers'][i] if i < result['subscribers'] else affinity['publisher'] if i == result['subscribers'] else affinity['gateway'])
                     assert all(t['Cpus_allowed_list'] == allowed for t in process['thread_status'])

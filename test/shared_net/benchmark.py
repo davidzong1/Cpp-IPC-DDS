@@ -141,6 +141,12 @@ def host(args):
                             valid_trace = all(stamps) and stamps == sorted(stamps) and start <= stamps[1] and stamps[-1] <= read
                         if not valid_trace:
                             stats['trace_missing_or_unordered'] += 1
+                        if 'receiver_tid' in row:
+                            receiver = int(row['receiver_tid'])
+                            known = {t['tid'] for t in before[index]['thread_status']}
+                            known.update(t['tid'] for t in after[index]['thread_status'])
+                            if receiver not in known or not int(row['generation']):
+                                stats['trace_missing_or_unordered'] += 1
                 if args.wait_trace:
                     wait_csv = directory/f'sub{index}.csv.wait_trace.csv'
                     with wait_csv.open() as file:

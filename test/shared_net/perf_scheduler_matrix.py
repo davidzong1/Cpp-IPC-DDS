@@ -17,6 +17,7 @@ COMM = 'shared_net_benc'
 def snapshot():
     result = {'time_ns': time.monotonic_ns(), 'load': os.getloadavg(), 'cpus': sorted(os.sched_getaffinity(0)), 'cpu': {}}
     result['kernel'] = os.uname().release
+    result['system_cpu_ticks'] = [int(value) for value in Path('/proc/stat').read_text().splitlines()[0].split()[1:]]
     result['cpuidle_driver'] = Path('/sys/devices/system/cpu/cpuidle/current_driver').read_text().strip()
     result['core_types'] = {name: (Path('/sys/devices')/name/'cpus').read_text().strip()
                             for name in ('cpu_core', 'cpu_atom') if (Path('/sys/devices')/name/'cpus').exists()}
@@ -44,21 +45,39 @@ def activity():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--suite', choices=('smoke', 'paired', 'paired32', 'copy', 'stacks'), required=True)
+    parser.add_argument('--suite', choices=('smoke', 'paired', 'paired32', 'copy', 'stacks', 'd04', 'd04-smoke'), required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--quiet-seconds', type=int, default=0, help='每窗前连续无编译/压测的秒数')
     parser.add_argument('--kernel-stacks', action='store_true', help='仅唤醒事件增加内核栈；独立诊断，不作无栈配对')
+    parser.add_argument('--binary', type=Path, default=ROOT/'build-local-latency/bin/shared_net_benchmark')
+    parser.add_argument('--gateway', type=Path, default=ROOT/'build-local-latency/bin/dzipc_gateway')
+    parser.add_argument('--library', type=Path, default=ROOT/'build-local-latency/lib/libipc.so')
+    parser.add_argument('--mode', choices=('baseline', 'shared_v1'), default='shared_v1')
+    parser.add_argument('--baseline-binary', type=Path)
+    parser.add_argument('--baseline-library', type=Path)
+    parser.add_argument('--baseline-worktree', type=Path, default=Path('/tmp/dzipc-d04-baseline'))
+    parser.add_argument('--receive-assist', choices=('0', '1'), default='1')
     args = parser.parse_args()
     if os.geteuid() != 0 or not os.environ.get('SUDO_UID'):
         raise RuntimeError('请通过 sudo 运行，业务工装必须降回原用户')
     uid, gid = int(os.environ['SUDO_UID']), int(os.environ['SUDO_GID'])
     if not uid:
         raise RuntimeError('业务工装不能以 root 采样')
+    if args.suite in ('d04', 'd04-smoke') and not (args.baseline_binary and args.baseline_library):
+        parser.error('d04 必须指定 baseline-binary 和 baseline-library')
     os.chdir(ROOT)
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     os.chown(args.output, uid, gid)
-    if args.suite == 'smoke':
+    if args.suite == 'd04-smoke':
+        cases = [('smoke-A', 1, 4096, True, None, 3, 'A')]
+    elif args.suite == 'd04':
+        order = [('A', False), ('B', False), ('B', True), ('A', True),
+                 ('A', True), ('B', True), ('B', False), ('A', False)]
+        cases = [(f'sub{n}-{i+1}-{label}-perf{int(enabled)}', n, b, enabled, None, 10, label)
+                 for n, b in ((1, 4096), (32, 64))
+                 for i, (label, enabled) in enumerate(order)]
+    elif args.suite == 'smoke':
         cases = [('smoke', 1, 4096, True, None, 3)]
     elif args.suite == 'stacks':
         if not args.kernel_stacks:
@@ -74,19 +93,50 @@ def main():
         placements = [('pp', 0, 4), ('pe', 0, 16), ('ep', 16, 4)]
         cases = [(f'r{r}-{name}', 1, 1048576, True, {'publisher': p, 'subscribers': [s], 'gateway': 2}, 10)
                  for r in (1, 2) for name, p, s in (placements if r == 1 else placements[::-1])]
-    paths = [ROOT/'test/shared_net/benchmark.cc', ROOT/'test/shared_net/benchmark.py', Path(__file__), ROOT/'build-local-latency/bin/shared_net_benchmark', ROOT/'build-local-latency/bin/dzipc_gateway', ROOT/'build-local-latency/lib/libipc.so']
+    if args.suite not in ('d04', 'd04-smoke'): cases = [(*case, 'B') for case in cases]
+    artifacts = {'B': dict(binary=str(args.binary.resolve()), library=str(args.library.resolve()),
+                           gateway=str(args.gateway.resolve()), mode=args.mode, worktree=str(ROOT))}
+    if args.suite in ('d04', 'd04-smoke'):
+        artifacts['A'] = dict(binary=str(args.baseline_binary.resolve()), library=str(args.baseline_library.resolve()),
+                              gateway=None, mode='baseline', worktree=str(args.baseline_worktree.resolve()))
+    paths = [ROOT/'test/shared_net/benchmark.cc', ROOT/'test/shared_net/benchmark.py', Path(__file__),
+             ROOT/'test/shared_net/summarize_perf_scheduler.py', ROOT/'test/shared_net/audit_perf_scheduler.py']
+    for artifact in artifacts.values():
+        paths += [Path(artifact['binary']), Path(artifact['library'])]
+        if artifact['mode'] == 'shared_v1': paths.append(Path(artifact['gateway']))
+        worktree = Path(artifact['worktree'])
+        artifact['head'] = subprocess.check_output(['git', '-c', f'safe.directory={worktree}', 'rev-parse', 'HEAD'], cwd=worktree, text=True).strip()
+        for relative in ('CMakeLists.txt', 'src/libipc/recv_wait_set.cpp', 'src/libipc/ipc.cpp',
+                         'src/dzIPC/shm_pub_sub_ipc.cc', 'include/libipc/recv_wait_set.h',
+                         'include/dzIPC/detail/shm_sub_seam.h', 'include/ipc_msg/std_msgs/std_image.hpp',
+                         'include/ipc_msg/ipc_msg_base/dzflat.h', 'generator/batch_msg_srv_generator.py'):
+            paths.append(worktree/relative)
+        for relative in ('src/libipc/publish_trace.cpp', 'include/libipc/detail/publish_trace.h'):
+            if (worktree/relative).exists(): paths.append(worktree/relative)
+        commands = worktree/'build-d04-diagnostic/compile_commands.json'
+        if commands.exists(): paths.append(commands)
     def hashes():
         return {str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
     frozen = hashes()
+    snapshots = args.output/'source-snapshots'
+    snapshots.mkdir()
+    source_snapshots = {}
+    for path in paths:
+        if path.suffix in ('.py', '.cc', '.cpp', '.h', '.hpp', '.txt', '.json'):
+            sha = frozen[str(path.resolve())]
+            saved = snapshots/sha
+            saved.write_bytes(path.read_bytes())
+            source_snapshots[str(path.resolve())] = str(saved.relative_to(args.output))
     manifest = {'head': subprocess.check_output(['git', '-c', f'safe.directory={ROOT}', 'rev-parse', 'HEAD'], text=True).strip(), 'hashes': frozen,
                 'perf_version': subprocess.check_output(['perf', '--version'], text=True).strip(), 'clock': 'CLOCK_MONOTONIC / perf --clockid mono',
                 'workload_uid': uid, 'kernel_stacks': args.kernel_stacks, 'quiet_seconds': args.quiet_seconds,
+                'artifacts': artifacts, 'source_snapshots': source_snapshots,
                 'cases': cases, 'windows': [], 'settings_before': snapshot()}
     for event in ('sched/sched_waking', 'sched/sched_wakeup', 'sched/sched_switch', 'sched/sched_migrate_task', 'power/cpu_idle'):
         source = Path('/sys/kernel/tracing/events')/event/'format'
         (args.output/(event.replace('/', '-')+'.format')).write_text(source.read_text())
     try:
-        for name, n, b, enabled, affinity, seconds in cases:
+        for name, n, b, enabled, affinity, seconds, label in cases:
             quiet_since = time.monotonic()
             while True:
                 active = activity()
@@ -99,9 +149,12 @@ def main():
             folder = args.output/name
             folder.mkdir()
             os.chown(folder, uid, gid)
-            workload = ['setpriv', f'--reuid={uid}', f'--regid={gid}', '--init-groups', '/usr/bin/python3', 'test/shared_net/benchmark.py',
-                        '--binary', 'build-local-latency/bin/shared_net_benchmark', '--gateway', 'build-local-latency/bin/dzipc_gateway',
-                        '--mode', 'shared_v1', '--output', str(folder), '--subscribers', str(n), '--bytes', str(b), '--seconds', str(seconds), '--rate', '100', '--receive-trace', '--publish-cpu-trace']
+            artifact = artifacts[label]
+            workload = ['setpriv', f'--reuid={uid}', f'--regid={gid}', '--init-groups', '/usr/bin/python3', str(ROOT/'test/shared_net/benchmark.py'),
+                        '--binary', artifact['binary'], '--gateway', artifact['gateway'] or '/unused-baseline-gateway',
+                        '--mode', artifact['mode'], '--output', str(folder), '--subscribers', str(n), '--bytes', str(b),
+                        '--seconds', str(seconds), '--rate', '100', '--receive-trace', '--publish-cpu-trace',
+                        '--receive-assist', args.receive_assist]
             if affinity:
                 workload += ['--affinity', json.dumps(affinity)]
             command = workload
@@ -113,14 +166,20 @@ def main():
                            '-e', 'sched:sched_wakeup'+stack_term, '--filter', f'comm == "{COMM}"',
                            '-e', 'sched:sched_switch', '--filter', f'prev_comm == "{COMM}" || next_comm == "{COMM}"',
                            '-e', 'sched:sched_migrate_task', '--filter', f'comm == "{COMM}"', '-e', 'power:cpu_idle', '--', *workload]
-            window = {'case': name, 'command': command, 'before': snapshot(), 'activity': []}
+            window = {'case': name, 'artifact': label, 'command': command, 'before': snapshot(), 'activity': []}
+            environment = dict(os.environ, LD_LIBRARY_PATH=str(Path(artifact['library']).parent))
             with (folder/'run.log').open('w') as log:
-                process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=environment, start_new_session=True)
                 while process.poll() is None:
                     window['activity'].append({'time_ns': time.monotonic_ns(), 'processes': activity()})
                     time.sleep(1)
             window['returncode'] = process.returncode
             window['after'] = snapshot()
+            if not process.returncode:
+                result = json.loads((folder/'result.json').read_text())
+                for side in ('before', 'after'):
+                    if any(p['loaded_libraries'] != [artifact['library']] for p in result[side]):
+                        raise RuntimeError('实际加载库与指定 library 不一致')
             if hashes() != frozen:
                 raise RuntimeError('采样二进制或工装改变')
             if enabled and (folder/'perf.data').exists():
