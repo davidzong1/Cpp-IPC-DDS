@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """审计采样完整性，并按真实样本区间标记其他编译/压测重叠。"""
 import argparse
+from collections import Counter
 import csv
 import gzip
 import hashlib
@@ -19,6 +20,9 @@ def original_bytes(path):
 
 def check_settings(before, after):
     assert before['cpus'] == after['cpus'] == list(range(32))
+    for key in ('kernel', 'cpuidle_driver', 'core_types'):
+        if key in before:
+            assert before[key] == after[key]
     assert set(before['cpu']) == set(after['cpu'])
     for cpu, values in before['cpu'].items():
         final = after['cpu'][cpu]
@@ -38,7 +42,11 @@ def read(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__); parser.add_argument('directory', type=Path); args = parser.parse_args()
     windows = []
-    for manifest_path in sorted(args.directory.glob('*/manifest.json')):
+    manifests = [args.directory/'manifest.json'] if (args.directory/'manifest.json').exists() else sorted(args.directory.glob('*/manifest.json'))
+    if not manifests:
+        raise ValueError('找不到采样 manifest')
+    legacy_decode = False
+    for manifest_path in manifests:
         manifest = json.loads(manifest_path.read_text())
         base = manifest_path.parent
         assert manifest['workload_uid'] == 1000
@@ -51,9 +59,12 @@ def main():
             elif p.is_relative_to(ROOT):
                 source = subprocess.check_output(['git', 'show', f"{manifest['head']}:{p.relative_to(ROOT)}"], cwd=ROOT)
                 assert hashlib.sha256(source).hexdigest() == sha, path
+                if p.name == 'perf_scheduler_matrix.py':
+                    legacy_decode |= b'--show-lost-events' not in source
         for w in manifest['windows']:
             folder = base/w['case']
             assert w['returncode'] == w.get('decode_returncode', 0) == 0
+            assert w.get('stacks_decode_returncode', 0) == 0
             check_settings(manifest['settings_before'], w['before'])
             check_settings(w['before'], w['after'])
             for path, sha in w['files'].items():
@@ -76,18 +87,24 @@ def main():
             assert summary['copy_cpu'] == stats([p['copy_cpu_end_ns']-p['copy_cpu_begin_ns'] for p in pubs])
             perf_enabled = (folder/'events.txt.gz').exists()
             if perf_enabled:
-                assert summary['matched'] == len(samples) and not summary['unmatched']
-                assert summary['publisher_wake_count'] == len(samples)
+                assert summary['matched']+sum(summary['unmatched'].values()) == len(samples)
                 by_key = {(r['reader_tid'], r['sequence']): r for r in samples}
                 seen = set()
+                matched, publisher_wakes, misses = 0, 0, Counter()
                 with gzip.open(folder/'joined.csv.gz', 'rt') as f:
                     for joined in csv.DictReader(f):
                         key = (int(joined['reader_tid']), int(joined['sequence']))
                         assert key not in seen
                         seen.add(key)
                         original = by_key[key]
-                        assert int(joined['matched']) == int(joined['publisher_wake']) == 1
                         assert int(joined['elapsed_ns']) == original['elapsed_ns']
+                        if not int(joined['matched']):
+                            misses[joined['unmatched_reason']] += 1
+                            assert not joined.get('waking_to_wakeup_ns')
+                            continue
+                        matched += 1
+                        publisher_wakes += int(joined['publisher_wake'])
+                        assert int(joined['publisher_wake']) == int(int(joined['waker_tid']) == summary['publisher_tid'])
                         points = [int(joined[k]) for k in ('notify_ns', 'waking_ns', 'wakeup_ns', 'scheduled_ns', 'wait_end_ns')]
                         assert points == sorted(points)
                         assert points[0] == pub_by_seq[key[1]]['notify_begin_ns']
@@ -96,6 +113,8 @@ def main():
                             assert int(joined[name]) == points[index+1]-points[index]
                         assert int(joined['notify_to_wait_end_ns']) == points[-1]-points[0]
                 assert seen == set(by_key)
+                assert matched == summary['matched'] and dict(misses) == summary['unmatched']
+                assert publisher_wakes == summary['publisher_wake_count']
             else:
                 assert summary['matched'] == 0 and summary['unmatched'] == {'perf_disabled': len(samples)}
             for tid in {r['reader_tid'] for r in samples}:
@@ -109,7 +128,7 @@ def main():
             uid_rows = [p for sample in w['activity'] for p in sample['processes'] if 'uid' in p]
             assert all(p['uid'].split() == ['1000']*4 for p in uid_rows)
             assert all(p['gid'].split() == ['1000']*4 for p in uid_rows)
-            if base.name == 'copy-affinity':
+            if base.name == 'copy-affinity' or 'kernel_stacks' in manifest:
                 assert uid_rows
             for side in ('before', 'after'):
                 for i, process in enumerate(result[side]):
@@ -122,8 +141,9 @@ def main():
                             'perf': perf_enabled, 'matched': summary['matched'], 'unmatched': summary['unmatched'],
                             'foreign_during_capture': foreign, 'foreign_during_samples': overlap, 'uncontended_samples': not overlap,
                             'uid_observations': len(uid_rows), 'latency': summary['latency']})
-    smoke = json.loads((args.directory/'smoke-lost-check.json').read_text())
-    assert smoke['returncode'] == 0 and not smoke['lost_lines'] and smoke['same_as_original_decode']
+    if legacy_decode:
+        smoke = json.loads((args.directory/'smoke-lost-check.json').read_text())
+        assert smoke['returncode'] == 0 and not smoke['lost_lines'] and smoke['same_as_original_decode']
     archive = args.directory/'archive-manifest.json'
     if archive.exists():
         for entry in json.loads(archive.read_text())['files']:
@@ -133,8 +153,8 @@ def main():
     out = {'windows': windows, 'window_count': len(windows), 'accepted': sum(w['accepted'] for w in windows), 'received': sum(w['received'] for w in windows),
            'perf_window_count': sum(w['perf'] for w in windows), 'matched': sum(w['matched'] for w in windows), 'overlapped_windows': [w['case'] for w in windows if not w['uncontended_samples']],
            'lost_messages': 0, 'duplicates': 0, 'invalid': 0, 'unknown_events': 0, 'reported_lost_event_records': 0,
-           'settings_unchanged': True, 'settings_scope': '批次及每窗前后 CPU 集合、调频驱动/governor/最大频率、空闲态名称/公布延迟/禁用标志；不代表实际频率不变，未记录采样当时的 cpuidle 驱动名称。',
-           'diagnostic_only': True, 'limitations': '按秒采集已知进程名的活动，可能漏过不足一秒的任务和其他负载；perf OFF仍开启应用分段诊断；smoke已离线补查show-lost-events。'}
+           'settings_unchanged': True, 'settings_scope': '批次及每窗前后 CPU 集合、调频驱动/governor/最大频率、空闲态名称/公布延迟/禁用标志；新格式另核对内核版本、cpuidle驱动和核型集合；不代表实际频率不变。',
+           'diagnostic_only': True, 'limitations': '按秒采集已知进程名的活动，可能漏过不足一秒的任务和其他负载；perf OFF仍开启应用分段诊断；旧版未加show-lost-events时必须提供离线补查。缺失链按原因保留，不能填零。'}
     (args.directory/'audit.json').write_text(json.dumps(out, ensure_ascii=False, indent=2)+'\n')
     print(json.dumps({k: v for k, v in out.items() if k != 'windows'}, ensure_ascii=False))
 
