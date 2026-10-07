@@ -1,8 +1,8 @@
 import unittest
 
 from run_local_latency_experiments import (activity_delta, aggregate_process_activity,
-                                           activity_under_roots, observed_competitors,
-                                           system_busy_delta)
+                                           activity_under_roots, make_windows,
+                                           observed_competitors, system_busy_delta)
 
 
 class LocalLatencyRunnerTest(unittest.TestCase):
@@ -69,6 +69,16 @@ class LocalLatencyRunnerTest(unittest.TestCase):
         self.assertEqual(observed_competitors(
             activity, current_pid=99, ambient_roots=["/home/zwc/MPC_GPU"]),
             [activity[1]])
+
+    def test_d03_has_mirrored_observation_order_for_two_scenarios(self):
+        windows = make_windows("d03")
+        self.assertEqual(len(windows), 16)
+        for offset in (0, 8):
+            block = windows[offset:offset + 8]
+            self.assertEqual([(item["mode"], item["observation"]) for item in block], [
+                ("A", "L0"), ("B", "L0"), ("B", "L1"), ("A", "L1"),
+                ("A", "L1"), ("B", "L1"), ("B", "L0"), ("A", "L0"),
+            ])
 
     def test_system_busy_ticks_excludes_idle(self):
         before = {"cpu": {"total_ticks": 1000, "idle_ticks": 700}}

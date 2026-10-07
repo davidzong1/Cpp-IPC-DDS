@@ -23,6 +23,7 @@ B_BINARY = B_WORKTREE / "build-latency-formal/bin/shared_net_benchmark"
 B_LIBRARY = B_WORKTREE / "build-latency-formal/lib/libipc.so"
 B_GATEWAY = B_WORKTREE / "build-latency-formal/bin/dzipc_gateway"
 SCENARIOS = [(1, 4096), (32, 64), (1, 1048576)]
+D03_SCENARIOS = SCENARIOS[:2]
 IDLE_SECONDS = 20
 
 
@@ -241,6 +242,18 @@ def make_windows(phase):
                                 "observation": "L0", "scenario_index": scenario_index,
                                 "pair_block": 1 if position < 4 else 2,
                                 "position": position + 1, "order": len(windows) + 1})
+    elif phase == "d03":
+        frozen_order = [("A", 0), ("B", 0), ("B", 1), ("A", 1),
+                        ("A", 1), ("B", 1), ("B", 0), ("A", 0)]
+        for scenario_index, (subscribers, size) in enumerate(D03_SCENARIOS):
+            for position, (mode, observation) in enumerate(frozen_order):
+                windows.append({"id": f"d03-{scenario_index + 1}-{mode}-L{observation}-sub{subscribers}-bytes{size}-p{position + 1}",
+                                "mode": mode, "subscribers": subscribers, "bytes": size,
+                                "seconds": 10, "rate_hz": 100, "warmup_seconds": 2,
+                                "observation": f"L{observation}", "receive_trace": bool(observation),
+                                "scenario_index": scenario_index,
+                                "pair_block": 1 if position < 4 else 2,
+                                "position": position + 1, "order": len(windows) + 1})
     else:
         raise ValueError(phase)
     return windows
@@ -254,7 +267,7 @@ def binary_for(mode):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--phase", choices=("smoke", "d02"), required=True)
+    parser.add_argument("--phase", choices=("smoke", "d02", "d03"), required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--validate-plan", action="store_true")
     parser.add_argument("--max-idle-wait-seconds", type=int, default=300)
@@ -315,6 +328,8 @@ def main():
                    "--subscribers", str(window["subscribers"]),
                    "--seconds", str(window["seconds"]), "--rate", str(window["rate_hz"]),
                    "--data-shards", "4", "--data-workers", "4"]
+        if window.get("receive_trace"):
+            command.append("--receive-trace")
         environment_before = environment_snapshot()
         started = time.time_ns()
         ticks = os.sysconf("SC_CLK_TCK")
