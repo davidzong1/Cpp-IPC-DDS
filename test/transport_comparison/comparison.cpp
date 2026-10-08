@@ -25,6 +25,7 @@
 #include "types_select.hpp"
 #include "dzIPC/shm_pub_sub_ipc.h"
 #include "dzIPC/socket_pub_sub_ipc.h"
+#include "dzIPC/shared_pub_sub_ipc.h"
 #include "dzIPC/shm_ser_cli_ipc.h"
 #include "dzIPC/socket_ser_cli_ipc.h"
 #include "dzIPC/threepools/recv_worker.h"
@@ -255,7 +256,7 @@ struct Bench {
     }
     void init() {
         dzIPC::EnableNodelet(false);
-        dzIPC::EnableDzFlat(c.backend=="a"||c.backend=="b"||c.backend=="prebuilt");
+        dzIPC::EnableDzFlat(c.backend=="a"||c.backend=="b"||c.backend=="prebuilt"||c.backend=="shared");
         const bool sender=c.role=="pub";
         if(isdds()) {
             dp=dds_create_participant(c.domain,nullptr,nullptr);check(dp,"participant");
@@ -308,11 +309,13 @@ struct Bench {
             msg->height=1;msg->width=0;msg->step=0;msg->header.stamp=0;
             td.push_back(std::make_shared<dzIPC::TopicData>(msg,77));
             if(sender) {
-                if(issocket()) pubs.emplace_back(new dzIPC::socket::socket_pub_ipc(td.back(),topic(i),c.domain));
+                if(c.backend=="shared") pubs.emplace_back(new dzIPC::shared_net::Publisher(td.back(),topic(i),c.domain));
+                else if(issocket()) pubs.emplace_back(new dzIPC::socket::socket_pub_ipc(td.back(),topic(i),c.domain));
                 else pubs.emplace_back(new dzIPC::shm::shm_pub_ipc(td.back(),topic(i),c.domain));
                 pubs.back()->InitChannel("");
             } else {
-                if(issocket()) subs.emplace_back(new dzIPC::socket::socket_sub_ipc(td.back(),topic(i),c.domain,64));
+                if(c.backend=="shared") subs.emplace_back(new dzIPC::shared_net::Subscriber(td.back(),topic(i),c.domain,64));
+                else if(issocket()) subs.emplace_back(new dzIPC::socket::socket_sub_ipc(td.back(),topic(i),c.domain,64));
                 else subs.emplace_back(new dzIPC::shm::shm_sub_ipc(td.back(),topic(i),c.domain,64));
                 subs.back()->InitChannel("");
             }
@@ -361,7 +364,7 @@ struct Bench {
             auto m=std::static_pointer_cast<Img>(td[i]->topic());
             m->data.resize(c.bytes);m->width=seq;m->height=1;m->step=c.bytes;m->header.stamp=double(begin);
             fill_payload(m->data.data(),m->data.size(),seq,c.full);
-            if(c.backend=="prebuilt") {
+            if(c.backend=="prebuilt"||c.backend=="shared") {
                 std::vector<uint8_t> segment(m->dzflat_size());
                 if(!m->dzflat_write(segment.data(),segment.size())) throw std::runtime_error("预构造段失败");
                 entered=now_ns();ok=pubs[i]->publish_prebuilt_segment(segment.data(),segment.size());finished=now_ns();
@@ -569,6 +572,13 @@ struct Bench {
         }
         o<<",\"received\":"<<received<<",\"received_in_window\":"<<win<<",\"bad\":"<<bad<<",\"duplicate\":"<<duplicate
          <<",\"gaps\":"<<gaps<<",\"topics_covered\":"<<covered<<",\"topic_rx_min\":"<<min_rx<<",\"topic_rx_max\":"<<max_rx;
+        // 仅在计时结束后导出原始时间值；压力仍保留原每百条抽样规则。
+        std::ofstream raw(c.out+".timing.csv"); raw.precision(12); raw<<"kind,index,value_us\n";
+        auto raw_values=[&](const char* kind,const std::vector<double>& values) {
+            for(size_t i=0;i<values.size();++i) raw<<kind<<','<<i<<','<<values[i]<<'\n';
+        };
+        raw_values("latency",lat); raw_values("send",send_times); raw_values("prepare",prepare_times); raw_values("rpc",rpc_times);
+        raw.close(); if(!raw) throw std::runtime_error("原始时间值写入失败");
         Histogram::write(o,std::move(lat),"latency");Histogram::write(o,send_times,"send");
         Histogram::write(o,prepare_times,"prepare");Histogram::write(o,rpc_times,"rpc");
         o<<",\"stalled\":"<<stalled<<",\"window\":"<<window<<",\"offered_rate\":"<<offered_rate;

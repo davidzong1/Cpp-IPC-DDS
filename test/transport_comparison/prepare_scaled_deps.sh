@@ -3,8 +3,8 @@
 set -euo pipefail
 target="${1:?用法：prepare_scaled_deps.sh 仓库外临时目录}"
 mkdir -p "$target/sources" "$target/prefix"
-curl -fL --retry 3 https://codeload.github.com/eclipse-iceoryx/iceoryx/tar.gz/refs/tags/v2.0.5 -o "$target/sources/iceoryx.tar.gz"
-curl -fL --retry 3 https://codeload.github.com/eclipse-cyclonedds/cyclonedds/tar.gz/refs/tags/0.10.2 -o "$target/sources/cyclonedds.tar.gz"
+curl -fL --retry 3 --retry-all-errors https://codeload.github.com/eclipse-iceoryx/iceoryx/tar.gz/refs/tags/v2.0.5 -o "$target/sources/iceoryx.tar.gz"
+curl -fL --retry 3 --retry-all-errors https://codeload.github.com/eclipse-cyclonedds/cyclonedds/tar.gz/refs/tags/0.10.2 -o "$target/sources/cyclonedds.tar.gz"
 sha256sum "$target/sources/iceoryx.tar.gz" "$target/sources/cyclonedds.tar.gz" > "$target/source-sha256.txt"
 tar -xf "$target/sources/iceoryx.tar.gz" -C "$target/sources"
 tar -xf "$target/sources/cyclonedds.tar.gz" -C "$target/sources"
