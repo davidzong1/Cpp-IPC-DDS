@@ -946,6 +946,13 @@ namespace
         return true;
       }
       auto id = ipc::detail::storage_from_wire(*reinterpret_cast<ipc::storage_id_t *>(&msg->data_));
+      /* 无效 loan/损坏槽位不能进入任一归还路径；否则会把 -1 解释成
+       * storage id，污染池的空闲链。 */
+      if (!ipc::detail::valid_storage(id))
+      {
+        ipc::error("[clear_message] invalid storage id: id = %ld\n", (long)id);
+        return true;
+      }
       auto sz = static_cast<std::size_t>(r_size);
       if constexpr (ipc::relat_trait<Flag>::is_broadcast)
       {
@@ -1877,19 +1884,24 @@ namespace
        * lo.size 属于同一档。TLV 的历史页尾由此保持位于逻辑载荷末尾。 */
       const std::int32_t remain = static_cast<std::int32_t>(used_size ? used_size : lo.size) -
                                   static_cast<std::int32_t>(ipc::data_length);
-      auto id = ipc::detail::storage_to_wire(lo.id);
+      /* 回调可能在队列覆盖/清理路径中晚于本次调用执行；不能捕获
+       * `&lo`（调用栈上的 loan_t），否则并发发布会读到已失效或被复用的
+       * loan，进而把无效 id 当成 chunk 归还。只捕获稳定的值。 */
+      auto const loan_id = lo.id;
+      auto id = ipc::detail::storage_to_wire(loan_id);
+      auto const loan_size = lo.size;
       bool pushed = wait_for(
           inf->wt_waiter_,
           [&]
           {
             /* 同上: push 覆写被套圈的格子时也要归还被丢弃消息的 chunk。 */
             return !que->push(
-                [inf, &lo](void *p, ipc::circ::cc_t rem_cc)
-                {
-                  const bool ready = clear_message<typename queue_t::value_t, flag_t>(inf, p, rem_cc);
-                  if (ready) mark_published(inf, lo.size, lo.id);
-                  return ready;
-                },
+                            [inf, loan_id, loan_size](void *p, ipc::circ::cc_t rem_cc)
+                            {
+                              const bool ready = clear_message<typename queue_t::value_t, flag_t>(inf, p, rem_cc);
+                              if (ready) mark_published(inf, loan_size, loan_id);
+                              return ready;
+                            },
                 inf->cc_id_, msg_id, remain, &id, 0);
           },
           tm);
@@ -1899,10 +1911,10 @@ namespace
           ipc::log("publish_loan force_push: msg_id = %zd, cap = %zd\n", msg_id,
                    lo.size);
         pushed = que->force_push(
-            [inf, &lo](void *p, ipc::circ::cc_t rem_cc)
+            [inf, loan_id, loan_size](void *p, ipc::circ::cc_t rem_cc)
             {
               const bool ready = clear_message<typename queue_t::value_t, flag_t>(inf, p, rem_cc);
-              if (ready) mark_published(inf, lo.size, lo.id);
+              if (ready) mark_published(inf, loan_size, loan_id);
               return ready;
             },
             inf->cc_id_, msg_id, remain, &id, 0);

@@ -33,6 +33,7 @@ list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/dzflat_benchmark.cpp")
 list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/dzflat_tx_benchmark.cpp")
 list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/dzflat_py_publisher.cpp")
 list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/pool_attribution_benchmark.cpp")
+list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/loan_phase_latency_benchmark.cpp")
 # W02 统一跨进程基准: 自带 main(), 同上必须在 GLOB 列表里剔除, 否则会与 gtest_main 冲突。
 list(REMOVE_ITEM SRC_FILES "${LIBIPC_PROJECT_DIR}/test/xproc_benchmark.cpp")
 # W02 自检用例也是显式 add_executable（要注入 W02_BENCH_BIN 与依赖基准 target），
@@ -402,6 +403,18 @@ if(UNIX AND NOT APPLE)
 endif()
 set_target_properties(pool_attribution_benchmark PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 message(STATUS "Created benchmark executable: pool_attribution_benchmark")
+
+add_executable(loan_phase_latency_measure ${LIBIPC_PROJECT_DIR}/test/loan_phase_latency_benchmark.cpp)
+target_compile_options(loan_phase_latency_measure PRIVATE
+    $<$<CONFIG:Release>:-O2>
+    $<$<CONFIG:RelWithDebInfo>:-O2>)
+target_compile_definitions(loan_phase_latency_measure PRIVATE $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
+target_link_libraries(loan_phase_latency_measure ipc Threads::Threads)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(loan_phase_latency_measure rt)
+endif()
+set_target_properties(loan_phase_latency_measure PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+message(STATUS "Created benchmark executable: loan_phase_latency_measure")
 # ================================================================
 # DZFlat 离线基准 (docs/dzflat_shm.md Step 1 验收门)
 # 自带 main(), 不是 gtest; 覆写 global operator new 以统计堆分配次数。
