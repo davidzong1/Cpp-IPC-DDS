@@ -491,6 +491,37 @@ struct prod_cons_impl<wr<relat::multi, relat::multi, trans::broadcast>> {
         ic_incr = 0x0000000100000000ull
     };
 
+    // Free flags use the low 32 bits; committed flags have all upper bits set.
+    // This third value arbitrates slot copies without changing the SHM layout.
+    constexpr static flag_t slot_busy = 0x0000000100000000ull;
+    constexpr static flag_t reader_busy = 0x4000000000000000ull;
+
+    template <typename E, std::size_t N>
+    void release_reader_copies(circ::cc_t readers, E(& elems)[N]) noexcept {
+        for (auto& el : elems) {
+            auto flag = el.f_ct_.load(std::memory_order_acquire);
+            if ((flag & 0xffffffe000000000ull) != reader_busy) continue;
+            const auto owner = circ::cc_t{1} << ((flag >> 32) & 31);
+            if (readers & owner)
+                el.f_ct_.compare_exchange_strong(flag,
+                    ~static_cast<flag_t>(static_cast<circ::u2_t>(flag)),
+                    std::memory_order_release);
+        }
+    }
+
+    template <typename W, typename E>
+    static bool reader_copy_in_progress(W* wrapper, E* el, flag_t flag) noexcept {
+        if ((flag & 0xffffffe000000000ull) != reader_busy) return false;
+        const auto owner = circ::cc_t{1} << ((flag >> 32) & 31);
+        if (!(wrapper->elems()->connections(std::memory_order_acquire) & owner)) {
+            // Disconnect is quiescent, or the control plane confirmed death.
+            // Restore the committed generation so its other readers can finish.
+            el->f_ct_.compare_exchange_strong(flag,
+                ~static_cast<flag_t>(static_cast<circ::u2_t>(flag)), std::memory_order_release);
+        }
+        return true;
+    }
+
     template <std::size_t DataSize, std::size_t AlignSize>
     struct elem_t {
         std::aligned_storage_t<DataSize, AlignSize> data_ {};
@@ -548,90 +579,95 @@ struct prod_cons_impl<wr<relat::multi, relat::multi, trans::broadcast>> {
 
     template <typename W, typename F, typename E>
     bool push(W* wrapper, F&& f, E* elems) {
-        E* el;
-        circ::u2_t cur_ct;
-        rc_t epoch = epoch_.load(std::memory_order_acquire);
         for (unsigned k = 0;;) {
-            circ::cc_t cc = wrapper->elems()->connections(std::memory_order_relaxed);
+            const circ::cc_t cc = wrapper->elems()->connections(std::memory_order_acquire);
             if (cc == 0) return false; // no reader
-            el = elems + circ::index_of(cur_ct = ct_.load(std::memory_order_relaxed));
-            // check all consumers have finished reading this element
-            auto cur_rc = el->rc_.load(std::memory_order_relaxed);
-            circ::cc_t rem_cc = cur_rc & rc_mask;
-            if ((cc & rem_cc) && ((cur_rc & ~ep_mask) == epoch)) {
-                return false; // has not finished yet
+            auto cur_ct = ct_.load(std::memory_order_acquire);
+            if (static_cast<circ::u2_t>(cur_ct - cursor()) >= kRingSlots) {
+                if (ct_.load(std::memory_order_acquire) != cur_ct) continue;
+                return false;
             }
-            else if (!rem_cc) {
-                auto cur_fl = el->f_ct_.load(std::memory_order_acquire);
-                if ((cur_fl != cur_ct) && cur_fl) {
-                    return false; // full
-                }
+            auto* el = elems + circ::index_of(cur_ct);
+            auto flag = el->f_ct_.load(std::memory_order_acquire);
+            if (flag == slot_busy || reader_copy_in_progress(wrapper, el, flag)) {
+                // A reserving writer advances ct_ before the payload callback.
+                // A reader only holds this state for the descriptor copy.
+                ipc::yield(k);
+                continue;
             }
-            // consider rem_cc to be 0 here
-            if (el->rc_.compare_exchange_weak(
-                        cur_rc, inc_mask(epoch | (cur_rc & ep_mask)) | static_cast<rc_t>(cc), std::memory_order_relaxed) &&
-                epoch_.compare_exchange_weak(epoch, epoch, std::memory_order_acq_rel)) {
-                break;
+            const auto old_commit = ~static_cast<flag_t>(static_cast<circ::u2_t>(cur_ct - kRingSlots));
+            if (flag != cur_ct && flag != old_commit && !(flag == 0 && cur_ct < kRingSlots)) {
+                if (ct_.load(std::memory_order_acquire) != cur_ct) continue;
+                return false;
             }
-            ipc::yield(k);
+            if (!el->f_ct_.compare_exchange_weak(flag, slot_busy, std::memory_order_acq_rel)) continue;
+            if (ct_.load(std::memory_order_acquire) != cur_ct) {
+                el->f_ct_.store(flag, std::memory_order_release);
+                continue;
+            }
+            auto cur_rc = el->rc_.load(std::memory_order_acquire);
+            if ((cur_rc & cc & rc_mask) != 0) {
+                el->f_ct_.store(flag, std::memory_order_release);
+                return false;
+            }
+            auto expected = cur_ct;
+            if (!ct_.compare_exchange_strong(expected, cur_ct + 1, std::memory_order_acq_rel)) {
+                el->f_ct_.store(flag, std::memory_order_release);
+                continue;
+            }
+            const auto epoch = epoch_.load(std::memory_order_acquire);
+            while (!el->rc_.compare_exchange_weak(cur_rc,
+                       inc_mask(epoch | (cur_rc & ep_mask)) | static_cast<rc_t>(cc),
+                       std::memory_order_relaxed)) {}
+            // Disconnected readers cannot release the overwritten descriptor.
+            if constexpr (std::is_invocable_v<F, void*, circ::cc_t>)
+                std::forward<F>(f)(&(el->data_), static_cast<circ::cc_t>(cur_rc & rc_mask));
+            else
+                std::forward<F>(f)(&(el->data_));
+            el->f_ct_.store(~static_cast<flag_t>(cur_ct), std::memory_order_release);
+            publish_ready(elems);
+            return true;
         }
-        // ct_ reservation is complete before invoking the copy callback.
-        ct_.store(cur_ct + 1, std::memory_order_release);
-        std::forward<F>(f)(&(el->data_));
-        // set flag & try update wt
-        el->f_ct_.store(~static_cast<flag_t>(cur_ct), std::memory_order_release);
-        publish_ready(elems);
-        return true;
     }
 
     template <typename W, typename F, typename E>
     bool force_push(W* wrapper, F&& f, E* elems) {
-        E* el;
-        circ::u2_t cur_ct;
-        circ::cc_t rem_cc = 0;
-        rc_t epoch = epoch_.fetch_add(ep_incr, std::memory_order_release) + ep_incr;
         for (unsigned k = 0;;) {
-            circ::cc_t cc = wrapper->elems()->connections(std::memory_order_relaxed);
+            const circ::cc_t cc = wrapper->elems()->connections(std::memory_order_acquire);
             if (cc == 0) return false; // no reader
-            el = elems + circ::index_of(cur_ct = ct_.load(std::memory_order_relaxed));
-            // check all consumers have finished reading this element
+            auto cur_ct = ct_.load(std::memory_order_acquire);
+            // A full ring behind an uncommitted writer cannot be overwritten.
+            if (static_cast<circ::u2_t>(cur_ct - cursor()) >= kRingSlots) {
+                if (ct_.load(std::memory_order_acquire) != cur_ct) continue;
+                return false;
+            }
+            auto* el = elems + circ::index_of(cur_ct);
+            auto flag = el->f_ct_.load(std::memory_order_acquire);
+            if (flag == slot_busy || reader_copy_in_progress(wrapper, el, flag)) {
+                ipc::yield(k);
+                continue;
+            }
+            const auto old_commit = ~static_cast<flag_t>(static_cast<circ::u2_t>(cur_ct - kRingSlots));
+            if (flag != cur_ct && flag != old_commit && !(flag == 0 && cur_ct < kRingSlots)) {
+                if (ct_.load(std::memory_order_acquire) != cur_ct) continue;
+                return false;
+            }
+            if (!el->f_ct_.compare_exchange_weak(flag, slot_busy, std::memory_order_acq_rel)) continue;
+            auto expected = cur_ct;
+            if (!ct_.compare_exchange_strong(expected, cur_ct + 1, std::memory_order_acq_rel)) {
+                el->f_ct_.store(flag, std::memory_order_release);
+                continue;
+            }
             auto cur_rc = el->rc_.load(std::memory_order_acquire);
-            rem_cc = cur_rc & rc_mask;
-            // 同 <single,multi,broadcast>::force_push: 只覆写, 不再 disconnect_receiver。
-            // 详细理由见该处注释。
-            if (cc & rem_cc) {
-                static std::atomic<unsigned> warned{0};
-                const unsigned n = warned.fetch_add(1, std::memory_order_relaxed);
-                if (n < 8) {
-                    ipc::log("force_push: overwriting slot still held by reader(s); "
-                             "k = %u, cc = %u, rem_cc = %u\n", k, cc, rem_cc);
-                } else if (n == 8) {
-                    ipc::log("force_push: further overwrite warnings suppressed\n");
-                }
-            }
-            // just compare & exchange
-            if (el->rc_.compare_exchange_weak(
-                        cur_rc, inc_mask(epoch | (cur_rc & ep_mask)) | static_cast<rc_t>(cc), std::memory_order_relaxed)) {
-                if (epoch == epoch_.load(std::memory_order_acquire)) {
-                    break; // rem_cc 取自 CAS 成功的那一轮
-                }
-                else if (push(wrapper, std::forward<F>(f), elems)) {
-                    // 退化为 push(): 它只占用"读方都已放行"的槽位, 不存在"永远看不
-                    // 到"的接收方, 故覆写回调按 rem_cc = 0 处理(见 queue.h 的默认实参)。
-                    return true;
-                }
-                epoch = epoch_.fetch_add(ep_incr, std::memory_order_release) + ep_incr;
-            }
-            ipc::yield(k);
+            const auto epoch = epoch_.fetch_add(ep_incr, std::memory_order_acq_rel) + ep_incr;
+            while (!el->rc_.compare_exchange_weak(cur_rc,
+                       inc_mask(epoch | (cur_rc & ep_mask)) | static_cast<rc_t>(cc),
+                       std::memory_order_relaxed)) {}
+            std::forward<F>(f)(&(el->data_), static_cast<circ::cc_t>(cur_rc & rc_mask));
+            el->f_ct_.store(~static_cast<flag_t>(cur_ct), std::memory_order_release);
+            publish_ready(elems);
+            return true;
         }
-        // ct_ reservation is complete before invoking the copy callback.
-        ct_.store(cur_ct + 1, std::memory_order_release);
-        // rem_cc 语义与 <single,multi,broadcast>::force_push 一致, 见该处注释。
-        std::forward<F>(f)(&(el->data_), rem_cc);
-        // set flag & try update wt
-        el->f_ct_.store(~static_cast<flag_t>(cur_ct), std::memory_order_release);
-        publish_ready(elems);
-        return true;
     }
 
     /* Passive sniffers do not claim a receiver bit.  A normal MPMC push
@@ -640,55 +676,71 @@ struct prod_cons_impl<wr<relat::multi, relat::multi, trans::broadcast>> {
      * the next slot with the same CAS used by push(), clear stale reader bits,
      * and publish the fragment without touching receiver ownership. */
     template <typename W, typename F, typename E>
-    bool push_sniffer(W* /*wrapper*/, F&& f, E* elems) {
-        const rc_t epoch = epoch_.fetch_add(ep_incr, std::memory_order_acq_rel) + ep_incr;
+    bool push_sniffer(W* wrapper, F&& f, E* elems) {
         for (unsigned k = 0;;) {
             const auto cur_ct = ct_.load(std::memory_order_relaxed);
+            if (static_cast<circ::u2_t>(cur_ct - cursor()) >= kRingSlots) {
+                if (ct_.load(std::memory_order_acquire) != cur_ct) continue;
+                return false;
+            }
             auto* el = elems + circ::index_of(cur_ct);
+            auto flag = el->f_ct_.load(std::memory_order_acquire);
+            if (flag == slot_busy || reader_copy_in_progress(wrapper, el, flag) ||
+                !el->f_ct_.compare_exchange_weak(flag, slot_busy, std::memory_order_acq_rel)) {
+                ipc::yield(k);
+                continue;
+            }
+            auto expected = cur_ct;
+            if (!ct_.compare_exchange_strong(expected, cur_ct + 1, std::memory_order_acq_rel)) {
+                el->f_ct_.store(flag, std::memory_order_release);
+                continue;
+            }
+            const rc_t epoch = epoch_.fetch_add(ep_incr, std::memory_order_acq_rel) + ep_incr;
             auto cur_rc = el->rc_.load(std::memory_order_acquire);
             const auto desired = inc_mask(epoch);
-            if (el->rc_.compare_exchange_weak(cur_rc, desired,
-                                              std::memory_order_relaxed,
-                                              std::memory_order_acquire)) {
-                /* Advance before invoking the caller's copy callback.  This
-                 * preserves the existing MPMC writer reservation ordering. */
-                ct_.store(cur_ct + 1, std::memory_order_release);
-                std::forward<F>(f)(&(el->data_));
-                el->f_ct_.store(~static_cast<flag_t>(cur_ct),
-                                std::memory_order_release);
-                publish_ready(elems);
-                return true;
-            }
-            ipc::yield(k);
+            while (!el->rc_.compare_exchange_weak(cur_rc, desired, std::memory_order_relaxed)) {}
+            std::forward<F>(f)(&(el->data_));
+            el->f_ct_.store(~static_cast<flag_t>(cur_ct), std::memory_order_release);
+            publish_ready(elems);
+            return true;
         }
     }
 
     template <typename W, typename F, typename R, typename E, std::size_t N>
     bool pop(W* wrapper, circ::u2_t& cur, F&& f, R&& out, E(& elems)[N]) {
-        auto* el = elems + circ::index_of(cur);
-        auto cur_fl = el->f_ct_.load(std::memory_order_acquire);
-        if (cur_fl != ~static_cast<flag_t>(cur)) {
-            return false; // empty
-        }
-        ++cur;
-        std::forward<F>(f)(&(el->data_));
         for (unsigned k = 0;;) {
+            const auto published = cursor();
+            if (cur == published) return false;
+            if (static_cast<circ::u2_t>(published - cur) > N) cur = published - N;
+            auto* el = elems + circ::index_of(cur);
+            auto flag = el->f_ct_.load(std::memory_order_acquire);
+            if (flag == slot_busy || reader_copy_in_progress(wrapper, el, flag)) {
+                ipc::yield(k);
+                continue;
+            }
+            if (flag != ~static_cast<flag_t>(cur)) {
+                ++cur; // A forced overwrite removed this committed generation.
+                continue;
+            }
+            const auto copying = reader_busy |
+                (static_cast<flag_t>(circ::bit_slot_of(wrapper->connected_id())) << 32) | cur;
+            if (!el->f_ct_.compare_exchange_weak(flag, copying, std::memory_order_acq_rel)) continue;
             auto cur_rc = el->rc_.load(std::memory_order_acquire);
-            if ((cur_rc & rc_mask) == 0) {
-                std::forward<R>(out)(true);
-                el->f_ct_.store(cur + N - 1, std::memory_order_release);
-                return true;
+            const auto my = static_cast<rc_t>(wrapper->connected_id());
+            if ((cur_rc & my) == 0) {
+                el->f_ct_.store(flag, std::memory_order_release);
+                ++cur;
+                continue;
             }
-            auto nxt_rc = inc_rc(cur_rc) & ~static_cast<rc_t>(wrapper->connected_id());
-            bool last_one = false;
-            if ((last_one = (nxt_rc & rc_mask) == 0)) {
-                el->f_ct_.store(cur + N - 1, std::memory_order_release);
-            }
-            if (el->rc_.compare_exchange_weak(cur_rc, nxt_rc, std::memory_order_release)) {
-                std::forward<R>(out)(last_one);
-                return true;
-            }
-            ipc::yield(k);
+            std::forward<F>(f)(&(el->data_));
+            rc_t next;
+            do { next = inc_rc(cur_rc) & ~my; }
+            while (!el->rc_.compare_exchange_weak(cur_rc, next, std::memory_order_relaxed));
+            const bool last = (next & rc_mask) == 0;
+            el->f_ct_.store(last ? static_cast<circ::u2_t>(cur + N) : flag, std::memory_order_release);
+            ++cur;
+            std::forward<R>(out)(last);
+            return true;
         }
     }
 };

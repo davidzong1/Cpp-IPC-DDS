@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <set>
 #include <string>
 #include <thread>
@@ -250,6 +251,271 @@ TEST(ShmMpmcChannel, FullRingRejectsAndReusesReleasedSlot) {
     EXPECT_EQ(first.sequence, 0u);
     EXPECT_TRUE(tx.push(prep, 7u, kRingSlots));
     EXPECT_TRUE(rx.disconnect());
+}
+
+TEST(ShmMpmcChannel, ForcePushCannotOverwriteUncommittedWriter) {
+    elems_t elems{};
+    queue_t tx0{&elems}, tx1{&elems}, rx{&elems};
+    ASSERT_TRUE(rx.connect());
+    ASSERT_TRUE(tx0.ready_sending());
+    ASSERT_TRUE(tx1.ready_sending());
+
+    std::promise<void> entered, release;
+    auto resumed = release.get_future().share();
+    auto first = std::async(std::launch::async, [&] {
+        return tx0.push([&](void*, ipc::circ::cc_t) {
+            entered.set_value();
+            resumed.wait();
+            return true;
+        }, 0u, 0u);
+    });
+    entered.get_future().wait();
+    auto prep = [](void*, ipc::circ::cc_t) { return true; };
+    bool filled = true;
+    for (std::uint32_t sequence = 1; sequence < kRingSlots; ++sequence)
+        filled = tx1.push(prep, 1u, sequence) && filled;
+    const bool pushed = tx1.push(prep, 2u, 0u);
+    const bool overwritten = tx1.force_push(prep, 2u, 0u);
+    release.set_value();
+    EXPECT_TRUE(first.get());
+    ASSERT_TRUE(filled);
+    EXPECT_FALSE(pushed);
+    EXPECT_FALSE(overwritten) << "An in-flight writer owns the wrapped slot";
+
+    message value;
+    ASSERT_TRUE(rx.pop(value));
+    EXPECT_EQ(value.writer, 0u);
+    EXPECT_EQ(value.sequence, 0u);
+    for (std::uint32_t sequence = 1; sequence < kRingSlots; ++sequence) {
+        ASSERT_TRUE(rx.pop(value));
+        EXPECT_EQ(value.writer, 1u);
+        EXPECT_EQ(value.sequence, sequence);
+    }
+    EXPECT_FALSE(rx.pop(value));
+    EXPECT_TRUE(rx.disconnect());
+}
+
+struct PausedReservation {
+    std::atomic<std::uint64_t> value{0};
+    std::atomic<bool> pause{false};
+    std::promise<void> entered;
+    std::shared_future<void> resumed;
+
+    std::uint64_t load(std::memory_order order) const { return value.load(order); }
+    void store(std::uint64_t next, std::memory_order order) { value.store(next, order); }
+    bool compare_exchange_weak(std::uint64_t& expected, std::uint64_t next,
+                               std::memory_order order) {
+        const bool claimed = value.compare_exchange_weak(expected, next, order);
+        if (claimed && pause.exchange(false)) {
+            entered.set_value();
+            resumed.wait();
+        }
+        return claimed;
+    }
+    bool compare_exchange_weak(std::uint64_t& expected, std::uint64_t next,
+                               std::memory_order success, std::memory_order failure) {
+        const bool claimed = value.compare_exchange_weak(expected, next, success, failure);
+        if (claimed && pause.exchange(false)) {
+            entered.set_value();
+            resumed.wait();
+        }
+        return claimed;
+    }
+};
+
+TEST(ShmMpmcChannel, ConcurrentReservationCannotBeMistakenForFullRing) {
+    // Pause immediately after the first writer claims the reader bitmap,
+    // before it advances ct_. This is the failing production interleaving.
+    struct Slot {
+        std::aligned_storage_t<sizeof(message), alignof(message)> data_{};
+        PausedReservation rc_;
+        std::atomic<std::uint64_t> f_ct_{0};
+    } slots[kRingSlots];
+    ipc::prod_cons_impl<flag_t> policy;
+    elems_t elems{};
+    queue_t tx{&elems}, rx{&elems};
+    ASSERT_TRUE(rx.connect());
+    std::promise<void> release;
+    slots[0].rc_.resumed = release.get_future().share();
+    slots[0].rc_.pause.store(true);
+    auto first = std::async(std::launch::async, [&] {
+        return policy.push(&tx, [](void* data) { new (data) message(0, 0); }, slots);
+    });
+    slots[0].rc_.entered.get_future().wait();
+    const bool pushed = policy.push(&tx, [](void* data) { new (data) message(1, 0); }, slots);
+    const bool forced = !pushed && policy.force_push(&tx,
+        [](void* data, ipc::circ::cc_t = 0) { new (data) message(1, 0); }, slots);
+    release.set_value();
+    EXPECT_TRUE(first.get());
+    ASSERT_TRUE(pushed || forced);
+    EXPECT_EQ(policy.ct_.load(), 2u);
+    EXPECT_EQ(policy.write_index(), 2u);
+    const auto* a = reinterpret_cast<const message*>(&slots[0].data_);
+    const auto* b = reinterpret_cast<const message*>(&slots[1].data_);
+    EXPECT_EQ(a->writer, 0u);
+    EXPECT_EQ(b->writer, 1u);
+    EXPECT_TRUE(rx.disconnect());
+}
+
+TEST(ShmMpmcChannel, ReaderWaitsForContiguousCommitBeforeReleasingSlot) {
+    ipc::prod_cons_impl<flag_t> policy;
+    elems_t elems{};
+    queue_t rx{&elems};
+    ASSERT_TRUE(rx.connect());
+    elems_t::elem_t slots[kRingSlots];
+    new (&slots[0].data_) message(3u, 7u);
+    slots[0].rc_.store(rx.connected_id());
+    slots[0].f_ct_.store(~std::uint64_t{0});
+    policy.ct_.store(1);
+    ipc::circ::u2_t cur = 0;
+    message value;
+    auto copy = [&](void* data) { value = *static_cast<message*>(data); };
+    auto writable = [](bool) {};
+    EXPECT_FALSE(policy.pop(&rx, cur, copy, writable, slots));
+    EXPECT_EQ(cur, 0u);
+    policy.publish_ready(slots);
+    EXPECT_EQ(policy.write_index(), 1u);
+    ASSERT_TRUE(policy.pop(&rx, cur, copy, writable, slots));
+    EXPECT_EQ(value.writer, 3u);
+    EXPECT_EQ(value.sequence, 7u);
+    EXPECT_TRUE(rx.disconnect());
+}
+
+TEST(ShmMpmcChannel, ForcedCommittedOverwriteResynchronizesSlowReader) {
+    elems_t elems{};
+    queue_t tx{&elems}, rx{&elems};
+    ASSERT_TRUE(rx.connect());
+    ASSERT_TRUE(tx.ready_sending());
+    std::uint32_t discarded = 0;
+    auto prep = [&](void*, ipc::circ::cc_t readers) {
+        if (readers) ++discarded;
+        return true;
+    };
+    for (std::uint32_t sequence = 0; sequence < 3 * kRingSlots; ++sequence)
+        ASSERT_TRUE(tx.force_push(prep, 0u, sequence));
+    EXPECT_EQ(discarded, 2 * kRingSlots);
+    message value;
+    for (std::uint32_t sequence = 2 * kRingSlots; sequence < 3 * kRingSlots; ++sequence) {
+        ASSERT_TRUE(rx.pop(value));
+        EXPECT_EQ(value.sequence, sequence);
+    }
+    EXPECT_FALSE(rx.pop(value));
+    EXPECT_TRUE(rx.connected());
+    EXPECT_TRUE(rx.disconnect());
+}
+
+TEST(ShmMpmcChannel, DisconnectedReaderCopyDoesNotBlockSurvivingReader) {
+    elems_t elems{};
+    queue_t tx{&elems}, stopped{&elems}, survivor{&elems};
+    ASSERT_TRUE(stopped.connect());
+    ASSERT_TRUE(survivor.connect());
+    ASSERT_TRUE(tx.ready_sending());
+    auto prep = [](void*, ipc::circ::cc_t) { return true; };
+    ASSERT_TRUE(tx.push(prep, 5u, 9u));
+    // Simulate a reader killed while it holds the descriptor-copy reservation.
+    elems.block()[0].f_ct_.store(0x4000000000000000ull |
+        (std::uint64_t{ipc::circ::bit_slot_of(stopped.connected_id())} << 32));
+    EXPECT_TRUE(stopped.disconnect());
+    message value;
+    ASSERT_TRUE(survivor.pop(value));
+    EXPECT_EQ(value.writer, 5u);
+    EXPECT_EQ(value.sequence, 9u);
+    for (std::uint32_t i = 0; i < kRingSlots; ++i)
+        ASSERT_TRUE(tx.push(prep, 6u, i));
+    EXPECT_TRUE(survivor.disconnect());
+}
+
+TEST(ShmMpmcChannel, DisconnectedReaderCopyIsClearedBeforeConnectionBitReuse) {
+    elems_t elems{};
+    queue_t tx{&elems}, stopped{&elems}, survivor{&elems}, replacement{&elems};
+    ASSERT_TRUE(stopped.connect());
+    ASSERT_TRUE(survivor.connect());
+    const auto old_id = stopped.connected_id();
+    auto prep = [](void*, ipc::circ::cc_t) { return true; };
+    ASSERT_TRUE(tx.push(prep, 5u, 9u));
+    elems.block()[0].f_ct_.store(0x4000000000000000ull |
+        (std::uint64_t{ipc::circ::bit_slot_of(old_id)} << 32));
+    ASSERT_TRUE(stopped.disconnect());
+    ASSERT_TRUE(replacement.connect());
+    ASSERT_EQ(replacement.connected_id(), old_id);
+    ASSERT_EQ(elems.block()[0].f_ct_.load(), ~std::uint64_t{0});
+    message value;
+    ASSERT_TRUE(survivor.pop(value));
+    EXPECT_EQ(value.writer, 5u);
+    EXPECT_EQ(value.sequence, 9u);
+    EXPECT_TRUE(replacement.disconnect());
+    EXPECT_TRUE(survivor.disconnect());
+}
+
+TEST(ShmMpmcChannel, ForcedOverwriteWaitsForDescriptorCopy) {
+    ipc::prod_cons_impl<flag_t> policy;
+    elems_t elems{};
+    queue_t tx{&elems}, rx{&elems};
+    ASSERT_TRUE(rx.connect());
+    elems_t::elem_t slots[kRingSlots];
+    for (std::uint32_t sequence = 0; sequence < kRingSlots; ++sequence)
+        ASSERT_TRUE(policy.push(&tx, [sequence](void* data) {
+            new (data) message(0, sequence);
+        }, slots));
+
+    std::promise<void> entered, release;
+    auto resumed = release.get_future().share();
+    ipc::circ::u2_t cur = 0;
+    message value;
+    auto reading = std::async(std::launch::async, [&] {
+        return policy.pop(&rx, cur, [&](void* data) {
+            entered.set_value();
+            resumed.wait();
+            value = *static_cast<message*>(data);
+        }, [](bool) {}, slots);
+    });
+    entered.get_future().wait();
+    auto overwriting = std::async(std::launch::async, [&] {
+        return policy.force_push(&tx, [](void* data, ipc::circ::cc_t) {
+            new (data) message(1, kRingSlots);
+        }, slots);
+    });
+    const auto state = overwriting.wait_for(std::chrono::milliseconds(20));
+    release.set_value();
+    EXPECT_TRUE(reading.get());
+    EXPECT_TRUE(overwriting.get());
+    EXPECT_EQ(state, std::future_status::timeout);
+    EXPECT_EQ(value.writer, 0u);
+    EXPECT_EQ(value.sequence, 0u);
+    EXPECT_TRUE(rx.disconnect());
+}
+
+TEST(ShmMpmcChannel, LoanHeldByFastReaderSurvivesForcedOverwrite) {
+    const auto name = unique_channel_name("forced_loan");
+    ipc::mpmc_channel::clear_storage(name.c_str());
+    {
+        ipc::mpmc_channel tx{name.c_str(), ipc::sender, false};
+        ipc::mpmc_channel fast{name.c_str(), ipc::receiver, false};
+        ipc::mpmc_channel slow{name.c_str(), ipc::receiver, false};
+        auto loan = tx.loan(4096);
+        ASSERT_TRUE(loan.valid());
+        std::memset(loan.data, 0x5a, loan.size);
+        ASSERT_TRUE(tx.publish_loan(loan, 0));
+        auto held = fast.try_recv();
+        ASSERT_EQ(held.size(), loan.size);
+        for (std::uint32_t i = 0; i < kRingSlots; ++i)
+            ASSERT_TRUE(tx.send(&i, sizeof(i), 0));
+        EXPECT_TRUE(std::all_of(static_cast<const unsigned char*>(held.data()),
+                               static_cast<const unsigned char*>(held.data()) + held.size(),
+                               [](unsigned char byte) { return byte == 0x5a; }));
+        std::vector<ipc::loan_t> loans;
+        for (unsigned i = 0; i < 9; ++i) {
+            auto next = tx.loan(4096);
+            ASSERT_TRUE(next.valid());
+            EXPECT_NE(next.id, loan.id);
+            loans.push_back(std::move(next));
+        }
+        EXPECT_FALSE(tx.loan(4096).valid());
+        held = {};
+        auto recycled = tx.loan(4096);
+        EXPECT_TRUE(recycled.valid());
+    }
+    ipc::mpmc_channel::clear_storage(name.c_str());
 }
 
 TEST(ShmMpmcChannel, SenderWaitsForReaderConnection) {

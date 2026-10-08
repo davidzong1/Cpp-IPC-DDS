@@ -132,6 +132,11 @@ public:
     }
 
     cc_t disconnect_receiver(cc_t cc_id) noexcept {
+        if constexpr (broadcast_policy && relat_trait<policy_t>::is_multi_producer) {
+            // The reader is quiescent or confirmed dead. Release its copy
+            // reservations before another receiver can reuse the same bit.
+            head_.release_reader_copies(cc_id, block_);
+        }
         /* UF-003: 先清位、后清槽 —— 于是"位悬挂 + 槽记录属于死进程"只在
          * 崩溃时出现(稳定指纹); 干净断连不会留下可被误判为死的记录。 */
         cc_t const left = r_ckr_.disconnect(*this, cc_id);
