@@ -5,6 +5,8 @@
 #include "libipc/utility/log.h"
 #include "dzIPC/common/hash.h"
 #include <mutex>
+#include <shared_mutex>
+#include <new>
 #include <map>
 #include <cstring>
 #include <cerrno>
@@ -23,6 +25,7 @@ void pool_alloc::free(void* p, std::size_t size) noexcept { async_pool_alloc::fr
 
 namespace {
 constexpr std::uint64_t registry_magic = 0x445A504F4F4C0002ULL;
+constexpr std::uint64_t credit_magic = 0x445A435245440001ULL;
 constexpr std::uint64_t payload_magic = 0x445A4348554E0002ULL;
 // 注册项只存身份，不存载荷。完整名字用于验证哈希碰撞，禁止误删或串池。
 struct registry_record {
@@ -67,17 +70,21 @@ void remove_channel_storage(ipc::string const& p, ipc::string const& n) {
     for (const auto* kind : {"CC_CONN__", "WT_CONN__", "RD_CONN__"})
         ipc::detail::waiter::clear_storage(ipc::make_prefix(p,{kind,n}).c_str());
     ipc::shm::handle::clear_storage(ipc::make_prefix(p,{"AC_CONN__",n}).c_str());
-    ipc::shm::handle::clear_storage(ipc::make_prefix(p,{"QU_CONN__",n,"__",
-        ipc::to_string(static_cast<std::size_t>(ipc::data_length)),"__",
-        ipc::to_string((ipc::detail::min)(static_cast<std::size_t>(ipc::data_length),alignof(std::max_align_t))),"__V4"}).c_str());
+    // V4/V5 共用话题租约；只有最后租约消失后才能清理旧协议遗留的队列。
+    for (const auto* version : {"__V4", "__V5"})
+        ipc::shm::handle::clear_storage(ipc::make_prefix(p,{"QU_CONN__",n,"__",
+            ipc::to_string(static_cast<std::size_t>(ipc::data_length)),"__",
+            ipc::to_string((ipc::detail::min)(static_cast<std::size_t>(ipc::data_length),alignof(std::max_align_t))),version}).c_str());
 }
 bool remove_pools(ipc::string const& prefix) {
     DIR* dir=::opendir("/dev/shm");
     if(!dir)return false;
     const auto lead=prefix+"CHUNK_INFO__";
+    const auto credits=prefix+"CREDIT__";
     bool okay=true;
     while(auto* e=::readdir(dir)) {
-        if(std::strncmp(e->d_name,lead.c_str(),lead.size())!=0)continue;
+        if(std::strncmp(e->d_name,lead.c_str(),lead.size())!=0 &&
+           std::strncmp(e->d_name,credits.c_str(),credits.size())!=0)continue;
         const std::string n="/"+std::string(e->d_name);
         if(::shm_unlink(n.c_str())!=0 && errno!=ENOENT)okay=false;
     }
@@ -95,8 +102,12 @@ struct topic_pool_context::impl {
     int fd=-1;
     pid_t pid=::getpid();
     std::uint64_t id=0;
-    std::mutex mutex;
-    std::map<std::size_t,ipc::shm::handle> pools;
+    std::shared_mutex mutex;
+    struct mapping {
+        ipc::shm::handle payload, credit;
+        pool_credit_state* state = nullptr;
+    };
+    std::map<std::size_t,mapping> pools;
 
     impl(ipc::string const& p,ipc::string const& n)
         :prefix(p),name(n),pool_prefix(topic_pool_prefix(p,n)),registry(registry_name(p,n)),id(name_id(n)) {
@@ -136,7 +147,10 @@ struct topic_pool_context::impl {
     }
     ~impl() {
         // 不让 ipc::shm 的普通引用计数自动 unlink；生杀由跨进程租约决定。
-        for(auto& item:pools)item.second.release_no_unlink();
+        for(auto& item:pools) {
+            item.second.payload.release_no_unlink();
+            item.second.credit.release_no_unlink();
+        }
         pools.clear();
         if(fd<0)return;
         if(pid!=::getpid()){::close(fd);return;} // fork 继承的 OFD 不主动解锁父进程
@@ -158,30 +172,73 @@ std::uint64_t topic_pool_context::identity()const noexcept{return p_->id;}
 
 void* topic_pool_context::map_pool(std::size_t stride,std::size_t bytes) {
     if(!valid() || !same_process() || bytes<sizeof(pool_identity_header))return nullptr;
-    std::lock_guard<std::mutex> local(p_->mutex);
+    {
+        std::shared_lock<std::shared_mutex> local(p_->mutex);
+        auto found=p_->pools.find(stride);
+        if(found!=p_->pools.end())return found->second.payload.get();
+    }
+    std::unique_lock<std::shared_mutex> local(p_->mutex);
     auto found=p_->pools.find(stride);
-    if(found!=p_->pools.end())return found->second.get();
+    if(found!=p_->pools.end())return found->second.payload.get();
     catalog_guard guard;if(!guard)return nullptr;
     const auto name=p_->pool_prefix+"CHUNK_INFO__"+to_string(stride)+"__C10";
     const auto sys=system_name(name);
     int file=::shm_open(sys.c_str(),O_RDWR|O_CLOEXEC,0600);
-    bool existed=file>=0;
+    const bool existed=file>=0;
     if(existed) {
         struct stat st{};
         const bool okay=::fstat(file,&st)==0 && static_cast<std::size_t>(st.st_size)==bytes+sizeof(std::int32_t);
         ::close(file);
         if(!okay)return nullptr;
     } else if(errno!=ENOENT)return nullptr;
-    ipc::shm::handle h;
-    if(!h.acquire(name.c_str(),bytes))return nullptr;
-    auto* head=static_cast<pool_identity_header*>(h.get());
+    impl::mapping mapped;
+    if(!mapped.payload.acquire(name.c_str(),bytes))return nullptr;
+    auto* head=static_cast<pool_identity_header*>(mapped.payload.get());
     if(!existed){head->magic=payload_magic;head->topic_id=p_->id;}
     if(head->magic!=payload_magic || head->topic_id!=p_->id) {
-        h.release_no_unlink();return nullptr;
+        mapped.payload.release_no_unlink();return nullptr;
     }
-    auto* result=h.get();
-    p_->pools.emplace(stride,std::move(h));
-    return result;
+    // shm inode 标识当前载荷段，晚释放对象持租约时不会更换此段。
+    struct stat st{};
+    file=::shm_open(sys.c_str(),O_RDWR|O_CLOEXEC,0600);
+    const bool identified=file>=0 && ::fstat(file,&st)==0;
+    if(file>=0)::close(file);
+    if(!identified){mapped.payload.release_no_unlink();return nullptr;}
+    const auto generation=static_cast<std::uint64_t>(st.st_ino);
+    const auto credit_name=p_->pool_prefix+"CREDIT__"+to_string(stride)+"__G"+to_string(generation)+"__V1";
+    file=::shm_open(system_name(credit_name).c_str(),O_RDWR|O_CLOEXEC,0600);
+    const bool credit_existed=file>=0;
+    if(credit_existed) {
+        struct stat cs{};
+        const bool okay=::fstat(file,&cs)==0 && cs.st_size==sizeof(pool_credit_state)+sizeof(std::int32_t);
+        ::close(file);
+        if(!okay){mapped.payload.release_no_unlink();return nullptr;}
+    } else if(errno!=ENOENT){mapped.payload.release_no_unlink();return nullptr;}
+    if(!mapped.credit.acquire(credit_name.c_str(),sizeof(pool_credit_state))) {
+        mapped.payload.release_no_unlink();return nullptr;
+    }
+    mapped.state=static_cast<pool_credit_state*>(mapped.credit.get());
+    if(!credit_existed) {
+        // 没有信用的旧活跃段无法可靠还原所有权，禁止混合协议。
+        if(existed) {
+            mapped.payload.release_no_unlink();mapped.credit.release();return nullptr;
+        }
+        new (mapped.state) pool_credit_state;
+        mapped.state->magic=credit_magic;mapped.state->topic_id=p_->id;
+        mapped.state->stride=stride;mapped.state->generation=generation;
+    }
+    if(mapped.state->magic!=credit_magic || mapped.state->topic_id!=p_->id ||
+       mapped.state->stride!=stride || mapped.state->generation!=generation) {
+        mapped.payload.release_no_unlink();mapped.credit.release_no_unlink();return nullptr;
+    }
+    auto* result=mapped.payload.get();
+    p_->pools.emplace(stride,std::move(mapped));return result;
+}
+
+pool_credit_state* topic_pool_context::map_credit(std::size_t stride) {
+    std::shared_lock<std::shared_mutex> local(p_->mutex);
+    auto found=p_->pools.find(stride);
+    return found==p_->pools.end() ? nullptr : found->second.state;
 }
 
 std::shared_ptr<topic_pool_context> acquire_topic_pool(ipc::string const& pref,ipc::string const& name) {

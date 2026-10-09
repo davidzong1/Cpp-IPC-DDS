@@ -39,9 +39,9 @@
  * **不是可复现判据**, 已按"未定位"登记, 不作门。把 UF011_EXPECT_LEAK_FREE=1 设进环境
  * 可把它变成硬判据(用于继续追查, 不作常态门)。
  *
- * 清残池(池段全局, 见 docs/unfixed_defects.md §6.3)不归本文件管; 残池会让② 假红。
+ * 当前池按话题隔离；量具必须读取本轮话题的段，不能扫描任意同尺寸档的段。
  */
-#include <dirent.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <cstdint>
@@ -57,11 +57,12 @@
 
 #include "libipc/def.h"
 #include "libipc/ipc.h"
+#include "libipc/memory/resource.h"
 #include "libipc/utility/id_pool.h"
 
 namespace {
 
-/* 池容量**只从模板语义取**, 不复查魔数: id_pool<>::max_count = min(large_msg_cache,
+/* 池容量**只从模板语义取**, 不复查魔数: id_pool<>::max_count = min(topic_msg_cache,
  * uint8 上限)。写死魔数的害处不是"以后再改", 而是**判据失真** —— 容量一变, 走链的
  * 步数上限与段名分量都会跟着错, 而错法是静默的(读到另一个段/少走几步)。 */
 constexpr std::size_t kCap = static_cast<std::size_t>(ipc::id_pool<>::max_count);
@@ -70,13 +71,13 @@ constexpr std::size_t kCap = static_cast<std::size_t>(ipc::id_pool<>::max_count)
 constexpr int kRingSlots = 256;
 
 /* 槽位承载的字节数: ipc::data_length(超过它才走 chunk)。 */
-constexpr std::size_t kSlotBytes = 64;
+constexpr std::size_t kSlotBytes = ipc::data_length;
 
 /* ⛔ **不得**写死尺寸档: 池段名里的尺寸分量是 `calc_chunk_size(size)` 的结果, 它随
  * `large_msg_align` / `sizeof(std::atomic<cc_t>)` / `alignof(max_align_t)` 一起变。
  * 写死的失败方式是**静默**的: 档位猜错 ⇒ 读到另一个段或读不到段 ⇒ 量具退化, 而用例
  * 看起来还是绿的(本文件初版就栽在这上面)。所以 payload 与档位一起算。 */
-constexpr std::size_t kAlignStep = 1024;   /* ipc::large_msg_align */
+constexpr std::size_t kAlignStep = ipc::large_msg_align;
 
 constexpr std::size_t align_up_to(std::size_t x, std::size_t a) noexcept
 {
@@ -84,41 +85,27 @@ constexpr std::size_t align_up_to(std::size_t x, std::size_t a) noexcept
 }
 /* 与 src/libipc/ipc.cpp 的 calc_chunk_size 同构(抄写而非调用: 它在 ipc.cpp 的匿名
  * namespace 里, 没有对外链接)。 */
-constexpr std::size_t calc_chunk_class(std::size_t size) noexcept
+std::size_t calc_chunk_class(std::size_t size) noexcept
 {
-    return align_up_to(align_up_to(sizeof(std::max_align_t) + size, kAlignStep),
+    return align_up_to(align_up_to(align_up_to(sizeof(std::atomic<std::uint32_t>),
+                                             alignof(std::max_align_t)) + ipc::pool_size_class(size), kAlignStep),
                        alignof(std::max_align_t));
 }
 constexpr std::size_t kPayload = 8000;
-constexpr std::size_t kChunkClass = calc_chunk_class(kPayload);
+const std::size_t kChunkClass = calc_chunk_class(kPayload);
 
-/* 段路径**靠扫描发现**: 段名里除尺寸档外还有别的分量(如容量后缀 `__C<cap>`), 而那个
- * 分量的形状正在变 —— 拼写死就是上面说的静默退化。扫描只要求 "CHUNK_INFO__<class>"
- * 之后要么到头、要么是 '__', 免得 8192 匹配上 81920。 */
-std::string pool_segment_path()
+/* 与被测 route 使用同一话题身份，禁止从别的话题借一条正常空闲链充当量具。 */
+std::string pool_segment_path(const std::string& topic)
 {
-    const std::string want = "CHUNK_INFO__" + std::to_string(kChunkClass);
-    DIR* d = opendir("/dev/shm");
-    if (d == nullptr) return {};
-    std::string found;
-    while (struct dirent* e = readdir(d))
-    {
-        const std::string n = e->d_name;
-        const std::size_t p = n.find(want);
-        if (p == std::string::npos) continue;
-        const std::size_t after = p + want.size();
-        if (after != n.size() && n[after] != '_') continue;   /* 8192 不匹配 81920 */
-        found = "/dev/shm/" + n;
-        break;
-    }
-    closedir(d);
-    return found;
+    const auto key = ipc::topic_pool_prefix({}, ipc::make_string(topic.c_str()));
+    return "/dev/shm/" + std::string(key.c_str()) + "CHUNK_INFO__" +
+        std::to_string(kChunkClass) + "__C" + std::to_string(kCap);
 }
 
 std::string uniq(const char* tag)
 {
     static std::atomic<int> n{0};
-    return std::string("uf011_") + tag + "_" + std::to_string(n.fetch_add(1));
+    return std::string("uf011_") + tag + "_" + std::to_string(getpid()) + "_" + std::to_string(n.fetch_add(1));
 }
 
 std::vector<std::uint8_t> make_payload(std::size_t n, std::uint8_t fill)
@@ -127,14 +114,15 @@ std::vector<std::uint8_t> make_payload(std::size_t n, std::uint8_t fill)
 }
 
 /* 段内是否存在 `next_[id] == id`。读 [0, cap+1) 即读整条空闲链: `chunk_info_t` 的首
- * 成员是 `id_pool<>`, 其 `next_[cap]` 占偏移 0..cap-1(每项 1 字节)、`cursor_` 在偏移
- * cap。段是 tmpfs 文件, 进程 mmap 的同时可按文件读同一份内存。
+ * 成员是话题身份头，随后才是 `id_pool<>`。跳过身份头后，`next_[cap]` 每项 1 字节、
+ * `cursor_` 在偏移 cap。段是 tmpfs 文件, 进程 mmap 的同时可按文件读同一份内存。
  * 返回: 1 = 有自环(*which 给出 id), 0 = 没有, -1 = 读不出来(段不存在/读不全)。 */
-int self_loop(std::size_t* which)
+int self_loop(const std::string& topic, std::size_t* which)
 {
-    std::FILE* f = std::fopen(pool_segment_path().c_str(), "rb");
+    std::FILE* f = std::fopen(pool_segment_path(topic).c_str(), "rb");
     if (f == nullptr) return -1;
     unsigned char b[kCap + 1];
+    if (std::fseek(f, sizeof(ipc::pool_identity_header), SEEK_SET) != 0) { std::fclose(f); return -1; }
     const std::size_t got = std::fread(b, 1, sizeof(b), f);
     std::fclose(f);
     if (got < sizeof(b)) return -1;
@@ -147,11 +135,12 @@ int self_loop(std::size_t* which)
 
 /* 走一遍空闲链得空闲块数。⛔ 必须限步: 自环时 cursor_ 永远 < cap, 不限步就是死循环
  * —— 量具把被测进程挂住比读错更糟。返回 -1 = 读不出来, -2 = 链带环。 */
-int walk_free()
+int walk_free(const std::string& topic)
 {
-    std::FILE* f = std::fopen(pool_segment_path().c_str(), "rb");
+    std::FILE* f = std::fopen(pool_segment_path(topic).c_str(), "rb");
     if (f == nullptr) return -1;
     unsigned char b[kCap + 1];
+    if (std::fseek(f, sizeof(ipc::pool_identity_header), SEEK_SET) != 0) { std::fclose(f); return -1; }
     const std::size_t got = std::fread(b, 1, sizeof(b), f);
     std::fclose(f);
     if (got < sizeof(b)) return -1;
@@ -162,7 +151,7 @@ int walk_free()
         cur = b[cur];
         ++n;
     }
-    if (n > static_cast<int>(kCap)) return -2;
+    if (n > static_cast<int>(kCap) || cur != kCap) return -2;
     return n;
 }
 
@@ -202,18 +191,20 @@ TEST(UF011ChunkReturn, PoolChainMustNotSelfLoop)
         ASSERT_TRUE(gtx.wait_for_recv(1, 2000)) << "量具门的接收方未连上";
         ASSERT_TRUE(blast(gtx, payload)) << "量具门的大消息发送失败";
 
-        const int g_free = walk_free();
+        const int g_free = walk_free(gname);
         ASSERT_EQ(g_free, static_cast<int>(kCap) - 1)
             << "量具门不成立: 钉住一条大消息后空闲链读到 " << g_free << "/" << kCap
-            << "(期望 " << (kCap - 1) << ")。段 = " << pool_segment_path()
+            << "(期望 " << (kCap - 1) << ")。段 = " << pool_segment_path(gname)
             << " —— 走链器/段名对不上或串档(残池), 本用例结论不可用";
         std::size_t gw = 0;
-        ASSERT_NE(self_loop(&gw), 1) << "量具门就已有自环(next_[" << gw << "]) —— 残池未清";
+        ASSERT_EQ(self_loop(gname, &gw), 0) << "量具门已有自环或量具读取失败(next_[" << gw << "])";
 
         /* 收回量具门钉住的那一块(断开 + 覆写), 让循环从满池开始。 */
         grx.release();
+        ipc::route grx_sweep{gname.c_str(), ipc::receiver};
+        ASSERT_TRUE(gtx.wait_for_recv(1, 2000));
         for (int i = 0; i < kRingSlots + 16; ++i) blast(gtx, tiny);
-        ASSERT_EQ(walk_free(), static_cast<int>(kCap))
+        ASSERT_EQ(walk_free(gname), static_cast<int>(kCap))
             << "量具门自己钉住的块收不回来 —— 走链器/归还路径有问题, 本用例结论不可用";
     }
 
@@ -263,14 +254,17 @@ TEST(UF011ChunkReturn, PoolChainMustNotSelfLoop)
         for (int i = 0; i < kRingSlots * 2 + 16; ++i) blast(tx, tiny);
 
         std::size_t w = 0;
-        if (self_loop(&w) == 1)
+        const int loop = self_loop(name, &w);
+        ASSERT_GE(loop, 0) << "收尾后量具无法读取 " << pool_segment_path(name);
+        if (loop == 1)
         {
             saw_loop = true;
             loop_id = w;
             loop_round = r;
             break;
         }
-        const int fr = walk_free();
+        const int fr = walk_free(name);
+        ASSERT_GE(fr, 0) << "空闲链无法读取或存在环: " << pool_segment_path(name);
         if (fr >= 0 && fr < min_free_end) min_free_end = fr;
         if (fr >= 0 && fr < static_cast<int>(kCap)) ++leak_rounds;
     }

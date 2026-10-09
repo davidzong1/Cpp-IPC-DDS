@@ -49,6 +49,11 @@ enum : std::size_t {
 };
 
 namespace detail {
+// V5 队列 storage descriptor。序号隔离同一 ID 的不同借出，代次隔离不同段。
+struct storage_token {
+    storage_id_t wire_id = -1;
+    std::uint64_t ticket = 0, generation = 0;
+};
 constexpr bool valid_storage(storage_id_t id) noexcept {
     return id >= 0 && id < static_cast<storage_id_t>(topic_msg_cache);
 }

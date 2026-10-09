@@ -82,9 +82,21 @@ public:
     }
 
     bool release(storage_id_t id) {
-        if (id < 0) return false;
+        if (id < 0 || static_cast<std::size_t>(id) >= max_count) return false;
         next_[id] = cursor_;
         cursor_ = static_cast<uint_t<8>>(id); // put it back
+        return true;
+    }
+
+    // 调用方持池锁；一次遍历给出可借 ID 位图，遇到越界或环立即失败。
+    bool audit(std::uint64_t& free_mask, std::size_t& free_count) const noexcept {
+        free_mask = 0; free_count = 0;
+        auto id = static_cast<std::size_t>(cursor_);
+        while (id != max_count) {
+            if (id > max_count || (free_mask & (std::uint64_t{1} << id))) return false;
+            free_mask |= std::uint64_t{1} << id; ++free_count;
+            id = static_cast<std::size_t>(next_[id]);
+        }
         return true;
     }
 

@@ -60,6 +60,13 @@ struct SubState
     std::size_t adopt_cap{0};
     std::atomic<int> adopt_borrowed{0};
     std::uint32_t msg_id{0};
+    bool metrics_enabled{false}; // InitChannel 前设置，收包线程只读。
+    std::atomic<std::uint64_t> queue_high_watermark{0}, queue_evicted{0};
+};
+
+struct subscriber_snapshot {
+    std::size_t queued = 0;
+    std::uint64_t queue_high_watermark = 0, queue_evicted = 0;
 };
 
 IPC_EXPORT void process_received_buffer(const std::shared_ptr<SubState>& state, ipc::buff_t&& raw_data);
@@ -74,16 +81,23 @@ public:
     ~shm_pub_ipc();
     void reset_message(const std::shared_ptr<TopicData>& msg);
     bool channel_ready() const { return publisher_ && publisher_->valid(); }
+    std::size_t recv_count() const { return publisher_ ? publisher_->recv_count() : 0; }
+    bool inspect_pool(std::size_t size, ipc::pool_snapshot& out) const {
+        return publisher_ && publisher_->inspect_pool(size, out);
+    }
     void set_internal(bool value) { internal_ = value; }
     void InitChannel(std::string extra_info = "");
     bool publish(std::shared_ptr<IpcMsgBase> msg);
     bool publish_best_effort(std::shared_ptr<IpcMsgBase> msg) override;
     bool publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm) override;
+    // 暴露本次 DZFlat loan 的失败原因；非 loan 失败由返回值表示。
+    bool publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm, ipc::loan_status& loan_reason);
     bool publish_for_sniffer(std::shared_ptr<IpcMsgBase> msg) override;
 
     /* 预构造段发布(见 pub_ipc_base.h)。段由调用方写好, 这里只负责借 chunk 送出去 ——
      * 发布端因此**有一次整段 memcpy**(段在调用方地址空间里), 接收侧照旧真零拷贝。 */
     bool publish_prebuilt_segment(const void* seg, std::size_t len) override;
+    bool publish_prebuilt_segment(const void* seg, std::size_t len, std::uint64_t timeout_ms);
 
     bool has_subscribed() const { return subscribed_; }
 
@@ -101,13 +115,13 @@ public:
      * 用法见 loaned_message.h 顶部注释。
      */
     template<typename Flat>
-    LoanedMessage<Flat> loan(std::uint32_t varlen_budget)
+    LoanedMessage<Flat> loan(std::uint32_t varlen_budget, std::uint64_t timeout_ms = 0)
     {
         if (!dzIPC::IsDzFlatEnabled() || !publisher_)
         {
             return {};
         }
-        auto lo = publisher_->loan(Flat::loan_size(varlen_budget));
+        auto lo = publisher_->loan(Flat::loan_size(varlen_budget), timeout_ms);
         if (!lo.valid())
         {
             return {};
@@ -214,7 +228,8 @@ private:
     }
 
     /* DZFlat 借样发布; 返回 false 表示本次须回退整包序列化(见 .cc 中的说明)。 */
-    bool try_publish_dzflat(const std::shared_ptr<IpcMsgBase>& msg, std::uint64_t tm);
+    bool try_publish_dzflat(const std::shared_ptr<IpcMsgBase>& msg, std::uint64_t tm,
+                           ipc::loan_status* loan_reason = nullptr);
 
 private:
     bool internal_{false};
@@ -262,6 +277,11 @@ public:
                          int cpu_id = -1, int thread_priority = 0);
     ~shm_sub_ipc();
     void set_receive_notifier(std::function<void()> notify);
+    void enable_pool_metrics() { sub_state_->metrics_enabled = true; }
+    subscriber_snapshot inspect_queues() const {
+        return {sub_state_->view_queue->size() + sub_state_->msg_queue->size(),
+                sub_state_->queue_high_watermark.load(), sub_state_->queue_evicted.load()};
+    }
     void enable_cancellable_wait();
     bool enable_receive_assist(); // 仅首次InitChannel前调用；共享MPMC内部reader使用。
     void cancel_waits();

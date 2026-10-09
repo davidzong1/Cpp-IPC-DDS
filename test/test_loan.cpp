@@ -5,7 +5,7 @@
  *      全程没有 send() 那次 "调用方缓冲 → chunk" 的 memcpy;
  *   ② loan 返回的是**容量**而非请求长度(按尺寸档位取整), 接收方 recv 到的 buff_t
  *      大小等于该容量 —— 真实负载长度由负载自身的头部承载;
- *   ③ 失败是常态而非异常: 无接收方、chunk 池耗尽(32 块/档位)都会返回无效 loan,
+ *   ③ 失败是常态而非异常: 无接收方、chunk 池耗尽(10 块/档位)都会返回无效 loan,
  *      调用方必须能回退到 send();
  *   ④ discard_loan 与 publish_loan 都必须归还 chunk, 否则池子会被耗干。
  *      publish_loan 失败时由它自己归还, 调用方不得重复 discard。

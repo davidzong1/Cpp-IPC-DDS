@@ -10,6 +10,7 @@
 #include <limits>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include "dzIPC/common/hash.h"
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -422,4 +423,241 @@ TEST(TopicPoolLifecycle, InvalidRegistryIdentityIsNeverOverwrittenOrDeleted) {
     ipc::route::clear_storage(ipc::prefix{pref.c_str()},name.c_str());
     std::ifstream in(file);std::string content;std::getline(in,content);
     EXPECT_EQ(content,"invalid identity");std::filesystem::remove(file);
+}
+
+TEST(LoanCredit, BoundedLoanReservesOneAndReportsDeadline) {
+    Pair p; Held held(*p.tx);
+    for (unsigned i=0; i<9; ++i) {
+        auto lo=p.tx->loan(2000,100); ASSERT_TRUE(lo.valid()); held.items.push_back(lo);
+    }
+    ipc::pool_snapshot snapshot;
+    ASSERT_TRUE(p.tx->inspect_pool(2000,snapshot));
+    EXPECT_TRUE(snapshot.consistent); EXPECT_EQ(snapshot.free,1u);
+    EXPECT_EQ(snapshot.capacity,10u); EXPECT_EQ(snapshot.publisher_cap,9u);
+    ipc::loan_status status;
+    const auto begin=std::chrono::steady_clock::now();
+    EXPECT_FALSE(p.tx->loan(2000,15,status).valid());
+    const auto elapsed=std::chrono::steady_clock::now()-begin;
+    EXPECT_EQ(status,ipc::loan_status::pool_exhausted);
+    EXPECT_GE(elapsed,std::chrono::milliseconds(10));
+    EXPECT_LT(elapsed,std::chrono::milliseconds(250));
+    auto immediate=p.tx->loan(2000); ASSERT_TRUE(immediate.valid());
+    p.tx->discard_loan(immediate);
+    held.items.clear();
+    ASSERT_TRUE(p.tx->inspect_pool(2000,snapshot));
+    EXPECT_EQ(snapshot.free,10u); EXPECT_TRUE(snapshot.consistent);
+    EXPECT_EQ(snapshot.loan_reject,1u); EXPECT_EQ(snapshot.loan_success,10u);
+    EXPECT_EQ(snapshot.pool_chain_corrupt,0u);
+}
+
+TEST(LoanCredit, LastSampleReturnWakesWaiter) {
+    Pair p; std::vector<ipc::buff_t> samples;
+    for (unsigned i=0;i<9;++i) {
+        auto lo=p.tx->loan(2000,100); ASSERT_TRUE(lo.valid());fill(lo,i);
+        ASSERT_TRUE(p.tx->publish_loan(lo)); samples.push_back(p.rx->recv(1000));
+        ASSERT_FALSE(samples.back().empty());
+    }
+    auto pending=std::async(std::launch::async,[&]{return p.tx->loan(2000,1000);});
+    ipc::pool_snapshot snapshot;
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+    do { ASSERT_TRUE(p.tx->inspect_pool(2000,snapshot));std::this_thread::yield(); }
+    while (!snapshot.waiters && std::chrono::steady_clock::now()<deadline);
+    EXPECT_GT(snapshot.waiters,0u); EXPECT_EQ(pending.wait_for(std::chrono::milliseconds(0)),std::future_status::timeout);
+    samples.pop_back();
+    EXPECT_EQ(pending.wait_for(std::chrono::milliseconds(500)),std::future_status::ready);
+    auto lo=pending.get(); ASSERT_TRUE(lo.valid());p.tx->discard_loan(lo);
+    samples.clear(); ASSERT_TRUE(p.tx->inspect_pool(2000,snapshot));
+    EXPECT_TRUE(snapshot.consistent); EXPECT_EQ(snapshot.free,10u);EXPECT_EQ(snapshot.waiters,0u);
+}
+
+namespace {
+template<typename Channel>
+void subscriber_joining_during_wait() {
+    const auto name=unique();
+    Channel tx(name.c_str(),ipc::sender,false),first(name.c_str(),ipc::receiver,false);
+    std::vector<ipc::loan_t> held;
+    for(unsigned i=0;i<9;++i)held.push_back(tx.loan(2000,100));
+    auto pending=std::async(std::launch::async,[&]{return tx.loan(2000,1000);});
+    ipc::pool_snapshot snapshot;
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+    do { ASSERT_TRUE(tx.inspect_pool(2000,snapshot));std::this_thread::yield(); }
+    while(!snapshot.waiters && std::chrono::steady_clock::now()<deadline);
+    ASSERT_GT(snapshot.waiters,0u);
+    Channel joined(name.c_str(),ipc::receiver,false);
+    ASSERT_TRUE(tx.wait_for_recv(2,1000));
+    held.pop_back();
+    auto lo=pending.get();ASSERT_TRUE(lo.valid());fill(lo,0xC7);
+    held.clear();ASSERT_TRUE(tx.try_publish_loan(lo));
+    auto a=first.recv(1000),b=joined.recv(1000);
+    ASSERT_TRUE(matches(a,0xC7));ASSERT_TRUE(matches(b,0xC7));
+    a={};ASSERT_TRUE(tx.inspect_pool(2000,snapshot));
+    EXPECT_EQ(snapshot.free,9u) << "新增订阅者仍持样，不能提前回池";
+    EXPECT_TRUE(snapshot.consistent);
+    b={};ASSERT_TRUE(tx.inspect_pool(2000,snapshot));
+    EXPECT_EQ(snapshot.free,10u);EXPECT_TRUE(snapshot.consistent);
+    EXPECT_EQ(snapshot.duplicate_return,0u);
+}
+
+template<typename Channel>
+void subscriber_leaving_during_wait() {
+    const auto name=unique();
+    Channel tx(name.c_str(),ipc::sender,false),first(name.c_str(),ipc::receiver,false);
+    Channel leaving(name.c_str(),ipc::receiver,false);
+    ASSERT_TRUE(tx.wait_for_recv(2,1000));
+    std::vector<ipc::loan_t> held;
+    for(unsigned i=0;i<9;++i)held.push_back(tx.loan(2000,100));
+    auto pending=std::async(std::launch::async,[&]{return tx.loan(2000,1000);});
+    ipc::pool_snapshot snapshot;
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+    do { ASSERT_TRUE(tx.inspect_pool(2000,snapshot));std::this_thread::yield(); }
+    while(!snapshot.waiters && std::chrono::steady_clock::now()<deadline);
+    ASSERT_GT(snapshot.waiters,0u);
+    leaving.disconnect();ASSERT_EQ(tx.recv_count(),1u);
+    held.pop_back();
+    auto lo=pending.get();ASSERT_TRUE(lo.valid());fill(lo,0xD4);
+    held.clear();ASSERT_TRUE(tx.try_publish_loan(lo));
+    auto sample=first.recv(1000);ASSERT_TRUE(matches(sample,0xD4));sample={};
+    ASSERT_TRUE(tx.inspect_pool(2000,snapshot));
+    EXPECT_EQ(snapshot.free,10u) << "已经离开的订阅者不能钉住新的发布";
+    EXPECT_TRUE(snapshot.consistent);EXPECT_EQ(snapshot.duplicate_return,0u);
+}
+}
+
+TEST(LoanCredit, SubscriberJoiningDuringWaitKeepsItsSampleAlive) {
+    subscriber_joining_during_wait<ipc::route>();
+    subscriber_joining_during_wait<ipc::mpmc_channel>();
+}
+
+TEST(LoanCredit, SubscriberLeavingDuringWaitDoesNotPinCredit) {
+    subscriber_leaving_during_wait<ipc::route>();
+    subscriber_leaving_during_wait<ipc::mpmc_channel>();
+}
+
+TEST(LoanCredit, PublishFailureAndCopiedDiscardRecoverExactlyOnce) {
+    Pair p;auto lo=p.tx->loan(2000,100);ASSERT_TRUE(lo.valid());auto copy=lo;
+    p.rx->disconnect(); EXPECT_FALSE(p.tx->try_publish_loan(lo));
+    p.tx->discard_loan(copy);p.tx->discard_loan(lo);
+    ipc::pool_snapshot snapshot;ASSERT_TRUE(p.tx->inspect_pool(2000,snapshot));
+    EXPECT_TRUE(snapshot.consistent);EXPECT_EQ(snapshot.free,10u);
+    EXPECT_EQ(snapshot.duplicate_return,0u);EXPECT_EQ(snapshot.pool_chain_corrupt,0u);
+}
+
+TEST(LoanCredit, ForgedIdCannotPublishAnotherLiveAllocation) {
+    Pair p;auto first=p.tx->loan(2000),second=p.tx->loan(2000);
+    ASSERT_TRUE(first.valid());ASSERT_TRUE(second.valid());auto forged=first;forged.id=second.id;
+    EXPECT_FALSE(p.tx->publish_loan(forged));
+    fill(second,0x93);ASSERT_TRUE(p.tx->publish_loan(second));
+    auto sample=p.rx->recv(1000);EXPECT_TRUE(matches(sample,0x93));sample={};
+    p.tx->discard_loan(first);ipc::pool_snapshot snapshot;
+    ASSERT_TRUE(p.tx->inspect_pool(2000,snapshot));EXPECT_TRUE(snapshot.consistent);EXPECT_EQ(snapshot.free,10u);
+}
+
+TEST(LoanCredit, CrossProcessWaitUsesSharedCreditAndWakeup) {
+    const auto name=unique();ipc::mpmc_channel tx(name.c_str(),ipc::sender,false),rx(name.c_str(),ipc::receiver,false);
+    std::vector<ipc::loan_t> held;for(unsigned i=0;i<9;++i)held.push_back(tx.loan(2000));
+    const auto child=fork();ASSERT_GE(child,0);
+    if(child==0) {
+        ipc::mpmc_channel child_tx(name.c_str(),ipc::sender,false);
+        auto lo=child_tx.loan(2000,2000);if(!lo.valid())_exit(2);
+        child_tx.discard_loan(lo);ipc::pool_snapshot snap;
+        _exit(child_tx.inspect_pool(2000,snap)&&snap.consistent?0:3);
+    }
+    ipc::pool_snapshot snapshot;const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+    do { tx.inspect_pool(2000,snapshot);std::this_thread::yield(); }
+    while (!snapshot.waiters && std::chrono::steady_clock::now()<deadline);
+    EXPECT_GT(snapshot.waiters,0u);held.pop_back();
+    int status=0;ASSERT_EQ(waitpid(child,&status,0),child);
+    ASSERT_TRUE(WIFEXITED(status));EXPECT_EQ(WEXITSTATUS(status),0);
+    held.clear();ASSERT_TRUE(tx.inspect_pool(2000,snapshot));
+    EXPECT_TRUE(snapshot.consistent);EXPECT_EQ(snapshot.free,10u);EXPECT_EQ(snapshot.waiters,0u);
+}
+
+TEST(LoanCredit, NewSegmentHasNewGenerationAndCreditSegmentsFollowLease) {
+    const auto pref=unique(),name=unique();std::uint64_t generation=0;
+    const auto key=std::string(ipc::topic_pool_prefix(ipc::make_string(pref.c_str()),ipc::make_string(name.c_str())).c_str());
+    auto credit_count=[&] {
+        unsigned count=0;for(const auto& f:std::filesystem::directory_iterator("/dev/shm"))
+            if(f.path().filename().string().rfind(key+"CREDIT__",0)==0)++count;
+        return count;
+    };
+    ipc::buff_t late;
+    {
+        Pair p(pref,name);auto lo=p.tx->loan(2000,100);ASSERT_TRUE(lo.valid());
+        ipc::pool_snapshot snap;ASSERT_TRUE(p.tx->inspect_pool(2000,snap));generation=snap.generation;
+        ASSERT_TRUE(p.tx->publish_loan(lo));late=p.rx->recv(1000);ASSERT_FALSE(late.empty());
+        EXPECT_EQ(credit_count(),1u);
+    }
+    EXPECT_EQ(credit_count(),1u);late={};EXPECT_EQ(credit_count(),0u);
+    Pair reopened(pref,name);ipc::pool_snapshot snap;ASSERT_TRUE(reopened.tx->inspect_pool(2000,snap));
+    EXPECT_NE(snap.generation,generation);EXPECT_EQ(snap.loan_attempt,0u);EXPECT_EQ(snap.free,10u);EXPECT_TRUE(snap.consistent);
+}
+
+TEST(LoanCredit, LegacyQueueCleanupFollowsLastPoolLease) {
+    const auto pref=unique(),name=unique();
+    const auto queue=ipc::make_prefix(ipc::make_string(pref.c_str()),{"QU_CONN__",ipc::make_string(name.c_str()),"__",
+        ipc::to_string(static_cast<std::size_t>(ipc::data_length)),"__",
+        ipc::to_string(std::min(static_cast<std::size_t>(ipc::data_length),alignof(std::max_align_t))),"__V4"});
+    const auto path=std::filesystem::path("/dev/shm")/std::string(queue.c_str());
+    ipc::buff_t sample;
+    {
+        Pair p(pref,name);auto lo=p.tx->loan(2000,100);ASSERT_TRUE(lo.valid());
+        fill(lo,0x71);ASSERT_TRUE(p.tx->publish_loan(lo));sample=p.rx->recv(1000);ASSERT_FALSE(sample.empty());
+        {std::ofstream file(path);file<<"legacy queue residue";ASSERT_TRUE(file.good());}
+        ipc::route::clear_storage(ipc::prefix{pref.c_str()},name.c_str());
+        EXPECT_TRUE(std::filesystem::exists(path));
+    }
+    EXPECT_TRUE(std::filesystem::exists(path));EXPECT_TRUE(matches(sample,0x71));
+    sample={};EXPECT_FALSE(std::filesystem::exists(path));
+    {std::ofstream file(path);file<<"crash residue";ASSERT_TRUE(file.good());}
+    Pair reopened(pref,name);EXPECT_FALSE(std::filesystem::exists(path));
+}
+
+TEST(LoanCredit, ThirtyTwoPublishersBroadcastThreeWindowsAndRecover) {
+    constexpr unsigned publishers=32, per_publisher=64, total=publishers*per_publisher;
+    for(unsigned subscribers:{1u,8u})for(unsigned window=0;window<3;++window) {
+        const auto name=unique();std::vector<std::unique_ptr<ipc::mpmc_channel>> tx,rx;
+        for(unsigned p=0;p<publishers;++p)tx.emplace_back(std::make_unique<ipc::mpmc_channel>(name.c_str(),ipc::sender,false));
+        for(unsigned s=0;s<subscribers;++s)rx.emplace_back(std::make_unique<ipc::mpmc_channel>(name.c_str(),ipc::receiver,false));
+        ASSERT_TRUE(tx[0]->wait_for_recv(subscribers,1000));
+        std::atomic<bool> start{false},done{false};std::atomic<unsigned> accepted{0},errors{0};
+        std::vector<std::thread> readers,writers;
+        std::vector<unsigned> received(subscribers);
+        for(unsigned s=0;s<subscribers;++s)readers.emplace_back([&,s]{
+            std::vector<unsigned> seen(total),next(publishers);
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(20);
+            while(std::chrono::steady_clock::now()<deadline) {
+                auto sample=rx[s]->try_recv();
+                if(sample.empty()) {
+                    if(done.load(std::memory_order_acquire)&&received[s]>=accepted.load())break;
+                    std::this_thread::yield();continue;
+                }
+                ++received[s];std::uint32_t header[2];std::memcpy(header,sample.data(),sizeof(header));
+                if(header[0]>=publishers||header[1]>=per_publisher){++errors;continue;}
+                const auto id=header[0]*per_publisher+header[1];
+                if(++seen[id]!=1||next[header[0]]++!=header[1])++errors;
+                auto* data=static_cast<const unsigned char*>(sample.data());
+                for(std::size_t i=sizeof(header);i<sample.size();++i)
+                    if(data[i]!=static_cast<unsigned char>(id+i)){++errors;break;}
+            }
+            for(auto count:seen)if(count!=1)++errors;
+        });
+        for(unsigned p=0;p<publishers;++p)writers.emplace_back([&,p]{
+            while(!start.load(std::memory_order_acquire))std::this_thread::yield();
+            for(unsigned n=0;n<per_publisher;++n) {
+                auto lo=tx[p]->loan(2000,2000);if(!lo.valid()){++errors;continue;}
+                const std::uint32_t header[]{p,n};std::memcpy(lo.data,header,sizeof(header));
+                auto* data=static_cast<unsigned char*>(lo.data);
+                for(std::size_t i=sizeof(header);i<lo.size;++i)data[i]=static_cast<unsigned char>(p*per_publisher+n+i);
+                if(tx[p]->try_publish_loan(lo))++accepted;else ++errors;
+            }
+        });
+        start.store(true,std::memory_order_release);for(auto& t:writers)t.join();
+        done.store(true,std::memory_order_release);for(auto& t:readers)t.join();
+        EXPECT_EQ(accepted,total);EXPECT_EQ(errors,0u);
+        for(auto count:received)EXPECT_EQ(count,total);
+        ipc::pool_snapshot snapshot;ASSERT_TRUE(tx[0]->inspect_pool(2000,snapshot));
+        EXPECT_EQ(snapshot.free,10u);EXPECT_TRUE(snapshot.consistent);EXPECT_LE(snapshot.high_watermark,9u);
+        EXPECT_EQ(snapshot.duplicate_return,0u);EXPECT_EQ(snapshot.invalid_storage_id,0u);
+        EXPECT_EQ(snapshot.pool_chain_corrupt,0u);EXPECT_EQ(snapshot.loan_reject,0u);
+    }
 }

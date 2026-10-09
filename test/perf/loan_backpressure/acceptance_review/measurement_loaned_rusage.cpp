@@ -10,7 +10,6 @@
 #include <fstream>
 #include <functional>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -149,7 +148,6 @@ struct ProcessUsage {
     std::uint64_t user_ns = 0;
     std::uint64_t system_ns = 0;
     std::uint64_t max_rss_kb = 0;
-    std::uint64_t rusage_max_rss_kb = 0;
 };
 
 ProcessUsage process_usage() {
@@ -167,21 +165,6 @@ ProcessUsage process_usage() {
 #else
         result.max_rss_kb = static_cast<std::uint64_t>(usage.ru_maxrss);
 #endif
-        result.rusage_max_rss_kb = result.max_rss_kb;
-    }
-#endif
-#if defined(__linux__)
-    // ru_maxrss 会继承 fork 父进程高水位；VmHWM 属于 exec 后当前地址空间。
-    result.max_rss_kb = 0;
-    std::ifstream status("/proc/self/status");
-    std::string line;
-    while (std::getline(status, line)) {
-        if (line.compare(0, 6, "VmHWM:") != 0) continue;
-        std::istringstream record(line);
-        std::string key, unit;
-        std::uint64_t kb = 0;
-        if (record >> key >> kb >> unit && unit == "kB") result.max_rss_kb = kb;
-        break;
     }
 #endif
     return result;
@@ -196,12 +179,11 @@ void print_runtime(const ProcessUsage& before, const ProcessUsage& after,
     const double producer_seconds = producer_elapsed_ns > 0 ? producer_elapsed_ns / 1e9 : 0.0;
     const double drain_seconds = drain_elapsed_ns > 0 ? drain_elapsed_ns / 1e9 : 0.0;
     const double bytes = static_cast<double>(published) * static_cast<double>(payload);
-    std::printf("cpu_user_ns=%llu cpu_system_ns=%llu cpu_total_ns=%llu rss_peak_kb=%llu rusage_peak_kb=%llu "
+    std::printf("cpu_user_ns=%llu cpu_system_ns=%llu cpu_total_ns=%llu rss_peak_kb=%llu "
                 "throughput_msgs_per_s=%.3f throughput_bytes_per_s=%.3f "
                 "drain_throughput_msgs_per_s=%.3f drain_throughput_bytes_per_s=%.3f ",
                 (unsigned long long)user_ns, (unsigned long long)system_ns,
                 (unsigned long long)cpu_ns, (unsigned long long)after.max_rss_kb,
-                (unsigned long long)after.rusage_max_rss_kb,
                 producer_seconds > 0.0 ? static_cast<double>(published) / producer_seconds : 0.0,
                 producer_seconds > 0.0 ? bytes / producer_seconds : 0.0,
                 drain_seconds > 0.0 ? static_cast<double>(published) / drain_seconds : 0.0,

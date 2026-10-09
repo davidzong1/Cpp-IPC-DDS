@@ -34,10 +34,12 @@ public:
     Sample() = default;
 
     /* 由订阅线程构造: 把 recv() 的 buff_t 连同段头信息移进来。 */
-    Sample(ipc::buffer buf, std::uint32_t msg_id, std::uint32_t schema_hash) noexcept
+    Sample(ipc::buffer buf, std::uint32_t msg_id, std::uint32_t schema_hash,
+           std::uint64_t enqueue_ns = 0) noexcept
         : buf_(std::move(buf))
         , msg_id_(msg_id)
         , schema_hash_(schema_hash)
+        , enqueue_ns_(enqueue_ns)
     {
     }
 
@@ -61,6 +63,8 @@ public:
 
     /// 段头的 schema_hash(已由订阅线程与话题比对通过)。
     std::uint32_t schema_hash() const noexcept { return schema_hash_; }
+    /// 可选 CLOCK_MONOTONIC 入队时间；未开启接收观测时为零。
+    std::uint64_t enqueue_ns() const noexcept { return enqueue_ns_; }
 
     /// 把本段 bind 成该话题的只读 XxxView。类型不符(不应发生)时返回空 view。
     /// 例: auto v = s.view<dzIPC::Msg::StdImageFlat>();
@@ -74,6 +78,7 @@ private:
     ipc::buffer buf_;
     std::uint32_t msg_id_ = 0;
     std::uint32_t schema_hash_ = 0;
+    std::uint64_t enqueue_ns_ = 0;
 };
 
 }   // namespace dzIPC

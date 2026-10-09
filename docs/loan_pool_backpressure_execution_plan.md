@@ -52,6 +52,7 @@ publisher_cap  = capacity - reserve_for_consumer
 
 - `loan()` 前先尝试获取信用；失败时进入短暂自旋/条件等待。
 - 等待必须有截止时间，超时返回 `pool_exhausted`。
+- 有界等待入口默认保留 1 块消费者信用（`publisher_cap = capacity - 1`）；保留原有无超时 `loan(size)` 的即时兼容语义，允许在调用方明确承担生命周期责任时借满整档。无超时入口不等待，因此不能把它当作消费者保留配额的替代品。
 - `discard_loan()`、发布失败、接收端最后一个 `buff_t` 析构时归还信用。
 - 归还必须与现有位图 CAS 和 `id_pool` 归还绑定，禁止独立递增计数。
 - 重复归还只记录诊断，不增加信用。
@@ -121,6 +122,7 @@ publisher_cap  = capacity - reserve_for_consumer
 | 1 | 1/8 | 64 B、4 KiB、11 KiB、1 MiB | 对照 |
 | 4 | 1/8 | 同上 | 并发 |
 | 8 | 1/8 | 同上 | 并发 |
+| 32 | 1/8 | 同上 | 压力验证（补充要求） |
 
 每窗检查：
 

@@ -91,6 +91,15 @@ namespace ipc
     return "unknown";
   }
 
+  struct pool_snapshot {
+    std::uint64_t topic_id = 0, chunk_size = 0, generation = 0;
+    std::uint32_t capacity = 0, free = 0, used = 0, publisher_cap = 0, high_watermark = 0, waiters = 0;
+    std::uint64_t loan_attempt = 0, loan_success = 0, loan_reject = 0;
+    std::uint64_t duplicate_return = 0, invalid_storage_id = 0, pool_chain_corrupt = 0;
+    std::uint64_t loan_wait_p50_ns = 0, loan_wait_p95_ns = 0, loan_wait_p99_ns = 0, loan_wait_max_ns = 0;
+    bool consistent = false;
+  };
+
   template <typename Flag>
   struct IPC_EXPORT chan_impl
   {
@@ -167,6 +176,11 @@ namespace ipc
      *  这一条**只对溢出请求**生效的安全修复, 见 t46 交付 §4.3）。 */
     static ipc::loan_t loan(ipc::handle_t h, std::size_t size,
                             ipc::loan_status *st, bool verbose);
+    // timeout 以毫秒计，使用单调截止时间；有界等待保留一块消费者信用，invalid_value 取 default_timeout。
+    // 无超时 loan(size) 保持历史的立即借用语义，必要时可借满整档；需要保留信用时应使用此入口。
+    static ipc::loan_t loan(ipc::handle_t h, std::size_t size, std::uint64_t timeout,
+                            ipc::loan_status *st, bool verbose);
+    static bool inspect_pool(ipc::handle_t h, std::size_t size, pool_snapshot& out);
 
     /// \brief 把已借出的 chunk 作为一条消息投递(单条, 不拆包)。
     /// 投递失败会归还 chunk；重复 discard_loan 不会再次归还。
@@ -391,6 +405,18 @@ namespace ipc
     loan_t loan(std::size_t size, loan_status &st)
     {
       return detail_t::loan(h_, size, &st, verbose_);
+    }
+    loan_t loan(std::size_t size, std::uint64_t timeout, loan_status &st)
+    {
+      return detail_t::loan(h_, size, timeout, &st, verbose_);
+    }
+    loan_t loan(std::size_t size, std::uint64_t timeout)
+    {
+      return detail_t::loan(h_, size, timeout, nullptr, verbose_);
+    }
+    bool inspect_pool(std::size_t size, pool_snapshot& out) const
+    {
+      return detail_t::inspect_pool(h_, size, out);
     }
 
     bool publish_loan(loan_t const &lo, std::uint64_t tm = default_timeout)

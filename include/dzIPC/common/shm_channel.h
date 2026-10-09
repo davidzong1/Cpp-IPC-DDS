@@ -84,6 +84,19 @@ public:
     {
         return std::visit([size](auto& channel) { return channel.loan(size); }, channel_);
     }
+    ipc::loan_t loan(std::size_t size, std::uint64_t timeout, ipc::loan_status& status)
+    {
+        return std::visit([&](auto& channel) { return channel.loan(size, timeout, status); }, channel_);
+    }
+    ipc::loan_t loan(std::size_t size, std::uint64_t timeout)
+    {
+        ipc::loan_status status;
+        return loan(size, timeout, status);
+    }
+    bool inspect_pool(std::size_t size, ipc::pool_snapshot& out) const
+    {
+        return std::visit([&](const auto& channel) { return channel.inspect_pool(size, out); }, channel_);
+    }
     bool publish_loan(const ipc::loan_t& loan, std::uint64_t timeout)
     {
         return std::visit([&](auto& channel) { return channel.publish_loan(loan, timeout); }, channel_);

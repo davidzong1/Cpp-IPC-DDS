@@ -122,6 +122,8 @@ class spin_lock
     std::atomic<std::uint32_t> lc_{0};
 
 public:
+    bool try_lock() noexcept { return !lc_.exchange(1, std::memory_order_acquire); }
+
     void lock(void) noexcept
     {
         for (unsigned k = 0; lc_.exchange(1, std::memory_order_acquire); yield(k))

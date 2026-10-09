@@ -262,6 +262,17 @@ bool control_scheduler_allowed_in_this_process()
 
 }   // namespace
 
+namespace {
+void record_queue_usage(const std::shared_ptr<SubState>& state)
+{
+    if (!state->metrics_enabled) return;
+    const auto used = state->view_queue->size() + state->msg_queue->size();
+    auto high = state->queue_high_watermark.load(std::memory_order_relaxed);
+    while (used > high && !state->queue_high_watermark.compare_exchange_weak(
+               high, used, std::memory_order_relaxed)) {}
+}
+}
+
 void process_received_buffer(const std::shared_ptr<SubState>& state, ipc::buff_t&& raw_data)
 {
     if (!state || raw_data.empty())
@@ -307,9 +318,13 @@ void process_received_buffer(const std::shared_ptr<SubState>& state, ipc::buff_t
                 return;
             }
             detail::NoteDzFlatRx(detail::DzFlatRxEvent::kDzFlatAccepted);
-            auto sample = std::make_shared<Sample>(std::move(raw_data), seg_id, exp_hash);
+            const auto enqueue_ns = state->metrics_enabled ?
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count()) : 0;
+            auto sample = std::make_shared<Sample>(std::move(raw_data), seg_id, exp_hash, enqueue_ns);
             detail::FireSeam({detail::SeamPoint::kBeforeViewEnqueue, 0, nullptr, sample->data(), sample->size()});
             state->view_queue->push(std::move(sample));
+            record_queue_usage(state);
             detail::FireSeam({detail::SeamPoint::kAfterViewEnqueue});
             return;
         }
@@ -344,6 +359,7 @@ void process_received_buffer(const std::shared_ptr<SubState>& state, ipc::buff_t
             std::shared_ptr<IpcMsgBase> ptr_cache;
             local_msg->swap(ptr_cache);
             state->msg_queue->push(std::move(ptr_cache));
+            record_queue_usage(state);
             return;
         }
         if (!raw_data.empty() && local_msg->topic()->dzflat_read(raw_data.data(), raw_data.size()))
@@ -352,6 +368,7 @@ void process_received_buffer(const std::shared_ptr<SubState>& state, ipc::buff_t
             std::shared_ptr<IpcMsgBase> ptr_cache;
             local_msg->swap(ptr_cache);
             state->msg_queue->push(std::move(ptr_cache));
+            record_queue_usage(state);
             return;
         }
         return;
@@ -378,6 +395,7 @@ void process_received_buffer(const std::shared_ptr<SubState>& state, ipc::buff_t
     std::shared_ptr<IpcMsgBase> ptr_cache;
     local_msg->swap(ptr_cache);
     state->msg_queue->push(std::move(ptr_cache));
+    record_queue_usage(state);
 }
 
 /******************************************************************************************************/
@@ -1521,9 +1539,18 @@ bool shm_pub_ipc::publish_best_effort(std::shared_ptr<IpcMsgBase> msg)
 /******************************************************************************************************/
 bool shm_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm)
 {
+    ipc::loan_status reason;
+    return publish_blocking(std::move(msg), tm, reason);
+}
+
+bool shm_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_t tm, ipc::loan_status& loan_reason)
+{
+    const auto begin = std::chrono::steady_clock::now();
+    if (tm == ipc::invalid_value) tm = ipc::default_timeout;
+    loan_reason = ipc::loan_status::ok;
     try
     {
-        if (try_publish_dzflat(msg, tm))
+        if (try_publish_dzflat(msg, tm, &loan_reason))
         {
             dzIPC::detail::NoteDzFlatPublish(true);
             /* W08: 三路径分流计数(仅计数, 无行为变更)。A = 对象→共享段一次复制;
@@ -1532,6 +1559,8 @@ bool shm_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_
                 dzIPC::DzFlatPath::DzFlatA, static_cast<std::uint64_t>(msg->dzflat_size()));
             return true;
         }
+        // 信用超时应向调用方传递背压；分片回退会绕过 outstanding 上限。
+        if (loan_reason == ipc::loan_status::pool_exhausted) return false;
         dzIPC::detail::NoteDzFlatPublish(false);
         /* W09/t19：三种语义分列（只计数，不改返回值/控制流）。 */
         {
@@ -1544,10 +1573,13 @@ bool shm_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_
             dzIPC::measure::note_dzflat_attempt(att);
         }
         ipc::buffer response_data(std::move(msg->serialize()));
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - begin).count();
+        const auto remaining = tm > static_cast<std::uint64_t>(elapsed) ? tm - elapsed : 0;
         /* W08: 为计数把原两个 return 收敛成一个局部 sent —— 控制流与返回值逐位不变。 */
         const bool sent = (publisher_->recv_count() == 0)
                               ? publisher_->no_member_try_send(response_data.data(), response_data.size(), 0)
-                              : publisher_->try_send(response_data.data(), response_data.size(), tm);
+                              : publisher_->try_send(response_data.data(), response_data.size(), remaining);
         if (sent)
         {
             dzIPC::detail::NoteDzFlatPathDelivered(
@@ -1577,7 +1609,8 @@ bool shm_pub_ipc::publish_blocking(std::shared_ptr<IpcMsgBase> msg, std::uint64_
  * 生命周期: loan 成功后每条出口都必须以 publish_loan 或 discard_loan 结束。
  * publish_loan 失败时 chunk 已由其内部归还, 这里不得重复 discard。
  */
-bool shm_pub_ipc::try_publish_dzflat(const std::shared_ptr<IpcMsgBase>& msg, std::uint64_t tm)
+bool shm_pub_ipc::try_publish_dzflat(const std::shared_ptr<IpcMsgBase>& msg, std::uint64_t tm,
+                                    ipc::loan_status* loan_reason)
 {
     if (!dzIPC::IsDzFlatEnabled() || !msg || !msg->dzflat_supported())
     {
@@ -1592,7 +1625,10 @@ bool shm_pub_ipc::try_publish_dzflat(const std::shared_ptr<IpcMsgBase>& msg, std
     {
         return false;
     }
-    auto lo = publisher_->loan(need);
+    const auto begin = std::chrono::steady_clock::now();
+    ipc::loan_status reason;
+    auto lo = publisher_->loan(need, tm, reason);
+    if (loan_reason) *loan_reason = reason;
     if (!lo.valid())
     {
         return false;   // 池耗尽 / 无接收方 —— 回退整包
@@ -1602,7 +1638,11 @@ bool shm_pub_ipc::try_publish_dzflat(const std::shared_ptr<IpcMsgBase>& msg, std
         publisher_->discard_loan(lo);
         return false;
     }
-    return publisher_->publish_loan(lo, tm);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - begin).count();
+    const auto remaining = tm == ipc::invalid_value ? ipc::default_timeout :
+        (tm > static_cast<std::uint64_t>(elapsed) ? tm - elapsed : 0);
+    return publisher_->publish_loan(lo, remaining);
 }
 
 /******************************************************************************************************/
@@ -1618,6 +1658,11 @@ bool shm_pub_ipc::try_publish_dzflat(const std::shared_ptr<IpcMsgBase>& msg, std
  * 不记 publish 事件日志: log_publish_event 需要 owning 消息对象去 clone + serialize,
  * 段路径没有(段本身就是序列化结果)。这是取舍, 见函数末尾注释。 */
 bool shm_pub_ipc::publish_prebuilt_segment(const void* seg, std::size_t len)
+{
+    return publish_prebuilt_segment(seg, len, 0);
+}
+
+bool shm_pub_ipc::publish_prebuilt_segment(const void* seg, std::size_t len, std::uint64_t timeout_ms)
 {
     if (!dzIPC::IsDzFlatEnabled() || seg == nullptr)
     {
@@ -1645,7 +1690,8 @@ bool shm_pub_ipc::publish_prebuilt_segment(const void* seg, std::size_t len)
     using ipc::detail::trace_publish;
     using ipc::detail::PublishPoint;
     trace_publish(PublishPoint::BeforeLoan);
-    auto lo = publisher_->loan(h.total_size);
+    const auto begin = std::chrono::steady_clock::now();
+    auto lo = publisher_->loan(h.total_size, timeout_ms);
     trace_publish(PublishPoint::AfterLoan);
     if (!lo.valid())
     {
@@ -1655,7 +1701,11 @@ bool shm_pub_ipc::publish_prebuilt_segment(const void* seg, std::size_t len)
     std::memcpy(lo.data, seg, h.total_size);
     trace_publish(PublishPoint::AfterCopy);
     trace_publish(PublishPoint::BeforeCommit);
-    const bool ok = publisher_->publish_loan(lo, 0);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - begin).count();
+    const auto remaining = timeout_ms == ipc::invalid_value ? ipc::default_timeout :
+        (timeout_ms > static_cast<std::uint64_t>(elapsed) ? timeout_ms - elapsed : 0);
+    const bool ok = publisher_->publish_loan(lo, remaining);
     trace_publish(PublishPoint::AfterCommit);
     if (ok)
     {
@@ -1800,9 +1850,13 @@ shm_sub_ipc::shm_sub_ipc(const std::shared_ptr<TopicData>& msg, const std::strin
     sub_state_->adopt_cap = view_cap;
     // 队列属于 SubState，回调不能强持有 SubState，否则形成环并永久钉住池。
     const std::weak_ptr<SubState> weak_state = sub_state_;
+    sub_state_->view_queue->set_evict_cb([weak_state](const std::shared_ptr<Sample>&) {
+        if (auto state = weak_state.lock()) state->queue_evicted.fetch_add(1, std::memory_order_relaxed);
+    });
     sub_state_->msg_queue->set_evict_cb(
         [weak_state](const std::shared_ptr<IpcMsgBase> &dropped)
         {
+            if (auto state = weak_state.lock()) state->queue_evicted.fetch_add(1, std::memory_order_relaxed);
             if (dropped && dropped->dzflat_is_borrowed())
             {
                 if (auto state = weak_state.lock())

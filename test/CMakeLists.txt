@@ -415,6 +415,35 @@ if(UNIX AND NOT APPLE)
 endif()
 set_target_properties(loan_phase_latency_measure PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 message(STATUS "Created benchmark executable: loan_phase_latency_measure")
+add_test(NAME loan_pool_backpressure COMMAND test_topic_chunk_pool --gtest_filter=LoanCredit.*)
+add_test(NAME loan_pool_32_publishers COMMAND loan_phase_latency_measure
+    --transport=raw --pubs=32 --subs=8 --msgs=2048 --payload=11000 --windows=3 --timeout=1000 --require-all=1)
+add_test(NAME loan_pool_32_publishers_dzflat COMMAND loan_phase_latency_measure
+    --transport=dzflat --pubs=32 --subs=8 --msgs=2048 --payload=11000 --windows=3 --timeout=1000 --require-all=1)
+foreach(transport raw dzflat)
+    add_test(NAME loan_pool_32_publishers_${transport}_burst COMMAND loan_phase_latency_measure
+        --transport=${transport} --pubs=32 --subs=8 --msgs=512 --payload=1048576 --windows=3 --timeout=1000 --require-all=0)
+endforeach()
+set_tests_properties(loan_pool_backpressure loan_pool_32_publishers loan_pool_32_publishers_dzflat
+    loan_pool_32_publishers_raw_burst loan_pool_32_publishers_dzflat_burst PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+foreach(transport raw dzflat)
+    add_test(NAME loan_pool_32_publishers_${transport}_copy COMMAND loan_phase_latency_measure
+        --transport=${transport} --pubs=32 --subs=8 --msgs=256 --payload=11000 --windows=3
+        --timeout=1000 --require-all=1 --consume-mode=copy --hold-us=2000)
+    add_test(NAME loan_pool_32_publishers_${transport}_copy_burst COMMAND loan_phase_latency_measure
+        --transport=${transport} --pubs=32 --subs=8 --msgs=512 --payload=1048576 --windows=3
+        --timeout=1000 --require-all=0 --consume-mode=copy)
+    set_tests_properties(loan_pool_32_publishers_${transport}_copy
+        loan_pool_32_publishers_${transport}_copy_burst PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+endforeach()
+foreach(mode zero_copy copy)
+    add_test(NAME loan_pool_32_publishers_dzflat_loaned_${mode} COMMAND loan_phase_latency_measure
+        --transport=dzflat --pubs=32 --subs=8 --msgs=256 --payload=11000 --windows=3
+        --timeout=1000 --require-all=1 --consume-mode=${mode} --dzflat-publish=loaned)
+    set_tests_properties(loan_pool_32_publishers_dzflat_loaned_${mode} PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+endforeach()
+add_test(NAME loan_pool_acceptance_validation COMMAND ${Python3_EXECUTABLE}
+    ${LIBIPC_PROJECT_DIR}/test/perf/loan_backpressure/test_acceptance.py)
 # ================================================================
 # DZFlat 离线基准 (docs/dzflat_shm.md Step 1 验收门)
 # 自带 main(), 不是 gtest; 覆写 global operator new 以统计堆分配次数。

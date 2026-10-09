@@ -10,6 +10,8 @@
 #include <string_view>
 #include <cstdio>
 #include <memory>
+#include <atomic>
+#include <array>
 #include "libipc/export.h"
 
 #include "libipc/def.h"
@@ -136,6 +138,21 @@ struct pool_identity_header {
     std::uint64_t magic;
     std::uint64_t topic_id;
 };
+// 独立控制段；chunk_info_t 和十块载荷段的既有布局保持不变。
+// 除 waiters/sequence 外，所有字段均由载荷段的池锁保护。
+struct pool_credit_state {
+    std::uint64_t magic = 0, topic_id = 0, stride = 0, generation = 0;
+    std::uint32_t capacity = topic_msg_cache, free = topic_msg_cache;
+    std::uint32_t reserve = 1, high_watermark = 0;
+    std::atomic<std::uint32_t> sequence{0}, waiters{0};
+    std::uint64_t next_ticket = 0;
+    std::array<std::uint64_t, topic_msg_cache> tickets{};
+    std::array<bool, topic_msg_cache> active{};
+    std::uint64_t loan_attempt = 0, loan_success = 0, loan_reject = 0;
+    std::uint64_t duplicate_return = 0, invalid_storage_id = 0, pool_chain_corrupt = 0;
+    std::uint64_t wait_ns = 0, wait_max_ns = 0;
+    std::array<std::uint64_t, 64> wait_histogram{};
+};
 class topic_pool_context {
     struct impl;
     std::unique_ptr<impl> p_;
@@ -146,6 +163,7 @@ public:
     bool same_process() const noexcept;
     std::uint64_t identity() const noexcept;
     void* map_pool(std::size_t stride, std::size_t bytes);
+    pool_credit_state* map_credit(std::size_t stride);
 };
 IPC_EXPORT ipc::string topic_pool_prefix(ipc::string const& pref, ipc::string const& name);
 IPC_EXPORT std::shared_ptr<topic_pool_context> acquire_topic_pool(ipc::string const& pref, ipc::string const& name);

@@ -233,7 +233,7 @@ public:
             prefix_, {"QU_CONN__", name_, "__",
                       ipc::to_string(static_cast<std::size_t>(ipc::data_length)),
                       "__",
-                      ipc::to_string(kAlignSize), "__V4"});
+                      ipc::to_string(kAlignSize), "__V5"});
 
         switch (t) {
         case sniffer::topology::server: {
@@ -288,8 +288,8 @@ public:
 
     /// Resolve a large-message storage chunk and copy its payload out.
     /// Returns empty buff_t on failure.
-    buff_t fetch_storage(ipc::storage_id_t wire_id, std::size_t msg_size) {
-        const auto encoded_id = ipc::detail::storage_from_wire(wire_id);
+    buff_t fetch_storage(ipc::detail::storage_token token, std::size_t msg_size) {
+        const auto encoded_id = ipc::detail::storage_from_wire(token.wire_id);
         if (!ipc::detail::valid_storage(encoded_id)) return {};
         constexpr auto count = ipc::topic_msg_cache;
         const auto id = encoded_id;
@@ -303,7 +303,15 @@ public:
         // 只复制观察，不取得持有者位，也不归还业务方的块。
         auto* mem = static_cast<ipc::byte_t*>(ipc::mem::alloc(msg_size));
         if (mem == nullptr) return {};
-        std::memcpy(mem, chunk->data(), msg_size);
+        auto* credit = topic_pool_->map_credit(chunk_size);
+        if (!credit) { ipc::mem::free(mem, msg_size); return {}; }
+        // 被动观察没有持有者位，复制期间持池锁以防 ID 回池复用。
+        while (!info->lock_.try_lock()) std::this_thread::yield();
+        const bool current = credit->active[id] && credit->tickets[id] == token.ticket &&
+                             credit->generation == token.generation;
+        if (current) std::memcpy(mem, chunk->data(), msg_size);
+        info->lock_.unlock();
+        if (!current) { ipc::mem::free(mem, msg_size); return {}; }
         return buff_t{mem, msg_size, ipc::mem::free};
     }
 
@@ -369,9 +377,9 @@ public:
 
             // ---- Large message: data_ is a storage_id_t into chunk pool.
             if (msg.storage_) {
-                ipc::storage_id_t sid =
-                    *reinterpret_cast<ipc::storage_id_t*>(&msg.data_);
-                buff_t out = fetch_storage(sid, msg_size);
+                ipc::detail::storage_token token;
+                std::memcpy(&token, &msg.data_, sizeof(token));
+                buff_t out = fetch_storage(token, msg_size);
                 if (!out.empty()) {
                     if (out_meta) {
                         out_meta->cc_id   = msg.cc_id_;

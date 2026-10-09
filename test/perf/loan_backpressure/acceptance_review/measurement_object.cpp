@@ -10,7 +10,6 @@
 #include <fstream>
 #include <functional>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -60,7 +59,6 @@ struct Args {
     bool raw = false;
     std::string csv_dir;
     std::string consume_mode = "mixed";
-    std::string dzflat_publish = "object";
     std::uint64_t hold_us = 0;
     std::uint64_t slow_start_us = 0;
     bool metrics = true;
@@ -71,7 +69,7 @@ bool parse(int argc, char** argv, Args& a) {
         std::string s(argv[i]);
         auto eq = s.find('='); if (eq == std::string::npos) return false;
         auto k = s.substr(0, eq), val = s.substr(eq + 1);
-        if (k != "--csv-dir" && k != "--transport" && k != "--consume-mode" && k != "--dzflat-publish" &&
+        if (k != "--csv-dir" && k != "--transport" && k != "--consume-mode" &&
             (val.empty() || val.find_first_not_of("0123456789") != std::string::npos)) return false;
         if (k == "--pubs") a.pubs = std::stoi(val);
         else if (k == "--subs") a.subs = std::stoi(val);
@@ -90,7 +88,6 @@ bool parse(int argc, char** argv, Args& a) {
         }
         else if (k == "--csv-dir") a.csv_dir = val;
         else if (k == "--consume-mode") a.consume_mode = val;
-        else if (k == "--dzflat-publish") a.dzflat_publish = val;
         else if (k == "--hold-us") a.hold_us = std::stoull(val);
         else if (k == "--slow-start-us") a.slow_start_us = std::stoull(val);
         else if (k == "--metrics") {
@@ -104,27 +101,12 @@ bool parse(int argc, char** argv, Args& a) {
            a.payload <= 16 * 1024 * 1024 && a.rate <= 1000000000 &&
            a.timeout <= 60000 &&
            a.hold_us <= 1000000 && a.slow_start_us <= 1000000 &&
-           (a.dzflat_publish == "object" || a.dzflat_publish == "loaned") &&
            (a.consume_mode == "zero_copy" || a.consume_mode == "copy" || a.consume_mode == "mixed");
 }
 
 std::string topic_name() {
     return "/phase_latency_" + std::to_string(monotonic_now_ns());
 }
-
-// 后台诊断也写 stdout；锁住整条记录，避免多次 printf 的字段被日志打断。
-struct OutputRecord {
-    OutputRecord() {
-#if !defined(_WIN32)
-        ::flockfile(stdout);
-#endif
-    }
-    ~OutputRecord() {
-#if !defined(_WIN32)
-        ::funlockfile(stdout);
-#endif
-    }
-};
 
 void print_stats(const char* name, const Stats& s) {
     std::printf("%s_n=%zu %s_p50_ns=%llu %s_p95_ns=%llu %s_p99_ns=%llu %s_max_ns=%llu ",
@@ -149,7 +131,6 @@ struct ProcessUsage {
     std::uint64_t user_ns = 0;
     std::uint64_t system_ns = 0;
     std::uint64_t max_rss_kb = 0;
-    std::uint64_t rusage_max_rss_kb = 0;
 };
 
 ProcessUsage process_usage() {
@@ -167,21 +148,6 @@ ProcessUsage process_usage() {
 #else
         result.max_rss_kb = static_cast<std::uint64_t>(usage.ru_maxrss);
 #endif
-        result.rusage_max_rss_kb = result.max_rss_kb;
-    }
-#endif
-#if defined(__linux__)
-    // ru_maxrss 会继承 fork 父进程高水位；VmHWM 属于 exec 后当前地址空间。
-    result.max_rss_kb = 0;
-    std::ifstream status("/proc/self/status");
-    std::string line;
-    while (std::getline(status, line)) {
-        if (line.compare(0, 6, "VmHWM:") != 0) continue;
-        std::istringstream record(line);
-        std::string key, unit;
-        std::uint64_t kb = 0;
-        if (record >> key >> kb >> unit && unit == "kB") result.max_rss_kb = kb;
-        break;
     }
 #endif
     return result;
@@ -196,12 +162,11 @@ void print_runtime(const ProcessUsage& before, const ProcessUsage& after,
     const double producer_seconds = producer_elapsed_ns > 0 ? producer_elapsed_ns / 1e9 : 0.0;
     const double drain_seconds = drain_elapsed_ns > 0 ? drain_elapsed_ns / 1e9 : 0.0;
     const double bytes = static_cast<double>(published) * static_cast<double>(payload);
-    std::printf("cpu_user_ns=%llu cpu_system_ns=%llu cpu_total_ns=%llu rss_peak_kb=%llu rusage_peak_kb=%llu "
+    std::printf("cpu_user_ns=%llu cpu_system_ns=%llu cpu_total_ns=%llu rss_peak_kb=%llu "
                 "throughput_msgs_per_s=%.3f throughput_bytes_per_s=%.3f "
                 "drain_throughput_msgs_per_s=%.3f drain_throughput_bytes_per_s=%.3f ",
                 (unsigned long long)user_ns, (unsigned long long)system_ns,
                 (unsigned long long)cpu_ns, (unsigned long long)after.max_rss_kb,
-                (unsigned long long)after.rusage_max_rss_kb,
                 producer_seconds > 0.0 ? static_cast<double>(published) / producer_seconds : 0.0,
                 producer_seconds > 0.0 ? bytes / producer_seconds : 0.0,
                 drain_seconds > 0.0 ? static_cast<double>(published) / drain_seconds : 0.0,
@@ -338,8 +303,7 @@ bool run(const Args& a, int window) {
         subs.back()->InitChannel();
     }
     dzIPC::Msg::StdImage prototype; prototype.data.resize(a.payload);
-    const auto loan_size = a.dzflat_publish == "loaned" ?
-        dzIPC::Msg::StdImageFlat::loan_size(static_cast<std::uint32_t>(a.payload)) : prototype.dzflat_size();
+    const auto loan_size = prototype.dzflat_size();
     const auto ready_deadline = std::chrono::steady_clock::now() + 5s;
     while (!std::all_of(pubs.begin(), pubs.end(), [&](const auto& p) {
         if (!p->channel_ready()) return false;
@@ -477,46 +441,21 @@ bool run(const Args& a, int window) {
                 const auto scheduled = begin + std::chrono::nanoseconds(n * (1000000000 / a.rate));
                 std::this_thread::sleep_until(scheduled);
             }
-            std::uint64_t t0;
+            auto m = std::make_shared<dzIPC::Msg::StdImage>();
+            m->set_msg_id(31);
+            m->header.stamp = monotonic_now_ns();
+            m->height = p;
+            m->width = n;
+            m->step = a.payload;
+            m->data.resize(a.payload);
+            for (std::size_t i = 0; i < a.payload; ++i) m->data[i] = payload_byte(n, i);
+            const auto t0 = monotonic_now_ns();
             ipc::loan_status reason = ipc::loan_status::ok;
-            bool okay = false;
-            if (a.dzflat_publish == "loaned") {
-                t0 = monotonic_now_ns();
 #if DZIPC_LOAN_PERF_BASELINE
-                // 同一 B 级入口；旧库只在无有效借样时有界重试，绝不回退到 TLV。
-                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(a.timeout);
-                auto lo = pubs[p]->loan<dzIPC::Msg::StdImageFlat>(a.payload);
-                while (!lo.valid() && a.timeout && std::chrono::steady_clock::now() < deadline) {
-                    std::this_thread::yield();
-                    lo = pubs[p]->loan<dzIPC::Msg::StdImageFlat>(a.payload);
-                }
+            const bool okay = pubs[p]->publish_blocking(m, a.timeout);
 #else
-                auto lo = pubs[p]->loan<dzIPC::Msg::StdImageFlat>(a.payload, a.timeout);
+            const bool okay = pubs[p]->publish_blocking(m, a.timeout, reason);
 #endif
-                if (lo.valid()) {
-                    lo->set_height(p); lo->set_width(n); lo->set_step(a.payload);
-                    auto data = lo->alloc_data(a.payload);
-                    if (data.size() == a.payload) {
-                        for (std::size_t i = 0; i < a.payload; ++i) data[i] = payload_byte(n, i);
-                        okay = pubs[p]->publish_loaned(std::move(lo), a.timeout);
-                    }
-                } else reason = ipc::loan_status::pool_exhausted;
-            } else {
-                auto m = std::make_shared<dzIPC::Msg::StdImage>();
-                m->set_msg_id(31);
-                m->header.stamp = monotonic_now_ns();
-                m->height = p;
-                m->width = n;
-                m->step = a.payload;
-                m->data.resize(a.payload);
-                for (std::size_t i = 0; i < a.payload; ++i) m->data[i] = payload_byte(n, i);
-                t0 = monotonic_now_ns();
-#if DZIPC_LOAN_PERF_BASELINE
-                okay = pubs[p]->publish_blocking(m, a.timeout);
-#else
-                okay = pubs[p]->publish_blocking(m, a.timeout, reason);
-#endif
-            }
             stats.add(monotonic_now_ns() - t0);
             if (okay) {
                 accepted[n] = 1;
@@ -559,7 +498,6 @@ bool run(const Args& a, int window) {
         okay = okay && r.count == published.load() && !missing && !unexpected &&
             !r.duplicate && !r.corrupt && !r.out_of_order;
         okay = okay && r.copied_bytes == (a.consume_mode == "copy" ? r.count * a.payload : 0);
-        OutputRecord record;
         std::printf("RESULT transport=dzflat window=%d pubs=%d subs=%d subscriber=%d msgs=%zu payload=%zu rate=%llu "
                     "attempted=%zu published=%zu publish_failed=%zu pool_exhausted=%zu other_failed=%zu received=%zu flat=%zu tlv=%zu "
                     "missing=%zu unexpected=%zu duplicate=%zu corrupt=%zu out_of_order=%zu elapsed_ns=%lld ",
@@ -568,10 +506,9 @@ bool run(const Args& a, int window) {
                     r.count, r.flat, r.tlv,
                     missing, unexpected, r.duplicate, r.corrupt, r.out_of_order, (long long)elapsed);
         std::printf("consume_mode=%s hold_us=%llu slow_start_us=%llu metrics=%d baseline=%d "
-                    "copied_bytes=%llu drain_elapsed_ns=%llu dzflat_publish=%s ", a.consume_mode.c_str(),
+                    "copied_bytes=%llu drain_elapsed_ns=%llu ", a.consume_mode.c_str(),
                     (unsigned long long)a.hold_us, (unsigned long long)a.slow_start_us, a.metrics,
-                    DZIPC_LOAN_PERF_BASELINE, (unsigned long long)r.copied_bytes,
-                    (unsigned long long)drain_elapsed, a.dzflat_publish.c_str());
+                    DZIPC_LOAN_PERF_BASELINE, (unsigned long long)r.copied_bytes, (unsigned long long)drain_elapsed);
         print_runtime(usage_before, usage_after, published.load(), elapsed, drain_elapsed, a.payload);
         print_stats("publish", pub); print_stats("recv", r.recv); print_stats("destroy", r.destroy);
         print_stats("queue_residence", r.residence); print_stats("sample_hold", r.hold);
@@ -741,7 +678,6 @@ bool run_raw(const Args& a, int window) {
         okay = okay && r.count == published.load() && !missing && !unexpected &&
             !r.duplicate && !r.corrupt && !r.out_of_order;
         okay = okay && r.copied_bytes == (a.consume_mode == "copy" ? r.count * a.payload : 0);
-        OutputRecord record;
         std::printf("RESULT transport=raw window=%d pubs=%d subs=%d subscriber=%d msgs=%zu payload=%zu rate=%llu "
                     "attempted=%zu published=%zu publish_failed=%zu pool_exhausted=%zu other_failed=%zu received=%zu missing=%zu unexpected=%zu duplicate=%zu "
                     "corrupt=%zu out_of_order=%zu elapsed_ns=%lld ", window, a.pubs, a.subs, s, a.msgs,
@@ -749,10 +685,9 @@ bool run_raw(const Args& a, int window) {
                     failures.pool_exhausted, failures.other,
                     r.count, missing, unexpected, r.duplicate, r.corrupt, r.out_of_order, (long long)elapsed);
         std::printf("consume_mode=%s hold_us=%llu slow_start_us=%llu metrics=%d baseline=%d "
-                    "copied_bytes=%llu drain_elapsed_ns=%llu dzflat_publish=%s ", a.consume_mode.c_str(),
+                    "copied_bytes=%llu drain_elapsed_ns=%llu ", a.consume_mode.c_str(),
                     (unsigned long long)a.hold_us, (unsigned long long)a.slow_start_us, a.metrics,
-                    DZIPC_LOAN_PERF_BASELINE, (unsigned long long)r.copied_bytes,
-                    (unsigned long long)drain_elapsed, a.dzflat_publish.c_str());
+                    DZIPC_LOAN_PERF_BASELINE, (unsigned long long)r.copied_bytes, (unsigned long long)drain_elapsed);
         print_runtime(usage_before, usage_after, published.load(), elapsed, drain_elapsed, a.payload);
         print_stats("publish", pub); print_stats("recv", r.recv); print_stats("destroy", r.destroy);
         print_stats("transport_latency", r.latency); print_stats("sample_hold", r.hold);
@@ -768,8 +703,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "usage: loan_phase_latency_measure --pubs=1..32 --subs=1..8 --msgs=N "
                              "--payload=N --windows=N --rate=N --timeout=N --require-all=0|1 "
                              "--transport=raw|dzflat --consume-mode=zero_copy|copy|mixed "
-                             "--hold-us=N --slow-start-us=N --metrics=0|1 --csv-dir=PATH "
-                             "--dzflat-publish=object|loaned\n");
+                             "--hold-us=N --slow-start-us=N --metrics=0|1 --csv-dir=PATH\n");
         return 2;
     }
     dzIPC::EnableNodelet(false);

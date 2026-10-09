@@ -262,7 +262,7 @@ struct prod_cons_impl<wr<relat::single, relat::multi, trans::broadcast>> {
     template <typename W, typename F, typename E>
     bool push(W* wrapper, F&& f, E* elems) {
         E* el;
-        circ::cc_t rem_cc = 0;
+        circ::cc_t rem_cc = 0, recipients = 0;
         for (unsigned k = 0;;) {
             circ::cc_t cc = wrapper->elems()->connections(std::memory_order_relaxed);
             if (cc == 0) return false; // no reader
@@ -290,13 +290,17 @@ struct prod_cons_impl<wr<relat::single, relat::multi, trans::broadcast>> {
              * "看起来"是满的。详见 docs/dzflat_known_issues.md 第 4 条。 */
             if (el->rc_.compare_exchange_weak(
                         cur_rc, epoch_ | static_cast<rc_t>(cc), std::memory_order_release)) {
+                recipients = cc;
                 break;
             }
             ipc::yield(k);
         }
         const std::uint32_t s0 = el->seq_.load(std::memory_order_relaxed);
         el->seq_.store(s0 + 1, std::memory_order_release);   // 奇 = 正在落笔
-        std::forward<F>(f)(&(el->data_), rem_cc);
+        if constexpr (std::is_invocable_v<F, void*, circ::cc_t, circ::cc_t>)
+            std::forward<F>(f)(&(el->data_), rem_cc, recipients);
+        else
+            std::forward<F>(f)(&(el->data_), rem_cc);
         el->seq_.store(s0 + 2, std::memory_order_release);   // 偶 = 完成
         wt_.fetch_add(1, std::memory_order_release);
         return true;
@@ -305,7 +309,7 @@ struct prod_cons_impl<wr<relat::single, relat::multi, trans::broadcast>> {
     template <typename W, typename F, typename E>
     bool force_push(W* wrapper, F&& f, E* elems) {
         E* el;
-        circ::cc_t rem_cc = 0;
+        circ::cc_t rem_cc = 0, recipients = 0;
         epoch_ += ep_incr;
         for (unsigned k = 0;;) {
             circ::cc_t cc = wrapper->elems()->connections(std::memory_order_relaxed);
@@ -339,6 +343,7 @@ struct prod_cons_impl<wr<relat::single, relat::multi, trans::broadcast>> {
             // just compare & exchange
             if (el->rc_.compare_exchange_weak(
                         cur_rc, epoch_ | static_cast<rc_t>(cc), std::memory_order_release)) {
+                recipients = cc;
                 break; // rem_cc 取自 CAS 成功的那一轮, 与被覆写的世代一致
             }
             ipc::yield(k);
@@ -350,7 +355,10 @@ struct prod_cons_impl<wr<relat::single, relat::multi, trans::broadcast>> {
         // 会在持有者手里被回池复用)。详见 ipc.cpp: discard_storage。
         const std::uint32_t fs0 = el->seq_.load(std::memory_order_relaxed);
         el->seq_.store(fs0 + 1, std::memory_order_release);
-        std::forward<F>(f)(&(el->data_), rem_cc);
+        if constexpr (std::is_invocable_v<F, void*, circ::cc_t, circ::cc_t>)
+            std::forward<F>(f)(&(el->data_), rem_cc, recipients);
+        else
+            std::forward<F>(f)(&(el->data_), rem_cc);
         el->seq_.store(fs0 + 2, std::memory_order_release);
         wt_.fetch_add(1, std::memory_order_release);
         return true;
@@ -620,7 +628,9 @@ struct prod_cons_impl<wr<relat::multi, relat::multi, trans::broadcast>> {
                        inc_mask(epoch | (cur_rc & ep_mask)) | static_cast<rc_t>(cc),
                        std::memory_order_relaxed)) {}
             // Disconnected readers cannot release the overwritten descriptor.
-            if constexpr (std::is_invocable_v<F, void*, circ::cc_t>)
+            if constexpr (std::is_invocable_v<F, void*, circ::cc_t, circ::cc_t>)
+                std::forward<F>(f)(&(el->data_), static_cast<circ::cc_t>(cur_rc & rc_mask), cc);
+            else if constexpr (std::is_invocable_v<F, void*, circ::cc_t>)
                 std::forward<F>(f)(&(el->data_), static_cast<circ::cc_t>(cur_rc & rc_mask));
             else
                 std::forward<F>(f)(&(el->data_));
@@ -663,7 +673,10 @@ struct prod_cons_impl<wr<relat::multi, relat::multi, trans::broadcast>> {
             while (!el->rc_.compare_exchange_weak(cur_rc,
                        inc_mask(epoch | (cur_rc & ep_mask)) | static_cast<rc_t>(cc),
                        std::memory_order_relaxed)) {}
-            std::forward<F>(f)(&(el->data_), static_cast<circ::cc_t>(cur_rc & rc_mask));
+            if constexpr (std::is_invocable_v<F, void*, circ::cc_t, circ::cc_t>)
+                std::forward<F>(f)(&(el->data_), static_cast<circ::cc_t>(cur_rc & rc_mask), cc);
+            else
+                std::forward<F>(f)(&(el->data_), static_cast<circ::cc_t>(cur_rc & rc_mask));
             el->f_ct_.store(~static_cast<flag_t>(cur_ct), std::memory_order_release);
             publish_ready(elems);
             return true;
