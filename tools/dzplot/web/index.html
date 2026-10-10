@@ -1,131 +1,118 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>dzplot — Time-Series Visualization</title>
-  <link rel="stylesheet" href="/styles.css?v=1" />
+  <title>dzplot · 曲线与 3D 工作区</title>
+  <link rel="stylesheet" href="/styles.css?v=3" />
 </head>
 <body>
-<div class="app-shell">
-  <!-- Sidebar -->
-  <aside class="sidebar">
-    <div class="brand">
-      <div class="brand-mark">P</div>
-      <div>
-        <h1>dzplot</h1>
-        <p id="connectionText">Disconnected</p>
-      </div>
-    </div>
-
-    <!-- FPS Control -->
-    <section class="control-panel">
-      <div class="section-head"><h2>Render FPS</h2></div>
-      <div class="fps-control">
-        <input id="fpsSlider" type="range" min="1" max="120" value="60" />
-        <span class="fps-value"><strong id="fpsValue">60</strong> fps</span>
-      </div>
-      <div class="fps-meta">
-        <span>Target: <strong id="targetFps">60</strong></span>
-        <span>Actual: <strong id="actualFps">0</strong></span>
-      </div>
-    </section>
-
-    <!-- Source Control -->
-    <section class="control-panel">
-      <div class="section-head"><h2>Source</h2></div>
-      <div class="source-tabs">
-        <button id="tabBag" class="tab active">📁 Bag</button>
-        <button id="tabLive" class="tab">🔴 Live</button>
-      </div>
-      <!-- Bag mode -->
-      <div id="bagPanel" class="source-panel">
-        <label>Bag File
-          <input id="bagPath" type="text" placeholder="/path/to/events.bag" />
-        </label>
-        <div class="row">
-          <label>Speed
-            <input id="bagSpeed" type="number" value="1.0" min="0.01" max="100" step="0.1" />
-          </label>
-          <label class="checkbox-label">
-            <input id="bagLoop" type="checkbox" /> Loop
-          </label>
+<div class="app-shell" id="appShell" data-view="plot">
+  <header class="app-header">
+    <a class="brand" href="/" aria-label="dzplot 主页面">
+      <svg class="brand-mark" viewBox="0 0 28 28" aria-hidden="true"><path d="M2 21C7 21 6 5 11 5s3 18 8 18 5-10 7-10"/><path d="M2 17C9 17 7 9 12 9s4 10 9 10h5"/></svg><strong>dzplot</strong>
+    </a>
+    <button id="toggleSidebarTopBtn" class="icon-button" type="button" title="显示或隐藏数据栏" aria-label="显示或隐藏数据栏">▤</button>
+    <button id="openSourceBtn" type="button">数据源</button>
+    <button id="addDisplayBtn" type="button">添加 3D 显示</button>
+    <button id="resetLayoutBtn" type="button">重置布局</button>
+    <span class="header-spacer"></span>
+    <span class="connection"><i id="connectionDot"></i><span id="connectionText">正在连接</span></span>
+    <button id="fullscreenBtn" class="icon-button" type="button" title="全屏" aria-label="全屏">⛶</button>
+  </header>
+  <div class="content-shell">
+    <aside class="sidebar" id="dataSidebar">
+      <section class="sources-panel">
+        <div class="section-head"><h2>数据源</h2><div class="source-actions">
+          <button id="quickBagBtn" class="icon-button" type="button" title="加载录包" aria-label="加载录包">▱</button>
+          <button id="quickLiveBtn" class="icon-button" type="button" title="连接实时话题" aria-label="连接实时话题">◉</button>
+        </div></div>
+        <div id="sourceSummary" class="source-summary">尚未加载数据源</div>
+      </section>
+      <section class="topic-panel">
+        <div class="section-head"><h2>数据集</h2><span id="topicCount" class="count">0</span></div>
+        <div class="dataset-filter"><input id="topicFilter" type="search" placeholder="筛选话题或字段…" aria-label="筛选话题或字段"/><button id="expandTopicsBtn" class="icon-button" title="展开或收起话题" aria-label="展开或收起话题">⌃</button></div>
+        <div class="dataset-columns"><span>名称</span><span>最新值</span></div>
+        <div id="topicList" class="topic-list"></div>
+        <p id="datasetEmpty" class="dataset-empty">加载录包或连接实时话题，<br/>选择字段，或将字段拖入曲线区。</p>
+      </section>
+      <section class="selected-panel">
+        <div class="section-head"><h2 id="selectedPanelTitle">窗口 1 · 已选曲线</h2><span id="seriesCount" class="count">0</span></div>
+        <div id="seriesList" class="series-list"><span class="empty-hint">尚未选择字段</span></div>
+      </section>
+      <section class="status-panel collapsed">
+        <div class="section-head"><h2>队列状态</h2><button class="collapse-toggle icon-button" type="button" aria-label="展开队列状态">+</button></div>
+        <div class="status-body">
+          <div class="status-row"><span>队列 / 容量</span><span><strong id="qSize">0</strong> / <strong id="qCap">4096</strong></span></div>
+          <div class="status-row"><span>水位</span><strong id="qWatermark">0%</strong></div>
+          <div class="status-row"><span>丢弃</span><strong id="qDropped">0</strong></div>
+          <div class="status-row"><span>背压</span><strong id="qBP">关闭</strong></div>
+          <div class="status-row"><span>降采样</span><strong id="qSub">1x</strong></div>
+          <div class="status-row"><span>收到样本</span><strong id="qTotalRx">0</strong></div>
         </div>
-        <button id="loadBagBtn" class="primary-action">Load & Play</button>
+      </section>
+    </aside>
+    <div id="sidebarDivider" class="divider sidebar-divider" role="separator" aria-label="调整数据栏宽度" aria-orientation="vertical" tabindex="0"></div>
+    <main class="workspace">
+      <nav class="workspace-tabs" role="tablist" aria-label="工作区视图">
+        <button id="plotTab" class="workspace-tab active" role="tab" aria-selected="true" aria-controls="plotPane" data-view="plot">⌁ <span>曲线</span></button>
+        <button id="vizTab" class="workspace-tab" role="tab" aria-selected="false" aria-controls="vizPane" data-view="viz">⬡ <span>3D 视图</span></button>
+        <button id="splitTab" class="workspace-tab" role="tab" aria-selected="false" aria-controls="workbench" data-view="split">◫ <span>并排查看</span></button>
+        <span class="header-spacer"></span><span id="workspaceHint" class="workspace-hint">曲线工作区</span>
+      </nav>
+      <div id="workbench" class="workbench">
+        <section id="plotPane" class="plot-pane" role="tabpanel" aria-labelledby="plotTab">
+          <header class="pane-toolbar"><span>时间序列 <small id="chartCount">1 个窗口</small></span><div class="plot-layout-actions">
+            <span id="activePlotLabel">当前窗口 1</span>
+            <button id="splitPlotRightBtn" type="button" title="将当前窗口分为左右两部分">◫ 左右分裂</button>
+            <button id="splitPlotDownBtn" type="button" title="将当前窗口分为上下两部分">⬒ 上下分裂</button>
+            <button id="mergePlotsBtn" type="button" title="恢复单窗口并保留全部曲线">合并窗口</button>
+            <button id="clearChartsBtn" class="icon-button" type="button" title="清空当前窗口的曲线" aria-label="清空当前窗口的曲线">×</button>
+          </div></header>
+          <div id="chartContainer" class="chart-container" aria-label="可分裂的曲线工作区"></div>
+        </section>
+        <div id="paneDivider" class="divider pane-divider" role="separator" aria-label="调整曲线与 3D 比例" aria-orientation="vertical" tabindex="0" hidden></div>
+        <section id="vizPane" class="viz-pane" role="tabpanel" aria-labelledby="vizTab" hidden><iframe id="vizFrame" title="dzplot 3D 子页面" allow="fullscreen"></iframe></section>
       </div>
-      <!-- Live mode -->
-      <div id="livePanel" class="source-panel" hidden>
-        <label>Topic
-          <input id="liveTopic" type="text" placeholder="/test/topic" />
-        </label>
-        <label>Msg Type
-          <input id="liveMsgType" type="text" placeholder="StdRawMessage" value="StdRawMessage" />
-        </label>
-        <div class="row">
-          <label>Transport
-            <select id="liveTransport">
-              <option value="shm">shm</option>
-              <option value="socket">socket</option>
-            </select>
-          </label>
-          <label>Domain
-            <input id="liveDomain" type="number" value="0" min="0" />
-          </label>
-        </div>
-        <button id="startSniffBtn" class="primary-action">Start Sniffing</button>
-      </div>
-    </section>
-
-    <!-- Playback Controls -->
-    <section class="control-panel">
-      <div class="section-head"><h2>Playback</h2></div>
-      <div class="playback-row">
-        <button id="btnStop" title="Stop">⏹</button>
-        <button id="btnPause" title="Pause">⏸</button>
-        <button id="btnPlay" title="Play">▶</button>
-      </div>
-      <div id="playbackInfo" class="playback-info">Idle</div>
-    </section>
-
-    <!-- Topics & Fields -->
-    <section class="topic-panel">
-      <div class="section-head">
-        <h2>Topics</h2>
-        <span id="topicCount">0</span>
-      </div>
-      <div id="topicList" class="topic-list"></div>
-    </section>
-
-    <!-- Status -->
-    <section class="status-panel collapsed">
-      <div class="section-head">
-        <h2>Queue Status</h2>
-        <button class="collapse-toggle" type="button">+</button>
-      </div>
-      <div class="status-body">
-        <div class="status-row"><span>Queue</span><strong id="qSize">0</strong></div>
-        <div class="status-row"><span>Capacity</span><strong id="qCap">4096</strong></div>
-        <div class="status-row"><span>Watermark</span><strong id="qWatermark">0%</strong></div>
-        <div class="status-row"><span>Dropped</span><strong id="qDropped">0</strong></div>
-        <div class="status-row"><span>Backpressure</span><strong id="qBP">off</strong></div>
-        <div class="status-row"><span>Subsample</span><strong id="qSub">1x</strong></div>
-        <div class="status-row"><span>Samples Rx</span><strong id="qTotalRx">0</strong></div>
-      </div>
-    </section>
-  </aside>
-
-  <!-- Main chart area -->
-  <main class="chart-area">
-    <div id="chartContainer" class="chart-container">
-      <div id="chartPlaceholder" class="chart-placeholder">
-        <div class="placeholder-icon">📈</div>
-        <h2>No charts active</h2>
-        <p>Load a .bag file or start sniffing, then select topics and fields to plot.</p>
-      </div>
-    </div>
-  </main>
+    </main>
+    <aside class="tool-rail" aria-label="视图工具">
+      <button id="toggleSidebarBtn" class="icon-button active" type="button" title="显示或隐藏数据栏" aria-label="显示或隐藏数据栏" aria-pressed="true">▤</button>
+      <button id="railSplitBtn" class="icon-button" type="button" title="并排查看" aria-label="并排查看">◫</button><span class="rail-separator"></span>
+      <button id="resetCameraBtn" class="icon-button" type="button" title="复位 3D 相机" aria-label="复位 3D 相机">⌖</button>
+      <button id="toggleGridBtn" class="icon-button active" type="button" title="切换 3D 网格" aria-label="切换 3D 网格" aria-pressed="true">▦</button>
+      <button id="toggleDisplaysBtn" class="icon-button" type="button" title="3D 显示列表" aria-label="3D 显示列表">⬡</button>
+    </aside>
+  </div>
+  <footer class="playback-bar">
+    <span id="playbackInfo" class="playback-info">空闲</span>
+    <button id="btnStop" class="icon-button" type="button" title="停止数据源" aria-label="停止数据源">■</button>
+    <button id="btnPause" class="icon-button" type="button" title="暂停回放" aria-label="暂停回放">Ⅱ</button>
+    <button id="btnPlay" class="icon-button" type="button" title="继续回放" aria-label="继续回放">▶</button>
+    <span id="latestTime" class="time-value">0.000 s</span>
+    <progress id="playbackProgress" class="playback-progress" max="1" value="0" aria-label="录包播放进度"></progress>
+    <label class="compact-label" title="调整录包回放速度">速度 <input id="bagSpeed" type="number" value="1.0" min="0.01" max="100" step="0.1"/>×</label>
+    <label class="checkbox-label"><input id="bagLoop" type="checkbox"/>循环</label>
+    <div class="fps-control"><label for="fpsSlider">曲线帧率</label><input id="fpsSlider" type="range" min="1" max="120" value="60"/><span><strong id="fpsValue">60</strong></span><span class="fps-meta">目标 <strong id="targetFps">60</strong> · 实际 <strong id="actualFps">0</strong></span></div>
+  </footer>
 </div>
-
-<script type="module" src="/app.js?v=1"></script>
+<div id="sourceModal" class="modal-backdrop" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="sourceTitle">
+    <header class="modal-head"><h2 id="sourceTitle">加载数据源</h2><button id="closeSourceBtn" class="icon-button" type="button" aria-label="关闭">×</button></header>
+    <div class="source-tabs"><button id="tabBag" class="tab active" type="button">录包回放</button><button id="tabLive" class="tab" type="button">实时话题</button></div>
+    <div id="bagPanel" class="source-panel">
+      <label>录包文件路径<input id="bagPath" type="text" placeholder="/path/to/events.bag"/></label>
+      <p class="form-hint">使用服务所在机器的 .bag 文件路径。回放速度和循环可在底部设置。</p>
+      <button id="loadBagBtn" class="primary-action" type="button">加载并播放</button>
+    </div>
+    <div id="livePanel" class="source-panel" hidden>
+      <label>话题<input id="liveTopic" type="text" placeholder="/test/topic"/></label>
+      <label>消息类型<input id="liveMsgType" type="text" placeholder="StdRawMessage" value="StdRawMessage"/></label>
+      <div class="row"><label>传输<select id="liveTransport"><option value="shm">shm</option><option value="socket">socket</option></select></label><label>域编号<input id="liveDomain" type="number" value="0" min="0"/></label></div>
+      <button id="startSniffBtn" class="primary-action" type="button">连接并嗅探</button>
+    </div>
+  </section>
+</div>
+<div id="notification" class="notification" role="status" hidden></div>
+<script type="module" src="/app.js?v=3"></script>
 </body>
 </html>

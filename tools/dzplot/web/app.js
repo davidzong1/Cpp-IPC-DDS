@@ -5,6 +5,9 @@
  * Communicates with main.py backend via WebSocket (2026-09-13 由 dzplot.py 改名).
  */
 
+import { createWorkspace } from "./workspace.js";
+import { createPlotWindows, seriesKey } from "./plots.js";
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -14,16 +17,19 @@ const state = {
   reconnectTimer: null,
   fps: 60,
   drawIntervalMs: 1000 / 60,
-  topics: {},
-  selectedFields: {},       // topic -> [field names]
+  topics: Object.create(null),
+  selectedFields: Object.create(null),
+  availableFields: Object.create(null),
+  latestFields: Object.create(null),
+  collapsedTopics: Object.create(null),
   playback: { mode: "idle", source: "", speed: 1.0, loop: false },
   queueStats: {
     queue_size: 0, queue_capacity: 4096, fill_ratio: 0, zone: "normal",
     total_published: 0, total_dropped: 0, backpressure_active: false,
     backpressure_zone: "normal", keep_every_n: 1,
   },
-  charts: {},               // topic_field -> Chart instance
-  chartData: {},            // topic_field -> { times: [], values: [] }
+  charts: Object.create(null),
+  chartData: Object.create(null),
   maxDataPoints: 600,       // 10s at 60fps
   sourceMode: "bag",        // "bag" | "live"
   // Render tracking — time-window actual frame counter
@@ -45,7 +51,6 @@ const dom = {
   topicList: $("topicList"),
   topicCount: $("topicCount"),
   chartContainer: $("chartContainer"),
-  chartPlaceholder: $("chartPlaceholder"),
   // Bag panel
   tabBag: $("tabBag"),
   tabLive: $("tabLive"),
@@ -76,199 +81,6 @@ const dom = {
 };
 
 // ---------------------------------------------------------------------------
-// Chart class — lightweight Canvas 2D time-series
-// ---------------------------------------------------------------------------
-class TimeSeriesChart {
-  constructor(container, title) {
-    this.container = container;
-    this.title = title;
-    this.data = [];           // [{time_ms, value}]
-    this.maxPoints = state.maxDataPoints;
-    this.yMin = null;        // auto-scale; null = auto
-    this.yMax = null;
-    this.color = this._randomColor();
-    this.dirty = true;       // set when new data or resize arrives
-
-    this.el = document.createElement("div");
-    this.el.className = "chart-card";
-    this.el.innerHTML = `
-      <div class="chart-card-head">
-        <span class="chart-title">${this.title}</span>
-        <button class="chart-close icon-button" title="Remove">×</button>
-      </div>
-      <canvas class="chart-canvas"></canvas>
-    `;
-    this.canvas = this.el.querySelector(".chart-canvas");
-    this.ctx = this.canvas.getContext("2d");
-
-    this.el.querySelector(".chart-close").onclick = () => this.destroy();
-    container.appendChild(this.el);
-
-    this._resize();
-    this._draw();
-  }
-
-  _randomColor() {
-    const hues = [200, 340, 50, 120, 280, 30, 170, 310];
-    const h = hues[Math.floor(Math.random() * hues.length)];
-    return `hsl(${h}, 65%, 50%)`;
-  }
-
-  markDirty() { this.dirty = true; }
-
-  push(timeMs, value) {
-    this.data.push({ time_ms: timeMs, value });
-    if (this.data.length > this.maxPoints) {
-      this.data = this.data.slice(-this.maxPoints);
-    }
-    this.dirty = true;
-  }
-
-  pushBatch(points) {
-    for (const p of points) {
-      this.data.push({ time_ms: p.time_ms, value: p.value });
-    }
-    if (this.data.length > this.maxPoints) {
-      this.data = this.data.slice(-this.maxPoints);
-    }
-    if (points.length > 0) this.dirty = true;
-  }
-
-  _resize() {
-    const rect = this.el.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    const w = rect.width - 16;
-    const h = Math.max(120, Math.min(300, w * 0.45));
-    const oldW = this._w, oldH = this._h;
-    this.canvas.style.width = w + "px";
-    this.canvas.style.height = h + "px";
-    this.canvas.width = w * dpr;
-    this.canvas.height = h * dpr;
-    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
-    this.ctx.scale(dpr, dpr);
-    this._w = w;
-    this._h = h;
-    if (oldW !== w || oldH !== h) this.dirty = true;
-  }
-
-  _draw() {
-    this._resize();
-    const ctx = this.ctx;
-    const w = this._w;
-    const h = this._h;
-    if (!w || !h) return;
-
-    // Clear
-    ctx.clearRect(0, 0, w, h);
-
-    // Background
-    ctx.fillStyle = "#1a1d23";
-    ctx.fillRect(0, 0, w, h);
-
-    // Grid
-    ctx.strokeStyle = "rgba(255,255,255,0.06)";
-    ctx.lineWidth = 1;
-    const gridLines = 5;
-    for (let i = 0; i <= gridLines; i++) {
-      const y = (h / gridLines) * i;
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(w, y);
-      ctx.stroke();
-    }
-    for (let i = 0; i <= 4; i++) {
-      const x = (w / 4) * i;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, h);
-      ctx.stroke();
-    }
-
-    if (this.data.length < 2) {
-      ctx.fillStyle = "rgba(255,255,255,0.3)";
-      ctx.font = "12px monospace";
-      ctx.textAlign = "center";
-      ctx.fillText("Waiting for data...", w / 2, h / 2);
-      return;
-    }
-
-    // Compute bounds
-    let yMin = this.yMin !== null ? this.yMin : Infinity;
-    let yMax = this.yMax !== null ? this.yMax : -Infinity;
-    if (this.yMin === null || this.yMax === null) {
-      for (const p of this.data) {
-        if (p.value < yMin) yMin = p.value;
-        if (p.value > yMax) yMax = p.value;
-      }
-      const pad = (yMax - yMin) * 0.1 || 1;
-      yMin -= pad;
-      yMax += pad;
-    }
-
-    const xMin = this.data[0].time_ms;
-    const xMax = this.data[this.data.length - 1].time_ms;
-    const xRange = xMax - xMin || 1;
-    const yRange = yMax - yMin || 1;
-
-    const margin = { top: 10, right: 10, bottom: 24, left: 50 };
-    const pw = w - margin.left - margin.right;
-    const ph = h - margin.top - margin.bottom;
-
-    const tx = (v) => margin.left + ((v - xMin) / xRange) * pw;
-    const ty = (v) => margin.top + (1 - (v - yMin) / yRange) * ph;
-
-    // Y-axis labels
-    ctx.fillStyle = "rgba(255,255,255,0.5)";
-    ctx.font = "10px monospace";
-    ctx.textAlign = "right";
-    for (let i = 0; i <= 4; i++) {
-      const val = yMin + (yRange / 4) * i;
-      const label = Math.abs(val) < 0.01 ? "0" :
-        Math.abs(val) > 1000 ? val.toExponential(1) :
-        Math.abs(val) < 1 ? val.toFixed(3) : val.toFixed(1);
-      ctx.fillText(label, margin.left - 4, ty(val) + 4);
-    }
-
-    // Line
-    ctx.strokeStyle = this.color;
-    ctx.lineWidth = 2;
-    ctx.lineJoin = "round";
-    ctx.beginPath();
-    let firstPoint = true;
-    for (const p of this.data) {
-      const x = tx(p.time_ms);
-      const y = ty(p.value);
-      if (firstPoint) { ctx.moveTo(x, y); firstPoint = false; }
-      else { ctx.lineTo(x, y); }
-    }
-    ctx.stroke();
-
-    // Latest value indicator
-    if (this.data.length > 0) {
-      const last = this.data[this.data.length - 1];
-      const lx = tx(last.time_ms);
-      const ly = ty(last.value);
-      ctx.fillStyle = this.color;
-      ctx.beginPath();
-      ctx.arc(lx, ly, 4, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // X-axis label
-    ctx.fillStyle = "rgba(255,255,255,0.4)";
-    ctx.font = "10px monospace";
-    ctx.textAlign = "center";
-    ctx.fillText("time →", w / 2, h - 4);
-  }
-
-  destroy() {
-    this.el.remove();
-    this.dirty = false;
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Render loop — rAF-based, dirty-flag on-demand, FPS-throttled
 // ---------------------------------------------------------------------------
 let renderRafId = null;
@@ -280,6 +92,7 @@ function startRenderLoop() {
   function tick(now) {
     renderRafId = requestAnimationFrame(tick);
 
+    if (document.hidden || workspace.view === "viz") { dom.actualFps.textContent = "0"; return; }
     const intervalMs = 1000 / Math.max(state.fps, 1);
     if (now - lastDrawTime < intervalMs) return;
 
@@ -287,11 +100,14 @@ function startRenderLoop() {
     const dirty = [];
     for (const key in state.charts) {
       const c = state.charts[key];
-      if (c.dirty && c.data.length > 0) {
+      if (c.dirty) {
         dirty.push(c);
       }
     }
-    if (dirty.length === 0) return;
+    if (dirty.length === 0) {
+      if (now - lastDrawTime > 1000) dom.actualFps.textContent = "0";
+      return;
+    }
 
     lastDrawTime = now;
     const frameStart = performance.now();
@@ -350,8 +166,8 @@ function connect() {
 
   ws.onopen = () => {
     state.connected = true;
-    dom.connectionText.textContent = "Connected";
-    dom.connectionText.style.color = "#4caf50";
+    dom.connectionText.textContent = "已连接";
+    $("connectionDot").style.background = "#589b69";
     startRenderLoop();
   };
 
@@ -366,8 +182,8 @@ function connect() {
 
   ws.onclose = () => {
     state.connected = false;
-    dom.connectionText.textContent = "Reconnecting...";
-    dom.connectionText.style.color = "#ff9800";
+    dom.connectionText.textContent = "正在重连…";
+    $("connectionDot").style.background = "#d69c39";
     scheduleReconnect();
   };
 
@@ -387,7 +203,35 @@ function scheduleReconnect() {
 function sendCommand(cmd) {
   if (state.socket && state.socket.readyState === WebSocket.OPEN) {
     state.socket.send(JSON.stringify(cmd));
+    return true;
   }
+  notify("连接尚未建立，请稍后重试。");
+  return false;
+}
+
+let notificationTimer;
+function notify(message) {
+  $("notification").textContent = message;
+  $("notification").hidden = false;
+  clearTimeout(notificationTimer);
+  notificationTimer = setTimeout(() => { $("notification").hidden = true; }, 5000);
+}
+
+function escapeHtml(value) {
+  return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+
+function numericFields(value, prefix = "", result = [], depth = 0) {
+  if (depth > 7 || result.length >= 160) return result;
+  if (typeof value === "number" && Number.isFinite(value) && prefix) result.push(prefix);
+  else if (value && typeof value === "object") {
+    const entries = Object.entries(value);
+    for (const [key, item] of Array.isArray(value) ? entries.slice(0, 12) : entries) {
+      numericFields(item, prefix ? `${prefix}.${key}` : key, result, depth + 1);
+      if (result.length >= 160) break;
+    }
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -428,8 +272,7 @@ const ONE_YEAR_MS = 365 * 24 * 3600 * 1000;
 function sampleTimeMs(sample, fallbackMs) {
   if (sample && typeof sample.timestamp_ns === "number") {
     const ms = sample.timestamp_ns / 1e6;
-    const now = Date.now();
-    if (ms > now - ONE_YEAR_MS && ms < now + ONE_YEAR_MS) {
+    if (Number.isFinite(ms) && ms > 0) {
       return ms;
     }
   }
@@ -439,6 +282,7 @@ function sampleTimeMs(sample, fallbackMs) {
 // ---------------------------------------------------------------------------
 // Message handler
 // ---------------------------------------------------------------------------
+let selectionInitialized = false;
 function handleMessage(msg) {
   switch (msg.kind) {
     case "hello":
@@ -454,6 +298,14 @@ function handleMessage(msg) {
         dom.targetFps.textContent = msg.fps;
       }
       updateTopicList();
+      // 首次打开时兼容老版本的全局选择；已保存的空窗口及重连均以本地选择为准。
+      if (!selectionInitialized) {
+        selectionInitialized = true;
+        if (!plots.restored) for (const [topic, fields] of Object.entries(msg.selected_fields || {})) plots.addFields(topic, fields);
+      }
+      for (const topic of new Set([...Object.keys(msg.selected_fields || {}), ...Object.keys(state.selectedFields)])) {
+        sendCommand({ action: "select_fields", topic, fields: state.selectedFields[topic] || [] });
+      }
       updatePlaybackUI();
       break;
 
@@ -464,7 +316,7 @@ function handleMessage(msg) {
     case "ack":
       if (!msg.ok) {
         console.warn("dzplot: command failed", msg.error || msg);
-        alert("Error: " + (msg.error || "unknown"));
+        notify("操作失败：" + (msg.error || "未知错误"));
       }
       if (msg.topics) {
         // Refresh topics after load/sniff — ensure safe defaults
@@ -490,6 +342,7 @@ function handleMessage(msg) {
         state.playback = { ...state.playback, ...msg.playback };
         updatePlaybackUI();
       }
+      if (msg.ok && ["load_bag", "start_sniff"].includes(msg.action)) { workspace.closeSource(); workspace.resetTime(); }
       if (msg.mode) {
         state.playback.mode = msg.mode;
         updatePlaybackUI();
@@ -513,7 +366,7 @@ function handleFrame(frame) {
   if (!batch || batch.length === 0) return;
 
   // Group samples by topic
-  const byTopic = {};
+  const byTopic = Object.create(null);
   for (const sample of batch) {
     const topic = sample.topic;
     if (!byTopic[topic]) byTopic[topic] = [];
@@ -531,16 +384,28 @@ function handleFrame(frame) {
         active: true,
         sample_count: 0,
       };
-      updateTopicList();
     }
+    state.topics[topic].msg_type = samples.at(-1).msg_type || state.topics[topic].msg_type;
     state.topics[topic].sample_count += samples.length;
+    const latest = samples.at(-1);
+    state.latestFields[topic] = { ...latest.fields };
+    if (typeof latest.data_length === "number") state.latestFields[topic].data_length = latest.data_length;
+    const discovered = [...new Set([...(state.availableFields[topic] || []), ...numericFields(state.latestFields[topic])])];
+    const changed = discovered.length !== (state.availableFields[topic]?.length || 0);
+    state.availableFields[topic] = discovered;
+    if (changed || ![...dom.topicList.children].some((item) => item.dataset.topic === topic)) updateTopicList();
+    workspace.sampleTime(sampleTimeMs(latest, timestamp_ms));
 
     // Inline-update sample count in sidebar DOM (avoid full topicList rebuild per frame)
     for (const el of document.querySelectorAll(".topic-item")) {
       if (el.dataset.topic === topic) {
         const countSpan = el.querySelector(".topic-sample-count");
         if (countSpan) {
-          countSpan.textContent = `${state.topics[topic].sample_count} samples`;
+          countSpan.textContent = `${state.topics[topic].sample_count} 个样本`;
+        }
+        for (const row of el.querySelectorAll(".field-row")) {
+          const value = getNested(state.latestFields[topic], row.dataset.field);
+          row.querySelector(".field-value").textContent = typeof value === "number" ? Number(value.toPrecision(6)).toString() : "—";
         }
         break;
       }
@@ -553,11 +418,10 @@ function handleFrame(frame) {
     // Frame timestamp as fallback for samples without their own
     const fallbackTimeMs = timestamp_ms || Date.now();
 
-    // Extract field values from each sample, build batch points per chart
-    const chartPoints = {};  // chartKey -> [{time_ms, value}]
+    // 同一字段在多个窗口中显示时仅写入一次共享缓冲。
+    const updated = new Set();
     for (const fieldName of fields) {
-      const chartKey = `${topic}\x00${fieldName}`;
-      if (!chartPoints[chartKey]) chartPoints[chartKey] = [];
+      const chartKey = seriesKey(topic, fieldName);
 
       for (const sample of samples) {
         // Per-sample timestamp (ns → ms), validated; falls back to frame ts
@@ -585,26 +449,19 @@ function handleFrame(frame) {
           state.chartData[chartKey].times.push(tMs);
           state.chartData[chartKey].values.push(value);
 
-          chartPoints[chartKey].push({ time_ms: tMs, value });
+          updated.add(chartKey);
         }
       }
     }
 
-    // Push batch points to charts (single DOM update per chart per frame)
-    for (const [chartKey, points] of Object.entries(chartPoints)) {
-      if (points.length === 0) continue;
-
-      // Trim chartData
+    for (const chartKey of updated) {
       const cd = state.chartData[chartKey];
       while (cd.times.length > state.maxDataPoints) {
         cd.times.shift();
         cd.values.shift();
       }
 
-      // Update chart (use pushBatch for batched insertion)
-      if (state.charts[chartKey]) {
-        state.charts[chartKey].pushBatch(points);
-      }
+      for (const chart of Object.values(state.charts)) if (chart.series.has(chartKey)) chart.markDirty();
     }
   }
 }
@@ -614,136 +471,103 @@ function handleFrame(frame) {
 // ---------------------------------------------------------------------------
 function updateTopicList() {
   const topics = Object.values(state.topics);
+  const focused = document.activeElement;
+  const draft = focused?.classList.contains("field-input") ? { topic: focused.dataset.topic, value: focused.value, position: focused.selectionStart } : null;
+  const scrollTop = dom.topicList.scrollTop;
   dom.topicCount.textContent = topics.length;
-
-  dom.topicList.innerHTML = topics.map(t => {
-    const fields = state.selectedFields[t.topic] || [];
-    const isSelected = fields.length > 0;
+  $("datasetEmpty").hidden = topics.length > 0;
+  const selected = plots.selectedFields();
+  dom.topicList.innerHTML = topics.map((t) => {
+    const topic = escapeHtml(t.topic);
+    const fields = selected[t.topic] || [];
+    const available = [...new Set([...(state.availableFields[t.topic] || []), ...(state.selectedFields[t.topic] || [])])];
+    const source = { bag: "回放", live: "实时", visualizer: "3D" }[t.source] || "数据";
     return `
-      <div class="topic-item ${isSelected ? "active" : ""}" data-topic="${t.topic}">
+      <div class="topic-item ${fields.length ? "active" : ""}" data-topic="${topic}">
         <div class="topic-item-head">
-          <span class="topic-name" title="${t.topic}">${t.topic}</span>
-          <span class="topic-source ${t.source || "?"}">${t.source || "?"}</span>
+          <button class="topic-expand" type="button" aria-label="展开或收起 ${topic}">${state.collapsedTopics[t.topic] ? "▸" : "▾"}</button>
+          <input class="topic-select" type="checkbox" aria-label="将 ${topic} 的全部数值字段显示在当前窗口" ${available.length && available.every(field => fields.includes(field)) ? "checked" : ""} ${available.length ? "" : "disabled"}/>
+          <span class="topic-name" draggable="true" title="${topic} · 拖到绘图窗口添加全部数值字段">${topic}</span>
+          <span class="topic-source">${source}</span>
+          <button class="topic-viz-btn" type="button" title="将话题添加到 3D 视图" aria-label="将 ${topic} 添加到 3D 视图">⬡</button>
         </div>
-        <div class="topic-item-meta">
-          <span>${t.msg_type || "?"}</span>
-          <span class="topic-sample-count">${t.sample_count ?? 0} samples</span>
-        </div>
+        <div class="topic-item-meta"><span>${escapeHtml(t.msg_type || "等待消息类型")}</span><span class="topic-sample-count">${t.sample_count ?? 0} 个样本</span></div>
         <div class="topic-item-fields">
-          ${renderFieldInputs(t.topic, fields, t)}
+          ${available.map((field) => {
+            const value = getNested(state.latestFields[t.topic], field);
+            return `<label class="field-row ${fields.includes(field) ? "selected" : ""}" draggable="true" data-field="${escapeHtml(field)}">
+              <input type="checkbox" ${fields.includes(field) ? "checked" : ""}/><span class="field-name" title="${escapeHtml(field)}">${escapeHtml(field)}</span><span class="field-value">${typeof value === "number" ? Number(value.toPrecision(6)) : "—"}</span>
+            </label>`;
+          }).join("")}
+          <div class="field-input-row"><input class="field-input" data-topic="${topic}" type="text" placeholder="手动添加字段，如 position.x" aria-label="${topic} 的字段路径"/><button class="field-add-btn primary-action small" type="button" aria-label="添加字段">+</button></div>
         </div>
-      </div>
-    `;
+      </div>`;
   }).join("");
-
-  // Bind field input events
-  dom.topicList.querySelectorAll(".field-add-btn").forEach(btn => {
-    btn.onclick = () => {
-      const topic = btn.dataset.topic;
-      const input = dom.topicList.querySelector(`.field-input[data-topic="${topic}"]`);
-      const fieldName = input.value.trim();
-      if (!fieldName) return;
-      addField(topic, fieldName);
-      input.value = "";
+  for (const item of dom.topicList.children) {
+    const topic = item.dataset.topic;
+    item.querySelector(".topic-expand").onclick = () => {
+      state.collapsedTopics[topic] = !state.collapsedTopics[topic];
+      item.querySelector(".topic-expand").textContent = state.collapsedTopics[topic] ? "▸" : "▾";
+      workspace.filter();
     };
-  });
-
-  dom.topicList.querySelectorAll(".field-remove-btn").forEach(btn => {
-    btn.onclick = () => {
-      removeField(btn.dataset.topic, btn.dataset.field);
+    item.querySelector(".topic-viz-btn").onclick = () => workspace.prepareDisplay(topic, state.topics[topic].msg_type);
+    const topicSelect = item.querySelector(".topic-select");
+    topicSelect.indeterminate = Boolean(selected[topic]?.length) && !topicSelect.checked;
+    topicSelect.onchange = () => topicSelect.checked ? addTopic(topic) : plots.removeTopic(topic);
+    item.querySelector(".topic-name").ondragstart = (event) => {
+      event.dataTransfer.setData("application/dzplot-topic", JSON.stringify({ topic }));
+      event.dataTransfer.effectAllowed = "copy";
     };
-  });
-
-  dom.topicList.querySelectorAll(".quick-field-btn").forEach(btn => {
-    btn.onclick = () => {
-      addField(btn.dataset.topic, btn.dataset.field);
-    };
-  });
+    const input = item.querySelector(".field-input");
+    const add = () => { const field = input.value.trim(); if (field) addField(topic, field); };
+    item.querySelector(".field-add-btn").onclick = add;
+    input.onkeydown = (event) => { if (event.key === "Enter") add(); };
+    for (const row of item.querySelectorAll(".field-row")) {
+      row.querySelector("input").onchange = (event) => event.target.checked ? addField(topic, row.dataset.field) : removeField(topic, row.dataset.field);
+      row.ondragstart = (event) => { event.dataTransfer.setData("application/dzplot-field", JSON.stringify({ topic, field: row.dataset.field })); event.dataTransfer.effectAllowed = "copy"; };
+    }
+  }
+  workspace.filter();
+  dom.topicList.scrollTop = scrollTop;
+  if (draft) {
+    const input = [...dom.topicList.querySelectorAll(".field-input")].find((item) => item.dataset.topic === draft.topic);
+    if (input) { input.value = draft.value; input.focus(); input.setSelectionRange(draft.position, draft.position); }
+  }
 }
 
-function renderFieldInputs(topic, fields, meta) {
-  // Common fields that might be in the message
-  const commonFields = ["data", "x", "y", "z", "timestamp", "data_length",
-    "header.seq", "header.stamp", "position.x", "position.y", "position.z"];
-
-  let html = '<div class="field-tags">';
-  for (const f of fields) {
-    html += `<span class="field-tag">
-      ${f}
-      <button class="field-remove-btn" data-topic="${topic}" data-field="${f}">×</button>
-    </span>`;
+function syncPlotSelection() {
+  const previous = state.selectedFields;
+  state.selectedFields = plots.selectedFields(null);
+  const keys = new Set(Object.entries(state.selectedFields).flatMap(([topic, fields]) => fields.map(field => seriesKey(topic, field))));
+  for (const key of Object.keys(state.chartData)) if (!keys.has(key)) delete state.chartData[key];
+  if (state.connected) for (const topic of new Set([...Object.keys(previous), ...Object.keys(state.selectedFields)])) {
+    const fields = state.selectedFields[topic] || [];
+    if (JSON.stringify(previous[topic] || []) !== JSON.stringify(fields)) sendCommand({ action: "select_fields", topic, fields });
   }
-  html += '</div>';
-
-  html += `<div class="field-input-row">
-    <input class="field-input" data-topic="${topic}" type="text" placeholder="field name..." />
-    <button class="field-add-btn primary-action small" data-topic="${topic}">+</button>
-  </div>`;
-
-  html += '<div class="quick-fields">';
-  for (const f of commonFields.slice(0, 6)) {
-    html += `<button class="quick-field-btn" data-topic="${topic}" data-field="${f}">${f}</button>`;
-  }
-  html += '</div>';
-
-  return html;
-}
-
-function addField(topic, fieldName) {
-  if (!state.selectedFields[topic]) {
-    state.selectedFields[topic] = [];
-  }
-  if (state.selectedFields[topic].includes(fieldName)) return;
-
-  state.selectedFields[topic] = [...state.selectedFields[topic], fieldName];
   updateTopicList();
-
-  // Create chart
-  const chartKey = `${topic}\x00${fieldName}`;
-  if (!state.charts[chartKey]) {
-    dom.chartPlaceholder.style.display = "none";
-    state.charts[chartKey] = new TimeSeriesChart(
-      dom.chartContainer,
-      `${topic} / ${fieldName}`
-    );
-  }
-
-  // Notify server
-  sendCommand({
-    action: "select_fields",
-    topic,
-    fields: state.selectedFields[topic],
-  });
+  workspace.updateSeries();
 }
 
-function removeField(topic, fieldName) {
-  if (!state.selectedFields[topic]) return;
-  state.selectedFields[topic] = state.selectedFields[topic].filter(f => f !== fieldName);
-  updateTopicList();
+function addField(topic, fieldName, id = state.activePlotId) {
+  plots.addFields(topic, [fieldName], id);
+}
 
-  const chartKey = `${topic}\x00${fieldName}`;
-  if (state.charts[chartKey]) {
-    state.charts[chartKey].destroy();
-    delete state.charts[chartKey];
-    delete state.chartData[chartKey];
-  }
+function addTopic(topic, id = state.activePlotId) {
+  const fields = [...new Set([...(state.availableFields[topic] || []), ...(state.selectedFields[topic] || [])])];
+  if (!fields.length) { notify("该话题尚未发现数值字段，请等待数据或手动输入字段路径。"); return; }
+  plots.addFields(topic, fields, id);
+}
 
-  if (Object.keys(state.charts).length === 0) {
-    dom.chartPlaceholder.style.display = "flex";
-  }
-
-  sendCommand({
-    action: "select_fields",
-    topic,
-    fields: state.selectedFields[topic],
-  });
+function removeField(topic, fieldName, id = state.activePlotId) {
+  plots.removeField(topic, fieldName, id);
 }
 
 function updatePlaybackUI() {
   const { mode, source, speed, loop } = state.playback;
   dom.playbackInfo.textContent = mode === "playing"
-    ? `${source} ${speed}x${loop ? " 🔁" : ""}`
-    : mode === "paused" ? "Paused" : "Idle";
+    ? source === "bag" ? `回放 ${speed || 1}x${loop ? " · 循环" : ""}` : "实时数据"
+    : mode === "paused" ? "已暂停" : mode === "finished" ? "播放完成" : Object.keys(state.topics).length ? "实时数据" : "空闲";
+  workspace.updatePlayback();
 }
 
 function updateQueueStats() {
@@ -752,19 +576,19 @@ function updateQueueStats() {
   dom.qCap.textContent = s.queue_capacity || 4096;
   dom.qWatermark.textContent = Math.round((s.fill_ratio || 0) * 100) + "%";
   dom.qDropped.textContent = s.total_dropped || 0;
-  dom.qBP.textContent = s.backpressure_active ? "ON ⚠" : "off";
+  dom.qBP.textContent = s.backpressure_active ? "开启" : "关闭";
   dom.qSub.textContent = (s.keep_every_n || 1) + "x";
   dom.qTotalRx.textContent = s.total_published || 0;
 
   // Color coding
   const zone = s.zone || "normal";
-  dom.qWatermark.style.color = zone === "emergency" ? "#f44336" :
-    zone === "heavy" ? "#ff9800" : zone === "warn" ? "#ffc107" : "#4caf50";
+  dom.qWatermark.style.color = zone === "emergency" ? "#bf4d4d" :
+    zone === "heavy" ? "#c57932" : zone === "warn" ? "#b38c34" : "#589b69";
   dom.qBP.style.color = s.backpressure_active ? "#ff9800" : "#4caf50";
 }
 
 function restartRenderLoop() {
-  if (renderTimer) { clearInterval(renderTimer); renderTimer = null; }
+  onFpsChanged();
   startRenderLoop();
 }
 
@@ -804,7 +628,7 @@ dom.tabLive.onclick = () => {
 // Bag load
 dom.loadBagBtn.onclick = () => {
   const path = dom.bagPath.value.trim();
-  if (!path) { alert("Enter a .bag file path"); return; }
+  if (!path) { notify("请输入 .bag 文件路径。"); return; }
   const speed = parseFloat(dom.bagSpeed.value) || 1.0;
   const loop = dom.bagLoop.checked;
   sendCommand({ action: "load_bag", path, speed, loop });
@@ -813,7 +637,7 @@ dom.loadBagBtn.onclick = () => {
 // Sniff start
 dom.startSniffBtn.onclick = () => {
   const topic = dom.liveTopic.value.trim();
-  if (!topic) { alert("Enter a topic name"); return; }
+  if (!topic) { notify("请输入话题名称。"); return; }
   const msgType = dom.liveMsgType.value.trim() || "StdRawMessage";
   const transport = dom.liveTransport.value;
   const domain = parseInt(dom.liveDomain.value) || 0;
@@ -829,6 +653,11 @@ dom.startSniffBtn.onclick = () => {
 dom.btnStop.onclick = () => sendCommand({ action: "stop" });
 dom.btnPause.onclick = () => sendCommand({ action: "pause" });
 dom.btnPlay.onclick = () => sendCommand({ action: "resume" });
+const updatePlaybackOptions = () => {
+  if (state.playback.source === "bag") sendCommand({ action: "set_playback", speed: Number(dom.bagSpeed.value), loop: dom.bagLoop.checked });
+};
+dom.bagSpeed.onchange = updatePlaybackOptions;
+dom.bagLoop.onchange = updatePlaybackOptions;
 
 // Status panel collapse
 document.querySelector(".status-panel .collapse-toggle")?.addEventListener("click", function() {
@@ -888,4 +717,14 @@ scheduleReconnect = function() {
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
+const plots = createPlotWindows({ state, onChange: syncPlotSelection, onDrop: (payload, id) => {
+  if (!state.topics[payload.topic]) return;
+  plots.select(id);
+  if (typeof payload.field === "string" && payload.field) addField(payload.topic, payload.field, id);
+  else addTopic(payload.topic, id);
+} });
+const workspace = createWorkspace({ state, plots, removeField, notify });
+plots.init();
+workspace.updatePlayback();
+window.dzplotWorkspace = { state, workspace, plots, addField, removeField };
 connect();

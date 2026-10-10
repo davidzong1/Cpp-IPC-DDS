@@ -2,13 +2,10 @@
 
 > 审计日期: 2026-09-15 · 对象: `HEAD=8663dab7` 工作树
 
-> ⚠️ **本轮交付的验证状态(务必先读)**: 本文档与 `scripts/ci_check.sh` 是在**无法执行任何 shell**
-> 的环境下写的(工具链故障, 全文所有 `bash`/`python3.10` 调用均未能运行)。因此:
-> **§1 的事实均来自只读核对(逐行读 `.gitignore`、`git status`、目录枚举), 可靠; §2/§3/§4 的脚本与命令
-> 未经实跑, 属"待验证"。** 首次使用前请先跑一次 `bash scripts/ci_check.sh`(或至少 `bash -n scripts/ci_check.sh`)
-> 并把结果回填到本文件与交付报告 —— 尤其要确认: ①脚本语法与失败路径(故意把 `PY310` 指向不存在的解释器,
-> 应得 `rc=2` 而非崩溃)②`python3.10 -c "import dzipc, dzipc._dzipc_core"` 真的可导入
-> ③三条运行时核对在 `3.10` 下全绿。**不要把"未跑过"读成"已验证"。**
+> 2026-10-10 工作区合并验收：脚本语法、L1、CPython 3.10 绑定导入、段名检查与独立运行的重启检查已通过。目录合并后 L1 增加了 `tools/dzplot/test/test_visualizer_components.py --integration`，共三项；3D 组件、网页和示例统一位于 `tools/dzplot/`。
+> 全量脚本在 `verify_runtime_no_garbage.py` 的一条旧断言处停止（12 通过、1 失败）：断言要求无发布端时嗅探停止后仍有残留段，而本机绑定停止后没有残留。修改前的 `HEAD` 代码也复现相同结果。
+> 这条检查尚未更新预期，因此全量 CI 当前仍返回 `1`。运行命令使用 `LD_LIBRARY_PATH=$PWD/local/lib`。
+> 具体界面、数据通路与截图见 [工作区验收记录](dzplot_workspace/README.md)。§1 保留历史审计事实；§4 的 GitHub Actions 示例仍未经 runner 验证。
 
 
 ## 1. 审计结论
@@ -44,6 +41,8 @@
 | 层 | 检查 | 解释器 | 需要绑定 |
 |----|------|--------|----------|
 | L1 | `tools/dzplot/test/test_dzplot.py` | 任意 CPython3(默认 `python3`) | 否 |
+| L1 | `tools/dzplot/test/test_workspace.py` | 任意 CPython3；需要本机监听端口 | 否 |
+| L1 | `tools/dzplot/test/test_visualizer_components.py --integration` | 任意 CPython3；需要本机监听端口 | 否 |
 | L2 | `CPython 3.10 + dzipc._dzipc_core 可导入` | **CPython 3.10** | 是 |
 | L2 | `tools/dzplot/test/verify_segment_naming.py` | **3.10** | 是 |
 | L2 | `tools/dzplot/test/verify_runtime_no_garbage.py` | **3.10** | 是 |

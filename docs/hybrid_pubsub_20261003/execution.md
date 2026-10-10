@@ -28,6 +28,6 @@
 - `test_topic_cat_select`：15/15 通过，确认混合端点优先且只选择一条逻辑记录。
 - `test_channel_scope`、`test_ipc_info_pool_version`、`test_dzipc_log`：均成功构建；作用域与信息池版本单元测试通过。
 - `dzipc_list`、`dzipc_topic_cat`：成功构建。
-- Python 工具 `tools/dzplot/main.py`、`tools/dzviz/component/subscriber.py`：`py_compile` 通过；`IPC_SOCKET` 只创建一个混合订阅对象，不同时打开 SHM 嗅探器。
+- Python 工具 `tools/dzplot/main.py`、`tools/dzplot/component/subscriber.py`：`py_compile` 通过；`IPC_SOCKET` 只创建一个混合订阅对象，不同时打开 SHM 嗅探器。
 - UDP 混合帧固定为 `scope[32] + DZH1[4] + source[28] + payload`，作用域完整保留；本机身份位于 source 的前 16 字节。普通作用域帧仍为 `scope[32] + payload`。
 - 混合专用集成测试 `test_hybrid_pubsub` 在沙箱外运行，7/7 通过；容器内旧组播测试仍可能返回 `EPERM`，不作为网络权限完整环境下的证据。

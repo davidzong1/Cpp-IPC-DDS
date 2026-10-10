@@ -16,6 +16,8 @@
 #
 # 两层(矩阵与理由见 docs/ci.md):
 #   L1 无绑定 —— tools/dzplot/test/test_dzplot.py        任意 CPython3
+#               tools/dzplot/test/test_workspace.py     同端口 HTTP / WebSocket 验证
+#               tools/dzplot/test/test_visualizer_components.py  3D 组件与服务集成
 #   L2 需绑定 —— verify_segment_naming.py / verify_runtime_no_garbage.py /
 #                integration_pub_restart.py              必须 CPython 3.10
 #
@@ -124,6 +126,26 @@ else
     exit 1
 fi
 
+echo
+echo "===== L1 无绑定: dzplot 统一工作区 HTTP / WebSocket ====="
+if "$PYBASE" "$REPO_DIR/tools/dzplot/test/test_workspace.py"; then
+    record "L1|test_workspace.py (统一工作区集成)" "PASS"
+else
+    record "L1|test_workspace.py (统一工作区集成)" "FAIL"
+    print_matrix
+    exit 1
+fi
+
+echo
+echo "===== L1 无绑定: dzplot 3D 组件与 HTTP / WebSocket ====="
+if "$PYBASE" "$REPO_DIR/tools/dzplot/test/test_visualizer_components.py" --integration; then
+    record "L1|test_visualizer_components.py (3D 集成)" "PASS"
+else
+    record "L1|test_visualizer_components.py (3D 集成)" "FAIL"
+    print_matrix
+    exit 1
+fi
+
 if [[ $NO_BINDING -eq 1 ]]; then
     print_matrix
     echo "✅ 只跑了 L1 (--no-binding)。L2 需 CPython 3.10 + 绑定, 未执行。"
@@ -209,4 +231,4 @@ for rel in "${L2_SCRIPTS[@]}"; do
 done
 
 print_matrix
-echo "✅ 全过: L1 1 项 + L2 4 项。"
+echo "✅ 全过: L1 3 项 + L2 4 项。"

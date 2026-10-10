@@ -26,7 +26,6 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DZPLOT_DIR = SCRIPT_DIR.parent
-sys.path.insert(0, str(DZPLOT_DIR.parent / "dzviz"))
 sys.path.insert(0, str(DZPLOT_DIR))
 
 # 段名一律取自**被测工具自己**的静态方法 —— 本脚本不复刻任何名字。

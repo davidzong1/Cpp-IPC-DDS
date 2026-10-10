@@ -12,9 +12,9 @@ Architecture:
                             └── LiveSniffSource  (online, dzIPC subscriber)
 
 Queue & rate control reuses the team's shared modules:
-  - tools/dzviz/transport/bounded_queue.py  → BoundedPubQueue (thread-safe)
-  - tools/dzviz/component/rate_controller.py → RateController (backpressure)
-  - tools/dzviz/transport/backpressure.py   → BackpressureController (zones)
+  - tools/dzplot/transport/bounded_queue.py  → BoundedPubQueue (thread-safe)
+  - tools/dzplot/component/rate_controller.py → RateController (backpressure)
+  - tools/dzplot/transport/backpressure.py   → BackpressureController (zones)
 
 Design constraints (per spec):
   - Render at configurable fps (default 60, max 120, left-side UI control)
@@ -31,6 +31,7 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import io
 import json
 import math
 import mimetypes
@@ -44,6 +45,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from urllib.parse import unquote
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -51,13 +53,10 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 ROOT_DIR = Path(__file__).resolve().parents[2]
 WEB_DIR = Path(__file__).resolve().parent / "web"
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "config.json"
-TOOLS_DIR = Path(__file__).resolve().parents[1]  # tools/
+if str(ROOT_DIR) not in sys.path:
+    sys.path.append(str(ROOT_DIR))
 
-# Ensure tools/dzviz is importable for shared transport/rate modules.
-# This is a repo-local path with no external alternative — safe to prepend.
-_DZVIZ_DIR = TOOLS_DIR / "dzviz"
-if str(_DZVIZ_DIR) not in sys.path:
-    sys.path.insert(0, str(_DZVIZ_DIR))
+VIZ_WEB_DIR = WEB_DIR / "viz"
 
 # dzipc / _dzipc_core fallback paths: only append as a last resort so
 # an explicit PYTHONPATH (e.g. fresh build_py/python/) or an installed
@@ -71,9 +70,9 @@ for _dzipc_candidate in (
         sys.path.append(_dzipc_candidate)
 
 # Shared team modules
-from transport.bounded_queue import BoundedPubQueue, QueueWatermark, BackpressureSignal  # noqa: E402
-from component.rate_controller import RateController, RateControllerConfig  # noqa: E402
-from transport.backpressure import BackpressureController, DEFAULT_ZONE_POLICIES  # noqa: E402
+from tools.dzplot.transport.bounded_queue import BoundedPubQueue, QueueWatermark, BackpressureSignal  # noqa: E402
+from tools.dzplot.component.rate_controller import RateController, RateControllerConfig  # noqa: E402
+from tools.dzplot.transport.backpressure import BackpressureController, DEFAULT_ZONE_POLICIES  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -140,42 +139,26 @@ class BagReader:
         self._fh: Any = None
 
     def open(self) -> None:
+        self.close()
+        self.connections.clear()
+        self.chunk_infos.clear()
         self._fh = open(self.path, "rb")
         header = self._fh.read(13)
         if header != BAG_MAGIC:
+            self.close()
             raise ValueError(f"Not a ROS bag v2.0 file: {self.path}")
         # Scan file to build connection index
-        offset = 13
-        file_size = os.fstat(self._fh.fileno()).st_size
-        while offset + 8 <= file_size:
-            self._fh.seek(offset)
-            header_len_raw = self._fh.read(4)
-            if len(header_len_raw) < 4:
-                break
-            header_len = struct.unpack("<I", header_len_raw)[0]
-            data_len_raw = self._fh.read(4)
-            if len(data_len_raw) < 4:
-                break
-            data_len = struct.unpack("<I", data_len_raw)[0]
-            if offset + 4 + 4 + header_len + data_len > file_size:
-                break
-            header_fields = self._fh.read(header_len)
-            data = self._fh.read(data_len)
-            fields = self._parse_header_fields(header_fields)
+        for fields, data in self._iter_records(self._fh, start=13):
             op = int(fields.get("op", 0))
             if op == OP_CONNECTION:
                 conn_id = int(fields.get("conn", 0))
                 topic = str(fields.get("topic", ""))
-                type_name = str(fields.get("type", ""))
-                md5 = ""
-                msg_def = ""
-                if "md5sum" in fields:
-                    md5 = str(fields["md5sum"])
-                if "message_definition" in fields:
-                    msg_def = str(fields["message_definition"])
+                connection_fields = self._parse_header_fields(data)
                 self.connections[conn_id] = BagConnection(
-                    conn_id=conn_id, topic=topic, type_name=type_name,
-                    md5sum=md5, message_definition=msg_def,
+                    conn_id=conn_id, topic=topic,
+                    type_name=str(connection_fields.get("type", "")),
+                    md5sum=str(connection_fields.get("md5sum", "")),
+                    message_definition=str(connection_fields.get("message_definition", "")),
                 )
             elif op == OP_CHUNK_INFO:
                 self.chunk_infos.append(ChunkInfo(
@@ -184,8 +167,25 @@ class BagReader:
                     start_time_ns=int(fields.get("start_time", 0)),
                     end_time_ns=int(fields.get("end_time", 0)),
                 ))
-            offset += 4 + 4 + header_len + data_len
         self._fh.seek(13)
+
+    @classmethod
+    def _iter_records(cls, stream: Any, start: int = 0) -> Any:
+        """ROS bag 记录：头长度、头字段、数据长度、数据。"""
+        file_size = stream.seek(0, os.SEEK_END)
+        stream.seek(start)
+        while stream.tell() < file_size:
+            length = stream.read(4)
+            if len(length) != 4:
+                raise ValueError("录包记录的头长度不完整")
+            header_len = struct.unpack("<I", length)[0]
+            if header_len > file_size - stream.tell() - 4:
+                raise ValueError("录包记录的头字段不完整")
+            fields = cls._parse_header_fields(stream.read(header_len))
+            data_len = struct.unpack("<I", stream.read(4))[0]
+            if data_len > file_size - stream.tell():
+                raise ValueError("录包记录的数据不完整")
+            yield fields, stream.read(data_len)
 
     @staticmethod
     def _parse_header_fields(data: bytes) -> Dict[str, Any]:
@@ -203,12 +203,17 @@ class BagReader:
             key = data[pos:eq_idx].decode("utf-8", errors="replace")
             val_start = eq_idx + 1
             val_bytes = data[val_start: pos + field_len]
-            if key in ("op", "conn", "ver", "count", "conn_count", "chunk_count"):
+            if key == "op":
+                result[key] = struct.unpack("<B", val_bytes)[0]
+            elif key in ("conn", "ver", "count", "conn_count", "chunk_count", "size"):
                 try:
                     result[key] = struct.unpack("<I", val_bytes)[0]
                 except struct.error:
                     result[key] = val_bytes
-            elif key in ("index_pos", "start_time", "end_time", "chunk_pos", "time"):
+            elif key in ("start_time", "end_time", "time"):
+                seconds, nanoseconds = struct.unpack("<II", val_bytes)
+                result[key] = seconds * 1_000_000_000 + nanoseconds
+            elif key in ("index_pos", "chunk_pos"):
                 try:
                     result[key] = struct.unpack("<Q", val_bytes)[0]
                 except struct.error:
@@ -225,24 +230,7 @@ class BagReader:
 
     def iter_messages(self) -> Any:
         """Generator yielding (topic, timestamp_ns, data_bytes) tuples."""
-        self._fh.seek(13)
-        offset = 13
-        file_size = os.fstat(self._fh.fileno()).st_size
-        while offset + 8 <= file_size:
-            self._fh.seek(offset)
-            header_len_raw = self._fh.read(4)
-            if len(header_len_raw) < 4:
-                break
-            header_len = struct.unpack("<I", header_len_raw)[0]
-            data_len_raw = self._fh.read(4)
-            if len(data_len_raw) < 4:
-                break
-            data_len = struct.unpack("<I", data_len_raw)[0]
-            if offset + 4 + 4 + header_len + data_len > file_size:
-                break
-            header_fields = self._fh.read(header_len)
-            data = self._fh.read(data_len)
-            fields = self._parse_header_fields(header_fields)
+        for fields, data in self._iter_records(self._fh, start=13):
             op = int(fields.get("op", 0))
 
             if op == OP_CHUNK:
@@ -253,34 +241,22 @@ class BagReader:
                         print(f"[dzplot] WARNING: compressed chunk (compression={compression}) "
                               f"in {self.path}; dzipc_log always uses 'none'. Skipping chunk.",
                               flush=True)
-                    offset += 4 + 4 + header_len + data_len
                     continue
-                inner_pos = 0
-                while inner_pos + 8 <= len(data):
-                    ih_len = struct.unpack("<I", data[inner_pos: inner_pos + 4])[0]
-                    id_len = struct.unpack("<I", data[inner_pos + 4: inner_pos + 8])[0]
-                    inner_pos += 8
-                    if inner_pos + ih_len + id_len > len(data):
-                        break
-                    ih = data[inner_pos: inner_pos + ih_len]
-                    ib = data[inner_pos + ih_len: inner_pos + ih_len + id_len]
-                    ifields = self._parse_header_fields(ih)
+                for ifields, ib in self._iter_records(io.BytesIO(data)):
                     iop = int(ifields.get("op", 0))
-                    if iop == OP_MESSAGE_DATA:
+                    # 早期 dzipc_log 的 chunk 内消息省略 op，仅含 conn/time。
+                    if iop == OP_MESSAGE_DATA or (iop == 0 and "conn" in ifields and "time" in ifields):
                         conn_id = int(ifields.get("conn", 0))
                         ts_ns = int(ifields.get("time", 0))
                         conn = self.connections.get(conn_id)
                         if conn:
                             yield (conn.topic, ts_ns, ib)
-                    inner_pos += ih_len + id_len
             elif op == OP_MESSAGE_DATA:
                 conn_id = int(fields.get("conn", 0))
                 ts_ns = int(fields.get("time", 0))
                 conn = self.connections.get(conn_id)
                 if conn:
                     yield (conn.topic, ts_ns, data)
-
-            offset += 4 + 4 + header_len + data_len
 
     def close(self) -> None:
         if self._fh:
@@ -738,7 +714,7 @@ def _decode_payload(type_name: str, raw: bytes,
     raw_buf = bytes(raw)
     dzflat_fields = _decode_dzflat_payload(type_name, raw_buf)
     if dzflat_fields is not None:
-        return dzflat_fields
+        return _to_jsonable(dzflat_fields)
     try:
         import dzipc as ipc_mod
         msg = ipc_mod.create_message(type_name)
@@ -789,6 +765,13 @@ class BagReplaySource:
         self._thread: Optional[threading.Thread] = None
         self._start_real_ns: int = 0
         self._start_bag_ns: int = 0
+        self._first_bag_ns: int = 0
+        self._end_bag_ns: int = 0
+        self._position_ns: int = 0
+        self._paused_at_ns: int = 0
+        self._clock_lock = threading.Lock()
+        self._wakeup = threading.Event()
+        self.sample_callback: Optional[Callable[..., None]] = None
 
     @property
     def running(self) -> bool:
@@ -803,6 +786,10 @@ class BagReplaySource:
             return
         self._reader = BagReader(self.path)
         self._reader.open()
+        # 无绑定仍可回放原始载荷；有绑定时先加载，首条样本即可发现数值字段。
+        from tools.dzplot.workspace import load_workspace_ipc
+        with contextlib.suppress(RuntimeError):
+            load_workspace_ipc()
         self._running = True
         self._paused = False
         self._thread = threading.Thread(target=self._replay_loop, daemon=True)
@@ -810,6 +797,7 @@ class BagReplaySource:
 
     def stop(self) -> None:
         self._running = False
+        self._wakeup.set()
         if self._thread:
             self._thread.join(timeout=3.0)
             self._thread = None
@@ -818,12 +806,36 @@ class BagReplaySource:
             self._reader = None
 
     def pause(self) -> None:
-        self._paused = True
+        with self._clock_lock:
+            if not self._paused:
+                self._paused_at_ns = now_ns()
+                self._paused = True
+        self._wakeup.set()
 
     def resume(self) -> None:
-        if self._paused:
-            self._paused = False
-            self._start_real_ns = now_ns()
+        with self._clock_lock:
+            if self._paused:
+                self._start_real_ns += now_ns() - self._paused_at_ns
+                self._paused = False
+        self._wakeup.set()
+
+    def set_options(self, speed: float, loop: bool) -> None:
+        if not math.isfinite(speed) or speed <= 0:
+            raise ValueError("回放速度必须是正数")
+        with self._clock_lock:
+            current_ns = self._paused_at_ns if self._paused else now_ns()
+            if self._start_real_ns:
+                self._start_bag_ns += int((current_ns - self._start_real_ns) * self.speed)
+                self._start_real_ns = current_ns
+            self.speed = max(0.01, min(speed, 100.0))
+            self.loop = loop
+        self._wakeup.set()
+
+    def progress(self) -> Dict[str, Any]:
+        duration = max(0, self._end_bag_ns - self._first_bag_ns)
+        elapsed = max(0, self._position_ns - self._first_bag_ns)
+        return {"progress": min(1.0, elapsed / duration) if duration else 0.0,
+                "elapsed_s": elapsed / 1e9, "duration_s": duration / 1e9}
 
     def _replay_loop(self) -> None:
         assert self._reader is not None
@@ -849,20 +861,24 @@ class BagReplaySource:
 
             self._start_real_ns = now_ns()
             self._start_bag_ns = bag_msgs[0][1]
+            self._first_bag_ns = bag_msgs[0][1]
+            self._end_bag_ns = bag_msgs[-1][1]
+            self._position_ns = self._first_bag_ns
 
             for topic, ts_ns, data in bag_msgs:
                 if not self._running:
                     break
-                while self._paused and self._running:
-                    time.sleep(0.05)
+                while self._running:
+                    with self._clock_lock:
+                        paused = self._paused
+                        target_real_ns = self._start_real_ns + int((ts_ns - self._start_bag_ns) / self.speed)
+                    wait_ns = target_real_ns - now_ns()
+                    if not paused and wait_ns <= 100_000:
+                        break
+                    self._wakeup.wait(0.05 if paused else min(0.05, max(0, wait_ns / 1e9)))
+                    self._wakeup.clear()
                 if not self._running:
                     break
-
-                elapsed_bag_ns = ts_ns - self._start_bag_ns
-                target_real_ns = self._start_real_ns + int(elapsed_bag_ns / self.speed)
-                wait_ns = target_real_ns - now_ns()
-                if wait_ns > 100_000:
-                    time.sleep(wait_ns / 1e9)
 
                 # Parse TransportPacket envelope to extract real topic, type,
                 # timestamp and the inner message payload.
@@ -917,7 +933,10 @@ class BagReplaySource:
                 if not self._running:
                     break
 
+                if self.sample_callback:
+                    self.sample_callback(sample, tp["payload"] if tp is not None else data, None)
                 self.queue.put(sample)
+                self._position_ns = ts_ns
 
             if not self.loop:
                 break
@@ -1126,6 +1145,7 @@ class LiveSniffSource:
 
         # Per-topic RateController instances (one per thread for thread safety)
         self._rate_ctrls: Dict[str, RateController] = {}
+        self.sample_callback: Optional[Callable[..., None]] = None
         rc_cfg = RateControllerConfig(
             max_recv_hz=1000.0,
             default_render_hz=60.0,
@@ -1165,6 +1185,8 @@ class LiveSniffSource:
             rc.set_render_hz(hz)
 
     def _sniff_loop(self, cfg: Dict[str, Any]) -> None:
+        from tools.dzplot.workspace import load_workspace_ipc
+
         topic = cfg["topic"]
         msg_type = cfg.get("msg_type", "StdRawMessage")
         extra = cfg.get("extra", "")
@@ -1180,11 +1202,11 @@ class LiveSniffSource:
         topic_data = None
         control_plane = None
         generation = 0
-        use_sniffer = self._check_sniffer() and trans == "shm"
+        use_sniffer = False
 
         try:
-            import dzipc as ipc_mod
-            ipc = ipc_mod
+            ipc = load_workspace_ipc()
+            use_sniffer = self._check_sniffer() and trans == "shm"
 
             if use_sniffer:
                 # Passive sniffer via ipc::sniffer pybind11 binding.
@@ -1319,6 +1341,10 @@ class LiveSniffSource:
                     msg_obj = out.topic() if out else topic_data.topic()
                     sample = self._serialize_message(msg_obj, topic, msg_type)
 
+                if self.sample_callback:
+                    self.sample_callback(sample, raw_data if use_sniffer else None,
+                                         None if use_sniffer else msg_obj)
+
                 rc.batch_append(sample)
 
                 # Flush batch into shared queue
@@ -1361,7 +1387,7 @@ class LiveSniffSource:
 
 
 # ---------------------------------------------------------------------------
-# WebSocket frame helpers (matching dzviz.py wire protocol)
+# WebSocket frame helpers (matching visualizer.py wire protocol)
 # ---------------------------------------------------------------------------
 
 def ws_make_frame(payload: bytes, opcode: int = 1) -> bytes:
@@ -1450,6 +1476,8 @@ class PlotHub:
         self._clients: Dict[int, _ClientSlot] = {}
         self.topics: Dict[str, PlotTopicMeta] = {}
         self.selected_fields: Dict[str, List[str]] = {}
+        self.sample_observer: Optional[Callable[[Dict[str, Any]], None]] = None
+        self.sample_decoder: Optional[Callable[..., None]] = None
 
         self._bag_source: Optional[BagReplaySource] = None
         self._live_source: Optional[LiveSniffSource] = None
@@ -1485,9 +1513,6 @@ class PlotHub:
     # ------------------------------------------------------------------
 
     def load_bag(self, path: str, speed: float = 1.0, loop: bool = False) -> Dict[str, Any]:
-        if self._bag_source and self._bag_source.running:
-            self._bag_source.stop()
-
         reader = BagReader(path)
         try:
             reader.open()
@@ -1496,6 +1521,8 @@ class PlotHub:
             return {"ok": False, "error": str(e)}
         finally:
             reader.close()
+
+        self.stop_source()
 
         for t in bag_topics:
             self.topics[t["topic"]] = PlotTopicMeta(
@@ -1507,6 +1534,7 @@ class PlotHub:
         self._bag_source = BagReplaySource(
             path, self.event_queue, speed=speed, loop=loop,
         )
+        self._bag_source.sample_callback = self.sample_decoder
         self._bag_source.start()
         self._playback_state = {
             "mode": "playing",
@@ -1530,8 +1558,7 @@ class PlotHub:
         self, topics: List[Dict[str, Any]],
         transport: str = "shm", domain: int = 0,
     ) -> Dict[str, Any]:
-        if self._live_source and self._live_source.running:
-            self._live_source.stop()
+        self.stop_source()
 
         for t in topics:
             self.topics[t["topic"]] = PlotTopicMeta(
@@ -1544,6 +1571,7 @@ class PlotHub:
             topics, self.event_queue, self._backpressure_ctrl,
             transport, domain,
         )
+        self._live_source.sample_callback = self.sample_decoder
         self._live_source.start()
         self._playback_state = {
             "mode": "playing",
@@ -1568,6 +1596,15 @@ class PlotHub:
         self._playback_state["mode"] = "paused"
 
     def resume(self) -> None:
+        if self._playback_state.get("source") == "bag" and (
+            self._bag_source is None or not self._bag_source.running
+        ):
+            result = self.load_bag(self._playback_state["path"],
+                                   self._playback_state.get("speed", 1),
+                                   self._playback_state.get("loop", False))
+            if not result.get("ok"):
+                raise ValueError(result.get("error", "无法重新播放录包"))
+            return
         if self._bag_source:
             self._bag_source.resume()
         self._playback_state["mode"] = "playing"
@@ -1583,6 +1620,14 @@ class PlotHub:
 
     def select_fields(self, topic: str, fields: List[str]) -> None:
         self.selected_fields[topic] = fields
+
+    def playback_status(self) -> Dict[str, Any]:
+        playback = dict(self._playback_state)
+        if self._bag_source and playback.get("source") == "bag":
+            playback.update(self._bag_source.progress())
+            if not self._bag_source.running and playback["mode"] == "playing":
+                playback["mode"] = "finished"
+        return playback
 
     # ------------------------------------------------------------------
     # WebSocket client management — per-client sender-task isolation
@@ -1618,7 +1663,7 @@ class PlotHub:
                 }
                 for m in self.topics.values()
             ],
-            "playback": self._playback_state,
+            "playback": self.playback_status(),
             "fps": self._max_fps,
             "selected_fields": self.selected_fields,
         })
@@ -1733,6 +1778,10 @@ class PlotHub:
                 await self._reap_dead_clients()
                 continue
 
+            if self.sample_observer:
+                for sample in batch:
+                    self.sample_observer(sample)
+
             # -------- build frame once --------
             wm = self.event_queue.watermark()
             signal = self.event_queue.last_signal()
@@ -1789,6 +1838,11 @@ class PlotHub:
             # -------- update metadata --------
             for item in batch:
                 t = item.get("topic", "")
+                if t and t not in self.topics:
+                    self.topics[t] = PlotTopicMeta(
+                        topic=t, msg_type=item.get("msg_type", ""),
+                        source=item.get("source", ""),
+                    )
                 if t in self.topics:
                     self.topics[t].sample_count += 1
                     self.topics[t].last_update_ms = now_ms()
@@ -1853,6 +1907,13 @@ class PlotHub:
             if action == "stop":
                 self.stop_source()
                 return {"kind": "ack", "ok": True, "mode": "idle"}
+            if action == "set_playback":
+                speed = float(cmd.get("speed", self._playback_state.get("speed", 1)))
+                loop = bool(cmd.get("loop", self._playback_state.get("loop", False)))
+                if self._bag_source:
+                    self._bag_source.set_options(speed, loop)
+                    self._playback_state.update(speed=self._bag_source.speed, loop=loop)
+                return {"kind": "ack", "ok": True, "playback": self.playback_status()}
             if action == "set_fps":
                 self.max_fps = int(cmd.get("fps", 60))
                 return {"kind": "ack", "ok": True, "fps": self._max_fps}
@@ -1879,13 +1940,16 @@ class PlotHub:
                 wm = self.event_queue.watermark()
                 signal = self.event_queue.last_signal()
                 return {"kind": "ack", "ok": True,
-                    "playback": self._playback_state,
+                    "playback": self.playback_status(),
                     "fps": self._max_fps,
                     "queue_stats": {
+                        "queue_size": wm.current_size,
+                        "queue_capacity": wm.max_size,
                         "size": wm.current_size,
                         "capacity": wm.max_size,
                         "fill_ratio": round(wm.fill_ratio, 3),
                         "zone": wm.zone,
+                        "total_published": wm.total_published,
                         "total_dropped": wm.total_dropped,
                         "backpressure_active": signal.active if signal else False,
                         "total_sent": self._total_samples_sent,
@@ -1912,7 +1976,7 @@ def safe_static_path(path: str) -> Path:
         path = "/index.html"
     rel = Path(path.lstrip("/"))
     candidate = (WEB_DIR / rel).resolve()
-    if not str(candidate).startswith(str(WEB_DIR.resolve())):
+    if not candidate.is_relative_to(WEB_DIR.resolve()):
         return WEB_DIR / "index.html"
     return candidate
 
@@ -1921,6 +1985,7 @@ async def handle_client(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     hub: PlotHub,
+    viz_hub: Any = None,
 ) -> None:
     try:
         request = await reader.readuntil(b"\r\n\r\n")
@@ -1946,12 +2011,18 @@ async def handle_client(
         writer.close()
         return
 
-    # WebSocket upgrade (matching dzviz.py protocol)
+    # WebSocket upgrade (matching visualizer.py protocol)
     if (
         method == "GET"
-        and path == "/ws"
+        and path in ("/ws", "/viz/ws")
         and headers.get("upgrade", "").lower() == "websocket"
     ):
+        target_hub = viz_hub if path == "/viz/ws" else hub
+        if target_hub is None:
+            writer.write(http_response("404 Not Found", {}, b"not found"))
+            await writer.drain()
+            writer.close()
+            return
         key = headers.get("sec-websocket-key", "")
         accept = base64.b64encode(
             hashlib.sha1(
@@ -1967,7 +2038,7 @@ async def handle_client(
             ).encode("ascii")
         )
         await writer.drain()
-        await hub.add_client(writer)
+        await target_hub.add_client(writer)
         try:
             while True:
                 frame = await ws_read_frame(reader)
@@ -1980,13 +2051,17 @@ async def handle_client(
                 elif opcode == 1:
                     try:
                         command = json.loads(payload.decode("utf-8"))
-                        response = hub.handle_command(command)
+                        response = target_hub.handle_command(command)
+                        response.setdefault("action", command.get("action", ""))
                     except Exception as exc:
-                        response = {"kind": "ack", "ok": False, "error": str(exc)}
-                    await hub._send_json(writer, response)
+                        response = {"kind": "ack", "ok": False, "error": str(exc), "message": str(exc)}
+                    if target_hub is hub:
+                        await hub._send_json(writer, response)
+                    else:
+                        await target_hub.send(writer, response)
         except Exception:
             pass
-        await hub.remove_client(writer)
+        await target_hub.remove_client(writer)
         return
 
     # Static file serving
@@ -1996,8 +2071,23 @@ async def handle_client(
         writer.close()
         return
 
-    file_path = safe_static_path(path.split("?", 1)[0])
-    if not file_path.exists() or not file_path.is_file():
+    request_path = unquote(path.split("?", 1)[0])
+    if request_path == "/viz":
+        writer.write(http_response("302 Found", {"Location": "/viz/"}))
+        await writer.drain()
+        writer.close()
+        return
+    if request_path.startswith("/robot_assets/") and viz_hub:
+        parts = request_path.split("/", 3)
+        file_path = viz_hub.robot_asset_paths.get(parts[2])
+    elif request_path.startswith("/viz/"):
+        relative = request_path[len("/viz/"):] or "index.html"
+        file_path = (VIZ_WEB_DIR / relative).resolve()
+        if not file_path.is_relative_to(VIZ_WEB_DIR.resolve()):
+            file_path = None
+    else:
+        file_path = safe_static_path(request_path)
+    if file_path is None or not file_path.is_file():
         writer.write(http_response("404 Not Found", {"Content-Type": "text/plain"}, b"not found"))
         await writer.drain()
         writer.close()
@@ -2016,77 +2106,97 @@ async def handle_client(
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="dzplot — dzIPC time-series visualization dashboard"
+        description="dzplot — dzIPC 曲线与 3D 可视化工作区"
     )
-    p.add_argument("--host", default="127.0.0.1", help="Listen address (default: 127.0.0.1)")
-    p.add_argument("--port", type=int, default=8766, help="Listen port (default: 8766)")
-    p.add_argument("--bag", default=None, help="Path to .bag file for offline replay")
-    p.add_argument("--bag-speed", type=float, default=1.0, help="Replay speed multiplier (default: 1.0)")
-    p.add_argument("--bag-loop", action="store_true", help="Loop bag replay")
-    p.add_argument("--sniff", action="store_true", help="Enable online sniffer mode")
-    p.add_argument("--topic", action="append", default=[], help="Topic:MsgType, e.g. /test:StdRawMessage")
-    p.add_argument("--transport", choices=["shm", "socket"], default="shm", help="Sniffer transport (default: shm)")
-    p.add_argument("--domain", type=int, default=0, help="Domain ID for sniffer (default: 0)")
-    p.add_argument("--fps", type=int, default=60, help="Max WebSocket broadcast FPS (default: 60, max: 120)")
+    p.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
+    p.add_argument("--port", type=int, default=8766, help="监听端口（默认 8766）")
+    p.add_argument("--bag", default=None, help="离线回放的 .bag 文件路径")
+    p.add_argument("--bag-speed", type=float, default=1.0, help="初始回放速度（默认 1.0 倍）")
+    p.add_argument("--bag-loop", action="store_true", help="循环回放录包")
+    p.add_argument("--sniff", action="store_true", help="启用实时嗅探模式")
+    p.add_argument("--topic", action="append", default=[], help="话题:消息类型，如 /test:StdRawMessage")
+    p.add_argument("--transport", choices=["shm", "socket"], default=None, help="传输方式（默认读取配置，未配置时 shm）")
+    p.add_argument("--domain", type=int, default=None, help="域编号（默认读取配置，未配置时 0）")
+    p.add_argument("--fps", type=int, default=60, help="曲线广播帧率（默认 60，最高 120）")
+    p.add_argument("--config", default=str(DEFAULT_CONFIG), help="3D 显示配置文件")
+    p.add_argument("--load-config", action="store_true", help="启动时加载配置中的 3D 显示与订阅")
+    p.add_argument("--queue", type=int, default=None, help="3D 订阅队列大小")
+    p.add_argument("--poll", type=float, default=None, help="3D 订阅轮询间隔（秒）")
+    p.add_argument("--extra", default=None)
+    p.add_argument("--verbose", action="store_true")
+    p.add_argument("--dzflat", dest="dzflat", action="store_true", default=None)
+    p.add_argument("--no-dzflat", dest="dzflat", action="store_false")
+    p.add_argument("--demo", action="store_true", help="提供曲线和 3D 共用的演示数据，无需 dzIPC 绑定")
+    p.add_argument("--demo-period", type=float, default=0.05)
     return p
 
 
 async def run_server(args: argparse.Namespace) -> None:
+    from tools.dzplot.workspace import WorkspaceVizHub, viz
+
     hub = PlotHub(max_fps=args.fps)
-
-    # Auto-load bag if specified
-    if args.bag:
-        result = hub.load_bag(args.bag, speed=args.bag_speed, loop=args.bag_loop)
-        if not result.get("ok"):
-            print(f"[dzplot] ERROR loading bag: {result.get('error')}", flush=True)
-            sys.exit(1)
-        print(f"[dzplot] Loaded bag: {args.bag} ({len(result.get('topics', []))} topics)", flush=True)
-
-    # Auto-start sniffer if --sniff
-    if args.sniff:
-        topics = []
-        for raw in args.topic:
-            if ":" in raw:
-                topic, msg_type = raw.split(":", 1)
-                topics.append({"topic": topic.strip(), "msg_type": msg_type.strip()})
-            else:
-                topics.append({"topic": raw.strip(), "msg_type": "StdRawMessage"})
-        if not topics:
-            print("[dzplot] WARNING: --sniff specified but no --topic given.", flush=True)
-        else:
-            result = hub.start_sniff(topics, transport=args.transport, domain=args.domain)
-            if not result.get("ok"):
-                print(f"[dzplot] ERROR starting sniffer: {result.get('error')}", flush=True)
-            else:
-                print(f"[dzplot] Sniffing {len(topics)} topic(s) on {args.transport}", flush=True)
-
-    broadcast_task = asyncio.create_task(hub.broadcast_loop())
-
+    config_path = Path(args.config).expanduser().resolve()
+    file_config = viz.load_config_file(config_path)
+    defaults = viz.normalize_defaults({
+        **file_config,
+        "domain": args.domain if args.domain is not None else file_config.get("domain", 0),
+        "transport": args.transport or file_config.get("transport", "shm"),
+        **{key: getattr(args, key) for key in ("queue", "poll", "extra", "dzflat")
+           if getattr(args, key) is not None},
+        "verbose": args.verbose or bool(file_config.get("verbose", False)),
+    })
+    for key in ("displays", "robot_displays", "robot_state_displays", "robot_models"):
+        if key in file_config:
+            defaults[key] = file_config[key]
+    viz_hub = WorkspaceVizHub(hub, defaults, config_path)
+    hub.sample_observer = viz_hub.observe_plot_sample
+    hub.sample_decoder = viz_hub.decode_source_sample
+    tasks: List[asyncio.Task] = []
+    server = None
     try:
         server = await asyncio.start_server(
-            lambda r, w: handle_client(r, w, hub),
-            args.host,
-            args.port,
-            reuse_address=True,
+            lambda r, w: handle_client(r, w, hub, viz_hub),
+            args.host, args.port, reuse_address=True,
         )
-    except OSError as e:
-        print(f"[dzplot] ERROR: Cannot bind to {args.host}:{args.port}: {e}", flush=True)
-        sys.exit(1)
-
-    print(f"[dzplot] serving {WEB_DIR} on {args.host}:{args.port}", flush=True)
-    print(f"[dzplot] open: http://127.0.0.1:{args.port}", flush=True)
-    print(f"\033[32m[dzplot] Ctrl+Click http://127.0.0.1:{args.port}\033[0m", flush=True)
-
-    try:
+        if args.load_config:
+            viz_hub.apply_config(file_config, replace=False)
+        if args.demo:
+            worker = viz.DemoPublisher(viz_hub, max(0.005, args.demo_period), time_ms=now_ms)
+            viz_hub.demo_workers["demo"] = worker
+            worker.start()
+        if args.bag:
+            result = hub.load_bag(args.bag, speed=args.bag_speed, loop=args.bag_loop)
+            if not result.get("ok"):
+                raise ValueError(f"无法加载录包：{result.get('error')}")
+        if args.sniff:
+            topics = []
+            for raw in args.topic:
+                topic, _, msg_type = raw.partition(":")
+                topics.append({"topic": topic.strip(), "msg_type": msg_type.strip() or "StdRawMessage"})
+            if topics:
+                hub.start_sniff(topics, transport=defaults["transport"], domain=defaults["domain"])
+            else:
+                print("[dzplot] --sniff 未指定 --topic，请在页面中添加话题。", flush=True)
+        else:
+            for raw in args.topic:
+                viz_hub.add_topic(viz.parse_topic_spec(raw, defaults))
+        tasks = [asyncio.create_task(hub.broadcast_loop()),
+                 asyncio.create_task(viz_hub.broadcast_loop())]
+        print(f"[dzplot] 曲线与 3D 工作区：http://127.0.0.1:{args.port}/", flush=True)
+        print(f"[dzplot] 3D 子页面：http://127.0.0.1:{args.port}/viz/", flush=True)
+        print(f"[dzplot] 监听 {args.host}:{args.port}", flush=True)
         async with server:
             await server.serve_forever()
     finally:
-        server.close()
-        await server.wait_closed()
+        if server is not None:
+            server.close()
+            await server.wait_closed()
         await hub.shutdown()
-        broadcast_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await broadcast_task
+        await viz_hub.shutdown()
+        for task in tasks:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 def main() -> None:
@@ -2094,7 +2204,10 @@ def main() -> None:
     try:
         asyncio.run(run_server(args))
     except KeyboardInterrupt:
-        print("\n[dzplot] stopped", flush=True)
+        print("\n[dzplot] 已停止", flush=True)
+    except (OSError, ValueError) as exc:
+        print(f"[dzplot] 启动失败：{exc}", file=sys.stderr, flush=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

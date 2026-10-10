@@ -12,13 +12,13 @@ import threading
 import time
 from pathlib import Path
 
-# Ensure tools/dzviz is importable and dzplot is importable
+# 仓库根目录用于导入统一工具内的组件与传输模块。
 import importlib.util
 
 TOOLS_DIR = Path(__file__).resolve().parents[2]
 DZPLOT_DIR = TOOLS_DIR / "dzplot"
-sys.path.insert(0, str(TOOLS_DIR / "dzviz"))
-sys.path.insert(0, str(DZPLOT_DIR))
+if str(TOOLS_DIR.parent) not in sys.path:
+    sys.path.append(str(TOOLS_DIR.parent))
 
 # Load dzplot as a module from file path.
 #
@@ -40,11 +40,11 @@ BoundedPubQueue = dzplot.transport.bounded_queue.BoundedPubQueue if hasattr(dzpl
 
 # Fallback: import directly from the transport module
 if BoundedPubQueue is None:
-    from transport.bounded_queue import BoundedPubQueue
+    from tools.dzplot.transport.bounded_queue import BoundedPubQueue
 
 # Try to import BackpressureController for test use
 try:
-    from transport.backpressure import BackpressureController
+    from tools.dzplot.transport.backpressure import BackpressureController
 except ImportError:
     BackpressureController = None
 
@@ -73,7 +73,11 @@ def _make_header_fields(fields: dict) -> bytes:
     buf = bytearray()
     for key, val in fields.items():
         if isinstance(val, int):
-            if val < 2**32 and key not in ("index_pos", "start_time", "end_time", "chunk_pos", "time"):
+            if key == "op":
+                val_bytes = struct.pack("<B", val)
+            elif key in ("start_time", "end_time", "time"):
+                val_bytes = struct.pack("<II", val // 1_000_000_000, val % 1_000_000_000)
+            elif val < 2**32 and key not in ("index_pos", "chunk_pos"):
                 val_bytes = struct.pack("<I", val)
             else:
                 val_bytes = struct.pack("<Q", val)
@@ -90,12 +94,12 @@ def _make_header_fields(fields: dict) -> bytes:
 
 
 def _make_record(op: int, header_extra: dict, data: bytes) -> bytes:
-    """Build a single rosbag record: header_len + data_len + header + data."""
+    """Build a single rosbag record: header_len + header + data_len + data."""
     fields = {"op": op, **header_extra}
     header = _make_header_fields(fields)
     header_len = struct.pack("<I", len(header))
     data_len = struct.pack("<I", len(data))
-    return header_len + data_len + header + data
+    return header_len + header + data_len + data
 
 
 def make_minimal_bag(path: str, topic: str = "/test", msg_type: str = "std_msgs/String",
@@ -420,7 +424,7 @@ class TestInputRateCap:
         )
 
     def test_input_below_cap_passes(self):
-        from transport.backpressure import BackpressureController
+        from tools.dzplot.transport.backpressure import BackpressureController
         bp = BackpressureController(max_input_hz=1000.0, max_output_hz=60.0,
                                      rate_window_s=0.2)
         bp.register_topic("/test")
@@ -430,7 +434,7 @@ class TestInputRateCap:
 
     def test_input_cap_mechanism_works_with_low_cap(self):
         """Demonstrate input rate cap works by using a low threshold."""
-        from transport.backpressure import BackpressureController
+        from tools.dzplot.transport.backpressure import BackpressureController
         # Use a low cap (10 Hz) with _max_window=2000 + tiny rate_window_s
         # for the window-based EMA to detect the excess.
         bp = BackpressureController(max_input_hz=10.0, max_output_hz=60.0,
@@ -670,7 +674,7 @@ class TestBackpressureZones:
 
     def test_all_zone_signals_have_correct_policy(self):
         """Each zone signal carries the correct keep_every_n and max_publish_hz."""
-        from transport.backpressure import DEFAULT_ZONE_POLICIES
+        from tools.dzplot.transport.backpressure import DEFAULT_ZONE_POLICIES
 
         assert DEFAULT_ZONE_POLICIES["normal"].keep_every_n == 1
         assert DEFAULT_ZONE_POLICIES["warn"].keep_every_n == 2
@@ -986,7 +990,7 @@ class TestSnifferPollScheduling:
 
     def test_interval_s_never_below_1ms(self):
         """RateController.recv_interval_s >= 1ms (1000 Hz input cap)."""
-        from component.rate_controller import RateController
+        from tools.dzplot.component.rate_controller import RateController
         rc = RateController()
         assert rc.recv_interval_s >= 0.001, (
             f"recv_interval_s should be >= 1ms, got {rc.recv_interval_s}"
@@ -994,7 +998,7 @@ class TestSnifferPollScheduling:
 
     def test_interval_s_starts_at_max_recv(self):
         """Default recv_interval_s = 1/max_recv_hz = 1/1000 = 1ms."""
-        from component.rate_controller import RateController
+        from tools.dzplot.component.rate_controller import RateController
         rc = RateController()
         assert abs(rc.recv_interval_s - 0.001) < 1e-6, (
             f"Expected 1ms, got {rc.recv_interval_s}"
@@ -1002,7 +1006,7 @@ class TestSnifferPollScheduling:
 
     def test_on_sample_high_queue_increases_interval(self):
         """High queue depth → recv_interval_s grows (slow down receive)."""
-        from component.rate_controller import RateController
+        from tools.dzplot.component.rate_controller import RateController
         rc = RateController()
         initial = rc.recv_interval_s
         for _ in range(15):
@@ -1013,7 +1017,7 @@ class TestSnifferPollScheduling:
 
     def test_interval_recovers_after_low_queue(self):
         """Queue drains → recv_interval_s decreases back toward minimum."""
-        from component.rate_controller import RateController
+        from tools.dzplot.component.rate_controller import RateController
         rc = RateController()
         for _ in range(20):
             rc.on_sample(True, 3500)
@@ -1609,7 +1613,7 @@ class TestClientIsolation:
             slot.queue.put_nowait(b"test_frame")
 
             # Monkey-patch to simulate immediate timeout
-            async def fake_drain():
+            async def fake_drain(self):
                 raise asyncio.TimeoutError()
             slot.writer = type("FakeWriter", (), {
                 "write": lambda self, data: None,
@@ -1620,6 +1624,7 @@ class TestClientIsolation:
 
             task = asyncio.create_task(hub._sender_task(slot))
             await asyncio.sleep(0.1)
+            await task
             assert task.done(), "sender task should have exited after timeout"
             assert slot.dead is True, "dead flag should be True after timeout"
 
@@ -1777,9 +1782,7 @@ class TestSysPathPriority:
     an explicitly-configured PYTHONPATH.
 
     main.py (2026-09-13 由 dzplot.py 改名) must only *append* the dzipc fallback
-    directories, never
-    prepend them.  The dzviz shared-module path is repo-local and may
-    be prepended safely — it has no external alternative.
+    directories, never prepend them.
     """
 
     def test_dzipc_fallback_paths_are_appended_not_prepended(self):
@@ -1789,7 +1792,6 @@ class TestSysPathPriority:
         # Read the dzplot source to verify the pattern directly.
         source = DZPLOT_SRC.read_text()
 
-        # The dzviz line may use insert(0), but the dzipc lines must use append.
         # Check that we do NOT have insert(0) for the dzipc fallback dirs.
         lines = source.split("\n")
         in_dzipc_block = False
@@ -1803,7 +1805,7 @@ class TestSysPathPriority:
                     dzipc_ops.append("append")
                 elif "sys.path.insert" in line:
                     dzipc_ops.append("insert")
-                if "import dzipc" in line or "from transport" in line:
+                if "import dzipc" in line or "from tools.dzplot.transport" in line:
                     break
 
         # At least one append, zero inserts in the dzipc block
@@ -2360,7 +2362,7 @@ class TestControlPlaneReadOnly:
 
 
 # ---------------------------------------------------------------------------
-# 跨文件命名一致性(dzplot ↔ dzviz ↔ C++)
+# 跨文件命名一致性(曲线 ↔ 3D 订阅 ↔ C++)
 # ---------------------------------------------------------------------------
 
 class TestCrossFileNamingConsistency:
@@ -2368,31 +2370,31 @@ class TestCrossFileNamingConsistency:
 
     为什么值得单测: C++ 唯一出处 name_operator.h 把自己的"已知复刻点"逐个列了出来, 而
     Python 侧没有任何编译期约束 —— 一处改了另一处不动, 症状是**静默**(挂不上段、清理
-    清理不掉), 不是报错。这里把三处钉在一起: dzplot.main / dzviz.subscriber / C++ 源。
+    清理不掉), 不是报错。这里把三处钉在一起: dzplot.main / dzplot.component.subscriber / C++ 源。
     """
 
     @staticmethod
-    def _dzviz_subscriber():
+    def _visualizer_subscriber():
         try:
-            import component.subscriber as mod  # noqa: PLC0415 — 延迟导入, 缺依赖时 SKIP
+            import tools.dzplot.component.subscriber as mod  # noqa: PLC0415 — 延迟导入, 缺依赖时 SKIP
         except Exception as exc:                  # noqa: BLE001
-            raise SkipTest(f"dzviz component.subscriber 不可导入({type(exc).__name__})")
+            raise SkipTest(f"dzplot component.subscriber 不可导入({type(exc).__name__})")
         return mod.DzipcSubscriber
 
-    def test_dzviz_sanitize_matches_dzplot(self):
-        """dzviz 的 _sanitize_for_shm 与 dzplot 的 _sanitize_topic_name 必须逐字节相同。"""
-        sub = self._dzviz_subscriber()
+    def test_visualizer_sanitize_matches_dzplot(self):
+        """dzplot 的 _sanitize_for_shm 与 dzplot 的 _sanitize_topic_name 必须逐字节相同。"""
+        sub = self._visualizer_subscriber()
         mine = dzplot.LiveSniffSource._sanitize_topic_name
         for probe in ("/test/topic", "/a-b.c_d", "a@b/c:d e", "/中文", "ёё", "🚀",
                       "", "/", "１２３"):
             assert sub._sanitize_for_shm(probe) == mine(probe), (
-                f"{probe!r}: dzviz={sub._sanitize_for_shm(probe)!r} "
+                f"{probe!r}: visualizer={sub._sanitize_for_shm(probe)!r} "
                 f"dzplot={mine(probe)!r}"
             )
 
-    def test_dzviz_segment_name_matches_dzplot(self):
-        """dzviz 的 _segment_name_for_topic 与 dzplot 的 _channel_name_for_topic 同形。"""
-        sub = self._dzviz_subscriber()
+    def test_visualizer_segment_name_matches_dzplot(self):
+        """dzplot 的 _segment_name_for_topic 与 dzplot 的 _channel_name_for_topic 同形。"""
+        sub = self._visualizer_subscriber()
         for topic in ("/demo/depth_image", "/test", "/中文"):
             for dom in (0, 1, 7):
                 assert (sub._segment_name_for_topic(topic, dom)
@@ -2400,8 +2402,8 @@ class TestCrossFileNamingConsistency:
                     f"{topic!r} domain={dom}"
                 )
 
-    def test_dzviz_globs_cover_the_real_on_disk_names_and_nothing_else(self):
-        """dzviz 清理用的 glob 必须**覆盖真实落盘名**, 且不误伤邻居 topic / 别的 domain。
+    def test_visualizer_globs_cover_the_real_on_disk_names_and_nothing_else(self):
+        """dzplot 清理用的 glob 必须**覆盖真实落盘名**, 且不误伤邻居 topic / 别的 domain。
 
         真实落盘名是实测出来的(2026-09-15, 起真实 SHM 发布端后逐个核对), 不是推的:
         数据/等待者通道带 libipc 的 __IPC_SHM__ 前缀, 控制面是**裸文件**。
@@ -2409,7 +2411,7 @@ class TestCrossFileNamingConsistency:
         都不匹配 —— 于是清理函数一直静默空转(不报错、也不干活)。
         """
         import fnmatch
-        sub = self._dzviz_subscriber()
+        sub = self._visualizer_subscriber()
         pats = sub._shm_globs_for_topic("/x", 0)
         real = [
             "__IPC_SHM__AC_CONN__dz_ipc_d0_s2_537d4cdfd31fcf4303e5c691ab513841_topic",
@@ -2438,24 +2440,24 @@ class TestCrossFileNamingConsistency:
                 f"glob 越界, 会误删别的 topic/domain 的段: {name}"
             )
 
-    def test_dzviz_default_domain_matches_topic_spec_reader(self):
-        """dzviz 的 TopicSpec 默认 domain 取自 config, 而清理函数的 domain 必须由调用方给。
+    def test_visualizer_default_domain_matches_topic_spec_reader(self):
+        """dzplot 的 TopicSpec 默认 domain 取自 config, 而清理函数的 domain 必须由调用方给。
 
         钉的是"不要以为不传 domain 就等于对": 段名含 domain, 给错 domain 不会报错,
         只会去找**另一个** domain 的段。这里只固化"函数签名有 domain 且默认 0"这一事实,
-        并在 docstring 里写明 dzviz 的 TopicSpec.from_config 默认是 1。
+        并在 docstring 里写明 dzplot 的 TopicSpec.from_config 默认是 1。
         """
         import inspect
-        sub = self._dzviz_subscriber()
+        sub = self._visualizer_subscriber()
         sig = inspect.signature(sub._clean_shm_for_topic)
         assert "domain" in sig.parameters, (
             "_clean_shm_for_topic 必须能接 domain —— 段名含 domain, 否则清理必错"
         )
-        spec_src = (REPO_ROOT / "tools" / "dzviz" / "component" / "topic_spec.py")
+        spec_src = (REPO_ROOT / "tools" / "dzplot" / "component" / "topic_spec.py")
         if spec_src.is_file():
             text = spec_src.read_text()
             assert 'defaults.get("domain", 1)' in text, (
-                "dzviz TopicSpec 的 domain 默认值变了 —— subscriber 清理的默认值说明要同步"
+                "dzplot TopicSpec 的 domain 默认值变了 —— subscriber 清理的默认值说明要同步"
             )
 
 
