@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dzplot · 3D 子页面</title>
+    <link rel="stylesheet" href="./styles.css?v=5" />
+    <link rel="stylesheet" href="./workspace.css?v=1" />
+    <script>if (new URLSearchParams(location.search).get("embedded") === "1" && window.parent !== window) document.documentElement.classList.add("embedded");</script>
+  </head>
+  <body>
+    <nav class="subpage-nav" aria-label="工作区导航"><a class="home-link" href="/">⌁ dzplot</a><a href="/">曲线</a><span class="nav-active">3D 视图</span><a href="/#split">并排查看</a></nav>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">⬡</div>
+          <div>
+            <h1>3D 显示</h1>
+            <p id="connectionText">正在连接</p>
+          </div>
+        </div>
+
+        <div class="sidebar-actions">
+          <button id="openAddDisplayBtn" class="primary-action" type="button">+ 添加显示</button>
+        </div>
+
+        <section class="display-list-panel">
+          <div class="section-head">
+            <h2>显示列表</h2>
+            <span id="topicCount">0</span>
+          </div>
+          <div id="topicList" class="display-list"></div>
+        </section>
+
+        <section class="config-panel collapsed">
+          <div class="section-head">
+            <h2>配置</h2>
+            <button class="collapse-toggle icon-button" type="button" aria-label="展开">+</button>
+          </div>
+          <div class="config-actions">
+            <input id="configPathInput" type="text" placeholder="服务端配置文件路径" />
+            <button id="exportConfigBtn" type="button">保存</button>
+            <button id="importConfigBtn" type="button">加载</button>
+          </div>
+        </section>
+
+        <section class="status-panel">
+          <div class="section-head">
+            <h2>事件日志</h2>
+            <button class="collapse-toggle icon-button" type="button" aria-label="收起">−</button>
+          </div>
+          <div id="eventLog" class="event-log"></div>
+        </section>
+        <div class="sidebar-resize-handle"></div>
+      </aside>
+
+      <main class="viewport-shell">
+        <header class="viewport-toolbar">
+          <div>
+            <h2 id="activeTitle">3D 视图</h2>
+            <p id="activeMeta">滚轮缩放 · 左键旋转 · 右键平移</p>
+          </div>
+          <div class="scene-actions"><button id="sceneDisplaysBtn" type="button" title="显示列表">▤</button><button id="sceneAddBtn" type="button" title="添加显示">+</button><button id="sceneResetBtn" type="button" title="复位相机">⌖</button><button id="sceneGridBtn" type="button" title="网格" aria-pressed="true">▦</button><button id="scenePlotBtn" type="button" title="查看此话题的曲线">⌁</button></div>
+          <div class="metrics">
+            <div><span>距离</span><strong id="zoomMetric">18.0</strong></div>
+            <div><span>网格</span><strong>1 m</strong></div>
+            <div><span>显示列表</span><strong id="displayMetric">0</strong></div>
+          </div>
+        </header>
+
+        <section class="scene-panel">
+          <canvas id="sceneCanvas" aria-label="三维场景"></canvas><div id="sceneError" class="scene-error" role="alert" hidden></div>
+          <div class="scene-fps" aria-live="polite">
+            <span>FPS</span>
+            <strong id="sceneFpsMetric">0.0</strong>
+          </div>
+          <!--
+            【右下角坐标轴蒙版容器 div.scene-overlay】
+            - 纯 CSS 定位的 HTML 元素，提供带圆角边框的半透明容器
+            - 它本身不渲染 3D 内容，仅作为视觉边框蒙版
+            - 3D 坐标轴箭头由 JS renderAxisGizmo() 通过 WebGL scissor/viewport
+              渲染在此容器坐标区域内，与 CSS 边框完全对齐
+            - 位置/尺寸由 CSS 变量 --reference-axis-inset / --reference-axis-size 控制
+            - 子 div 被 CSS clip 隐藏（X/Y/Z 标签仅无障碍语义，实际颜色由 3D 箭头渲染）
+          -->
+          <div class="scene-overlay">
+            <div><strong>X</strong><span>红色</span></div>
+            <div><strong>Y</strong><span>绿色</span></div>
+            <div><strong>Z</strong><span>蓝色</span></div>
+          </div>
+
+          <div id="imageOverlay" class="image-overlay" hidden>
+            <div class="image-overlay-header" id="imageOverlayHeader">
+              <span id="imageOverlayTitle">图像</span>
+              <button id="imageOverlayClose" class="icon-button" type="button" aria-label="关闭">×</button>
+            </div>
+            <div class="image-overlay-body" id="imageOverlayBody">
+              <img id="imageOverlayImg" alt="" />
+              <canvas id="imageOverlayCanvas"></canvas>
+            </div>
+            <div class="image-resize-handle" id="imageResizeHandle"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="displayModal" class="modal-backdrop" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="displayModalTitle">
+        <div class="modal-head">
+          <h2 id="displayModalTitle">添加显示</h2>
+          <button id="closeDisplayModalBtn" class="icon-button" type="button" aria-label="关闭">x</button>
+        </div>
+        <div class="modal-body">
+          <label id="sourceField">数据来源<select id="sourceInput"><option value="live">实时订阅</option><option value="workspace">工作区数据（回放 / 嗅探）</option></select></label>
+          <label>
+            名称 / 话题
+            <input id="topicInput" type="text" placeholder="robot_state" />
+          </label>
+          <div class="split">
+            <label>
+              显示类型
+              <select id="typeInput"></select>
+            </label>
+            <label>
+              消息类型
+              <select id="messageTypeInput" disabled></select>
+            </label>
+          </div>
+          <label id="urdfPathField" hidden>
+            URDF 文件路径
+            <input id="urdfPathInput" type="text" placeholder="/path/to/robot.urdf" />
+          </label>
+          <label id="targetRobotField" hidden>
+            关联机器人
+            <select id="targetRobotInput"></select>
+          </label>
+          <div class="split">
+            <label>
+              域编号
+              <input id="domainInput" type="number" min="0" step="1" />
+            </label>
+            <label>
+              队列容量
+              <input id="queueInput" type="number" min="1" step="1" />
+            </label>
+          </div>
+          <div class="split">
+            <label>
+              传输方式
+              <select id="transportInput">
+                <option value="socket">socket</option>
+                <option value="shm">shm</option>
+              </select>
+            </label>
+            <label>
+              轮询间隔（毫秒）
+              <input id="pollInput" type="number" min="1" step="1" />
+            </label>
+          </div>
+          <label>
+            通道附加参数
+            <input id="extraInput" type="text" placeholder="InitChannel extra" />
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button id="cancelDisplayBtn" type="button">取消</button>
+          <button id="addTopicBtn" class="primary-action" type="button">添加</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "/viz/vendor/three/build/three.module.js",
+          "three/addons/": "/viz/vendor/three/examples/jsm/"
+        }
+      }
+    </script>
+    <script type="module" src="./app.js?v=8"></script>
+  </body>
+</html>

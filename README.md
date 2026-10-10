@@ -147,6 +147,10 @@ scripts/update_msg_srv.sh --reset
 scripts/update_msg_srv.sh --help
 ```
 
+## dzplot 曲线与 3D 工作区
+
+曲线、3D 后端、离线网页资源和示例统一位于 `tools/dzplot/`。启动 `python3 tools/dzplot/main.py --demo`，打开 `http://127.0.0.1:8766/`；支持多曲线窗口、左右 / 上下分裂，以及曲线与 3D 并排查看。使用方式、迁移后的目录和测试命令见 [dzplot 说明](tools/dzplot/README.md)。
+
 ## Test
 
 仓库当前**没有 CI**(且 `.gitignore` 忽略了 `.github/workflows/**`, 见 [docs/ci.md](docs/ci.md))。最小验证门是一个可跟踪的脚本:
@@ -157,7 +161,9 @@ bash scripts/ci_check.sh             # 全量, 失败即停
 bash scripts/ci_check.sh --no-binding # 只跑不需要绑定的层(任意 python3)
 ```
 
-它跑两层, 共 5 项: L1 = `tools/dzplot/test/test_dzplot.py`(静态规则 + 纯 Python 逻辑, 任意 CPython3);
+它跑两层, 共 7 项: L1 = `tools/dzplot/test/test_dzplot.py`(静态规则 + 纯 Python 逻辑, 任意 CPython3)、
+`tools/dzplot/test/test_workspace.py`(统一曲线 / 3D 服务的 HTTP、WebSocket 和数据共享)
+及 `tools/dzplot/test/test_visualizer_components.py --integration`(3D 组件和服务集成);
 L2 = `dzipc._dzipc_core` 可导入 + 三条真实 SHM 运行时核对(`verify_segment_naming` / `verify_runtime_no_garbage` /
 `integration_pub_restart`, **必须 CPython 3.10** —— 绑定是 cpython-310 构建)。退出码 0=全过 / 1=有失败 / 2=前置不满足,
 **CI 里 2 按失败处理**(跳过不等于通过)。

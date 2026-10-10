@@ -1,165 +1,126 @@
-# dzplot — dzIPC Time-Series Visualization Dashboard
+# dzplot — 曲线与 3D 可视化工作区
 
-Web-based time-series visualization for dzIPC topic data. Supports offline `.bag` file playback and online topic sniffing.
+一个进程、一个端口同时提供 dzIPC 曲线与 3D 显示。默认打开曲线主页面；3D 标签加载内置子页面，也可将曲线和 3D 放在同一个分栏工作区中。后端、网页、依赖资源和示例均位于本目录。
 
-## Quick Start
+界面参考仓库根目录的 `ref_ui.jpg`：浅色紧凑工具栏、左侧数据集、中央标签工作区、右侧视图工具和底部播放条。曲线采用 PlotJuggler 式窗口：默认一个窗口铺满绘图区，多条曲线共用坐标轴；窗口可左右、上下分裂。数据栏、窗口布局和曲线分配保存在浏览器中。
 
-```bash
-# Serve a .bag file replay
-python3 tools/dzplot/main.py --bag /path/to/events.bag --port 8766
+![曲线和 3D 并排查看](../../docs/dzplot_workspace/split.png)
 
-# Sniff live topics
-python3 tools/dzplot/main.py --sniff --topic /test:StdRawMessage --transport shm
-
-# Browser: open http://127.0.0.1:8766
-```
-
-## Features
-
-| Feature | Description |
-|---------|-------------|
-| **Offline .bag replay** | Parse ROS bag v2.0 files, extract topic/message data, replay with timing |
-| **Online sniffer** | Subscribe to live dzIPC topics via SHM or socket transport |
-| **Time-series charts** | Canvas 2D charts with auto-scale, select fields per topic |
-| **FPS control** | Left-side slider, configurable 1–120 fps (default 60) |
-| **Batch frames** | Multiple samples aggregated into single WebSocket frame |
-| **Adaptive backpressure** | Bounded queue with multi-zone watermark (>50% warn, >75% heavy, >90% emergency); progressive subsampling with hysteresis recovery |
-| **Dynamic rendering** | Charts render on-demand; only active fields consume resources |
-| **DZFlat / 旁路借样** | 订阅腿与嗅探腿都识别 DZFlat 平坦段(含 SHM 借样段), 按生成的 schema 解码; 样本带 `wire` / `dzflat_borrowed` 便于确认借样是否生效 |
-
-## Architecture
-
-```
-Browser (Canvas 2D charts)
-  ↕ WebSocket (JSON frames, batched)
-main.py (asyncio server)
-  ├── PlotHub (client management, command dispatch)
-  ├── BagReplaySource (offline .bag → BoundedPubQueue)
-  ├── LiveSniffSource (online dzIPC → BoundedPubQueue)
-  └── Shared modules:
-      ├── transport/bounded_queue.py  (BoundedPubQueue)
-      ├── component/rate_controller.py (RateController)
-      └── transport/backpressure.py   (BackpressureController)
-```
-
-## CLI Options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--host` | 127.0.0.1 | Listen address |
-| `--port` | 8766 | Listen port |
-| `--bag` | none | Path to .bag file for offline replay |
-| `--bag-speed` | 1.0 | Replay speed multiplier |
-| `--bag-loop` | false | Loop bag replay |
-| `--sniff` | false | Enable online sniffer mode |
-| `--topic` | none | Topic:MsgType for sniffer (repeatable) |
-| `--transport` | shm | Sniffer transport (shm/socket) |
-| `--domain` | 0 | Domain ID |
-| `--fps` | 60 | Max broadcast FPS (1–120) |
-
-## Backpressure Design
-
-Reuses shared modules from `tools/dzviz/`:
-
-- **BoundedPubQueue** (`transport/bounded_queue.py`): Thread-safe capacity-bounded queue with multi-zone watermark tracking (normal <50%, warn 50–75%, heavy 75–90%, emergency >90%)
-- **RateController** (`component/rate_controller.py`): Dynamic poll interval adjustment with hysteresis (α_down=0.8, α_up=0.9, confirm_ticks=3)
-- **BackpressureController** (`transport/backpressure.py`): Per-zone downsampling policies
-
-Input cap: 1000 Hz. Output cap: configurable (default 60 fps). Watermark >50% triggers progressive backpressure; drops below 25% triggers recovery.
-
-## Tests
-
-四个入口, 按**是否需要 dzipc 绑定**分两类 —— 绑定是 CPython **3.10** 的构建产物
-(`_dzipc_core.cpython-310-*.so`, 且 `*.so` 不入库), 在默认 `python3`(常为 3.12)下
-`import dzipc` 必失败。**解释器不能随手指**:
-
-| 脚本 | 解释器 | 退出码 | 查什么 |
-|------|--------|--------|--------|
-| `test/test_dzplot.py` | 任意 CPython3 | 0/1 | 静态规则 + 纯 Python 逻辑(自带 runner, 不需要 pytest) |
-| `test/verify_segment_naming.py` | **3.10** | 0/1/2 | 推导出的段名是不是传输层**真建出的那一个** |
-| `test/verify_runtime_no_garbage.py` | **3.10** | 0/1/2 | 运行时有没有在 `/dev/shm` 多建段 |
-| `test/integration_pub_restart.py` | **3.10** | 0/1/2 | 发布端重启 → generation 变化 → 重挂 |
+## 快速开始
 
 ```bash
-# 无绑定层(任意 python3)
+# 演示模式，不需要 dzIPC Python 绑定
+python3 tools/dzplot/main.py --demo
+
+# 回放 dzipc_log 录制的 .bag
+python3.10 tools/dzplot/main.py --bag /path/to/events.bag
+
+# 实时嗅探，并将数据用于曲线与 3D
+python3.10 tools/dzplot/main.py --sniff --topic /test:StdPose --transport shm
+
+# 加载机器人示例配置
+python3.10 tools/dzplot/main.py \
+  --config tools/dzplot/demo/robot_state_config.json --load-config
+```
+
+浏览器打开 `http://127.0.0.1:8766/`。直接访问 `/#viz` 打开工作区内的 3D 标签，`/#split` 打开分栏，`/viz/` 打开带返回导航的 3D 子页面。
+
+实时订阅和录包消息解码需要与本机 dzIPC 绑定 ABI 匹配的解释器；本仓现有绑定为 CPython 3.10。无绑定时仍可启动空工作区和演示模式。
+
+启动入口统一为 `tools/dzplot/main.py`（也可使用 `python3 -m tools.dzplot.main`），默认端口 8766。原 dzviz 目录和旧启动入口已删除；原 JSON 配置格式继续支持，自定义配置中指向原示例目录的文件路径需改为本目录下的 `demo/`。
+
+## 目录
+
+```text
+tools/dzplot/
+├── main.py             # 统一 HTTP / WebSocket 服务、曲线回放与嗅探
+├── workspace.py        # 曲线与 3D 数据共享
+├── visualizer.py       # 3D 后端、配置及消息编码
+├── config.json         # 合并后的默认配置
+├── component/          # 机器人、运动学、点云、TF、订阅与速率控制
+├── transport/          # 有界队列、背压与客户端管理
+├── demo/               # 图像 / 点云 / 机器人发布端、URDF 与网格资源
+├── test/               # 曲线、3D、工作区、传输及实际绑定测试
+└── web/
+    ├── index.html      # 曲线工作区
+    └── viz/            # 3D 子页面及 vendor/three 离线依赖
+```
+
+## 界面操作
+
+| 区域 | 操作 |
+|---|---|
+| 顶部「数据源」 | 加载服务端 .bag 路径，或指定实时话题、类型、传输与域编号 |
+| 左侧数据集 | 自动发现数值字段；搜索话题或字段；勾选话题 / 字段添加到当前窗口，或拖到指定窗口；可手动输入 `position.x` 等路径 |
+| 绘图窗口 | 点击选中，蓝框表示当前窗口；多条曲线共享时间轴和值域；窗口头或顶部工具栏支持左右 / 上下分裂，新窗口为空并自动选中 |
+| 已选曲线与图例 | 显示当前窗口的曲线和颜色；点击 × 仅从该窗口移除；图例也可拖到其它窗口，同一字段可在多个窗口显示 |
+| 窗口整理 | 清空仅作用于当前窗口；关闭后相邻窗口填满空位；合并窗口保留全部曲线并去重，始终保留至少一个窗口 |
+| 话题右侧立方体 | 将已有话题送入 3D；回放和嗅探复用现有数据源，不新增订阅 |
+| 曲线 / 3D / 并排查看 | 切换时保留曲线数据、相机与显示状态；隐藏的视图暂停绘制 |
+| 分隔条 | 鼠标拖动或方向键调整数据栏宽度、绘图窗口比例、曲线与 3D 比例；绘图窗口支持嵌套分裂 |
+| 右侧工具 | 显示数据栏、分栏、复位相机、切换 3D 网格与显示列表 |
+| 3D 内部工具 | 添加显示、展开显示列表、复位相机、切换网格、返回当前话题曲线 |
+| 底部播放条 | 录包暂停 / 继续 / 停止，进度、当前时间、速度、循环和曲线帧率 |
+
+先点击目标窗口，再勾选左侧话题或字段；话题复选框和话题拖拽会添加该话题当前已发现的全部数值字段。切换窗口时，左侧勾选状态和已选曲线列表同步显示该窗口的选择。同一字段在多个窗口中共用数据缓冲，移除一个窗口中的曲线不会影响其它窗口。
+
+![左右与上下嵌套分裂](../../docs/dzplot_workspace/windows.png)
+
+手机宽度下数据栏改为可收起面板；较窄窗口的曲线 / 3D 并排模式自动改为上下分栏，绘图窗口保留所选的分裂方向。刷新后恢复窗口布局、曲线归属和当前窗口。
+
+## 3D 数据来源
+
+添加显示时可选择「实时订阅」或「工作区数据（回放 / 嗅探）」。3D 实时订阅的数值字段也会出现在曲线数据集中；完整图像与点云通过原有 3D 编码通路发送，曲线只发送有界字段预览。
+
+3D 显示支持 Pose、Path、PointCloud、Marker、Image、TF、Robot（URDF）、RobotState 与 RawMessage。先添加机器人模型，再为 RobotState 选择关联机器人。OBJ/STL 网格仍通过同一服务的 `/robot_assets/` 加载。Three.js 0.168.0 已随工具保存，浏览器无需外部 CDN。
+
+发布端命令、显示类型与配置说明见 [3D 使用说明](3D.md)，离线库版本与许可证见 [Three.js 依赖说明](web/viz/vendor/README.md)。
+
+原 dzviz 配置兼容。工作区来源的话题额外保存 `"source": "workspace"`；普通话题按原方式订阅。3D 配置面板的保存 / 加载使用服务所在机器的文件路径，布局则保存在浏览器本地。
+
+## 启动参数
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--host` / `--port` | `127.0.0.1` / `8766` | 统一服务地址 |
+| `--bag` | 无 | 录包路径 |
+| `--bag-speed` / `--bag-loop` | `1.0` / 关闭 | 初始回放速度与循环 |
+| `--sniff` | 关闭 | 将 `--topic` 用作曲线嗅探数据源 |
+| `--topic` | 无 | 可重复的 `话题:消息类型`；未指定 `--sniff` 时作为 3D 实时订阅 |
+| `--transport` / `--domain` | 配置；未配置时 `shm` / `0` | 传输与域编号 |
+| `--fps` | `60`，范围 1–120 | 曲线广播 / 绘制帧率；3D 保留原有按需绘制限速 |
+| `--config` / `--load-config` | dzplot/config.json / 关闭 | 3D 配置；启动时加载订阅 |
+| `--queue` / `--poll` / `--extra` | 配置中的值 | 3D 订阅选项 |
+| `--dzflat` / `--no-dzflat` | 开启 | SHM DZFlat 借样设置 |
+| `--demo` / `--demo-period` | 关闭 / `0.05` 秒 | 曲线和 3D 共用的有界演示轨迹 |
+
+## 验证
+
+```bash
 python3 tools/dzplot/test/test_dzplot.py
+python3 tools/dzplot/test/test_workspace.py
+python3 tools/dzplot/test/test_workspace.py --browser --artifacts /tmp/dzplot-workspace
+python3.10 tools/dzplot/test/test_workspace.py --binding
+python3 tools/dzplot/test/test_visualizer_components.py --integration --browser
+python3 -m pytest tools/dzplot/test/test_transport.py tools/dzplot/test/test_rate_controller.py tools/dzplot/test/test_kinematics.py -q
+```
 
-# 需绑定层(必须 3.10; 绑定未构建先 python3.10 -m pip install ./python)
+浏览器测试需要 Playwright 和 Chrome / Chromium；可通过 `DZPLOT_BROWSER=/path/to/chromium` 指定浏览器。工作区验收覆盖同端口 HTTP / WebSocket、离线资源、双向样本共享、图像 / 点云二进制通路、配置保存加载、避免重复订阅、曲线和 3D 切换、字段筛选、帧率与窄屏布局。绘图验收检查单窗口的多条曲线实际像素、左右 / 上下嵌套分裂、窗口选择、话题与字段拖拽、共享缓冲、清空 / 关闭 / 合并、比例调整，以及刷新和重连后的选择恢复。
+
+`--binding` 使用实际绑定生成 TLV / DZFlat 原始字节，确认完整图像、点云与有界曲线预览；绑定缺失会直接失败。验收结果与截图见 [工作区验收记录](../../docs/dzplot_workspace/README.md)。
+
+原真实 SHM 验证仍使用 CPython 3.10，三条不能并行：
+
+```bash
 python3.10 tools/dzplot/test/verify_segment_naming.py
 python3.10 tools/dzplot/test/verify_runtime_no_garbage.py
 python3.10 tools/dzplot/test/integration_pub_restart.py
 ```
 
-后三者共用退出码约定 **0=全过 / 1=有失败 / 2=缺 dzipc 绑定(跳过)**。
-⛔ **`2` 在 CI 里必须按失败处理** —— `SKIP` 和 `PASS` 在 CI 面板上一样是绿的,
-当成通过就等于门是摆设。
+退出码 `2` 表示绑定缺失，CI 必须按失败处理。详见 [CI 说明](../../docs/ci.md)。
 
-一次跑全部(失败即停, 并做绑定可导入前置检查):
+## 传输与资源控制
 
-```bash
-bash scripts/ci_check.sh              # 全量
-bash scripts/ci_check.sh --no-binding # 只跑无绑定层
-```
+曲线继续使用 `BoundedPubQueue`、`RateController` 和 `BackpressureController`：输入上限 1000 Hz、批量 WebSocket 帧、50% 以上水位渐进背压与滞回恢复，慢客户端独立发送。每条曲线最多保存 600 个点，数值数组字段预览最多 100 个元素。图像 / 点云的完整 3D 显示走专用编码，不受曲线字段预览限制。
 
-⚠️ 后三条会起**真实 SHM 段**, 不可并行 —— 同机同时跑两个, 或一边跑它们一边跑
-C++ gtest, 会互相干扰出假红。详见 [docs/ci.md](../../docs/ci.md)。
-
-Covers (test_dzplot.py): BagReader parsing, BoundedPubQueue zone transitions/overflow, PlotHub commands and state management,
-TransportPacket roundtrip, sniffer poll scheduling, decode_payload fallback, input rate cap, backpressure zones, 段名/sanitize 规则核对。
-
-## Message Deserialization
-
-dzplot can extract structured fields from dzIPC messages for both bag replay and live sniffer:
-
-- **Bag replay**: Each bag message is a `dzipc_log/TransportPacket` envelope (timestamp + topic + type + domain + msg_id + transport + role + event + payload). dzplot parses this envelope, then calls `create_message(type_name).deserialize(inner_payload)` to produce typed fields (scalars, arrays, nested messages).
-- **Live sniffer (嗅探腿)**: Uses `_decode_payload(msg_type, raw_data)` with the user-configured `msg_type`; DZFlat段按 magic 识别后交给 `dzipc.dzflat`(纯 Python)解码。
-- **Live subscriber (订阅腿)**: `_extract_fields()` 是两种 wire 的**唯一分派点** —— TLV 走 `field_count()/get_*`, DZFlat 走 schema 解码(见下一节)。
-- **Fallback**: Unknown types or missing dzIPC bindings degrade gracefully to base64-encoded `data` field — the frontend always gets something.
-
-## DZFlat 与旁路借样(dzflat)
-
-发布端开启 DZFlat(`EnableDzFlat(true)` + 生成的 schema)后, SHM 通道上传的是**平坦段**
-而不是 TLV; 订阅腿对 schema-less 话题(本工具的模板恒为 `GenericMessage`)会把段**借样**
-收下(dzflat_adopt, 不拷整段), 此时消息对象里 `field_count() == 0`。
-
-⚠️ **不能直接调 `_serialize_message_fields()`** —— 它靠 `field_count()` 枚举字段, 对借样
-消息会**静默返回空 dict**: 图上看不到任何东西、也不报错。这正是
-[dzflat_known_issues.md §9.6](../../docs/dzflat_known_issues.md) 记的那个坑(症状是"通道
-看着通、数据是空的")。dzplot 现在的处理:
-
-```
-msg_obj.has_dzflat()?
-  ├── 是 → msg_cls.from_generic()            # 与 TLV 路径同形(嵌套 → dict、数组 → list)
-  │        └─ 失败 → dzipc.dzflat.decode_generic(zero_copy=True)   # 直读借样视图
-  │                 └─ 再失败(对端 schema 不在本进程) → base64 + 一次性告警
-  └── 否 → _serialize_message_fields()       # TLV, 行为与修复前完全一致
-```
-
-样本里因此多两个字段: `wire`(`"tlv"`/`"dzflat"`)与 `dzflat_borrowed`(仅 DZFlat 时出现)。
-借样是否生效、走的是哪种 wire, 不必再靠猜; 首次见到 DZFlat 时也会在 stdout 打一行说明。
-
-几条边界(都是有意为之, 不是缺陷):
-
-1. **dzplot 不需要打开任何开关**: 接收侧恒双 wire(按段首 magic 判别), 是否发平坦段由
-   **发布端进程**的 `EnableDzFlat` 决定(库级默认关)。
-2. **schema 必须在本进程**: 解码靠生成器产出的 schema(`python/dzipc/gen_msgs/_dzflat_schema.py`)。
-   对端改了 `.msg` 而本机没重跑 generator ⇒ 段解不出, dzplot 回退 base64 并告警一次。
-3. **嗅探腿有前提**: 嗅探器不是接收方, 而发布端在"无接收方"时必须送 TLV(否则按旧 TLV
-   解析的 sniffer 会读错), 所以**只被嗅探、无人订阅**的话题看到的是 TLV。有真订阅者时,
-   嗅探腿照样能读到平坦段(已实测)。
-4. **借样只在 SHM 上是真零拷贝**: UDP 腿借的是去帧后的独立块(分帧格式固有的一次拷贝)。
-   语义两边一致, 别拿 UDP 侧论证零拷贝收益。
-5. **数组字段每个样本最多 100 个元素**(两条 wire 相同, 给 WebSocket 帧留预算) —— 图像类
-   话题请用 width/height/step/encoding 判断通道是否正常, 不要数 `data` 长度。
-
-## Sniffer Binding (python/src/interface.cc)
-
-Passive `ipc::sniffer` pybind11 binding is available as `dzipc.Sniffer`. It attaches to the SHM channel (name = `dz_ipc_<sanitized_topic>_topic`, topology = route) without registering as a receiver — publishers are unaffected. Falls back to `SubscriberIPCPtrMake` if `_dzipc_core.so` is not rebuilt after the interface.cc change.
-
-## Known Limitations
-
-1. **Deserialization requires dzIPC Python bindings**: Structured field extraction needs `_dzipc_core.so` built and importable. Without it, only base64-encoded raw data is available. Run `scripts/install.sh` first.
-2. **No field auto-discovery for bag mode**: Bag connection records carry `dzipc_log/TransportPacket`; the real type is inside each message envelope. Users manually enter field names or use the quick-field buttons.
-3. **Single-process server**: The asyncio server runs in one process. For production multi-client use, deploy behind a reverse proxy.
-4. **Chart memory**: Each chart holds up to 600 data points (~10s at 60fps). Long sessions may need periodic page refresh.
-5. **DZFlat 依赖本进程的 schema**: 段能收到、但 schema 指纹在本进程注册表里找不到时, 该样本退化成 base64 `data`(并打一次告警) —— 不会静默空字段, 也不会错解。详见上面「DZFlat 与旁路借样」节。
+DZFlat 与 TLV 均自动识别。借样消息通过生成的 schema 解码，样本的 `wire` 与 `dzflat_borrowed` 字段可确认通路。schema 不在本进程时降级为 base64 并告警；重新生成消息 schema 后再启动工具。

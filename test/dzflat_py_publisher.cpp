@@ -60,8 +60,8 @@ dzIPC::Msg::StdPointCloud make_cloud()
 }
 
 /* RobotState: 覆盖 string / 嵌套消息 / 嵌套消息数组 / note(JSON 字符串,
- * dzviz 的 _unwrap_joint_state 从这里解 joint_state)四种形态。
- * 内容写死, 与 tools/dzviz/test/test_dzflat_live_e2e.py 的 EXPECT_* 共享。 */
+ * dzplot 的 _unwrap_joint_state 从这里解 joint_state)四种形态。
+ * 内容写死, 与 tools/dzplot/test/test_dzflat_live_e2e.py 的 EXPECT_* 共享。 */
 dzIPC::Msg::RobotState make_robot()
 {
     dzIPC::Msg::RobotState m;

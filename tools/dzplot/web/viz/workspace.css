@@ -1,0 +1,86 @@
+/* 3D 子页面与 dzplot 工作区保持相同的浅色、紧凑面板。 */
+:root { color-scheme: light; --bg: #fff; --sidebar: #f6f6f6; --panel: #f5f6f7; --panel-2: #dedede; --border: #bfc2c5; --text: #34383d; --muted: #747b83; --accent: #347aba; --accent-strong: #347aba; }
+body { font: 12px/1.45 system-ui, sans-serif; }
+[hidden] { display: none !important; }
+button { min-height: 26px; border-radius: 3px; background: #f0f2f4; padding: 0 7px; }
+button:hover { background: #dce8f3; border-color: #a8bed0; }
+input, select { min-height: 30px; border-radius: 3px; background: #fff; color: var(--text); font-size: 11px; }
+.subpage-nav { display: flex; align-items: stretch; gap: 0; height: 35px; background: #e1e1e1; border-bottom: 1px solid #afb5bd; }
+.subpage-nav a, .subpage-nav span { padding: 7px 14px; color: #4b5866; text-decoration: none; font-size: 11px; }
+.subpage-nav .home-link { font-weight: 600; padding-right: 24px; }
+.subpage-nav .nav-active { background: #b7d8f6; color: #234e75; border-inline: 1px solid #a3bfd6; }
+.app-shell { grid-template-columns: 320px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); height: calc(100dvh - 35px); width: 100%; }
+.embedded .subpage-nav { display: none; }
+.embedded .app-shell { height: 100dvh; }
+.sidebar { padding: 0; gap: 0; background: #f6f6f6; }
+.brand { display: flex; align-items: center; gap: 7px; padding: 5px 8px; height: 35px; background: #dedede; border-bottom: 1px solid var(--border); }
+.brand-mark { width: 21px; height: 21px; background: transparent; color: #506c8a; font-size: 22px; border-radius: 0; }
+.brand h1 { font-size: 12px; font-weight: 500; }
+.brand p { font-size: 9px; }
+.sidebar-actions { padding: 6px; border-bottom: 1px solid var(--border); }
+.primary-action { color: #fff; font-weight: 500; font-size: 11px; }
+.primary-action:hover { background: #23649e; }
+.display-list-panel, .config-panel, .status-panel { border: 0; border-bottom: 1px solid var(--border); border-radius: 0; }
+.status-panel { flex-basis: 120px; }
+.status-panel.collapsed { flex-basis: auto; }
+.section-head { height: 29px; padding: 0 7px; }
+.section-head h2, .viewport-toolbar h2, .modal h2 { font-size: 12px; font-weight: 500; height: auto; }
+.display-list, .event-log { height: calc(100% - 29px); }
+.display-list { background: #fff; }
+.display-item { padding: 6px 8px; border-bottom: 1px solid #e1e4e7; }
+.display-item.active, .display-item.active:hover { background: #e4effa; }
+.display-item:hover, .display-item:focus-visible { background: #f0f5fa; }
+.display-title { font-size: 11px; font-weight: 550; line-height: 1.4; }
+.display-meta { font-size: 9px; line-height: 1.5; }
+.display-actions { margin-top: 3px; }
+.display-actions button { min-height: 21px; padding: 2px 5px; font-size: 9px; border: 1px solid #c9d1d9; }
+.visualize-toggle { min-height: 22px; line-height: 1.4; }
+.event-row { line-height: 1.3; padding: 4px 7px; font-size: 9px; border-color: #e0e3e6; }
+.collapse-toggle { min-width: 22px; min-height: 24px; font-weight: 400; }
+.collapse-toggle:hover { background: #ccd9e5; }
+.sidebar-resize-handle { right: -3px; width: 4px; top: 0; bottom: 0; background: #e9e9e9; border: 1px solid var(--border); border-radius: 0; }
+.sidebar-resize-handle::before { display: none; }
+.viewport-shell { grid-template-rows: 29px minmax(0, 1fr); }
+.viewport-toolbar { height: 29px; padding: 0 7px; gap: 8px; background: #f7f7f7; }
+.viewport-toolbar > div:first-child { min-width: 0; flex: 1; }
+.viewport-toolbar h2 { font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.viewport-toolbar p { display: none; }
+.scene-actions { display: flex; align-items: center; gap: 3px; }
+.scene-actions button { min-height: 23px; min-width: 23px; border: 0; padding: 0 4px; background: transparent; color: #63758a; font-size: 16px; }
+.scene-actions button:hover { background: #dce9f6; }
+.scene-actions button[aria-pressed="true"] { background: #d5e7f8; }
+.metrics { display: flex; gap: 8px; }
+.metrics div { display: flex; align-items: center; gap: 3px; min-width: 0; border: 0; background: transparent; padding: 0; }
+.metrics span, .metrics strong { font-size: 9px; font-weight: 400; margin: 0; }
+.scene-fps { top: 9px; right: 9px; min-width: 52px; background: #f5f8fbd9; border-color: #cbd4de; color: #506276; border-radius: 3px; gap: 5px; padding: 3px 6px; }
+.scene-fps span { color: #768697; font-size: 9px; }
+.scene-fps strong { font-size: 10px; }
+.image-overlay { top: 45px; right: 15px; border-radius: 3px; background: #fff; border-color: #b9c8d6; }
+.image-overlay-header { min-height: 28px; background: #e8edf3; color: #475b70; }
+.modal { background: #f3f4f5; border-radius: 5px; border-color: #b1b9c2; box-shadow: 0 12px 40px #1c304833; max-height: calc(100dvh - 24px); overflow: auto; }
+.modal-head, .modal-actions { height: 40px; padding: 0 12px; border-color: #cad0d7; }
+.modal-head { background: #e8ebee; }
+.modal-body { gap: 9px; padding: 12px; }
+.modal-body label { gap: 3px; font-size: 10px; }
+.modal-backdrop { background: #27303c55; padding: 12px; }
+.scene-error { position: absolute; left: 20px; top: 40px; right: 20px; padding: 12px; background: #fff0ee; border: 1px solid #dfb6b0; color: #912f2f; font-size: 12px; }
+.compact-scene .app-shell { grid-template-columns: minmax(0, 1fr) !important; }
+.compact-scene .sidebar { display: none; }
+.compact-scene.show-displays .sidebar { display: flex; position: absolute; inset: 29px auto 0 0; width: min(275px, 85vw); z-index: 6; box-shadow: 3px 0 16px #0002; }
+.compact-scene .sidebar-resize-handle { display: none; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: #c5c9cd; border-radius: 3px; }
+@media (max-width: 900px) {
+  .app-shell { grid-template-columns: 260px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+  .viewport-toolbar { flex-direction: row; align-items: center; padding: 0 7px; }
+  .metrics { width: auto; }
+  .metrics div:nth-child(2) { display: none; }
+  .image-overlay { max-width: calc(100vw - 20px); max-height: calc(100vh - 20px); }
+}
+@media (max-width: 650px) {
+  .app-shell { grid-template-columns: minmax(0, 1fr); }
+  .sidebar { display: none; }
+  .show-displays .sidebar { display: flex; position: absolute; inset: 29px auto 0 0; width: min(260px, 85vw); z-index: 6; box-shadow: 3px 0 16px #0002; }
+  html:not(.embedded).show-displays .sidebar { top: 64px; }
+  .metrics { display: none; }
+}
